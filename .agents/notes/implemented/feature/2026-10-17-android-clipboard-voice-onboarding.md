@@ -32,3 +32,7 @@ Status: implemented
 
 - `check-host.sh` 通过；`CloudClipboardPanelPolicySmoke` 改为断言本机历史关着时仍打开本机、选过云端则保留云端、敏感输入框回到本机。
 - 发布签名 APK 装在 API 28 模拟器上：从功能面板打开剪贴板，停在「本机」并显示说明和按钮，点按后面板换成本机历史（0/200）；长按空格出现「语音输入」引导，面板铺满键区，点「设置语音输入」打开 App「语音输入」的「服务」分区。测完已把模拟器的剪贴板历史关回去。同一 APK 覆盖安装到 Pixel 3 XL，没有在真机上逐项点过。
+
+## Related decisions
+
+[充电夜间学习与输入辅助](2026-10-21-charging-learning-and-input-assistance.md)扩充后台训练和实时剪贴板补读，保留本篇原有模型、学习开关及剪贴板默认关闭的决定。

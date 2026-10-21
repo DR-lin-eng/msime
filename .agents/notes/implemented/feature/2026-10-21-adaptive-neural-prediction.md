@@ -37,3 +37,7 @@ Status: implemented
 真实 ONNX checker 接受固定图；ONNX CPU 与 Rust 固定网络的数值测试通过。缺少运行时的独立进程仍通过学习、重开、学习关闭与固定首选的三项集成测试。删除日志重建个人排序头、失焦和清空时丢弃长上下文均有回归。首次以 root 运行的四项权限测试失败；以普通用户重跑全部通过，没有修改测试基线。
 
 复现入口为 `scripts/test-adaptive-prediction-docker.sh`。本机 `cargo` 因 Homebrew `libgit2` 引用的 `libllhttp.9.4.dylib` 缺失无法启动，因此 Rust 验证均在 Docker 完成。仓库 quick、补丁重建与回滚证据在交付记录中保留；未把 Docker CPU 结果当作设备加速或原生宿主装机证明。
+
+## Related decisions
+
+[充电夜间学习与输入辅助](2026-10-21-charging-learning-and-input-assistance.md)扩充后台训练和实时剪贴板补读，保留本篇原有模型、学习开关及剪贴板默认关闭的决定。

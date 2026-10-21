@@ -1,5 +1,9 @@
 package app.msime.android.home;
 
+import app.msime.android.NightLearningJobService;
+import app.msime.android.InputAssistance;
+import app.msime.android.AndroidLocalSettings;
+
 import android.content.Context;
 import android.widget.LinearLayout;
 import androidx.annotation.Nullable;
@@ -19,6 +23,16 @@ public final class PrivacyPage extends ReloadingDetailPage {
     @Override protected java.util.List<String> sectionTitles() {
         return java.util.List.of("联网", "本机", "无痕");
     }
+
+    private GroupCard.Row smsCodeRow;
+    private final androidx.activity.result.ActivityResultLauncher<String> smsPermission = registerForActivityResult(
+        new androidx.activity.result.contract.ActivityResultContracts.RequestPermission(), granted -> {
+            if (getContext() == null) return;
+            HostTask.run(this, context -> {
+                InputAssistance.smsEnabled(context,granted);
+                return InputAssistance.smsEnabled(context);
+            }, enabled -> { if (smsCodeRow != null) smsCodeRow.setChecked(Boolean.TRUE.equals(enabled)); });
+        });
 
     private static final String POLICY = "https://msime.app/privacy/";
     private static final InputFeatureToggle[] NETWORK = {
@@ -45,6 +59,22 @@ public final class PrivacyPage extends ReloadingDetailPage {
 
         GroupCard local = GroupCard.add(sectionColumn(target, "本机"), "本机数据").withDividers(16);
         for (InputFeatureToggle toggle : LOCAL) addToggle(local, toggle);
+        local.toggle("充电夜间自学习", "本地 0–6 点、充电且空闲时优化个人排序；不使用短信或剪贴板作为语料",
+            InputAssistance.nightEnabled(requireContext()), enabled -> {
+                HostTask.run(this, context -> {
+                    try {
+                        AndroidLocalSettings.put(context,AndroidLocalSettings.CHARGING_NIGHT_LEARNING,enabled);
+                        NightLearningJobService.schedule(context);
+                        return enabled;
+                    } catch (java.io.IOException unavailable) { return null; }
+                }, saved -> {});
+            });
+        local.note(requireContext().getSharedPreferences(InputAssistance.STORE,0).getString("status","尚未执行夜间学习"));
+        smsCodeRow=local.toggle("短信验证码提示", "授权后识别新短信中的验证码，点击才填入；五分钟后清除，不记录短信正文",
+            InputAssistance.smsEnabled(requireContext()), enabled -> {
+                if (enabled) smsPermission.launch(android.Manifest.permission.RECEIVE_SMS);
+                else HostTask.run(this, context -> { InputAssistance.smsEnabled(context,false); return false; }, saved -> {});
+            });
 
         GroupCard incognito = GroupCard.add(sectionColumn(target, "无痕"), "隐私模式");
         incognito.note("在键盘功能面板里打开隐私模式后，" + app
@@ -57,7 +87,7 @@ public final class PrivacyPage extends ReloadingDetailPage {
 
     @Override protected boolean shouldReloadOnContentReady() { return false; }
 
-    @Override protected void onContentDestroyed() { rows.clear(); }
+    @Override protected void onContentDestroyed() { rows.clear(); smsCodeRow=null; }
 
     private void addToggle(GroupCard group, InputFeatureToggle toggle) {
         GroupCard.Row row = group.toggle(toggle.title(), toggle.description(), toggle.enabledByDefault(),

@@ -413,6 +413,7 @@ fn load_from(connection: &Connection, model: &mut PersonalNgram) -> Result<()> {
             clamp_count(row.get(3)?),
         );
     }
+    let _ = crate::adaptive::night::restore(connection, &mut model.adaptive);
     Ok(())
 }
 

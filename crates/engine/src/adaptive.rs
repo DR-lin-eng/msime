@@ -4,6 +4,7 @@
 //! 有界散列，模型为空、样本不足或后端不可用时仍由原有词频和 n 元模型排序。
 
 mod device;
+pub mod night;
 
 pub const CONTEXT_CHARACTERS: usize = 512;
 pub const MAX_CANDIDATES: usize = 16;
@@ -162,6 +163,23 @@ impl PersonalRanker {
             });
             self.next_word = (self.next_word + 1) % RESERVOIR;
         }
+    }
+
+    /// 夜间缓存只保存数值头，不包含原始上下文或候选文字。
+    pub(crate) fn snapshot(&self) -> Vec<f32> {
+        self.head.to_vec()
+    }
+
+    pub(crate) fn restore(&mut self, head: &[f32]) -> bool {
+        if head.len() != HIDDEN
+            || head
+                .iter()
+                .any(|value| !value.is_finite() || value.abs() > 2.0)
+        {
+            return false;
+        }
+        self.head.copy_from_slice(head);
+        true
     }
 
     pub fn observations(&self) -> u64 {

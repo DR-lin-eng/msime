@@ -32,6 +32,23 @@ import app.msime.android.WindowLayout;
 
 /** Separate synthetic editor app: tests the system InputConnection, not a mock. */
 public final class EditorActivity extends Activity {
+    private EditText clipboardEditor;
+    @SuppressWarnings("deprecation")
+    /** 外部编辑器夹具触发真实系统复制，不以产品包启动 instrumentation，避免停止输入法进程。 */
+    @Override protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        String text=intent.getStringExtra("msime_test_clipboard");
+        if (text != null && text.length() <= 4096) {
+            if (clipboardEditor == null) return;
+            clipboardEditor.requestFocus();
+            getSystemService(android.view.inputmethod.InputMethodManager.class).showSoftInput(clipboardEditor,0);
+            clipboardEditor.postDelayed(() -> {
+                android.content.ClipboardManager clipboard=getSystemService(android.content.ClipboardManager.class);
+                if (clipboard != null) clipboard.setPrimaryClip(android.content.ClipData.newPlainText("msime synthetic",text));
+            },800);
+        }
+    }
+
     @SuppressWarnings("deprecation")
     @Override public void onCreate(Bundle state) {
         WindowLayout.theme(this);
@@ -45,6 +62,7 @@ public final class EditorActivity extends Activity {
         title.setText("MSIME synthetic editor fixture");
         layout.addView(title);
         EditText plain = new EditText(this);
+        clipboardEditor=plain;
         // 需要验收真实换行的套件显式使用多行编辑器，普通单行夹具继续保留。
         plain.setInputType(InputType.TYPE_CLASS_TEXT | (getIntent().getBooleanExtra(
             "msime_test_multiline", false) ? InputType.TYPE_TEXT_FLAG_MULTI_LINE : 0));

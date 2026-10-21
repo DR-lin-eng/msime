@@ -183,6 +183,19 @@ impl TryFrom<DictionaryEntry> for Entry {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    /// 平台提供电源和本地时间，学习与隐私条件仍由共享层核验。
+    NightLearning {
+        charging: bool,
+        idle: bool,
+        local_hour: u8,
+        #[serde(default)]
+        private: bool,
+    },
+    CancelNightLearning,
+    /// 只返回短期提示所需的代码，不记录短信正文。
+    VerificationCode {
+        text: String,
+    },
     /// 浏览个人词库与语言资源；空查询也包含内置词条，不改变旧 `list` 的个人导出语义。
     Browse {
         kind: LookupKind,
@@ -766,6 +779,31 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
         return crate::dictionary_updates::request(&request.options, command, *enabled);
     }
 
+    if let Operation::VerificationCode { text } = &request.action {
+        return Ok(json!({"code": msime_client_core::input_assistance::verification_code(text)}));
+    }
+    if let Operation::CancelNightLearning = &request.action {
+        msime_engine::adaptive::night::cancel();
+        return Ok(json!({"status":"cancelled"}));
+    }
+    if let Operation::NightLearning {
+        charging,
+        idle,
+        local_hour,
+        private,
+    } = &request.action
+    {
+        if !msime_client_core::input_assistance::night_learning_allowed(
+            *charging,
+            *idle,
+            *local_hour,
+            request.options.preferences.learning,
+            *private,
+        ) {
+            return Ok(json!({"status":"skipped","examples":0,"epochs":0}));
+        }
+    }
+
     // 只有 `queue_learning_merge` 和 `merge_pending_learning` 用到：待合并的输入记录放在它下面。
     let preferences_directory = request
         .options
@@ -774,6 +812,20 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
         .filter(|path| Path::new(path).is_absolute());
     let options = request.options.into_engine_options();
     match request.action {
+        Operation::NightLearning { .. } => {
+            let _access = DictionaryAccess::try_maintenance(
+                Path::new(&options.user_data),
+                Path::new(&options.dictionaries),
+            )
+            .map_err(|_| "dictionary access unavailable")?
+            .ok_or("dictionary maintenance busy")?;
+            let result = msime_engine::adaptive::night::optimize(
+                &Path::new(&options.user_data).join(msime_engine::assets::USER_JOURNAL),
+            )
+            .map_err(|_| "night learning unavailable")?;
+            serde_json::to_value(result).map_err(|_| "night learning unavailable".to_owned())
+        }
+        Operation::CancelNightLearning | Operation::VerificationCode { .. } => unreachable!(),
         Operation::Browse {
             kind,
             query,
@@ -1366,7 +1418,10 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
             let state = store.read().map_err(personal_dictionary_error)?;
             Ok(json!({ "pending_count": state.pending_count() }))
         }
-        Operation::Browse { .. }
+        Operation::NightLearning { .. }
+        | Operation::CancelNightLearning
+        | Operation::VerificationCode { .. }
+        | Operation::Browse { .. }
         | Operation::Count { .. }
         | Operation::ExportSnapshot { .. }
         | Operation::LearningCount

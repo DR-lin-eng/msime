@@ -1,6 +1,6 @@
 //! 候选排序的唯一实现：句子模型重排、整句次选读法的后移，以及交给重排器的上文窗口。
 //!
-//! 这里只做决策，不碰候选数组：`rerank_pick` 返回应移到首位的下标，`runner_up_order` 返回一个排列（新座位 -> 旧座位）。`msime-input-runtime` 把结果同步应用到候选元数据和引擎座位映射上，网页引擎（`msime-engine-wasm`）也调用同一组函数，两处的排序因此不会各自漂移。
+//! 这里只做决策，不持有候选数组：`rerank_plan` 返回可应用到并行数组的紧凑计划，`rerank_pick` 保留只取首选的位置接口，`runner_up_order` 返回呈现排列（新座位 -> 旧座位）。`msime-input-runtime` 把结果同步应用到候选元数据和引擎座位映射上，网页引擎（`msime-engine-wasm`）也调用同一组函数，两处的排序因此不会各自漂移。
 
 use crate::SchemeType;
 
@@ -282,6 +282,55 @@ impl<'a> OrderRowSource<'a> for ParallelOrderRows<'a> {
     }
 }
 
+/// 只保存已评分候选的局部排列，避免为整张候选表分配索引。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RerankPlan {
+    kind: RerankPlanKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RerankPlanKind {
+    Promote(usize),
+    Scored {
+        positions: [usize; STATIC_RERANK_LIMIT],
+        order: [usize; STATIC_RERANK_LIMIT],
+        count: usize,
+    },
+}
+
+impl RerankPlan {
+    fn promote(index: usize) -> Self {
+        Self {
+            kind: RerankPlanKind::Promote(index),
+        }
+    }
+
+    fn leader(&self) -> usize {
+        match &self.kind {
+            RerankPlanKind::Promote(index) => *index,
+            RerankPlanKind::Scored {
+                positions, order, ..
+            } => positions[order[0]],
+        }
+    }
+
+    /// 将同一计划应用到候选和各并行数组；数组必须仍处于决策时的原顺序。
+    pub fn apply<T>(&self, rows: &mut [T]) {
+        match &self.kind {
+            RerankPlanKind::Promote(index) => rotate_to_front(rows, *index),
+            RerankPlanKind::Scored {
+                positions,
+                order,
+                count,
+            } => {
+                apply_order_with(&order[..*count], |left, right| {
+                    rows.swap(positions[left], positions[right]);
+                });
+            }
+        }
+    }
+}
+
 /// rerank() 的决策部分：返回应当移到首位的行下标；None 表示不动。
 ///
 /// `scheme` 是 `SchemeType` 序号；不允许重排的方案（韩文汉字表）返回 None，五笔且 `!answered_by_pinyin_fallback` 时返回 None，行数 < 2 时返回 None，首行是英文时返回 None。`Reranker::best_where` 是 `&mut self`，因此这里取 `&mut`。
@@ -292,6 +341,44 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     answered_by_pinyin_fallback: bool,
     rows: &'a R,
 ) -> Option<usize> {
+    choose_rerank(
+        reranker,
+        context,
+        scheme,
+        answered_by_pinyin_fallback,
+        rows,
+        false,
+    )
+    .map(|plan| plan.leader())
+}
+
+/// 保留与 `rerank_pick` 相同的首选决策，并用完整的静态混合评分排列次选。
+/// 证据不完整时沿用原先的单首选提升；来源、比较预算和上下文窗口均不变。
+pub fn rerank_plan<'a, R: OrderRowSource<'a> + ?Sized>(
+    reranker: &mut Reranker,
+    context: &str,
+    scheme: u8,
+    answered_by_pinyin_fallback: bool,
+    rows: &'a R,
+) -> Option<RerankPlan> {
+    choose_rerank(
+        reranker,
+        context,
+        scheme,
+        answered_by_pinyin_fallback,
+        rows,
+        true,
+    )
+}
+
+fn choose_rerank<'a, R: OrderRowSource<'a> + ?Sized>(
+    reranker: &mut Reranker,
+    context: &str,
+    scheme: u8,
+    answered_by_pinyin_fallback: bool,
+    rows: &'a R,
+    rank_runner_ups: bool,
+) -> Option<RerankPlan> {
     // A Korean Hanja list is a table in frequency order for one syllable, not Chinese text the language model can read.
     if !reorders_candidates(scheme) {
         return None;
@@ -347,7 +434,30 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
                         best = index;
                     }
                 }
-                return (best != 0).then(|| considered[best]);
+                if rank_runner_ups && (0..count).all(|index| !combined(index).is_nan()) {
+                    let mut order: [usize; STATIC_RERANK_LIMIT] =
+                        std::array::from_fn(|index| index);
+                    order[..count].sort_by(|&left, &right| {
+                        combined(right)
+                            .partial_cmp(&combined(left))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    if order[..count]
+                        .iter()
+                        .enumerate()
+                        .all(|(seat, index)| seat == *index)
+                    {
+                        return None;
+                    }
+                    return Some(RerankPlan {
+                        kind: RerankPlanKind::Scored {
+                            positions: considered,
+                            order,
+                            count,
+                        },
+                    });
+                }
+                return (best != 0).then(|| RerankPlan::promote(considered[best]));
             }
         }
     }
@@ -358,6 +468,7 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
                 && !corrected_key,
         })
     })
+    .map(RerankPlan::promote)
 }
 
 fn fill_static_rerank_inputs<'a, R, F>(

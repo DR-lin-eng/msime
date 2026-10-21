@@ -10,8 +10,7 @@ use std::time::Duration;
 
 use msime_engine::host::{HelpcodeKeymap, SharedKeymap};
 use msime_engine::ordering::{
-    rerank_pick, rotate_to_front, runner_up_order, OrderRow, Reranker, ScoredOrderRows,
-    SentenceModel,
+    rerank_plan, runner_up_order, OrderRow, Reranker, ScoredOrderRows, SentenceModel,
 };
 use msime_engine::time::Instant;
 use msime_engine::{
@@ -1018,7 +1017,7 @@ impl WebHost {
         }
     }
 
-    /// 排序刷新（D19）：句子模型挑首位，再把多余的整句读法后移，结果记成 `engine_order`。和 `Runtime::refresh` 的 `rerank` + `demote_runner_up_readings` 完全对应，`tests/parity.rs` 钉住这一点。
+    /// 排序刷新（D19）：应用共享候选评分计划，再把多余的整句读法后移，结果记成 `engine_order`。和 `Runtime::refresh` 的 `rerank` + `demote_runner_up_readings` 完全对应，`tests/parity.rs` 钉住这一点。
     fn order(&mut self, keep_highlight: bool) {
         let started = Instant::now();
         let use_model = self.model_on();
@@ -1051,18 +1050,18 @@ impl WebHost {
                     .iter()
                     .map(|item| item.static_evidence())
                     .collect();
-                if let Some(promote) = rerank_pick(
+                if let Some(plan) = rerank_plan(
                     reranker,
                     &self.context,
                     scheme,
                     snapshot.answered_by_pinyin_fallback,
                     &ScoredOrderRows::new(&rows, &evidence),
                 ) {
-                    rotate_to_front(&mut order, promote);
+                    plan.apply(&mut order);
                 }
             }
         }
-        // `Runtime::demote_runner_up_readings` 看到的是已经旋转过的列表，这里按旋转后的顺序交给它。
+        // 原生呈现规则看到的是已应用评分计划的列表，网页沿用相同顺序。
         let rotated: Vec<OrderRow<'_>> = order.iter().map(|&index| rows[index]).collect();
         if let Some(demoted) = runner_up_order(scheme, &rotated) {
             order = demoted.iter().map(|&seat| order[seat]).collect();

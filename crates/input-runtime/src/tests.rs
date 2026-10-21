@@ -4499,6 +4499,27 @@ fn committed_text_reaches_the_engine_rescoring_context() {
 }
 
 #[test]
+fn local_long_context_keeps_its_topic_without_expanding_cloud_context() {
+    let mut runtime = Runtime::new(recording_engine(), 5).unwrap();
+    runtime.focus(true).unwrap();
+    let text = format!("甲{}", "的".repeat(400));
+    runtime.seed_context(&text);
+    assert_eq!(runtime.engine.contexts.last(), Some(&text));
+    assert_eq!(runtime.prediction_context.chars().count(), 401);
+    assert!(runtime.ai_context.len() <= 1024);
+    assert!(!runtime.ai_context.starts_with('甲'));
+    runtime.seed_context(&"🙂".repeat(600));
+    assert_eq!(runtime.prediction_context.chars().count(), 512);
+    assert!(runtime.ai_context.len() <= 1024);
+    runtime.clear_context();
+    assert!(runtime.prediction_context.is_empty());
+    assert_eq!(runtime.engine.contexts.last().map(String::as_str), Some(""));
+    runtime.seed_context("乙");
+    runtime.focus(false).unwrap();
+    assert!(runtime.prediction_context.is_empty());
+}
+
+#[test]
 fn clearing_the_context_starts_the_next_seed_from_nothing() {
     let mut runtime = Runtime::new(recording_engine(), 5).unwrap();
     runtime.focus(true).unwrap();

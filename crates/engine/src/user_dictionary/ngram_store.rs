@@ -177,6 +177,7 @@ impl PersonalNgramStore {
                 }
             }
         }
+        self.invalidations.fetch_add(1, Ordering::AcqRel);
         self.version.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -378,17 +379,31 @@ fn load_from(connection: &Connection, model: &mut PersonalNgram) -> Result<()> {
             "personal n-gram state exceeds its memory limit",
         ));
     }
-    let mut pairs = connection.prepare("SELECT previous,word,count FROM personal_bigram")?;
+    let mut pairs = connection
+        .prepare("SELECT previous,word,count FROM personal_bigram ORDER BY previous,word")?;
     let mut rows = pairs.query([])?;
     while let Some(row) = rows.next()? {
-        model.add_pair(
+        model.restore_pair(
             &row.get::<_, String>(0)?,
             &row.get::<_, String>(1)?,
             clamp_count(row.get(2)?),
         );
     }
-    let mut triples =
-        connection.prepare("SELECT earlier,previous,word,count FROM personal_trigram")?;
+    // 恢复耗时与全部日志规模解耦；在线提交继续正常训练，不受回放预算限制。
+    let mut training = connection.prepare(
+        "SELECT previous,word,count FROM personal_bigram WHERE previous<>?1 ORDER BY count DESC,previous,word LIMIT 512"
+    )?;
+    let mut examples = training.query([SENTENCE_START])?;
+    while let Some(row) = examples.next()? {
+        model.adaptive.observe(
+            &row.get::<_, String>(0)?,
+            &row.get::<_, String>(1)?,
+            clamp_count(row.get(2)?),
+        );
+    }
+    let mut triples = connection.prepare(
+        "SELECT earlier,previous,word,count FROM personal_trigram ORDER BY earlier,previous,word",
+    )?;
     let mut rows = triples.query([])?;
     while let Some(row) = rows.next()? {
         model.add_triple(
@@ -1115,5 +1130,49 @@ mod tests {
         );
         store.invalidations.fetch_add(1, Ordering::AcqRel);
         assert!(store.model().bigram_probability("甲", "乙") > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::*;
+
+    #[test]
+    fn deleting_learning_rows_rebuilds_the_neural_head_from_remaining_data() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("personal.db");
+        let store = PersonalNgramStore::for_journal(&path);
+        for _ in 0..32 {
+            store
+                .record(&[
+                    PersonalTransition {
+                        earlier: String::new(),
+                        previous: String::new(),
+                        word: "丙".into(),
+                        times: 2,
+                    },
+                    PersonalTransition {
+                        earlier: String::new(),
+                        previous: "甲".into(),
+                        word: "丁".into(),
+                        times: 2,
+                    },
+                ])
+                .unwrap();
+        }
+        store.flush().unwrap();
+        assert!(store.model().adaptive.observations() > 0);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DELETE FROM personal_bigram; DELETE FROM personal_trigram;")
+            .unwrap();
+        store.forget_removed(&[PersonalTransition {
+            earlier: String::new(),
+            previous: "甲".into(),
+            word: "丁".into(),
+            times: 64,
+        }]);
+        assert_eq!(store.model().adaptive.observations(), 0);
+        assert!(store.model().adaptive.scores("甲", &["丙", "丁"]).is_none());
     }
 }

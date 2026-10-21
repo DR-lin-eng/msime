@@ -102,6 +102,8 @@ pub(super) struct InputSession {
     pub personal_context: Arc<PersonalNgramStore>,
     pub typo_profile: Arc<PersonalTypoProfile>,
     pub personal_reranked: bool,
+    /// 仅保留在内存中的长预测上下文，与个人学习开关共用访问边界。
+    pub prediction_context: String,
     /// The list before the personal rerank; learning, pinning and index-0 checks use this order.
     pub ranking_candidates: Option<Vec<WordItem>>,
     /// Caret-prefix decoding (overlays.md §7.6).
@@ -185,6 +187,11 @@ impl InputSession {
             personal_context: PersonalNgramStore::for_journal(&journal),
             typo_profile: PersonalTypoProfile::shared(&journal),
             personal_reranked: false,
+            prediction_context: crate::text::last_characters(
+                &options.rescoring_context,
+                crate::adaptive::CONTEXT_CHARACTERS,
+            )
+            .to_owned(),
             ranking_candidates: None,
             prefix_active: false,
             prefix_query_input: String::new(),
@@ -1417,6 +1424,8 @@ impl InputSession {
     }
 
     pub fn set_rescoring_context(&mut self, context: &str) {
+        self.prediction_context =
+            crate::text::last_characters(context, crate::adaptive::CONTEXT_CHARACTERS).to_owned();
         self.engine.set_rescoring_context(context);
     }
 

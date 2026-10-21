@@ -38,6 +38,14 @@
 | `vi`（固定 `=0.8.0`） | 0.8.0 | MIT（crate 以 `license-file` 声明，Copyright 2020 Hung Nguyen） | 越南语方案的 Telex 与 VNI 变换（`crates/engine/src/vietnamese/`）。固定到补丁版本，上游的小版本发布不会悄悄改变输入行为。链接进二进制的传递依赖新增 `nom` 8（MIT）与 `phf`、`phf_shared` 0.11（MIT，与 workspace 已有的 0.13 并存）；`log`、`smallvec`、`memchr` 与 `siphasher` 1 原本就在锁文件里。`phf` 的 `macros` 特性在编译期另带 `phf_macros`、`phf_generator` 0.11（MIT）和 `rand` 0.8（MIT OR Apache-2.0），它们不进二进制。macOS 包内的 `vi-MIT.txt` 是它的许可证全文，Windows 安装包的 `THIRD_PARTY_NOTICES.txt` 也收入同一份（`Collect-Notices.ps1`）。上游仓库是 [ZeroX-DG/vi-rs](https://github.com/ZeroX-DG/vi-rs) |
 | `ewts` | 0.1.3 | MIT OR Apache-2.0（按 MIT 使用，作者 Maxim Zommer） | 藏文方案把 EWTS（扩展威利转写）转成藏文 Unicode（`crates/engine/src/tibetan/`）。没有任何依赖。crate 和上游仓库都没有附许可证文件，`resources/licenses/ewts-MIT.txt` 是标准 MIT 文本，版权行写的是 crate 元数据里的作者；macOS 包内的 `ewts-MIT.txt`、Windows 安装包的 `THIRD_PARTY_NOTICES.txt`（`Collect-Notices.ps1`），以及 Android 的 `assets/native-notices/ewts.txt`（`build-native.sh`）、iOS App 资源（`project.yml`）和 HarmonyOS 的 `resfile/licenses`（`stage-resources.sh`）都收入这一份；这三个移动端同样带上 `vi-MIT.txt`。它的转换表按 README 所说取自 [rogerespel/ewts-js](https://github.com/rogerespel/ewts-js)（Copyright (C) 2010-2025 Roger Espel Llima，Apache-2.0）：`ewts-MIT.txt` 末尾附着这条版权行和 Apache-2.0 全文，所以上面每个渠道都随之带上；macOS 和 Linux 的 `THIRD_PARTY_NOTICES.txt` 另外注明出处。上游仓库是 [emgyrz/ewts-rs](https://github.com/emgyrz/ewts-rs) |
 
+## 个人神经排序与可选设备推理
+
+`crates/engine/src/adaptive/model.onnx` 是本项目自己的固定特征网络，没有外部训练语料或预训练权重，按本项目 GPL-3.0-only 分发。`scripts/generate_adaptive_model.py` 仅用 Python 标准库生成与 Rust CPU 实现相同的权重，`--check` 验证逐字节一致。个人排序头在本机通过既有学习日志重建，不随安装包分发、不上传。
+
+`ort` 和 `ort-sys` 固定为 `2.0.0-rc.11`（[pykeio/ort](https://github.com/pykeio/ort/tree/a873610ec2f315a941516b72746b2aa5fc0706d8)，提交 `a873610ec2f315a941516b72746b2aa5fc0706d8`），使用 MIT 选项，全文在 [ort-MIT.txt](../resources/licenses/ort-MIT.txt)。新增依赖的原包许可证汇总在 `adaptive-inference-NOTICES.txt`，经六个平台的原生打包入口随宿主分发；动态加载依赖 `libloading` 为 ISC，矩阵依赖 `ndarray` 为 MIT OR Apache-2.0。
+
+ONNX Runtime 由宿主另行提供，要求 1.23 或更新且包含所需设备执行提供者；本改动不下载或分发运行时。上游为 [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime)，采用 MIT，许可证副本见 [onnxruntime-MIT.txt](../resources/licenses/onnxruntime-MIT.txt)。分发运行时的宿主必须同时带其许可证与第三方通知。Docker 验证固定为 1.24.4，仅证明 CPU 图和回退行为，不作为 CoreML、NNAPI、CUDA、DirectML 或 OpenVINO 在设备上命中的证据。
+
 ## Android 组合表情
 
 `shared/emoji-combinations/emoji-combinations.txt` 取自 [gurecn/yuyansdk 的固定提交](https://github.com/gurecn/yuyansdk/blob/c99f9b7c451b7b77d379dab7d55fdbfb93b04b12/src/main/java/com/yuyan/imemodule/data/emojicon/EmojiconData.kt)中 `icon_emojibar_hot` 的 165 项，仅转换为逐行 UTF-8 文本，顺序和 Unicode 序列不变。它与 #8193 的用户附件完全一致，源文件 SHA-256 为 `903c1da263b241a7e47ca32b11ab80d7c8e70e583370640894186d2f8a183604`。采用 BSD-3-Clause，版权为 Copyright (c) 2026, 王莹，源文件保留 Hieu Rocker 作者标记；完整许可、署名和修改说明在同目录 `emoji-combinations-NOTICE.txt`。Android 原生 APK 和 Tauri 合包均带此通知，原生关于页的「开源许可」可查看。未引入 Kotlin 代码、图片、字体或微信文案；其他平台不打包这份数据。

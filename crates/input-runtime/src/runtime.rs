@@ -138,6 +138,8 @@ pub struct Runtime<E: InputEngine = Session> {
     ///
     /// The reference sends what the user has just written so a suggestion fits the sentence in progress. Every host but Linux left this empty, which made AI suggestions guess from the pinyin alone. The Engine's neural sentence association conditions on the same text, so every change here is mirrored with [`InputEngine::set_rescoring_context`]; without it the engine-side models ranked every sentence as if nothing had been written before it.
     pub(crate) ai_context: String,
+    /// 本地预测专用的 512 字窗口；云服务仍只接收原有 1024 字节窗口。
+    pub(crate) prediction_context: String,
     /// Reorders candidates the pinyin decoder assembled, when a host supplied a model.
     ///
     /// Absent unless a host calls [`Runtime::set_reranker`], and absent is the only state the
@@ -781,6 +783,7 @@ impl<E: InputEngine> Runtime<E> {
             session,
             generation: 0,
             ai_context: String::new(),
+            prediction_context: String::new(),
             reranker: None,
             settled_reranker: None,
             settled_rerank_enabled: true,
@@ -928,6 +931,7 @@ impl<E: InputEngine> Runtime<E> {
     /// [`Runtime::seed_context`] appends, exactly as a commit does, and cancelling a composition keeps what was committed before it. A harness that seeds a different context per case therefore has to clear it first, or every case is ranked against the tail of all the cases before it. The Engine's rescoring context is cleared with it, so both rankers start from the same empty sentence. The Engine's committed-word context is left alone: seeding never adds to it, so there is nothing of the seed's there to forget, unlike [`Runtime::focus`], which also ends real commits.
     pub fn clear_context(&mut self) {
         self.ai_context.clear();
+        self.prediction_context.clear();
         self.engine.set_rescoring_context("");
     }
 
@@ -1393,7 +1397,7 @@ impl<E: InputEngine> Runtime<E> {
         self.advance()?;
         self.engine = engine;
         // The committed text belongs to the client, not the engine, so the replacement ranks against it as its predecessor did.
-        self.engine.set_rescoring_context(&self.ai_context);
+        self.engine.set_rescoring_context(&self.prediction_context);
         self.load_snapshot(cached);
         self.snapshot_valid = true;
         self.page_size = page_size.into();
@@ -1559,13 +1563,13 @@ impl<E: InputEngine> Runtime<E> {
         })
     }
 
-    /// Keep the tail of what was committed, cut on a character boundary, and hand it to the Engine.
-    ///
-    /// Bounded at 1024 bytes because `query_candidates` refuses anything longer outright - an over-long context would silently disable the whole query rather than being trimmed for us.
+    /// 本地模型保留 512 字；云候选上下文仍按原有 1024 字节限制截断。
     pub(crate) fn remember_commit(&mut self, text: &str) {
         if !self.focused {
             self.ai_context.clear();
+            self.prediction_context.clear();
         } else {
+            msime_engine::adaptive::remember_context(&mut self.prediction_context, text);
             self.ai_context.push_str(text);
             if self.ai_context.len() > 1024 {
                 let mut cut = self.ai_context.len() - 1024;
@@ -1575,7 +1579,7 @@ impl<E: InputEngine> Runtime<E> {
                 self.ai_context.drain(..cut);
             }
         }
-        self.engine.set_rescoring_context(&self.ai_context);
+        self.engine.set_rescoring_context(&self.prediction_context);
     }
 
     /// 回退暂存词段：普通退格在拼写末尾剩零或一个字符时恢复最近一次选词；
@@ -2029,7 +2033,7 @@ impl<E: InputEngine> Runtime<E> {
         let rows = order_rows(snapshot);
         let Some(promote) = rerank_pick(
             reranker,
-            &self.ai_context,
+            &self.prediction_context,
             snapshot.scheme,
             snapshot.answered_by_pinyin_fallback,
             &rows,
@@ -2241,6 +2245,7 @@ impl<E: InputEngine> Runtime<E> {
         // from one application into another. The Engine's committed-word context follows the same rule: the next word
         // no longer follows the last one, and no later pick may take back what a commit in the other client taught.
         self.ai_context.clear();
+        self.prediction_context.clear();
         self.engine.set_rescoring_context("");
         self.engine.reset_context();
         let mut transition = self.transition(result);

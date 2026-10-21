@@ -253,6 +253,8 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-stroke
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/vi-MIT.txt" "${MSIME_LEGAL_DIRECTORY}/vi-MIT.txt" COPYONLY)
 # 引擎为藏文方案链接的 ewts crate（EWTS 威利转写转藏文）；它以 MIT OR Apache-2.0 双许可发布，这里选 MIT，MIT 要求每份副本都带上版权和许可声明。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/ewts-MIT.txt" "${MSIME_LEGAL_DIRECTORY}/ewts-MIT.txt" COPYONLY)
+# 个人神经排序的动态加载与固定网络依赖许可证随宿主分发。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/adaptive-inference-NOTICES.txt" "${MSIME_LEGAL_DIRECTORY}/adaptive-inference-NOTICES.txt" COPYONLY)
 # symphonia and triple_buffer, which host-api links in for key sounds and music, and rink-core, which the engine links in for V-mode unit conversion, are MPL-2.0: the licence text ships with the binary, and THIRD_PARTY_NOTICES.txt says where their source is.
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/MPL-2.0.txt" "${MSIME_LEGAL_DIRECTORY}/MPL-2.0.txt" COPYONLY)
 # The on-device speech runtime staged into Contents/Frameworks below. The upstream archive carries no license file, so the texts come from the copies the other desktops ship: sherpa-onnx's beside its vendored C header, ONNX Runtime's pinned under platforms/linux.

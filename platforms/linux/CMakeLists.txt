@@ -1153,6 +1153,7 @@ set(MSIME_NOTICE_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-cantonese-CC-BY-4.0.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libchewing-data-LGPL-2.1.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/ewts-MIT.txt"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/adaptive-inference-NOTICES.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-stroke-LGPL-3.0.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/OpenCC-Apache-2.0.txt")
 # `copyright` is the name Debian policy requires for the package license.
@@ -1171,6 +1172,7 @@ set(MSIME_NOTICE_NAMES
   rime-cantonese-CC-BY-4.0.txt
   libchewing-data-LGPL-2.1.txt
   ewts-MIT.txt
+  adaptive-inference-NOTICES.txt
   rime-stroke-LGPL-3.0.txt
   OpenCC-Apache-2.0.txt)
 # The handwriting model's LGPL-2.1 license travels with the model, so it is a notice only when the model is installed.

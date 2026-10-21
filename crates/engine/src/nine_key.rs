@@ -1558,6 +1558,31 @@ impl NineKeySession {
                 insert_inline_date_time(&mut candidates, anchor, kind, digits, || clock());
             }
         }
+        if self.learning && self.personal_context && !self.rescoring_context.is_empty() {
+            if let (Some(dictionary), Some(first)) = (self.dictionary.as_ref(), candidates.first())
+            {
+                // 只比较消费相同数字的行，不能让整词、补全和前缀互相越位。
+                let count = candidates
+                    .iter()
+                    .take_while(|row| row.pinyin == first.pinyin)
+                    .count();
+                let model = dictionary.personal_model();
+                let context = format!("nine-key:{}:{locked_key}", self.digits);
+                let journal = self.paths.user(assets::USER_JOURNAL);
+                if let Some(order) =
+                    crate::ime::personal_rerank::personal_context_rerank_with_history(
+                        &candidates[..count],
+                        &model,
+                        None,
+                        None,
+                        &self.rescoring_context,
+                        &mut |leader| positions::is_pinned_candidate(&journal, &context, leader),
+                    )
+                {
+                    order.reorder(&mut candidates[..count]);
+                }
+            }
+        }
         positions::apply_fixed_positions(
             &self.paths.user(assets::USER_JOURNAL),
             &format!("nine-key:{}:{locked_key}", self.digits),

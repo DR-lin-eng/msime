@@ -7312,9 +7312,21 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 密码、验证码这类输入框和隐私模式下根本没有「云端」页，也就什么都不去取（`KeyboardPrivacyGate` 的 `cloudClipboard`，与 Android 的 `cloudClipboardAllowed` 一致）；本机历史照常可插入，只是不保存新的剪贴板。
     let cloud = privacyGate.allows(.cloudClipboard) ? KeyboardCloudClipboard(hasFullAccess: hasFullAccess) : nil
     cloud?.fieldAllowsCloud = { [weak self] in self?.privacyGate.allows(.cloudClipboard) ?? false }
+    let documentIdentifier = textDocumentProxy.documentIdentifier
     let panel = KeyboardClipboardView(
       hasFullAccess: hasFullAccess, cloud: cloud,
       capturesHistory: { [weak self] in self?.privacyGate.allows(.clipboardHistory) ?? false },
+      allowsCode: { [weak self] in
+        guard let self else { return false }
+        return textDocumentProxy.documentIdentifier == documentIdentifier && !KeyboardPrivacyPreference.incognito
+          && textDocumentProxy.textContentType != .password && textDocumentProxy.textContentType != .newPassword
+          && (MetasequoiaInputSessionBridge.loadSharedPreferences()?["verification_code_suggestions"] as? Bool ?? true)
+      }, onCode: { [weak self] code in
+        guard let self, textDocumentProxy.documentIdentifier == documentIdentifier else { return }
+        // 验证码直接交给输入连接，不进入学习、上下文缓存或统计。
+        textDocumentProxy.insertText(code)
+        closeKeyboardPicker()
+      }, onSystemCode: { [weak self] in self?.advanceToNextInputMode() },
       showsHeader: false, onInsert: { [weak self] text in
       guard let self else { return }
       render(session.finishComposition())

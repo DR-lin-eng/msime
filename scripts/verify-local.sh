@@ -786,7 +786,10 @@ fi
 # behind, so testing for either turns a skip into two failing stages on a machine that never had
 # the dependency. The generated build system is the thing that only a finished configure writes.
 macos_configured() {
-  [ -f "$MSIME_MACOS_BUILD/build.ninja" ] || [ -f "$MSIME_MACOS_BUILD/Makefile" ]
+  # Linux 容器会看见宿主的构建目录，但不能构建或运行 AppKit 产物。
+  [ "$apple_host" -eq 1 ] && {
+    [ -f "$MSIME_MACOS_BUILD/build.ninja" ] || [ -f "$MSIME_MACOS_BUILD/Makefile" ]
+  }
 }
 
 # Rebuild the Rust host library the configured macOS build actually links, which is MSIME_HOST_LIBRARY in its cache and not necessarily target/debug: platforms/macos/README.md configures target/macos-isolated against target/macos-cargo. Nothing else in this script builds that copy, so without this a host-api ABI change failed the macOS compile with undefined symbols until someone rebuilt it by hand. A library outside target/ is built the way the README builds it, with the same deployment flags, because the cc build scripts fingerprint CFLAGS and CXXFLAGS and a different set would rebuild the C objects there on every alternation between the two. The README's CMAKE_PREFIX_PATH is left out: nothing in msime-host-api's build graph reads it. One inside target/ is built without them, like every other cargo step here that writes there, for the same reason.
@@ -860,7 +863,7 @@ elif macos_configured; then
     fail "cargo build -p msime-host-api (macos host library)"
   fi
 else
-  echo "skipped: $MSIME_MACOS_BUILD not configured"
+  echo "skipped: needs an Apple host with $MSIME_MACOS_BUILD configured"
 fi
 
 note "compile: shared apple bridge"
@@ -1140,7 +1143,7 @@ if macos_configured; then
     sed -n 's/^[[:space:]]*[0-9][0-9]* - \([^ ]*\).*/macos \1/p' > "$collected.macos" || true
   compare "macos tests" "$collected.macos"
 else
-  echo "skipped: $MSIME_MACOS_BUILD not configured"
+  echo "skipped: needs an Apple host with $MSIME_MACOS_BUILD configured"
 fi
 
 note "shared apple bridge tests"

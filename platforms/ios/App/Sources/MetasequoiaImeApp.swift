@@ -22,6 +22,7 @@ struct MetasequoiaImeApp: App {
       // 第一次启动就注册本机匿名账号，键盘需要之前就有；已有合法的会话时 Rust 只读一次存储、不联网，失败了下次启动再试。
       Task.detached(priority: .utility) { await IOSRustAccount.ensureAnonymous(account) }
     }
+    IOSNightLearning.register()
     CrashDiagnostics.shared.start()
     try? KeyboardSkinTrialStore().restorePending()
     #if DEBUG
@@ -74,7 +75,9 @@ struct MetasequoiaImeApp: App {
       #endif
     }
     .onChange(of: scenePhase) { _, phase in
+      if phase == .background { IOSNightLearning.schedule() }
       guard phase == .active else { return }
+      IOSNightLearning.schedule()
       // 「水杉四季」跟随月份，所以启动或从后台返回时会重新解析季节；季节变化时发出 `AppThemePalette.didChange`。
       AppThemePalette.refresh()
       applyAppearance()

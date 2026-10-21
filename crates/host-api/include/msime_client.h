@@ -264,6 +264,9 @@ char *msime_client_create(const uint8_t *options, size_t length);
  * with the identical nonempty request ID and content.
  */
 char *msime_client_dictionary(const uint8_t *request, size_t length);
+/* 纯本地验证码识别：{text,allow_plain_digits?:false} -> {code:null|4至8位数字}。
+ * allow_plain_digits 仅供用户明确点按验证码粘贴时使用；不读取任何系统数据，最大 32768 字节。 */
+char *msime_client_input_assistance(const uint8_t *request, size_t length);
 /* The same {options, action} as msime_client_dictionary, as a settings page sends it: an edit,
  * import or reset first has the input hosts let go of the dictionaries (the Windows Server
  * over its auxiliary pipe) and is retried until they have; an import of a whole file (up to

@@ -799,7 +799,8 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             *local_hour,
             request.options.preferences.learning,
             *private,
-        ) {
+        ) || !request.options.preferences.charging_night_learning
+        {
             return Ok(json!({"status":"skipped","examples":0,"epochs":0}));
         }
     }

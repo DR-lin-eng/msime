@@ -64,6 +64,7 @@ struct ClipboardHistoryStore {
     }
     let value = try call(["operation": "capture", "text": text])
     guard value["captured"] as? Bool == true else {
+      if value["reason"] as? String == "verification_code" { throw Failure.verificationCode }
       if value["reason"] as? String == "full" { throw Failure.full }
       if value["reason"] as? String == "invalid" { throw Failure.invalidText }
       throw Failure.invalidFile
@@ -116,9 +117,10 @@ struct ClipboardHistoryStore {
   }
 
   enum Failure: Error, LocalizedError {
-    case empty, invalidText, full, invalidFile, stale
+    case empty, invalidText, full, invalidFile, stale, verificationCode
     var errorDescription: String? {
       switch self {
+      case .verificationCode: "验证码只用于短时填入提示，不保存到历史。"
       case .empty: "剪贴板中没有可保存的文本，或尚未允许粘贴。"
       case .invalidText: "剪贴板文本过长或包含不能保存的字符，请缩短或修改后重试。"
       case .full: "历史记录已满且全部固定，请先取消固定或删除一条。"

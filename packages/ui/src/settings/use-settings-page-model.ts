@@ -108,6 +108,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showInstallInputSource,
     showFloatingToolbar,
     showToolbarAppearance,
+    showToolbarIdleBehavior,
     showToolbarComponents,
     showTouchKeyboardHeight,
     showTouchKeyboardSpacing,
@@ -116,6 +117,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showCandidateEnglishFont,
     showEnglishSuggestions,
     showHelpcodeShiftEntry,
+    showHelpcodeTriggerKey,
     showShuangpinPreedit,
     showShuangpinKeymapHint,
     showCharacterWidth,
@@ -136,6 +138,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showCandidateWindowOpacity,
     showCandidateCornerRadius,
     showCandidatePadding,
+    showCandidateItemGeometry,
     showInputModeHUD,
     showInputModeStatusItem,
     showVoiceCaptureDevices,
@@ -331,6 +334,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     issuesUrl: platformIssuesUrl,
     copyText: client.copyText,
     openExternalUrl: client.openExternalUrl,
+    setError,
   });
   const {
     dataDirectory,
@@ -399,6 +403,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
   } = useUpdateCheck({
     checkUpdate: client.checkUpdate,
     checkForApplicationUpdate: client.checkForApplicationUpdate,
+    pendingUpdateCheck: client.pendingUpdateCheck,
     platform: client.host?.platform ?? null,
     edition: client.host?.edition?.id,
     arch: client.host?.arch,
@@ -485,6 +490,9 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     translationProvider,
     onDeviceMissingLanguages,
     setTranslationProvider,
+    aiAssistant,
+    aiTranslationReady,
+    aiToken: aiTranslationToken,
   } = useTranslationSettings({
     preferences: draft,
     mobile: mobilePlatform,
@@ -516,7 +524,9 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     localModelsAvailable: client.localVoiceModels !== undefined,
     onChange: onVoiceChange,
   });
-  const providerPresetControls = createProviderPresetControl(client.openExternalUrl);
+  const providerPresetControls = createProviderPresetControl(
+    client.openExternalUrl ? openExternalUrl : undefined,
+  );
   const floatingToolbar = floatingToolbarPreferences(draft);
   const {
     themeMode,
@@ -687,6 +697,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showInstallInputSource,
     showFloatingToolbar,
     showToolbarAppearance,
+    showToolbarIdleBehavior,
     showToolbarComponents,
     showTouchKeyboardHeight,
     showTouchKeyboardSpacing,
@@ -695,6 +706,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showCandidateEnglishFont,
     showEnglishSuggestions,
     showHelpcodeShiftEntry,
+    showHelpcodeTriggerKey,
     showHelpcode,
     customHelpcodeSchemas,
     helpcodePacks,
@@ -717,6 +729,7 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     showCandidateWindowOpacity,
     showCandidateCornerRadius,
     showCandidatePadding,
+    showCandidateItemGeometry,
     showInputModeHUD,
     showInputModeStatusItem,
     showVoiceCaptureDevices,
@@ -919,6 +932,9 @@ export function useSettingsPageModel({ client, initialPage, route }: SettingsPag
     translationProvider,
     onDeviceMissingLanguages,
     setTranslationProvider,
+    aiAssistant,
+    aiTranslationReady,
+    aiTranslationToken,
     runProviderCredential,
     credentialTestControl,
     providerPresetControls,

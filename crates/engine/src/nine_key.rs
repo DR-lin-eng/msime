@@ -334,6 +334,8 @@ pub struct NineKeySession {
     /// 每个音节及其前缀的单字频度，`SyllablePrior::from_dictionary` 在第一次查词前建好，给切分路径排序用。
     prior: Option<SyllablePrior<'static>>,
     english: Option<EnglishDictionary>,
+    /// 完整分组码的 SQLite GLOB 模式；热刷新复用容量。
+    english_pattern: String,
     /// 和 `locked` 一一对应：撤销那次锁定要用的东西。部分上屏之后锁定的数字位置变了，记录随之作废成 `None`。
     lock_undo: Vec<Option<LockUndo>>,
     /// 从左列末尾选的字母：第一个未锁定的音节必须以它开头。
@@ -437,6 +439,7 @@ impl NineKeySession {
             dictionary: None,
             prior: None,
             english: None,
+            english_pattern: String::new(),
             lock_undo: Vec::new(),
             initial: None,
             single_character: false,
@@ -475,7 +478,7 @@ impl NineKeySession {
         if self.sentence_association == association && self.sentence_alternatives == alternatives {
             return;
         }
-        self.sentence_association = association;
+        self.sentence_association = association.clone();
         self.sentence_alternatives = alternatives;
         if !association.neural_keyboard {
             self.keyboard = None;
@@ -521,11 +524,12 @@ impl NineKeySession {
 
     /// 交给词库的句子联想设置。键盘模型不在词库里跑（每条切分各跑一次太贵），而由 `rerank_sentences` 跨切分统一跑一次；它要重排的是词网格整句，所以模型打开时即使用户关了词网格，词库也照样解出整句，挑完再去掉。
     fn dictionary_association(&self) -> SentenceAssociationOptions {
-        let association = self.sentence_association;
+        let association = self.sentence_association.clone();
         SentenceAssociationOptions {
             word_lattice: association.word_lattice || association.neural_keyboard,
             neural_keyboard: false,
             show_next_on_duplicate: association.show_next_on_duplicate,
+            ..association
         }
     }
 
@@ -777,18 +781,37 @@ impl NineKeySession {
         } else {
             None
         };
-        // 最近选中的候选要在相同九键上下文的下一次输入中直接显示在首位。用已有固定位置表保存这个信号，不把单字写进个人上下文模型，也不改主词库权重。
+        // 最近选中的候选要在下一次相同数字输入中直接显示在首位。选定读法后，首候选也是显式选择，另外记到未锁定的上下文；不把单字写进个人模型，也不改主词库权重。
         if self.learning
-            && index != 0
-            && selected_fixed_position == 0
             && selected_source.is_dictionary()
             && !selected_canonical_pinyin.is_empty()
             && !selected_is_initials
             && selected_pinyin_length == self.digits.len()
             && self.remember_recent
         {
-            diagnostic = diagnostic
-                .or(self.remember_recent_candidate(&selected_canonical_pinyin, &selected_word));
+            if index != 0 && selected_fixed_position == 0 {
+                diagnostic = diagnostic.or(self.remember_recent_candidate(
+                    &self.ranking_context(),
+                    &selected_canonical_pinyin,
+                    &selected_word,
+                ));
+            }
+            if !self.locked.is_empty() {
+                let unlocked_context = format!("nine-key:{}:", self.digits);
+                // 两个上下文的固定位置互相独立，不能因为读法内未固定就覆盖未锁定上下文里同一候选的手动槽位。
+                if !positions::is_fixed(
+                    &self.paths.user(assets::USER_JOURNAL),
+                    &unlocked_context,
+                    &selected_canonical_pinyin,
+                    &selected_word,
+                ) {
+                    diagnostic = diagnostic.or(self.remember_recent_candidate(
+                        &unlocked_context,
+                        &selected_canonical_pinyin,
+                        &selected_word,
+                    ));
+                }
+            }
         }
         self.consume(selected_pinyin_length);
         if self.learning {
@@ -1245,7 +1268,7 @@ impl NineKeySession {
         } else {
             let dictionary = self
                 .dictionary
-                .get_or_insert_with(|| open_dictionary(&self.paths, dictionary_options));
+                .get_or_insert_with(|| open_dictionary(&self.paths, dictionary_options.clone()));
             let prior = self
                 .prior
                 .get_or_insert_with(|| SyllablePrior::from_dictionary(dictionary, table));
@@ -1294,7 +1317,7 @@ impl NineKeySession {
         append_path_key(&mut locked_key, "", &self.locked);
         let mut dictionary = self
             .dictionary
-            .get_or_insert_with(|| open_dictionary(&self.paths, dictionary_options))
+            .get_or_insert_with(|| open_dictionary(&self.paths, dictionary_options.clone()))
             .row_cache_batch();
         let mut queried = (alternatives.len() > SMALL_QUERY_KEY_BATCH)
             .then(|| HashSet::with_capacity(alternatives.len()));
@@ -1552,10 +1575,11 @@ impl NineKeySession {
             .filter(|_| initial.is_none() && !filtering)
         {
             let digits = self.digits.as_str();
-            if let Some((anchor, kind)) =
+            if let Some((_keyword, anchor, kind)) =
                 inline_date_time_keyword(|keyword| keyword_spells_digits(grid, keyword, digits))
             {
-                insert_inline_date_time(&mut candidates, anchor, kind, digits, || clock());
+                // 九键不给「📅日期」入口：换页交互只在 26 键会话实现。
+                insert_inline_date_time(&mut candidates, anchor, kind, digits, || clock(), None);
             }
         }
         if self.learning && self.personal_context && !self.rescoring_context.is_empty() {
@@ -1974,7 +1998,7 @@ impl NineKeySession {
             return;
         }
         if front.source == CandidateSource::EnglishDictionary && self.grid == KeyGrid::FourteenKey {
-            // 英文行的 `pinyin` 是小写的查询键（`word_matches_digits` 保证全是字母）；九键不给英文读音，与按数字判断时相同。
+            // 英文行的 `pinyin` 是小写的查询键（完整组码查询保证全是字母）；九键不给英文读音，与按数字判断时相同。
             let typed = front.pinyin.len().min(self.digits.len());
             for byte in front.pinyin[..typed].bytes() {
                 reading.push(char::from(byte.to_ascii_lowercase()));
@@ -2079,17 +2103,31 @@ impl NineKeySession {
             return Vec::new();
         };
         let digits = self.digits.as_str();
+        self.english_pattern.clear();
+        for digit in digits.bytes() {
+            let letters = grid.letters(digit);
+            if letters.is_empty() {
+                return Vec::new();
+            }
+            self.english_pattern.push('[');
+            self.english_pattern.push_str(letters);
+            for letter in letters.bytes() {
+                self.english_pattern
+                    .push(char::from(letter.to_ascii_uppercase()));
+            }
+            self.english_pattern.push(']');
+        }
+        self.english_pattern.push('*');
         let prefixes = letter_prefixes(grid, digits, ENGLISH_PREFIX_BUDGET);
         let capacity = prefixes.len().saturating_mul(ENGLISH_LIMIT);
         let mut words = Vec::new();
         for prefix in prefixes {
-            for word in english.query_prefix(&prefix, ENGLISH_LIMIT) {
-                // 词条必须覆盖全部输入数字，防止展开前缀后面的字母读出不匹配的词。
-                // 对照 `pinyin` 中的小写查询键；`word` 是展示形式，可以带标点或空格，
-                // 例如查询键 `dont` 可以显示为 `don't`。
-                if !word_matches_digits(grid, &word.pinyin, digits) {
-                    continue;
-                }
+            for word in english.query_keypad_prefix(
+                &prefix,
+                &self.english_pattern,
+                digits.len(),
+                ENGLISH_LIMIT,
+            ) {
                 if words.capacity() == 0 {
                     words.reserve_exact(capacity);
                 }
@@ -2198,11 +2236,16 @@ impl NineKeySession {
         }
     }
 
-    /// 把最近一次九键选择固定到当前输入上下文的首位；后一次选择会替换第 1 槽，手动固定的其它槽位不受影响。
-    fn remember_recent_candidate(&self, canonical_pinyin: &str, word: &str) -> Option<String> {
+    /// 把最近一次九键选择固定到指定上下文的首位；后一次选择会替换第 1 槽。
+    fn remember_recent_candidate(
+        &self,
+        context: &str,
+        canonical_pinyin: &str,
+        word: &str,
+    ) -> Option<String> {
         positions::set_fixed_position(
             &self.paths.user(assets::USER_JOURNAL),
-            &self.ranking_context(),
+            context,
             canonical_pinyin,
             word,
             1,
@@ -2234,7 +2277,7 @@ fn rerank_cache_matches(entry: &RerankEntry, context: &str, scored: &[Option<&Wo
 
 /// 打开词库时要交给它的选项。取用词库的地方有三处，选项只在这一处攒齐（`dictionary_options`），
 /// 所以以后加选项不会再漏掉某一条路径，让它悄悄用上默认值。
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DictionaryOptions {
     /// `NineKeySession::dictionary_association` 给的句子联想设置。
     association: SentenceAssociationOptions,
@@ -2253,7 +2296,10 @@ fn open_dictionary(paths: &RuntimePaths, options: DictionaryOptions) -> QuanpinD
 
 /// 词网格解出的整句行（`lattice::merge::sentence_row` 的 `Generated` 行）。
 fn is_lattice_sentence(item: &WordItem) -> bool {
-    item.source == CandidateSource::Generated && item.sentence_association
+    matches!(
+        item.source,
+        CandidateSource::Generated | CandidateSource::Collocation
+    ) && item.sentence_association
 }
 
 /// 取候选列表中最多 `MAX_RERANK_PATHS` 条词网格整句，借用行本身而不建立临时索引向量。
@@ -3085,6 +3131,7 @@ fn digits_for_word(word: &str) -> String {
     KeyGrid::NineKey.encode(&lowered)
 }
 
+#[cfg(test)]
 fn word_matches_digits(grid: KeyGrid, word: &str, digits: &str) -> bool {
     let Some(keypad) = grid.keypad() else {
         return false;
@@ -5036,6 +5083,109 @@ mod tests {
     }
 
     #[test]
+    fn english_keypad_filters_full_code_before_prefix_limit() {
+        for grid in [KeyGrid::NineKey, KeyGrid::FourteenKey] {
+            for english_only in [false, true] {
+                let fixture = fixture();
+                Connection::open(fixture.paths.dictionary(assets::ENGLISH_DICTIONARY))
+                    .unwrap()
+                    .execute_batch("INSERT INTO english_words VALUES('previewing','previewing',1),('previewsa','previewsa',100),('previewsb','previewsb',100),('previewsc','previewsc',100),('previewsd','previewsd',100),('previewse','previewse',100);")
+                    .unwrap();
+                let mut session = open(&fixture.paths, false, mixed());
+                session.set_grid(grid);
+                session.set_english_only(english_only);
+                type_digits(&mut session, &grid.encode("previewing"));
+                assert!(
+                    words(&session).iter().any(|word| word == "previewing"),
+                    "完整组码不能被不匹配的高权重前缀词挤掉：{grid:?}，专用英文={english_only}"
+                );
+                let result = session.select(index_of(&session, "previewing"));
+                assert_eq!(result.commit.as_deref(), Some("previewing"));
+            }
+        }
+    }
+
+    #[test]
+    fn english_keypad_prefix_limit_uses_final_ranking() {
+        let fixture = fixture();
+        Connection::open(fixture.paths.dictionary(assets::ENGLISH_DICTIONARY))
+            .unwrap()
+            .execute_batch("INSERT INTO english_words VALUES('commit','COMMIT',1),('commita','commita',100),('commitb','commitb',100),('commitc','commitc',100),('commitd','commitd',100),('commite','commite',100);")
+            .unwrap();
+        let mut session = open(&fixture.paths, false, mixed());
+        session.set_english_only(true);
+        type_digits(&mut session, "266648");
+        assert_eq!(words(&session).first().map(String::as_str), Some("COMMIT"));
+        assert_eq!(words(&session).len(), ENGLISH_LIMIT);
+    }
+
+    #[test]
+    fn english_keypad_invalid_rows_do_not_consume_prefix_limit() {
+        let fixture = fixture();
+        let db = Connection::open(fixture.paths.dictionary(assets::ENGLISH_DICTIONARY)).unwrap();
+        for lookup in [
+            "commit!",
+            "commit ",
+            "commit9",
+            "commit-é",
+            "commit\0suffix",
+            "commit",
+        ] {
+            let display = (lookup != "commit").then_some("合成无效词");
+            db.execute(
+                "INSERT INTO english_words VALUES(?1,?2,1000)",
+                rusqlite::params![lookup, display],
+            )
+            .unwrap();
+        }
+        db.execute_batch("INSERT INTO english_words VALUES('commiT','don''t',1);")
+            .unwrap();
+        let mut session = open(&fixture.paths, false, mixed());
+        session.set_english_only(true);
+        type_digits(&mut session, "266648");
+        assert_eq!(words(&session), ["don't"]);
+    }
+
+    #[test]
+    #[ignore = "需要通过 MSIME_TEST_ENGLISH_DICTIONARY 指定已校验的发布英文词库"]
+    fn english_keypad_shipped_dictionary_reported_words() {
+        let database =
+            std::env::var_os("MSIME_TEST_ENGLISH_DICTIONARY").expect("指定已校验的发布英文词库");
+        let fixture = fixture();
+        std::fs::copy(
+            database,
+            fixture.paths.dictionary(assets::ENGLISH_DICTIONARY),
+        )
+        .unwrap();
+        for grid in [KeyGrid::NineKey, KeyGrid::FourteenKey] {
+            for english_only in [false, true] {
+                for (lookup, display) in [
+                    ("github", "GitHub"),
+                    ("preview", "preview"),
+                    ("commit", "commit"),
+                    ("clash", "clash"),
+                ] {
+                    let mut session = open(&fixture.paths, false, mixed());
+                    session.set_grid(grid);
+                    session.set_english_only(english_only);
+                    type_digits(&mut session, &grid.encode(lookup));
+                    assert!(
+                        words(&session).iter().any(|word| word == display),
+                        "发布词库缺少候选：{display}，{grid:?}，专用英文={english_only}"
+                    );
+                    assert_eq!(
+                        session
+                            .select(index_of(&session, display))
+                            .commit
+                            .as_deref(),
+                        Some(display)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn english_t9_empty_matches_do_not_reserve_prefix_capacity() {
         let fixture = fixture();
         let mut session = open(&fixture.paths, false, EnglishInputOptions::default());
@@ -6062,6 +6212,7 @@ mod tests {
             word_lattice,
             neural_keyboard: true,
             show_next_on_duplicate: false,
+            ..Default::default()
         };
         session.set_sentence_options(neural(true), false);
         type_digits(&mut session, "64426");
@@ -6330,6 +6481,152 @@ INSERT INTO tbl_1_n VALUES('neng','n','能',1),('neng','n','恁',100),('neng','n
         type_digits(&mut repeated, "6364");
         assert_eq!(words(&repeated)[0], "能");
         assert_eq!(repeated.snapshot().candidates[0].fixed_position, 1);
+    }
+
+    const SPELLING_RECENT_FIXTURE: &str =
+        "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_n VALUES('ni','n','你',1000);\
+CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_m VALUES('mi','m','米',100),('mi','m','谜',10),('mo','m','墨',100);\
+CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_h VALUES('hao','h','好',100);";
+
+    fn lock_spelling(session: &mut NineKeySession, spelling: &str) {
+        let index = session
+            .snapshot()
+            .nine_key_spellings
+            .iter()
+            .position(|choice| choice == spelling)
+            .expect("synthetic spelling offered");
+        assert!(session.choose_spelling(index).handled);
+    }
+
+    /// 显式选读法再确认候选，也要让下一次未锁定的数字输入记住这次选择。
+    #[test]
+    fn spelling_selection_remembers_first_and_later_candidates_without_a_lock() {
+        for (word, selected_index) in [("米", 0), ("谜", 1)] {
+            let fixture = fixture_with(SPELLING_RECENT_FIXTURE);
+            let mut session =
+                open_with_frequency(&fixture.paths, FrequencyAdjustmentMode::Disabled, 1, 1);
+            type_digits(&mut session, "64");
+            assert_eq!(words(&session)[0], "你");
+            lock_spelling(&mut session, "mi");
+            assert_eq!(index_of(&session, word), selected_index);
+            let selected = session.select(selected_index);
+            assert_eq!(selected.commit.as_deref(), Some(word));
+            assert_eq!(selected.diagnostic, None);
+            drop(session);
+
+            let mut repeated = open(&fixture.paths, false, EnglishInputOptions::default());
+            type_digits(&mut repeated, "64");
+            assert_eq!(words(&repeated)[0], word);
+            assert_eq!(repeated.snapshot().candidates[0].fixed_position, 1);
+            lock_spelling(&mut repeated, "ni");
+            assert_eq!(words(&repeated)[0], "你");
+        }
+    }
+
+    /// 未显式完成整串选择时，不把读法筛选本身当作最近选词。
+    #[test]
+    fn spelling_recent_requires_learning_and_an_explicit_whole_selection() {
+        for case in ["learning_off", "finish", "partial", "unlocked_first"] {
+            let fixture = fixture_with(SPELLING_RECENT_FIXTURE);
+            let mut session =
+                open_with_frequency(&fixture.paths, FrequencyAdjustmentMode::Disabled, 1, 1);
+            session.learning = case != "learning_off";
+            let digits = if case == "partial" { "64426" } else { "64" };
+            type_digits(&mut session, digits);
+            if case != "unlocked_first" {
+                lock_spelling(&mut session, "mi");
+            }
+            let word = if case == "unlocked_first" {
+                "你"
+            } else {
+                "米"
+            };
+            let index = index_of(&session, word);
+            let result = if case == "finish" {
+                session.finish(index)
+            } else {
+                session.select(index)
+            };
+            assert_eq!(result.commit.as_deref(), Some(word), "{case}");
+            assert_eq!(result.diagnostic, None, "{case}");
+            if case == "partial" {
+                assert!(session.active());
+            }
+            let journal = fixture.paths.user(assets::USER_JOURNAL);
+            for (key, spelling, value) in
+                [("64", "mi", "米"), (digits, "mi", "米"), ("64", "ni", "你")]
+            {
+                assert!(
+                    !positions::is_fixed(&journal, &format!("nine-key:{key}:"), spelling, value),
+                    "{case}"
+                );
+                assert!(
+                    !positions::is_fixed(
+                        &journal,
+                        &format!("nine-key:{key}:{spelling}"),
+                        spelling,
+                        value
+                    ),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// 未锁定的最近候选变化后，再选已有锁定首位也能更新；不同数字与读法仍隔离。
+    #[test]
+    fn spelling_recent_replaces_the_previous_unlocked_pick() {
+        let fixture = fixture_with(SPELLING_RECENT_FIXTURE);
+        let journal = fixture.paths.user(assets::USER_JOURNAL);
+        positions::set_fixed_position(&journal, "nine-key:64:mi", "mi", "米", 1).unwrap();
+        for word in ["米", "你", "米"] {
+            let mut session =
+                open_with_frequency(&fixture.paths, FrequencyAdjustmentMode::Disabled, 1, 1);
+            type_digits(&mut session, "64");
+            if word == "米" {
+                lock_spelling(&mut session, "mi");
+                assert_eq!(session.snapshot().candidates[0].fixed_position, 1);
+            }
+            let index = index_of(&session, word);
+            assert_eq!(session.select(index).commit.as_deref(), Some(word));
+            let mut repeated = open(&fixture.paths, false, EnglishInputOptions::default());
+            type_digits(&mut repeated, "64");
+            assert_eq!(words(&repeated)[0], word);
+            lock_spelling(&mut repeated, "ni");
+            assert_eq!(words(&repeated), ["你"]);
+            repeated.command(Command::Cancel);
+            type_digits(&mut repeated, "66");
+            assert_eq!(words(&repeated)[0], "墨");
+            assert_eq!(repeated.snapshot().candidates[0].fixed_position, 0);
+        }
+    }
+
+    /// 读法内的位置不能覆盖未锁定上下文里同一词或其它词的手动槽位。
+    #[test]
+    fn spelling_recent_preserves_unlocked_manual_slots() {
+        for selected_is_fixed in [false, true] {
+            let fixture = fixture_with(SPELLING_RECENT_FIXTURE);
+            let journal = fixture.paths.user(assets::USER_JOURNAL);
+            positions::set_fixed_position(&journal, "nine-key:64:", "mi", "谜", 2).unwrap();
+            if selected_is_fixed {
+                positions::set_fixed_position(&journal, "nine-key:64:", "mi", "米", 3).unwrap();
+            }
+            let mut session =
+                open_with_frequency(&fixture.paths, FrequencyAdjustmentMode::Disabled, 1, 1);
+            type_digits(&mut session, "64");
+            lock_spelling(&mut session, "mi");
+            assert_eq!(session.select(0).commit.as_deref(), Some("米"));
+            let mut repeated = open(&fixture.paths, false, EnglishInputOptions::default());
+            type_digits(&mut repeated, "64");
+            let snapshot = repeated.snapshot();
+            let target = &snapshot.candidates[index_of(&repeated, "米")];
+            assert_eq!(target.fixed_position, if selected_is_fixed { 3 } else { 1 });
+            assert_eq!(snapshot.candidates[1].word, "谜");
+            assert_eq!(snapshot.candidates[1].fixed_position, 2);
+        }
     }
 
     /// #5640：两位数字的音节行比候选上限还多时（出货词库里 `68` 有两百多个单字），不打切分的简拼行也不能被截掉：前三个音节行之后，其余音节行和简拼行按权重归并。

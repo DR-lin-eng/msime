@@ -140,7 +140,7 @@ def accept_animation(skin, entry, control, daemon):
     print(f"真实 GTK 原生 {FORMAT} 动画、连续输入、隐藏重显、文件失效和九宫格播放通过")
 
 
-def screenshot():
+def capture_image():
     if WAYLAND:
         loader = GdkPixbuf.PixbufLoader.new_with_type("png")
         loader.write(subprocess.check_output(["grim", "-"], timeout=5))
@@ -150,6 +150,12 @@ def screenshot():
         root = Gdk.get_default_root_window()
         image = Gdk.pixbuf_get_from_window(root, 0, 0, root.get_width(), root.get_height())
     assert image is not None, "无法读取隔离显示的像素"
+    return image
+
+
+def screenshot():
+    # 只有读取颜色数量的断言才统计整屏，几何与存图直接复用原始像素。
+    image = capture_image()
     channels, stride = image.get_n_channels(), image.get_rowstride()
     data = image.get_pixels()
     packed = b"".join(data[y * stride:y * stride + image.get_width() * channels]
@@ -159,7 +165,10 @@ def screenshot():
 
 NATIVE = os.environ.get("MSIME_TEST_NATIVE_CANVAS") == "1"
 TRANSLATION_BELOW = os.environ.get("MSIME_TEST_TRANSLATION_BELOW") == "1"
+FONT_GEOMETRY = os.environ.get("MSIME_TEST_FONT_GEOMETRY") == "1"
+MODE_HINT_PREFERENCES = os.environ.get("MSIME_TEST_MODE_HINT_PREFERENCES") == "1"
 ANIMATION = os.environ.get("MSIME_TEST_CANVAS_ANIMATION") == "1"
+OVERLAY = os.environ.get("MSIME_TEST_DECORATION_OVERLAY") == "1"
 NATIVE_SCALE = int(os.environ.get("GDK_SCALE", "1"))
 COMPOSITED = os.environ.get("MSIME_TEST_COMPOSITED") == "1"
 SELECTED = (7, 91, 173)
@@ -265,7 +274,7 @@ def window_geometry(window):
 
 
 def selected_pixels():
-    image, _ = screenshot()
+    image = capture_image()
     channels, stride = image.get_n_channels(), image.get_rowstride()
     data = image.get_pixels()
     window = native_window()
@@ -289,7 +298,7 @@ def selected_pixels():
 
 
 def color_position(color):
-    image, _ = screenshot()
+    image = capture_image()
     channels, stride = image.get_n_channels(), image.get_rowstride()
     data = image.get_pixels()
     for y in range(image.get_height()):
@@ -301,7 +310,7 @@ def color_position(color):
 
 
 def color_bounds(color):
-    image, _ = screenshot()
+    image = capture_image()
     channels, stride, data = image.get_n_channels(), image.get_rowstride(), image.get_pixels()
     bounds = window_geometry(native_window())
     left, top, width, height = (int(bounds[key]) for key in ("X", "Y", "WIDTH", "HEIGHT"))
@@ -369,7 +378,7 @@ def accept_appearance(manifest, preferences, publish, entry):
     def picked_preedit():
         # 字体抗锯齿不保证存在足够多纯色像素；只查预编辑背景框内向取色器绿色收敛的字形。
         left, top, right, bottom = color_bounds(background)
-        image, _ = screenshot()
+        image = capture_image()
         data, stride, channels = image.get_pixels(), image.get_rowstride(), image.get_n_channels()
         return sum(data[y * stride + x * channels + 1] > data[y * stride + x * channels] + 100 and
                    data[y * stride + x * channels + 1] > data[y * stride + x * channels + 2] + 100
@@ -390,6 +399,8 @@ def accept_pager(manifest, preferences, publish, entry):
     hover, divider = (34, 238, 119), (49, 209, 255)
     horizontal = preferences['candidate_layout'] == 'horizontal'
     for triangle in (False, True):
+        ready = (91, 41, 221 if triangle else 201)
+        ready_hex = "#%02X%02X%02X" % ready
         style = original.replace('[candidate_window]\n',
                                  '[candidate_window]\npage_arrows = true\n'
                                  f"page_arrow_style = '{'chevron' if triangle else 'triangle'}'\n")
@@ -398,11 +409,18 @@ def accept_pager(manifest, preferences, publish, entry):
                   'item_extra_height = 20\n')
         for mode in ('light', 'dark'):
             style = style.replace(f'[candidate.{mode}]\n', f'[candidate.{mode}]\n'
-                                  "hover = '#22EE77'\npage_arrow_divider = '#31D1FF'\n")
+                                  "hover = '#22EE77'\npage_arrow_divider = '#31D1FF'\n"
+                                  f"preedit_background = '{ready_hex}'\n")
         manifest.write_text(style)
+        # 两种形状行高相同，必须等各自的配色实际绘出，不能命中上一轮的旧几何。
+        wait(lambda: palette_visible((ready,)))
         # 最小候选行高为 24 * 1.35 + 20；热更新后再据真实面板边缘定位。
-        wait(lambda: selected_pixels() and selected_pixels()[1] >= 52 * NATIVE_SCALE)
+        # 只取一次：热更新时窗口可能在两次读取之间撤下又出现。
+        wait(lambda: (pixels := selected_pixels()) is not None and pixels[1] >= 52 * NATIVE_SCALE)
         subprocess.run(['xdotool', 'mousemove', '0', '0'], check=True, timeout=5)
+        if horizontal:
+            # 两轮的行高相同，上面的等待在这一轮清单热更新生效之前就会通过；横排只有三角样式画翻页分隔线，等它出现（或消失）确认画的已是这一轮的清单，免得按上一轮的位置去点。
+            wait(lambda: native_window() is not None and palette_visible((divider,)) == triangle and palette_visible((SELECTED,)))
 
         def buttons():
             left, top, _, bottom = color_bounds(SELECTED)
@@ -432,7 +450,7 @@ def accept_pager(manifest, preferences, publish, entry):
         candidate_box = color_bounds(SELECTED)
 
         def candidate_pixels():
-            image, _ = screenshot()
+            image = capture_image()
             data, stride, channels = image.get_pixels(), image.get_rowstride(), image.get_n_channels()
             left, top, right, bottom = candidate_box
             return b''.join(data[y * stride + left * channels:y * stride + right * channels]
@@ -479,6 +497,117 @@ def accept_pager(manifest, preferences, publish, entry):
     publish()
     manifest.write_text(original)
     wait(lambda: selected_pixels() == original_pixels)
+
+
+def accept_expand(manifest, preferences, publish, entry, host, value, options, control):
+    if preferences['candidate_layout'] != 'horizontal':
+        return
+    original = manifest.read_text()
+    page_size = preferences['candidate_page_size']
+    wheel = preferences['navigation']['mouse_wheel']
+    preferences['candidate_page_size'] = 3
+    preferences['navigation']['mouse_wheel'] = False
+    publish()
+    control.SetCurrentIM('keyboard-us')
+    wait(lambda: native_window() is None)
+    control.SetCurrentIM('msime')
+    control.Activate()
+    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '100', 'ni'], check=True, timeout=5)
+    wait(native_window)
+    # 独立运行时给出同一组合的完整候选身份，用它核对真实网格点选结果。
+    host.msime_client_create.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+    host.msime_client_create.restype = ctypes.c_void_p
+    host.msime_client_character.argtypes = [ctypes.c_uint64, ctypes.c_uint8, ctypes.c_bool]
+    host.msime_client_character.restype = ctypes.c_void_p
+    host.msime_client_focus.argtypes = [ctypes.c_uint64, ctypes.c_bool]
+    host.msime_client_focus.restype = ctypes.c_void_p
+    for name in ('msime_client_all_candidates', 'msime_client_destroy'):
+        getattr(host, name).argtypes = [ctypes.c_uint64]
+        getattr(host, name).restype = ctypes.c_void_p
+    request = json.dumps({'resources': options['resources'],
+                          'state_root': str(Path(options['user_data']).parent / 'expand-reference')}).encode()
+    reference = value(host.msime_client_prepare_host(request, len(request)))
+    reference['preferences'] = dict(preferences)
+    document = json.dumps(reference).encode()
+    session = value(host.msime_client_create(document, len(document)))['session']
+    try:
+        value(host.msime_client_focus(session, True))
+        for key in b'ni':
+            value(host.msime_client_character(session, key, False))
+        snapshot = value(host.msime_client_all_candidates(session))
+        expected = snapshot['candidates'][3]['text']
+    finally:
+        value(host.msime_client_destroy(session))
+    style = original.replace('[candidate_window]\n',
+                             '[candidate_window]\nexpand_panel = true\npage_arrows = true\nexpand_rows = 2\n')
+    style += ('\n[candidate_window.horizontal]\n'
+              'item_gap = 4\nitem_extra_height = 10\nitem_min_width = 72\n')
+    manifest.write_text(style)
+    wait(lambda: (pixels := selected_pixels()) is not None and pixels[1] >= 37 * NATIVE_SCALE)
+
+    def toggle():
+        left, top, right, bottom = color_bounds(SELECTED)
+        panel_right = color_bounds(LIGHT[2])[2]
+        point = (round(panel_right - (12 + 1 + 11) * NATIVE_SCALE), (top + bottom) // 2)
+        subprocess.run(['xdotool', 'mousemove', *map(str, point), 'click', '1'], check=True, timeout=5)
+
+    collapsed_height = int(window_geometry(native_window())['HEIGHT'])
+    toggle()
+    wait(lambda: int(window_geometry(native_window())['HEIGHT']) > collapsed_height)
+    geometry = window_geometry(native_window())
+    screen = capture_image()
+    assert int(geometry['WIDTH']) <= screen.get_width() // 2, '含挂件的展开窗口超过半屏宽度'
+    assert int(geometry['HEIGHT']) <= screen.get_height() // 2, '含挂件的展开窗口超过半屏高度'
+    save_image('native-expand-open')
+    first_pixels = selected_pixels()
+    left, top, right, bottom = color_bounds(SELECTED)
+    subprocess.run(['xdotool', 'mousemove', str(left + 10), str(top + 10), 'click', '5'], check=True, timeout=5)
+    wait(lambda: selected_pixels() != first_pixels)
+    assert entry.get_text() == '', '展开时滚轮错误地翻页或上屏'
+    save_image('native-expand-scroll')
+    subprocess.run(['xdotool', 'click', '4'], check=True, timeout=5)
+    wait(lambda: selected_pixels() == first_pixels)
+    panel_right = color_bounds(LIGHT[2])[2]
+    track_x = round(panel_right - (12 + 25 + 4) * NATIVE_SCALE)
+    subprocess.run(['xdotool', 'mousemove', str(track_x), str(top + 5 * NATIVE_SCALE),
+                    'mousedown', '1', 'mousemove', str(track_x), str(top + 100 * NATIVE_SCALE),
+                    'mouseup', '1'], check=True, timeout=5)
+    wait(lambda: selected_pixels() != first_pixels)
+    assert entry.get_text() == '', '拖动滑块错误地上屏'
+    subprocess.run(['xdotool', 'mousemove', str(track_x), str(top + NATIVE_SCALE), 'click', '1'],
+                   check=True, timeout=5)
+    wait(lambda: selected_pixels() == first_pixels)
+    # 滚轮翻页关闭时展开区仍滚动；按钮保持固定，收起后高度恢复。
+    toggle()
+    wait(lambda: int(window_geometry(native_window())['HEIGHT']) == collapsed_height)
+    toggle()
+    wait(lambda: int(window_geometry(native_window())['HEIGHT']) > collapsed_height)
+    left, top, right, bottom = color_bounds(SELECTED)
+    point = (left + 10 * NATIVE_SCALE, bottom + (10 + 18) * NATIVE_SCALE)
+    subprocess.run(['xdotool', 'mousemove', *map(str, point), 'click', '1'], check=True, timeout=5)
+    wait(lambda: entry.get_text() != '')
+    assert entry.get_text() == expected, '网格点击未选择完整列表中显示的候选身份'
+    wait(lambda: native_window() is None)
+    entry.set_text('')
+    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '100', 'ni'], check=True, timeout=5)
+    wait(native_window)
+    assert int(window_geometry(native_window())['HEIGHT']) == collapsed_height, '上屏后沿用了旧展开状态'
+    toggle()
+    wait(lambda: int(window_geometry(native_window())['HEIGHT']) > collapsed_height)
+    left, top, right, bottom = color_bounds(SELECTED)
+    point = ((left + right) // 2, (top + bottom) // 2)
+    subprocess.run(['xdotool', 'mousemove', *map(str, point), 'click', '1'], check=True, timeout=5)
+    wait(lambda: entry.get_text() != '')
+    assert entry.get_text() == '你', '展开释放缓存后，首行候选身份未同步'
+    wait(lambda: native_window() is None)
+    entry.set_text('')
+    manifest.write_text(original)
+    preferences['candidate_page_size'] = page_size
+    preferences['navigation']['mouse_wheel'] = wheel
+    publish()
+    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '100', 'ni'], check=True, timeout=5)
+    wait(lambda: palette_visible((SELECTED,)))
+    print('真实 GTK 卷轴展开、收起、独立滚轮和完整候选身份上屏通过')
 
 
 def accept_translation(manifest, preferences, publish, entry, fixture):
@@ -540,7 +669,7 @@ def accept_translation(manifest, preferences, publish, entry, fixture):
     wait(lambda: native_window() is not None and selected_height() > short_height + 10 * NATIVE_SCALE)
     wait(lambda: visible((selected[0], replacement, selected[2])))
     bounds = window_geometry(native_window())
-    screen = screenshot()[0]
+    screen = capture_image()
     assert 0 <= int(bounds["X"]) <= screen.get_width() - int(bounds["WIDTH"]), "长释义窗口横向超出工作区"
     assert 0 <= int(bounds["Y"]) <= screen.get_height() - int(bounds["HEIGHT"]), "长释义窗口纵向超出工作区"
     save_image("native-long-translation")
@@ -592,7 +721,7 @@ def palette_visible(colors):
 
 
 def palette_top(color):
-    image, _ = screenshot()
+    image = capture_image()
     channels, stride = image.get_n_channels(), image.get_rowstride()
     pixel = bytes(color) + (b"\xff" if channels == 4 else b"")
     data = image.get_pixels()
@@ -609,7 +738,109 @@ def save_image(name):
                      if NATIVE else "wayland" if WAYLAND else "x11") / FORMAT
                      / os.environ.get("MSIME_TEST_CANVAS_LAYOUT", "vertical"))
         directory.mkdir(parents=True, exist_ok=True)
-        screenshot()[0].savev(str(directory / f"{name}.png"), "png", [], [])
+        capture_image().savev(str(directory / f"{name}.png"), "png", [], [])
+
+
+def accept_overlay(skin, entry, preferences, publish, focused):
+    """真实 GTK 输入只装饰图的 system 包，检查文字、分页、失败和焦点。"""
+    green, blue = (0, 255, 127), (53, 132, 228)
+    manifest = skin / "skin.toml"
+    original = manifest.read_text()
+
+    def glyphs():
+        window = native_window()
+        if window is None:
+            return frozenset()
+        geometry = window_geometry(window)
+        image, _ = screenshot()
+        data, channels, stride = image.get_pixels(), image.get_n_channels(), image.get_rowstride()
+        x0, y0 = int(geometry["X"]), int(geometry["Y"])
+        points = set()
+        for y in range(max(0, y0), min(image.get_height(), y0 + int(geometry["HEIGHT"]))):
+            for x in range(max(0, x0), min(image.get_width(), x0 + int(geometry["WIDTH"]))):
+                at = y * stride + x * channels
+                if data[at:at + 3] == bytes(green):
+                    points.add((x - x0, y - y0))
+        return frozenset(points)
+
+    def wheel(button):
+        # GTK 焦点边框可能透过上方留白；在原生选中行底部的实色区定位。
+        left, _, right, bottom = color_bounds(blue)
+        y = bottom - 3 * NATIVE_SCALE
+        image, _ = screenshot()
+        data, channels, stride = image.get_pixels(), image.get_n_channels(), image.get_rowstride()
+        xs = [x for x in range(left, right)
+              if data[y * stride + x * channels:y * stride + x * channels + 3] == bytes(blue)]
+        assert xs, "原生选中行没有可点击的高亮区域"
+        subprocess.run(["xdotool", "mousemove", str(xs[len(xs) // 2]), str(y),
+                        "click", str(button)], check=True, timeout=5)
+
+    def background(color):
+        window = native_window()
+        if window is None:
+            return False
+        bounds = window_geometry(window)
+        image, _ = screenshot()
+        x = int(bounds["X"]) + int(bounds["WIDTH"]) // 2
+        y = int(bounds["Y"]) + int(bounds["HEIGHT"]) - 4 * NATIVE_SCALE
+        at = y * image.get_rowstride() + x * image.get_n_channels()
+        # 浅色文字也可能等于深色底色，只检查面板底部的空白内边距。
+        return image.get_pixels()[at:at + 3] == bytes(color)
+
+    wait(lambda: len(glyphs()) > 10)
+    first = glyphs()
+    save_image("overlay-first")
+    subprocess.run(["xdotool", "key", "Down"], check=True, timeout=5)
+    wait(lambda: (points := glyphs()) and points != first)
+    save_image("overlay-highlight")
+    subprocess.run(["xdotool", "key", "Up"], check=True, timeout=5)
+    wait(lambda: glyphs() == first)
+    wheel(5)
+    wait(lambda: (points := glyphs()) and points != first)
+    save_image("overlay-next-page")
+    wheel(4)
+    wait(lambda: glyphs() == first)
+    manifest.write_text(original.replace("candidate_overlay_index = 0", "candidate_overlay_index = 100"))
+    wait(lambda: native_window() is not None and not glyphs())
+    save_image("overlay-out-of-range")
+    manifest.write_text(original)
+    wait(lambda: glyphs() == first)
+    for horizontal in ("left", "center", "right"):
+        for vertical in ("top", "center", "bottom"):
+            text = original.replace("candidate_overlay_align_h = 'center'", f"candidate_overlay_align_h = '{horizontal}'")
+            text = text.replace("candidate_overlay_align_v = 'center'", f"candidate_overlay_align_v = '{vertical}'")
+            before = glyphs()
+            manifest.write_text(text)
+            # 位置变化必须体现在原生字形像素上；文件轮询不会抢走编辑器焦点。
+            wait(lambda: len(glyphs()) > 10 and glyphs() != before)
+            save_image(f"overlay-{horizontal}-{vertical}")
+    manifest.write_text(original)
+    wait(lambda: glyphs() == first)
+    preferences["candidate_theme"] = "dark"
+    publish()
+    wait(lambda: background((48, 48, 48)) and len(glyphs()) > 10)
+    save_image("overlay-dark")
+    decorated_height = int(window_geometry(native_window())["HEIGHT"])
+    (skin / "banner.png").write_bytes(b"broken")
+    # 坏图回到默认原生卡片，撤下装饰带和文字，不能残留旧资源。
+    wait(lambda: (window := native_window()) is not None and not glyphs()
+         and int(window_geometry(window)["HEIGHT"]) < decorated_height and background((48, 48, 48)))
+    assert entry.get_text() == "", "坏图回退提前上屏"
+    save_image("overlay-broken")
+    (skin / "banner.png").write_bytes(png(((30, 40, 50),) * 9))
+    wait(lambda: native_window() is not None and len(glyphs()) > 10)
+    save_image("overlay-repaired")
+    # 关闭声明只撤下文字，保留默认原生候选窗；重新启用后恢复图内候选。
+    manifest.write_text(original.replace("candidate_overlay = true", "candidate_overlay = false"))
+    wait(lambda: native_window() is not None and not glyphs() and background((48, 48, 48)))
+    assert entry.get_text() == "", "关闭装饰词提前上屏"
+    save_image("overlay-disabled")
+    manifest.write_text(original)
+    wait(lambda: native_window() is not None and len(glyphs()) > 10)
+    subprocess.run(["xdotool", "key", "space"], check=True, timeout=5)
+    wait(lambda: entry.get_text() != "" and native_window() is None)
+    assert focused(), "装饰词窗口抢走编辑器焦点"
+    print("真实 GTK 装饰词高亮、翻页、九种对齐、明暗、坏图与关闭清理及上屏通过")
 
 
 def fallback_visible(theme):
@@ -628,7 +859,7 @@ def accept_translation_below(preferences, publish, entry, control, daemon):
     selected, foreground = bytes((7, 91, 173)), bytes((255, 255, 255))
 
     def selected_area():
-        image, _ = screenshot()
+        image = capture_image()
         data, stride, channels = image.get_pixels(), image.get_rowstride(), image.get_n_channels()
         points = [(x, y) for y in range(image.get_height()) for x in range(image.get_width())
                   if data[y * stride + x * channels:y * stride + x * channels + 3] == selected]
@@ -662,6 +893,191 @@ def accept_translation_below(preferences, publish, entry, control, daemon):
     print("真实 classicui 译文位于正文下方，行高与译文区域点击上屏通过")
 
 
+def accept_font_geometry(root, preferences, publish, entry, focused, control, daemon):
+    """比较真实 classicui 序号像素与独立的绝对像素字号参考。"""
+    gi.require_version("PangoCairo", "1.0")
+    from gi.repository import Pango, PangoCairo
+
+    version = subprocess.check_output(["fcitx5", "--version"], text=True).strip()
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
+    assert match, "无法确认实际 Fcitx5 版本"
+    modern = tuple(map(int, match.groups())) >= (5, 1, 18)
+    libdir = Path(subprocess.check_output(["pkg-config", "--variable=libdir", "Fcitx5Core"], text=True).strip()).resolve()
+    mappings = (Path("/proc") / str(daemon.pid) / "maps").read_text().splitlines()
+    for library in ("libFcitx5Core.so", "libclassicui.so"):
+        loaded = {Path(line.split()[-1]).resolve() for line in mappings if library in line}
+        assert loaded and all(path.is_relative_to(libdir) for path in loaded), f"运行库来源不符：{library}"
+        print(f"实际加载 {library}: {', '.join(map(str, sorted(loaded)))}", flush=True)
+    context = PangoCairo.FontMap.get_default().create_context()
+    PangoCairo.context_set_resolution(context, 96)
+    config = root / "config/fcitx5/conf/classicui.conf"
+
+    def font_setting():
+        if not config.exists():
+            return None
+        return next((line for line in config.read_text().splitlines() if line.startswith("Font=")), None)
+
+    def label_geometry():
+        image = capture_image()
+        data, stride, channels = image.get_pixels(), image.get_rowstride(), image.get_n_channels()
+        selected = bytes((7, 91, 173))
+        points = [(x, y) for y in range(image.get_height()) for x in range(image.get_width())
+                  if data[y * stride + x * channels:y * stride + x * channels + 3] == selected]
+        if not points:
+            return None
+        # 页眉图标也可能使用同一蓝色，只测面积最大的连续高亮区域。
+        remaining = set(points)
+        largest = set()
+        while remaining:
+            component = {remaining.pop()}
+            pending = list(component)
+            while pending:
+                x, y = pending.pop()
+                for neighbor in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if neighbor in remaining:
+                        remaining.remove(neighbor)
+                        component.add(neighbor)
+                        pending.append(neighbor)
+            if len(component) > len(largest):
+                largest = component
+        points = largest
+        left, right = min(x for x, _ in points), max(x for x, _ in points) + 1
+        top, bottom = min(y for _, y in points), max(y for _, y in points) + 1
+        rows, columns = {}, {}
+        for x, y in points:
+            rows.setdefault(y, []).append(x)
+            columns.setdefault(x, []).append(y)
+        row_bounds = {y: (min(xs), max(xs)) for y, xs in rows.items()}
+        column_bounds = {x: (min(ys), max(ys)) for x, ys in columns.items()}
+        # 圆角外的白色卡片底色会落在包围盒内；字形须在四个方向都被高亮包围。
+        glyphs = [(x, y) for y in range(top, bottom) for x in range(left, right)
+                  if min(data[y * stride + x * channels:y * stride + x * channels + 3]) >= 220
+                  and y in row_bounds and x in column_bounds
+                  and row_bounds[y][0] < x < row_bounds[y][1]
+                  and column_bounds[x][0] < y < column_bounds[x][1]]
+        if not glyphs:
+            return None
+        # 首个候选标为「1 」；空列把序号与后面的汉字分开，不受两者字体回退差异影响。
+        columns = {x for x, _ in glyphs}
+        first = min(columns)
+        last = first
+        while last + 1 in columns:
+            last += 1
+        label = [(x, y) for x, y in glyphs if x <= last]
+        return last - first + 1, max(y for _, y in label) - min(y for _, y in label) + 1
+
+    wait(lambda: font_setting() is not None and label_geometry() is not None)
+    previous = label_geometry()
+    for size, scale in ((20, 100), (32, 100), (20, 150)):
+        before = font_setting()
+        preferences.update(candidate_font_size=size, candidate_scale_percent=scale)
+        publish()
+        wait(lambda: font_setting() != before)
+        wait(lambda: (geometry := label_geometry()) is not None and geometry != previous)
+        actual = label_geometry()
+        reference = Pango.Layout.new(context)
+        description = Pango.FontDescription.from_string("DejaVu Sans")
+        description.set_absolute_size(round(size * scale / 100 * (0.8 if modern else 1) * Pango.SCALE))
+        reference.set_font_description(description)
+        reference.set_text("1", -1)
+        ink, _ = reference.get_pixel_extents()
+        expected = (ink.width, ink.height)
+        save_image(f"font-{size}-scale-{scale}")
+        print(f"Fcitx5 {version}: 字号 {size}，缩放 {scale}%，序号像素 {actual}，参考 {expected}", flush=True)
+        # 墨迹矩形包含抗锯齿边缘，浅色字形实部在两侧合计可收窄两个像素。
+        assert all(abs(a - b) <= 2 for a, b in zip(actual, expected)), "序号像素偏离预期字号"
+        configured = Pango.FontDescription.from_string(font_setting().split("=", 1)[1].strip('"'))
+        assert configured.get_size_is_absolute() != modern, "字体描述的单位与实际运行库不匹配"
+        assert focused() and entry.get_text() == "", "字号热更新改变了焦点或提前上屏"
+        previous = actual
+    assert native_window() is None, "此项必须验收真实 classicui"
+    subprocess.run(["xdotool", "key", "space"], check=True, timeout=5)
+    wait(lambda: entry.get_text() == "你好")
+    control.Exit()
+    assert daemon.wait(timeout=10) == 0
+    print("真实 classicui 序号字号、整体缩放、热更新和 GTK 上屏通过")
+
+
+def accept_mode_hint_preferences(root, preferences, publish, window, entry, focused, focused_context, control, daemon):
+    """经真实 GTK 焦点、Shift 切换和窗口像素验证两个提示开关。"""
+    xid = GdkX11.X11Window.get_xid(window.get_window())
+    root_xid = GdkX11.X11Window.get_xid(Gdk.get_default_root_window())
+    bottom = window.get_position()[1] + window.get_size()[1]
+
+    def hint_visible():
+        image = capture_image()
+        data, stride, channels = image.get_pixels(), image.get_rowstride(), image.get_n_channels()
+        # Xvfb 根背景是黑色；编辑器下方的非黑像素来自实际提示窗口。
+        return sum(max(data[y * stride + x * channels:y * stride + x * channels + 3]) > 30
+                   for y in range(bottom, min(bottom + 120, image.get_height()))
+                   for x in range(min(window.get_size()[0] + 150, image.get_width()))) > 16
+
+    def observe_hidden():
+        deadline = time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            while GLib.MainContext.default().iteration(False):
+                pass
+            assert not hint_visible(), "没有切换模式时出现了提示窗口"
+            time.sleep(0.02)
+
+    def remote_focus(active):
+        return any(focused_context in line and re.search(rf"\bfocus:{int(active)}\b", line)
+                   for line in str(control.DebugInfo()).splitlines())
+
+    def refocus():
+        subprocess.run(["xdotool", "windowfocus", "--sync", str(root_xid)], check=True, timeout=5)
+        wait(lambda: not entry.has_focus() and remote_focus(False))
+        subprocess.run(["xdotool", "windowfocus", "--sync", str(xid)], check=True, timeout=5)
+        wait(lambda: entry.has_focus() and focused() and remote_focus(True))
+
+    config = root / "config/fcitx5/conf/classicui.conf"
+
+    def font_setting():
+        return next((line for line in config.read_text().splitlines() if line.startswith("Font=")), None) if config.exists() else None
+
+    def set_hints(focus, switch):
+        before = font_setting()
+        preferences.update(input_mode_focus_hud=focus, input_mode_hud=switch,
+                           candidate_font_size=preferences["candidate_font_size"] + 1)
+        publish()
+        # 同一快照中改字号，等实际字体配置变化作为宿主已读偏好的确认。
+        wait(lambda: font_setting() is not None and font_setting() != before)
+
+    def dismiss_hint():
+        # 先清掉框架在切到输入法时自带的信息，随后只观察本次触发产生的窗口。
+        subprocess.run(["xdotool", "key", "Escape"], check=True, timeout=5)
+        wait(lambda: not hint_visible())
+
+    dismiss_hint()
+    # 未设置聚焦偏好的旧文档，以及反复点击输入框，都不应借切换开关弹窗。
+    for _ in range(3):
+        refocus()
+        observe_hidden()
+    subprocess.run(["xdotool", "key", "Shift_L"], check=True, timeout=5)
+    wait(hint_visible)
+    save_image("mode-switch-hint")
+    dismiss_hint()
+    set_hints(True, False)
+    refocus()
+    wait(hint_visible)
+    save_image("focus-hint-enabled")
+    dismiss_hint()
+    subprocess.run(["xdotool", "key", "Shift_L"], check=True, timeout=5)
+    observe_hidden()
+    set_hints(False, True)
+    refocus()
+    observe_hidden()
+    save_image("focus-hint-disabled")
+    subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "100", "nihao"], check=True, timeout=5)
+    wait(lambda: palette_visible(LIGHT))
+    assert focused() and entry.get_text() == "", "提示偏好影响焦点或提前上屏"
+    subprocess.run(["xdotool", "key", "space"], check=True, timeout=5)
+    wait(lambda: entry.get_text() == "你好")
+    control.Exit()
+    assert daemon.wait(timeout=10) == 0
+    print("真实 GTK 聚焦默认无提示、切换提示、独立热更新和中文上屏通过")
+
+
 def main():
     resources, library, addon = map(Path, sys.argv[1:4])
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -670,7 +1086,7 @@ def main():
     bus.request_name("org.freedesktop.portal.Desktop")
     host = ctypes.CDLL(str(library))
     responses = ResponseDecoder(host)
-    for name in ("msime_client_prepare_host", "msime_client_load_preferences"):
+    for name in ("msime_client_prepare_host", "msime_client_load_preferences", "msime_client_skin_package"):
         function = getattr(host, name)
         function.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         function.restype = ctypes.c_void_p
@@ -680,7 +1096,7 @@ def main():
 
     def value(pointer):
         result = responses.decode(pointer)
-        assert result["ok"], "共享 Host API 请求失败"
+        assert result["ok"], "共享 Host API 请求失败：" + str(result.get("error", "unknown"))
         return result["value"]
 
     # Wayland 模块与编辑器同进程，GLib 读取前就要固定 XDG 目录；X11 面板在独立 daemon 中。
@@ -708,7 +1124,7 @@ def main():
             f"[candidate_window.border_image]\nsource = '{panel_file}'\nlight_source = '{light_file}'\n"
             "slice_dip = [20]\nwidth_dip = [8]\n[candidate.light]\ntext = '#010203'\n"
             "[candidate.dark]\ntext = '#FDFCFB'\n")
-        if TRANSLATION_BELOW:
+        if TRANSLATION_BELOW or FONT_GEOMETRY:
             manifest = skin / "skin.toml"
             # 普通基底由 classicui 绘制；canvas 基底在 X11 会被产品自身的原生窗口接管。
             manifest.write_text(manifest.read_text().replace("base = 'canvas'", "base = 'system'"))
@@ -724,14 +1140,37 @@ def main():
             text += (f"[[candidate_window.decorations]]\nimage = '{widget_name}'\nanchor = 'top-right'\n"
                      "offset_x_dip = 24\noffset_y_dip = -24\nwidth_dip = 20\nheight_dip = 20\nz_index = 2\n")
             manifest.write_text(text)
+        if OVERLAY:
+            assert NATIVE and not WAYLAND and not ANIMATION
+            (skin / "banner.png").write_bytes(png(((30, 40, 50),) * 9))
+            # 不声明 candidate 配色，确保有效图片包不会被空配色丢弃。
+            (skin / "skin.toml").write_text(
+                "schema_version = 2\nid = 'canvas-fixture'\nname = 'Overlay fixture'\nversion = '1'\nbase = 'system'\n"
+                "[supports]\nlayouts = ['horizontal', 'vertical']\nthemes = ['light', 'dark']\n"
+                "[candidate_window.decoration]\nimage = 'banner.png'\ntop_inset_dip = 80\nwidth_dip = 120\n"
+                "candidate_overlay = true\ncandidate_overlay_index = 0\ncandidate_overlay_font_size_dip = 36\n"
+                "candidate_overlay_min_font_size_dip = 8\ncandidate_overlay_color = '#00FF7F'\n"
+                "candidate_overlay_align_h = 'center'\ncandidate_overlay_align_v = 'center'\n")
         options["candidate_skin_catalog"] = {
             "directory": str(skin.parent), "packages": [{
                 "id": "canvas-fixture", "title": "Canvas fixture", "base": "system",
                 "layouts": ["horizontal", "vertical"], "candidate": {"light": {}, "dark": {}}}]}
+        if OVERLAY:
+            # 从完整包转换宿主目录字段；严格主题解析不接受 UI 包的 camelCase 条目。
+            request = json.dumps({"directory": str(skin.parent), "id": skin.name}).encode()
+            package = value(host.msime_client_skin_package(request, len(request)))
+            assert package.get("decorationCandidate") and package.get("decorationImage") == "banner.png"
+            options["candidate_skin_catalog"]["packages"][0].update(
+                decoration_top_dip=package["decorationTopDip"],
+                decoration_width_dip=package["decorationWidthDip"],
+                decoration_image=str(skin / package["decorationImage"]),
+                decoration_align=package["decorationAlign"])
         preferences = options["preferences"]
         preferences.update(learning=False, cloud_candidates=False, usage_reporting=False,
                            global_theme="custom", candidate_theme="light",
                            candidate_layout=os.environ.get("MSIME_TEST_CANVAS_LAYOUT", "vertical"))
+        # 悬浮工具栏会画在屏幕右下角；截图只看候选画布，不让它进到画面里。
+        preferences["floating_toolbar"]["enabled"] = False
         if TRANSLATION_BELOW:
             preferences.update(candidate_translations=False, candidate_english_gloss=False, candidate_font_size=20)
             options["translation_provider_socket"] = synthetic_translation_provider(root, cleanups)
@@ -745,6 +1184,20 @@ def main():
                                            candidate_skin_dark="canvas-fixture")
         if TRANSLATION_BELOW:
             preferences["custom_theme"]["candidate_colors"] = {"selected": "#075BAD", "text": "#010203"}
+        if FONT_GEOMETRY:
+            assert not NATIVE and not WAYLAND
+            preferences.update(candidate_translations=False, candidate_english_gloss=False,
+                               candidate_font_family="DejaVu Sans", candidate_fallback_fonts=[],
+                               candidate_font_size=12, candidate_scale_percent=100)
+            preferences["custom_theme"]["candidate_colors"] = {
+                "selected": "#075BAD", "text": "#010203", "selected_text": "#FFFFFF",
+                "selected_number": "#FFFFFF"}
+
+        if MODE_HINT_PREFERENCES:
+            assert not NATIVE and not WAYLAND
+            preferences.pop("input_mode_focus_hud", None)
+            preferences.update(input_mode_hud=True, candidate_font_size=20, show_app_logo=False,
+                               candidate_font_family="DejaVu Sans", candidate_fallback_fonts=[])
 
         def publish():
             store = options["preferences_directory"].encode()
@@ -762,6 +1215,9 @@ def main():
         os.environ["GDK_BACKEND"] = "wayland" if WAYLAND else "x11"
         if WAYLAND:
             assert Path(env.get("WAYLAND_DISPLAY", "")).is_absolute(), "需要隔离合成器的绝对 socket 路径"
+        if MODE_HINT_PREFERENCES:
+            # 框架默认用 Shift 临时切换输入法；本用例要走插件自己的中英文切换。
+            (root / "config/fcitx5/config").write_text("[Hotkey/AltTriggerKeys]\n0=Control+Shift+F12\n")
         window = keyboard = control = compositor = None
         with (root / "daemon.log").open("w") as log:
             daemon = subprocess.Popen(["fcitx5", "-D", "--keep"], env=env, stdout=log, stderr=log)
@@ -813,10 +1269,13 @@ def main():
                     return int(subprocess.check_output(["xdotool", "getwindowfocus"])) == xid
                 wait(lambda: entry.has_focus())
                 next_focus_retry = 0.0
+                focused_line = None
 
                 def ime_focused():
-                    nonlocal next_focus_retry
-                    if re.search(r"frontend:dbus\b.*\bfocus:1\b", str(control.DebugInfo())):
+                    nonlocal next_focus_retry, focused_line
+                    focused_line = next((line for line in str(control.DebugInfo()).splitlines()
+                                         if re.search(r"frontend:dbus\b.*\bfocus:1\b", line)), None)
+                    if focused_line is not None:
                         return True
                     # GTK 创建远端上下文是异步的；连接之前发出的首次焦点可能丢失。
                     # 只在握手未完成时重发真实窗口焦点，不重启 daemon 或绕过输入框。
@@ -828,17 +1287,25 @@ def main():
                     return False
 
                 wait(ime_focused)
-                focused_line = next(line for line in str(control.DebugInfo()).splitlines()
-                                    if re.search(r"frontend:dbus\b.*\bfocus:1\b", line))
+                # 使用等待成功的同一份焦点快照，避免两次 D-Bus 查询之间的连接切换。
                 focused_context = re.search(r"IC \[[^\]]+\]", focused_line).group()
                 control.SetCurrentIM("msime")
                 control.Activate()
                 wait(lambda: str(control.CurrentInputMethod()) == "msime")
+                if MODE_HINT_PREFERENCES:
+                    accept_mode_hint_preferences(root, preferences, publish, window, entry, focused, focused_context, control, daemon)
+                    return
                 if WAYLAND:
                     keyboard.keys(*"nihao")
                 else:
                     subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "100", "ni" if NATIVE else "nihao"],
                                    check=True, timeout=5)
+                if OVERLAY:
+                    accept_overlay(skin, entry, preferences, publish, focused)
+                    return
+                if FONT_GEOMETRY:
+                    accept_font_geometry(root, preferences, publish, entry, focused, control, daemon)
+                    return
                 if not TRANSLATION_BELOW:
                     wait(lambda: palette_visible(LIGHT))
                 assert entry.get_text() == "", "预编辑文字提前进入编辑器"
@@ -913,6 +1380,8 @@ def main():
                     wait(lambda: selected_pixels() == original_selected)
                     accept_pager(manifest, preferences, publish, entry)
                     wait(lambda: selected_pixels() == original_selected)
+                    accept_expand(manifest, preferences, publish, entry, host, value, options, control)
+                    wait(lambda: selected_pixels() == original_selected)
                     accept_translation(manifest, preferences, publish, entry, root / "translation.txt")
                     wait(lambda: selected_pixels() == original_selected)
                     before_move = window_geometry(native_window())
@@ -976,10 +1445,14 @@ def main():
                         journal = root / "state/user/msime_user.db"
                         if not journal.exists():
                             return False
-                        with sqlite3.connect(journal.as_uri() + "?mode=ro", uri=True) as connection:
-                            return connection.execute(
-                                "SELECT count(*) FROM pinned_candidates WHERE context_key=? AND value=?", ("ni", "你")
-                            ).fetchone()[0] == 1
+                        # 运行时正写这个库时只读连接会报 locked，当作还没写好，接着等。
+                        try:
+                            with sqlite3.connect(journal.as_uri() + "?mode=ro", uri=True) as connection:
+                                return connection.execute(
+                                    "SELECT count(*) FROM pinned_candidates WHERE context_key=? AND value=?", ("ni", "你")
+                                ).fetchone()[0] == 1
+                        except sqlite3.OperationalError:
+                            return False
 
                     wait(pinned)
                     wait(lambda: palette_visible((SELECTED,)))

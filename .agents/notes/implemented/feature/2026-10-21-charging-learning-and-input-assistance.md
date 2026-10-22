@@ -48,3 +48,6 @@ Apple 原生构建与行为验证：iOS App 和键盘扩展在 iOS 26.5 专用�
 公开系统接口依据：[充电后台任务](https://developer.apple.com/documentation/backgroundtasks/bgprocessingtaskrequest/requiresExternalPower)、[系统验证码语义](https://developer.apple.com/documentation/uikit/uitextcontenttype/onetimecode)。模拟器不能证明整夜真机调度或真实短信的系统自动填充，设备 NPU/GPU 命中和速度也未在本轮测量。
 
 跨平台 quick 门禁复用同一份检出目录时，Linux 会看见已经配置的 macOS 构建目录。`macos_configured` 同时检查 Apple 主机，避免容器拿 Darwin 的构建缓存去链接 AppKit；macOS 原生构建和测试仍在 Apple 主机单独执行。
+
+
+iOS 同时保留上游录音的 `audio` 与夜间学习的 `processing` 后台模式，`project.yml` 只声明一次合并数组，再重新生成工程与 Info.plist，避免 YAML 重复键使系统静默丢弃其中一项。Android 的内联自动填充与输入方式观察器继续运行，验证码监听与夜间任务在同一生命周期注册、清理，互不替代。

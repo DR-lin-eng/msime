@@ -27,6 +27,9 @@ import {
   candidateScalePatch,
   candidateScalePercent,
   candidateScaleSlider,
+  candidateGeometryFields,
+  candidateGeometryValue,
+  candidateGeometryPatch,
 } from "../candidate/candidate-window-style";
 import * as settings from "./settings-style";
 import { SegmentedRow } from "./segmented-row";
@@ -94,13 +97,13 @@ export interface CandidateScaleRowProps {
   onChange: (patch: Partial<Preferences>) => void;
 }
 
-/** 「整体大小」滑块；自绘候选窗连同窗口缩放，Linux 面板只缩放它能控制的候选字号。 */
-export function CandidateScaleRow({ preferences, platform, onChange }: CandidateScaleRowProps) {
+/** 「整体大小」滑块；自绘候选窗和 Linux 的 Fcitx5 主题连同窗口一起缩放，IBus 面板只缩放候选字号（见 `candidatePanelLimitNotes.ibus_panel`）。 */
+export function CandidateScaleRow({ preferences, onChange }: CandidateScaleRowProps) {
   const scale = candidateScalePercent(preferences.candidate_scale_percent);
   return (
     <SliderRow
       title="整体大小"
-      description={`${scale}%，${platform === "linux" ? "候选字号跟随缩放" : "字号与窗口尺寸一起缩放"}`}
+      description={`${scale}%，字号与窗口尺寸一起缩放`}
       {...candidateScaleSlider}
       value={scale}
       valueText={`${scale}%`}
@@ -110,29 +113,27 @@ export function CandidateScaleRow({ preferences, platform, onChange }: Candidate
 }
 
 export interface CandidateWindowStyleSectionProps {
-  preferences: Pick<
-    CandidateWindowStylePreferences,
-    "candidate_opacity_percent" | "candidate_corner_radius" | "candidate_padding"
-  > & { global_theme?: Preferences["global_theme"] };
+  preferences: CandidateWindowStylePreferences & { global_theme?: Preferences["global_theme"] };
   /** 宿主平台，决定「跟随皮肤」时滑块停在哪个圆角和内边距上。 */
   platform?: HostPlatform;
   showOpacity: boolean;
   showCornerRadius: boolean;
-  /** 宿主声明了 `candidate_padding` 时显示「内边距」行（目前只有 macOS）。 */
+  /** 宿主声明了 `candidate_padding` 时显示「内边距」行（目前是 macOS 和 Linux 的 Fcitx5）。 */
   showPadding?: boolean;
+  showItemGeometry?: boolean;
   onChange: (patch: Partial<Preferences>) => void;
   /** 排在窗口自身样式之后的行，例如链接到颜色和明暗设置处的那一行。 */
   children?: ReactNode;
 }
 
-/** 卡片跟随皮肤和宿主时滑块显示的圆角，即那时预览画的卡片圆角：macOS 是原生候选窗的 10pt（`skin-card-preview` 里 macOS 默认值块的 `--msime-host-card-radius`），其他平台的预览还没有自己的默认值块，仍是 6。 */
+/** 卡片跟随皮肤和宿主时滑块显示的圆角：macOS 是原生候选窗的 10pt，即那时预览画的卡片圆角（`skin-card-preview` 里 macOS 默认值块的 `--msime-host-card-radius`）；Linux 是 Fcitx5 经典界面主题画的 10px 卡片圆角（`CandidateFcitxTheme.h` 的 `FcitxPanelGeometry::radius`），滑块从这里往上拖卡片才会变圆；其他平台仍是 6。 */
 function followedCornerRadius(platform: HostPlatform | undefined): number {
-  return platform === "macos" ? 10 : 6;
+  return platform === "macos" || platform === "linux" ? 10 : 6;
 }
 
-/** 卡片跟随皮肤和宿主时滑块显示的内边距：macOS 原生候选窗的 4pt（`skin-card-preview` 里 macOS 默认值块的 `--msime-host-pad`）。只有 macOS 声明这一行，其他平台的值只是为了滑块有个落点。 */
+/** 卡片跟随皮肤和宿主时滑块显示的内边距：macOS 原生候选窗的 4pt（`skin-card-preview` 里 macOS 默认值块的 `--msime-host-pad`），Linux Fcitx5 卡片照 macOS 也是 4px（`FcitxPanelGeometry::padding`）。只有这两个平台声明这一行，其他平台的值只是为了滑块有个落点。 */
 function followedCardPadding(platform: HostPlatform | undefined): number {
-  return platform === "macos" ? 4 : 2;
+  return platform === "macos" || platform === "linux" ? 4 : 2;
 }
 
 /** 「窗口样式」组：窗口的不透明度、圆角和内边距，HarmonyOS 手机的「候选栏」页在宿主声明支持时用它。颜色和明暗只在「主题」页编辑。 */
@@ -155,6 +156,7 @@ export function CandidateWindowStyleRows({
   showOpacity,
   showCornerRadius,
   showPadding = false,
+  showItemGeometry = false,
   onChange,
 }: Omit<CandidateWindowStyleSectionProps, "children">) {
   const nativeGlass = useMacOSLiquidGlass();
@@ -209,7 +211,7 @@ export function CandidateWindowStyleRows({
           </span>
         </Row>
       )}
-      {showPadding && (
+      {showPadding && !showItemGeometry && (
         <Row
           title="内边距"
           description={
@@ -238,6 +240,42 @@ export function CandidateWindowStyleRows({
           </span>
         </Row>
       )}
+      {showItemGeometry &&
+        candidateGeometryFields.map((field) => {
+          const value = candidateGeometryValue(preferences, field.key);
+          return (
+            <Row
+              key={field.key}
+              title={field.title}
+              description={value === null ? "跟随皮肤与窗口布局" : `${value}pt，覆盖皮肤与窗口布局`}
+            >
+              <span className="candidate-color-control">
+                <span className={settings.sliderControl}>
+                  <Slider
+                    min={0}
+                    max={field.max}
+                    step={1}
+                    value={value ?? field.followed}
+                    valueText={value === null ? "跟随皮肤" : `${value}pt`}
+                    onChange={(next) =>
+                      onChange(candidateGeometryPatch(preferences, field.key, next))
+                    }
+                  />
+                </span>
+                <ActionButton
+                  action={() => {
+                    if (value !== null) {
+                      onChange(candidateGeometryPatch(preferences, field.key, null));
+                    }
+                  }}
+                  ariaPressed={value === null}
+                  className={`candidate-color-reset${value === null ? " is-active" : ""}`}
+                  label="跟随皮肤"
+                />
+              </span>
+            </Row>
+          );
+        })}
     </>
   );
 }

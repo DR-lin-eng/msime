@@ -137,7 +137,7 @@ final class ImeStyler {
         if (s.keyRows == null) return;
         applyKeyboardGeometry(s.keyRows);
         applyKeyboardHeight(s.keyRows);
-        // 功能行是键行的兄弟而不是其中一行，按底行角色算高度：和一行键同高，分摊四分之一的键盘高度调整；键帽照样带键距。
+        // 功能行是键行的兄弟而不是其中一行，按同一网格状态分摊高度；九宫格加高时底行保持默认高度，键帽照样带键距。
         if (s.actionRow != null) {
             applyKeyboardGeometry(s.actionRow);
             applyKeyboardHeight(s.actionRow);
@@ -162,17 +162,19 @@ final class ImeStyler {
             s.touchKeyboardHeightAdjustment, s.getResources().getConfiguration().screenHeightDp));
     }
 
-    /** {@code adjustment} 是当前窗口里实际要画的调整量（{@link KeyboardGeometry#windowHeightAdjustment}），整棵树用同一个值。 */
+    /** {@code adjustment} 是当前窗口里实际要画的调整量（{@link KeyboardHeightPolicy#windowHeightAdjustment}），整棵树用同一个值。 */
     private void applyKeyboardHeight(View node, int adjustment) {
         Object tag = node.getTag();
         if (tag instanceof MSIMEInputService.KeyboardHeightRole) {
             MSIMEInputService.KeyboardHeightRole role = (MSIMEInputService.KeyboardHeightRole) tag;
-            // 调整量由键区四行均分：底行拿它那一份，底行以上的键行和三行高的键块分摊其余部分，连底行一起占四行的整块（日语、注音九键）拿整份，各布局的总高都等于四行键高加整份调整。
+            // 九宫格加高只扩大上方键区，其余布局及缩小量仍四行均分；总高始终为四行默认键高加整份调整。
+            boolean nineKeyGrid = s.imeLayoutRows.nineKeyGridDrawn()
+                && (role.bottomRow || role.nineKeyGrid);
             int heightDp;
             if (role.bottomRow) {
-                heightDp = role.baseHeight + KeyboardHeightPolicy.bottomRowAdjustment(adjustment);
+                heightDp = role.baseHeight + KeyboardHeightPolicy.bottomRowAdjustment(adjustment, nineKeyGrid);
             } else {
-                int share = role.withBottomRow ? adjustment : KeyboardHeightPolicy.keyRowsAdjustment(adjustment);
+                int share = role.withBottomRow ? adjustment : KeyboardHeightPolicy.keyRowsAdjustment(adjustment, nineKeyGrid);
                 heightDp = KeyboardHeightPolicy.adjustedRowHeight(role.baseHeight, share, role.rowCount, role.rowIndex);
             }
             int height = s.pixels(heightDp);
@@ -425,18 +427,24 @@ final class ImeStyler {
         s.handwritingSkin = themed(s.handwritingSkin);
         // 浮动（以及候选栏跟随光标）时根视图铺满屏幕，底色透明才看得见下面的应用；导航栏也不再画成键盘底色的一条。
         boolean floating = s.overlayDrawn();
-        int rootColor = floating ? Color.TRANSPARENT : color(s.skin.background());
+        int rootColor = floating || s.clipboardPreviewExpanded ? Color.TRANSPARENT : color(s.skin.background());
         ViewPolicy.setBackgroundColor(s.keyboardRoot, rootColor);
-        s.imeFrame.applyNavigationBar(rootColor, s.skin.dark());
+        s.imeFrame.applyNavigationBar(floating ? Color.TRANSPARENT : color(s.skin.background()), s.skin.dark());
         if (s.keyboardSurface != null) applySkinBackground(s.keyboardSurface);
         CandidateCanvasAssets canvas = s.candidateAppearance.canvas();
         boolean canvasActive = canvas != null && ViewPolicy.isVisible(s.candidateViewport);
         s.imeFrame.setKeysCovered(canvas != null && ViewPolicy.isVisible(s.expandedCandidateScroll));
         int candidateSurface = s.candidateAppearance.surface();
-        if (s.candidateCanvasRegion != null)
+        Typeface decorationFont = canvas != null && canvas.banner != null && canvas.banner.candidate() != null
+            ? candidateTypeface() : Typeface.DEFAULT;
+        if (s.candidateCanvasRegion != null) {
             s.candidateCanvasRegion.apply(canvas, canvasActive, candidateSurface);
-        if (s.expandedCandidateCanvas != null)
+            s.candidateCanvasRegion.decorationWords(s.candidateDecorationWords, decorationFont);
+        }
+        if (s.expandedCandidateCanvas != null) {
             s.expandedCandidateCanvas.apply(canvas, ViewPolicy.isVisible(s.expandedCandidateScroll), candidateSurface);
+            s.expandedCandidateCanvas.decorationWords(s.candidateDecorationWords, decorationFont);
+        }
         if (s.candidateViewport != null)
             ViewPolicy.setBackgroundColor(s.candidateViewport, canvasActive ? Color.TRANSPARENT : candidateSurface);
         if (s.expandedCandidates != null)
@@ -447,6 +455,8 @@ final class ImeStyler {
             ViewPolicy.setPadding(s.candidateHeader, s.candidateHeader.getPaddingLeft(),
                 s.candidateHeader.getPaddingTop(), s.candidateHeader.getPaddingRight(), gap);
         }
+        if (s.clipboardSurface != null)
+            applySkinBackground(s.clipboardSurface);
         if (s.clipboardPanel != null)
             applySkinBackground(s.clipboardPanel);
         if (s.schemePanel != null)
@@ -544,7 +554,8 @@ final class ImeStyler {
             configuration.smallestScreenWidthDp, configuration.screenWidthDp, s.splitKeyboardDrawn());
         int width = widthDp == 0 ? FrameLayout.LayoutParams.MATCH_PARENT : s.pixels(widthDp);
         FrameLayout.LayoutParams params = LayoutPolicy.frameParamsPx(
-            width, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            width, s.clipboardPreviewExpanded ? s.clipboardPreviewKeyboardHeight : FrameLayout.LayoutParams.MATCH_PARENT,
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         s.keyboardSurface.setLayoutParams(params);
         ViewPolicy.setElevation(s.keyboardSurface, widthDp == 0 ? 0 : s.pixels(10));
     }

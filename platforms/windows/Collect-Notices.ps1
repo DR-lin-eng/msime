@@ -25,8 +25,10 @@ foreach ($notice in @(
     @('resources/helpcodes/NOTICE-wubi86.md', 'Helpcode table (wubi86), generated from KyleBing/rime-wubi86-jidian, Apache-2.0, with 16 characters from rime/rime-wubi, LGPL-3.0 distributed under GPL-3.0'),
     @('resources/licenses/Zinnia-LICENSE.txt', 'zinnia, whose recognizer the host library ports, BSD License'),
     @('resources/licenses/Administrative-divisions-of-China-WTFPL.txt', 'Chinese administrative divisions compiled into the host library for @ mode, modood/Administrative-divisions-of-China @ c49d495b40ac73eb1a66f6eeae5f8fd10696f035, WTFPL'),
+    @('resources/licenses/librime-octagram-BSD-3-Clause.txt', '语法模型查询与编码逻辑的 Rust 移植，lotem/librime-octagram @ 57d18b9f58e5284bd891d559f6bdd16cf60341e9，BSD-3-Clause'),
     @('resources/licenses/libhangul-hanja-BSD-3-Clause.txt', 'Korean Hanja table compiled into the host library for Hanja conversion, libhangul data/hanja/hanja.txt @ 717409ce61524bb3d8426060a384822f21354c62, BSD-3-Clause'),
     @('resources/licenses/kfcd-chaizi-CC-BY-3.0.txt', 'Component reverse lookup table compiled into the host library for 拆字反查 (C mode), adapted from kfcd/chaizi chaizi-jt.txt and chaizi-ft.txt @ e177ab54ce4edf255315a60593ffecbd8167e96b, © 2015 開放詞典, CC BY 3.0'),
+    @('resources/licenses/rime-wanxiang-CC-BY-4.0.txt', 'Group codes and code points of the symbol mode (S mode) table compiled into the host library, from wanxiang_symbols.yaml of amzxyz/rime-wanxiang v18.0.16 @ 7ab73ee0c7f80190004233e70f954833df64c80e, CC BY 4.0, with Chinese group names and their order written by this project'),
     @('resources/licenses/Unicode-License-V3.txt', 'Readings, ranks and traditional variants of the 拆字反查 (C mode) table compiled into the host library, from the Unicode Han Database (Unihan) 17.0.0 fields kMandarin, kTGHZ2013, kTGH and kTraditionalVariant, Unicode License V3'),
     @('resources/licenses/rime-cantonese-CC-BY-4.0.txt', 'Jyutping syllables and words of the Cantonese scheme in the host library, rime/rime-cantonese @ 259f0e48bba840c3a2e0d117539e96937f3d89bc, CC BY 4.0, with word weights from fcbond/hkcancor @ 39aeadf920e0b5ca93d0ad7792c59e740e7bdd65, CC BY 4.0'),
     @('resources/licenses/libchewing-data-LGPL-2.1.txt', 'Bopomofo syllables and words of the Zhuyin scheme in the host library, chewing/libchewing-data @ c44e81aef24b06f1509f19e1be54c99812d0c43f, LGPL-2.1-or-later, with phrase weights from openvanilla/McBopomofo @ be6564acad6c4d3265c34a2e1a872d80f9db6068 phrase.occ, MIT'),
@@ -38,6 +40,7 @@ foreach ($notice in @(
     @('platforms/windows/msimeui/LICENSE', 'msime-windows AnimatedImage，GPL-3.0'),
     @('platforms/windows/third_party/miniaudio/LICENSE', 'miniaudio (Server microphone capture and cue sounds)'),
     @('shared/voice/third_party/cppcodec/LICENSE', 'cppcodec 0.2, header-only, Base64 for Alibaba Cloud Bailian speech requests, tplgy/cppcodec, MIT'),
+    @('platforms/windows/settings/assets/feedback/NOTICE.md', 'Feedback channel icons on the about page of msime-client-settings.exe, GitHub and Telegram from yldm-tech/ai-logo (MIT), QQ from bytedance/IconPark (Apache-2.0)'),
     @('resources/licenses/OpenCC-Apache-2.0.txt', 'OpenCC dictionaries, BYVoid/OpenCC @ 26753884f1984add422f3b0249ccee8613deaff6'),
     @('plugins/script/LICENSE', 'Official script plugin uuid in server\plugin-packs, this project''s own code under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'),
     @('plugins/phrase_table/LICENSE', 'Official phrase table latex-symbols in server\plugin-packs, this project''s own data under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'))) {

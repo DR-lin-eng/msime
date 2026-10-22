@@ -10,6 +10,9 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "../../../../shared/contracts/candidate_decoration_overlay.h"
+
+#include "../../../../shared/candidate/CandidateDecoration.h"
 
 namespace msime::mac
 {
@@ -42,6 +45,12 @@ struct SkinTokens
     float selectedRadius = 6.0f;
     float borderWidth = 1.0f;
     float pad = 4.0f;
+    std::optional<double> paddingHorizontal;
+    std::optional<double> paddingVertical;
+    std::optional<double> itemPaddingHorizontal;
+    std::optional<double> itemPaddingVertical;
+    std::optional<double> itemSpacing;
+    bool explicitItemRadius = false;
     bool showSelectedBar = false;
     // The translation line when a package gives one (the resolved `secondary` differs from `number`); none draws it like the numbers.
     std::optional<Rgba> translation;
@@ -49,6 +58,8 @@ struct SkinTokens
     std::optional<Rgba> selectedTranslation;
     // The floating toolbar's separator, set only by a package's `[toolbar]` colours; none draws it in the border colour. The candidate window does not read it.
     std::optional<Rgba> divider;
+    // 列表内三角翻页标记前的分隔线。
+    std::optional<Rgba> pageArrowDivider;
 };
 
 // 选中与悬停使用各自的行 token，首尾位置不借用整个卡片的圆角。
@@ -57,27 +68,38 @@ inline float CandidateRowRadius(const SkinTokens &tokens, bool highlighted)
     return highlighted ? tokens.selectedRadius : tokens.candidateRadius;
 }
 
-// 卡片边缘到候选行的实际距离：内边距可以小到 0，但选中高亮不能压住卡片的边框，所以至少留出边框的宽度（#7974）。`tokens` 已经按整体大小缩放过时，内边距随之缩放，边框不变粗，下限也就不变。
+// 卡片边缘到候选行的实际距离；零表示贴边，不再以边框宽度作为下限。
 inline float CandidateInset(const SkinTokens &tokens)
 {
-    return std::max({0.0f, tokens.borderWidth, tokens.pad});
+    return std::max(0.0f, static_cast<float>(tokens.paddingHorizontal.value_or(tokens.pad)));
+}
+
+inline float CandidateVerticalInset(const SkinTokens &tokens)
+{
+    return std::max(0.0f, static_cast<float>(tokens.paddingVertical.value_or(tokens.pad)));
 }
 
 // 候选行的圆角至少要多大，高亮的角才不伸出卡片的圆角：两个圆角在对角线方向相切时 r = R - d(2 + √2)，卡片圆角 R 和内边距 d 都从边框内沿量起（窗口按矩形裁掉描边外侧的一半）。内边距够大时结果是 0，不改变行圆角。
 inline float CandidateRowRadiusFloor(const SkinTokens &tokens)
 {
     const float halfBorder = std::max(0.0f, tokens.borderWidth) / 2.0f;
-    const float inset = CandidateInset(tokens) - halfBorder;
+    const float inset = std::min(CandidateInset(tokens), CandidateVerticalInset(tokens)) - halfBorder;
     return std::max(0.0f, tokens.radius - halfBorder - inset * (2.0f + std::sqrt(2.0f)));
 }
 
-// The user's own 候选窗 style from the shared preferences: candidate_scale_percent and candidate_opacity_percent as factors, candidate_corner_radius in points, none to keep the theme's or the package's card radius, and candidate_padding in points, none to keep the theme's or the package's `pad`. The defaults leave a skin exactly as it was resolved.
+// 共享偏好的用户覆盖：长度为缩放前的点，缺省保留皮肤与宿主。窗口逐轴内边距先回退到旧的统一 padding；候选项圆角显式设置后不随窗口圆角联动。
 struct CandidateWindowStyle
 {
     double scale = 1.0;
     double opacity = 1.0;
     std::optional<double> cornerRadius;
     std::optional<double> padding;
+    std::optional<double> paddingHorizontal;
+    std::optional<double> paddingVertical;
+    std::optional<double> itemPaddingHorizontal;
+    std::optional<double> itemPaddingVertical;
+    std::optional<double> itemCornerRadius;
+    std::optional<double> itemSpacing;
 };
 
 struct SkinColors
@@ -95,12 +117,8 @@ struct SkinColors
 };
 
 // Where the decoration sits along the card's top edge; right is where every host drew it before a manifest could say otherwise.
-enum class DecorationAlign
-{
-    left,
-    center,
-    right,
-};
+// 装饰图对齐、摆放和动效余量与 Linux 的 X11 原生画布共用 shared/candidate/CandidateDecoration.h。
+using msime::candidate::DecorationAlign;
 
 enum class BackgroundFit
 {
@@ -158,6 +176,7 @@ struct ResolvedSkinLayout
     double cornerRadiusDip = 0.0;
     double borderWidthDip = 0.0;
     double itemCornerRadiusDip = 0.0;
+    std::optional<std::string> shadow;
     bool pageArrows = false;
     bool fitContent = false;
     bool expandPanel = false;
@@ -193,7 +212,7 @@ struct SkinCanvas
     std::vector<SkinFreeDecoration> decorations;
 };
 
-inline SkinInsets CanvasContentInsets(const SkinCanvas &canvas, double inset)
+inline SkinInsets CanvasContentInsets(const SkinCanvas &canvas, double inset, std::optional<double> verticalInset = std::nullopt)
 {
     const auto width = canvas.border ? canvas.border->width : std::array<double, 4>{};
     if (canvas.content) {
@@ -201,7 +220,8 @@ inline SkinInsets CanvasContentInsets(const SkinCanvas &canvas, double inset)
         return {std::max(content.top, width[0]), std::max(content.right, width[1]),
                 std::max(content.bottom, width[2]), std::max(content.left, width[3])};
     }
-    return {inset + width[0], inset + width[1], inset + width[2], inset + width[3]};
+    return {verticalInset.value_or(inset) + width[0], inset + width[1],
+            verticalInset.value_or(inset) + width[2], inset + width[3]};
 }
 inline double CanvasExtraWidth(const SkinCanvas &canvas, double inset)
 {
@@ -229,6 +249,13 @@ struct SkinToolbar
     SkinToolbarColors light;
 };
 
+struct SkinToolbarImage
+{
+    // 共享加载器规范化的缓存 JSON；状态变化通过无 I/O 布局桥处理。
+    std::string json;
+    std::filesystem::path directory;
+};
+
 // 装饰图的待机动效（清单 `decoration.motion`）：候选窗在屏幕上时整张装饰图的小幅循环动作，与显隐动效无关。`float` 是关键字，所以浮动叫 floating。
 enum class DecorationMotion
 {
@@ -239,8 +266,7 @@ enum class DecorationMotion
     bounce,
 };
 
-// 有待机动效的装饰图在窗口顶边和左右两边至少留出的点数。各动效的最大位移都不超过它（见 CandidateMotion.mm），候选窗内容视图裁掉越界部分时装饰图不会被切掉。
-constexpr double kDecorationMotionMargin = 4.0;
+using msime::candidate::kDecorationMotionMargin;
 
 enum class SkinAnimationPreset
 {
@@ -270,65 +296,9 @@ struct SkinLicense
     std::string source;
 };
 
-// The x of a decoration `width` wide over a card `cardWidth` wide: `pad` in from the edge it is aligned to, or centred, never left of the card. The same rule as the Windows host's candidate_decoration_left.
-inline double DecorationLeft(DecorationAlign align, double cardWidth, double pad, double width)
-{
-    double left = cardWidth - pad - width;
-    switch (align)
-    {
-    case DecorationAlign::left:
-        left = pad;
-        break;
-    case DecorationAlign::center:
-        left = (cardWidth - width) / 2.0;
-        break;
-    case DecorationAlign::right:
-        break;
-    }
-    return left > 0.0 ? left : 0.0;
-}
-
-// Where the decoration is drawn, in top-down coordinates: x from the card's left edge, top from the window's top edge.
-struct DecorationRect
-{
-    double x = 0.0;
-    double top = 0.0;
-    double width = 0.0;
-    double height = 0.0;
-};
-
-// The decoration as every host draws it: the window is `band` taller than the card and that band is transparent; the image is `width` wide at its own aspect ratio, its bottom `pad` below the card's top edge so it sits over the edge, and it is drawn after the card. An image too tall for the band and the overlap is scaled down whole rather than squashed. None for an empty band, width or image.
-// `margin` 是待机动效要的余量（有动效时传 kDecorationMotionMargin）：图片顶边离窗口顶边、左右两边离窗口边缘都至少这么远，放不下就整张等比缩小，底边仍压在卡片顶边上的同一位置。
-inline std::optional<DecorationRect> DecorationPlacement(DecorationAlign align, double cardWidth, double pad, double band,
-                                                         double width, double imageWidth, double imageHeight,
-                                                         double margin = 0.0)
-{
-    if (!(band > 0.0) || !(width > 0.0) || !(imageWidth > 0.0) || !(imageHeight > 0.0))
-        return std::nullopt;
-    const double room = band + pad;
-    const bool moving = margin > 0.0;
-    const double tallest = moving ? room - margin : room;
-    const double widest = cardWidth - 2.0 * margin;
-    if (!(tallest > 0.0) || (moving && !(widest > 0.0)))
-        return std::nullopt;
-    double height = width * imageHeight / imageWidth;
-    if (height > tallest)
-    {
-        width *= tallest / height;
-        height = tallest;
-    }
-    if (moving && width > widest)
-    {
-        height *= widest / width;
-        width = widest;
-    }
-    double left = DecorationLeft(align, cardWidth, pad, width);
-    if (moving && left < margin)
-        left = margin;
-    if (moving && left + width > cardWidth - margin)
-        left = cardWidth - margin - width;
-    return DecorationRect{left, room - height, width, height};
-}
+using msime::candidate::DecorationLeft;
+using msime::candidate::DecorationPlacement;
+using msime::candidate::DecorationRect;
 
 struct SkinRect
 {
@@ -418,9 +388,12 @@ struct SkinPackage
     double decorationMotionPeriodMs = 3000.0;
     // 装饰图的帧数：没有装饰图为 0，静态图为 1，APNG 为它的动画帧数。
     unsigned decorationFrames = 0;
+    std::optional<msime::candidate::DecorationCandidate> decorationCandidate;
     std::optional<SkinBackground> background;
     std::optional<SkinCanvas> canvas;
     SkinToolbar toolbar;
+    std::optional<std::string> shadow;
+    SkinToolbarImage toolbarImage;
     std::optional<ResolvedSkinLayout> resolvedLayout;
     SkinAnimation animation;
     std::optional<SkinLicense> license;
@@ -493,6 +466,7 @@ struct ResolvedSkin
     DecorationAlign decorationAlign = DecorationAlign::right;
     DecorationMotion decorationMotion = DecorationMotion::none;
     double decorationMotionPeriodMs = 3000.0;
+    std::optional<msime::candidate::DecorationCandidate> decorationCandidate;
     // Absolute path of the drawn package's background image, empty for none.
     std::string backgroundPath;
     BackgroundFit backgroundFit = BackgroundFit::cover;
@@ -506,7 +480,12 @@ struct ResolvedSkin
     bool fitContent = false;
     // 共享皮肤声明的首行之后的卷轴行数；原生主题保留宿主默认。
     std::optional<unsigned> expandRows;
+    // 空值保留宿主阴影；共享版式未声明档位时使用来源的普通双层阴影。
+    std::optional<std::string> shadow;
+    // 空值保留原生首行；共享版式显式控制列表内翻页与横排卷轴。
+    std::optional<bool> pageArrows, expandPanel;
     bool canvasPanelDrawn = false;
+    SkinToolbarImage toolbarImage;
 };
 
 bool IsSafeSkinId(std::string_view id);

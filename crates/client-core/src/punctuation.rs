@@ -11,20 +11,37 @@ pub enum QuoteMarks {
     Corner,
 }
 
-/// 中文标点下引号键和方头括号键实际出哪一组字。引擎、View 和 Windows Server 都只认这两种确定的值；View 里序列化成 `{"quotes": "curly"|"corner", "brackets": "solid"|"hollow"}`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+/// 中文标点下引号键和方头括号键实际出哪一组字、`\` 和 `/` 谁出顿号。引擎、View 和 Windows Server 都只认解析好的值；View 里序列化成 `{"quotes": "curly"|"corner", "brackets": "solid"|"hollow", "enumeration_comma_backslash": bool, "enumeration_comma_slash": bool}`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PunctuationMarks {
     pub quotes: QuoteMarks,
     pub brackets: BracketStyle,
+    /// `\` 键在中文标点下出顿号「、」。
+    pub enumeration_comma_backslash: bool,
+    /// `/` 键在中文标点下出顿号「、」。
+    pub enumeration_comma_slash: bool,
 }
 
-/// 从偏好算出生效的标点样式，这是唯一的解析处：`corner_when_traditional` 在繁体输出打开时是直角引号，否则是弯引号。Windows Server 读偏好 JSON 时照抄这条规则（`server_main.cpp` 的 `tsf_local_config`）。
+impl Default for PunctuationMarks {
+    /// 与偏好的缺省一致：`\` 出顿号、`/` 是命令模式触发键，不出顿号。
+    fn default() -> Self {
+        Self {
+            quotes: QuoteMarks::Curly,
+            brackets: BracketStyle::Solid,
+            enumeration_comma_backslash: true,
+            enumeration_comma_slash: false,
+        }
+    }
+}
+
+/// 从偏好算出生效的标点样式与顿号键，这是唯一的解析处：`corner_when_traditional` 在繁体输出打开时是直角引号，否则是弯引号；「至少留一个」在这里归一，两个顿号键都关掉时按「`\` 开」读，采用 Windows IPC 无效值的反斜杠回退。Windows Server 读偏好 JSON 时照抄样式规则（`server_main.cpp` 的 `tsf_local_config`）。
 pub fn punctuation_marks(preferences: &Preferences) -> PunctuationMarks {
     let corner = match preferences.quote_style {
         QuoteStyle::Curly => false,
         QuoteStyle::Corner => true,
         QuoteStyle::CornerWhenTraditional => preferences.traditional_chinese_output,
     };
+    let slash = preferences.enumeration_comma_slash;
     PunctuationMarks {
         quotes: if corner {
             QuoteMarks::Corner
@@ -32,6 +49,8 @@ pub fn punctuation_marks(preferences: &Preferences) -> PunctuationMarks {
             QuoteMarks::Curly
         },
         brackets: preferences.bracket_style,
+        enumeration_comma_backslash: preferences.enumeration_comma_backslash || !slash,
+        enumeration_comma_slash: slash,
     }
 }
 
@@ -663,13 +682,7 @@ mod tests {
             })
         };
         let defaults = punctuation_marks(&Preferences::default());
-        assert_eq!(
-            defaults,
-            PunctuationMarks {
-                quotes: QuoteMarks::Curly,
-                brackets: BracketStyle::Solid,
-            }
-        );
+        assert_eq!(defaults, PunctuationMarks::default());
         for traditional in [false, true] {
             assert_eq!(
                 marks(QuoteStyle::Curly, BracketStyle::Solid, traditional).quotes,
@@ -702,7 +715,33 @@ mod tests {
             PunctuationMarks {
                 quotes: QuoteMarks::Corner,
                 brackets: BracketStyle::Hollow,
+                ..PunctuationMarks::default()
             }
         );
+    }
+
+    /// 顿号自定义（契约 `enumerationComma` 段）：`\` 默认开、`/` 默认关；手改文档把两个都关掉时归一成「`\` 开」，采用 Windows IPC 无效值的反斜杠回退。
+    #[test]
+    fn enumeration_comma_keys_keep_at_least_one() {
+        let marks = |backslash, slash| {
+            punctuation_marks(&Preferences {
+                enumeration_comma_backslash: backslash,
+                enumeration_comma_slash: slash,
+                ..Preferences::default()
+            })
+        };
+        let defaults = marks(true, false);
+        assert!(defaults.enumeration_comma_backslash);
+        assert!(!defaults.enumeration_comma_slash);
+        // 各自独立开关。
+        assert!(marks(false, true).enumeration_comma_slash);
+        assert!(!marks(false, true).enumeration_comma_backslash);
+        assert!(marks(true, true).enumeration_comma_backslash);
+        assert!(marks(true, true).enumeration_comma_slash);
+        // 两个都关按「`\` 开」读。
+        let normalized = marks(false, false);
+        assert!(normalized.enumeration_comma_backslash);
+        assert!(!normalized.enumeration_comma_slash);
+        assert_eq!(normalized, marks(true, false));
     }
 }

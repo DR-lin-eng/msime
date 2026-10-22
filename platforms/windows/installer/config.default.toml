@@ -308,6 +308,8 @@ polish_token_groq = "<YOUR_POLISH_TOKEN_GROQ>"
 polish_endpoint = "https://api.deepseek.com/chat/completions"
 # 留空则按提供商填默认值，例如 Qwen/Qwen3-8B、gpt-4o-mini。
 polish_model = "deepseek-v4-flash"
+# DeepSeek 润色的思考强度: disabled | low | high | max，仅 DeepSeek 生效。开启后上屏前要多等几秒到几十秒。
+polish_thinking = "disabled"
 # 润色提示词: cleanup | faithful | zh2en | casual | custom_1 | custom_2 | custom_3
 polish_prompt_id = "cleanup"
 polish_prompt_custom_1 = ""
@@ -344,6 +346,7 @@ study_english_word = "false" # 背单词功能，开启后可以在候选项旁�
 quick_phrase = true # Shift+K 进入快捷短语模式
 unicode_mode = true # Shift+U 进入 Unicode 码位输入模式
 date_time_mode = true # Shift+T 进入日期与时间快捷模式
+date_time_menu = true # 日期时间混入候选时，在第三位放一个「📅日期」，选中后候选框换成全部日期格式（和 Shift+T 模式相同）
 emoji_mode = true # Shift+E 进入 Emoji 快捷模式（支持全拼/简拼/双拼/英文）
 kaomoji_mode = true # Shift+M 进入颜文字快捷模式（支持全拼/简拼/双拼/英文）
 jianpin_mode = true # Shift+J 进入超级简拼模式（每个字母作为简拼；双拼按方案转换 zh/ch/sh）
@@ -366,6 +369,8 @@ token_groq = "<YOUR_AI_TOKEN_GROQ>"
 endpoint = "https://api.deepseek.com/chat/completions"
 model = "deepseek-v4-flash"
 candidate_limit = 3
+# DeepSeek 思考强度: disabled | low | high | max，仅 DeepSeek 生效。开启后联想明显变慢。
+thinking = "disabled"
 prompt_id = "custom_1"
 # 自定义槽位留空时使用内置提示词。
 prompt_custom_1 = ""

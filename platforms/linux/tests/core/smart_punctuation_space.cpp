@@ -149,6 +149,11 @@ int main() {
   assert(english_mode_output(U'"', false, true, false, english, {}) == "”");
   assert(english_mode_output(U'\'', false, true, false, english, {}) == "‘");
   assert(english_mode_output(U'\'', false, true, false, english, {}) == "’");
+  // 契约第 3 版：`{` `}` 出直角引号，交替状态与弯引号分开。
+  assert(english_mode_output(U'{', false, true, false, english, {}) == "「");
+  assert(english_mode_output(U'{', false, true, false, english, {}) == "」");
+  assert(english_mode_output(U'}', false, true, false, english, {}) == "『");
+  assert(english_mode_output(U'}', false, true, false, english, {}) == "』");
   assert(english_mode_output(U'<', false, true, false, english, {}) == "《");
   assert(english_mode_output(U'<', false, true, false, english, {}) == "〈");
   assert(english_mode_output(U'>', false, true, false, english, {}) == "〉");
@@ -160,11 +165,24 @@ int main() {
   assert(corner.corner_quotes && corner.hollow_brackets);
   const auto defaults = msime::input::punctuation_marks_from_view("curly", "unknown");
   assert(!defaults.corner_quotes && !defaults.hollow_brackets);
+  // 顿号键直接消费 View 的已解析开关，英文模式固定中文标点也必须保持一致。
+  for (int mask = 0; mask < 4; ++mask) {
+    const auto marks = msime::input::punctuation_marks_from_view("curly", "solid", mask & 1, mask & 2);
+    EnglishPunctuationState enumeration;
+    assert(english_mode_output(U'\\', false, true, false, enumeration, marks) == ((mask & 1) ? "、" : ""));
+    assert(english_mode_output(U'/', false, true, false, enumeration, marks) == ((mask & 2) ? "、" : ""));
+    assert(english_mode_output(U'/', false, false, false, enumeration, marks).empty());
+    assert(english_mode_output(U'/', true, true, false, enumeration, marks).empty());
+    if (!(mask & 1)) assert(english_mode_output(U'\\', false, true, true, enumeration, marks) == "＼");
+  }
   EnglishPunctuationState styled;
   assert(english_mode_output(U'\'', false, true, false, styled, corner) == "「");
   assert(english_mode_output(U'"', false, true, false, styled, corner) == "『");
   assert(english_mode_output(U'\'', false, true, false, styled, corner) == "」");
   assert(english_mode_output(U'"', false, true, false, styled, corner) == "』");
+  // `{` `}` 出的本来就是直角引号，样式不换它们。
+  assert(english_mode_output(U'{', false, true, false, styled, corner) == "「");
+  assert(english_mode_output(U'}', false, true, false, styled, corner) == "『");
   assert(english_mode_output(U'[', false, true, false, styled, corner) == "〖");
   assert(english_mode_output(U']', false, true, false, styled, corner) == "〗");
   assert(english_mode_output(U',', false, true, false, styled, corner) == "，");

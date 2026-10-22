@@ -4,7 +4,7 @@ import type { AiAssistantPreferences } from "./ai-assistant-preferences";
 import type { SettingsClient } from "../core/settings-client";
 import type { useProviderCredentials } from "./use-provider-credentials";
 import { aiProviderOption, aiProviderOptionsFor, aiProviderUsesToken } from "./ai-provider-options";
-import { aiProviderUpdate } from "./ai-provider-update";
+import { aiProviderUpdate, aiEndpointUpdate, aiModelUpdate } from "./ai-provider-update";
 import {
   aiCredentialTestDisabled,
   aiProviderCredentialTestConfig,
@@ -18,7 +18,10 @@ import { AiLinuxProviderSection } from "./ai-linux-provider-section";
 import { AiApiTokenSection } from "./ai-api-token-section";
 import { aiEndpointHint } from "./ai-endpoint-policy";
 import { AiTestToolsSection } from "./ai-test-tools-section";
+import { NetworkProxySection } from "./network-proxy-section";
+import type { NetworkProxyPreferences } from "./network-proxy-preferences";
 import type { ProviderPresetControlFactory } from "./provider-preset-control";
+import { useMountedRef } from "./use-mounted-ref";
 import * as settings from "./settings-style";
 
 export interface AiSettingsContentProps {
@@ -40,6 +43,7 @@ export interface AiSettingsContentProps {
   aiTestStatus: string;
   aiTestBusy: boolean;
   testAi: () => Promise<void>;
+  setError?: (message: string) => void;
   providerPresetControls: ProviderPresetControlFactory;
   linuxPlatform: boolean;
   windowsPlatform: boolean;
@@ -58,6 +62,10 @@ export interface AiSettingsContentProps {
   >["providerCredentialMessages"];
   runProviderCredential: ReturnType<typeof useProviderCredentials>["runProviderCredential"];
   credentialTestControl: ReturnType<typeof useProviderCredentials>["credentialTestControl"];
+  /** 云候选、翻译、AI、语音、账号、更新检查和下载共用的代理设置；旧宿主不给时整组不显示。 */
+  network?: NetworkProxyPreferences;
+  onNetworkChange?: (value: NetworkProxyPreferences) => void;
+  showNetwork?: boolean;
   /** 最后一组之后的内容：设置页在这里放进入「AI 对话」的入口。 */
   trailing: ReactNode;
 }
@@ -82,6 +90,7 @@ export function AiSettingsContent({
   aiTestStatus,
   aiTestBusy,
   testAi,
+  setError,
   providerPresetControls,
   linuxPlatform,
   windowsPlatform,
@@ -97,8 +106,23 @@ export function AiSettingsContent({
   providerCredentialMessages,
   runProviderCredential,
   credentialTestControl,
+  network,
+  onNetworkChange,
+  showNetwork = false,
   trailing,
 }: AiSettingsContentProps) {
+  const mounted = useMountedRef();
+  const copyAiTestOutput = client.copyText
+    ? async () => {
+        if (!mounted.current) return;
+        setError?.("");
+        try {
+          await client.copyText!(aiTestOutput);
+        } catch {
+          if (mounted.current) setError?.("复制 AI 测试结果失败，请重试。");
+        }
+      }
+    : undefined;
   const linuxCredentialTest = credentialTestControl(
     "ai.assistant",
     "测试 AI 辅助配置",
@@ -143,8 +167,10 @@ export function AiSettingsContent({
       )}
       onEnabledChange={(enabled) => updateAi({ enabled })}
       onProviderChange={(provider) => updateAi(aiProviderUpdate(provider, ai))}
-      onModelChange={(model) => updateAi({ model })}
-      onEndpointChange={(endpoint) => updateAi({ endpoint })}
+      onModelChange={(model) => updateAi(aiModelUpdate(model, ai))}
+      onEndpointChange={(endpoint) => updateAi(aiEndpointUpdate(endpoint, ai))}
+      thinking={ai.thinking}
+      onThinkingChange={(thinking) => updateAi({ thinking })}
       // 不鉴权的服务（Ollama）没有 Token 可填，整块不显示；Linux 的 provider 直接用页面上的地址和模型。
       credentialSection={
         !aiProviderUsesToken(ai.provider) ? null : linuxPlatform && client.providerCredentials ? (
@@ -208,6 +234,11 @@ export function AiSettingsContent({
       onPromptCustom2Change={(prompt_custom_2) => updateAi({ prompt_custom_2 })}
       onPromptCustom3Change={(prompt_custom_3) => updateAi({ prompt_custom_3 })}
       // 「AI 润色测试」用的是润色提示词。桌面上这份配置只给拼音联想用，测出来的结果和用户实际得到的没有关系，凭据和接口通不通已经由「测试 AI 辅助配置」回答，所以只在用它润色的 iOS、Android 和 HarmonyOS（手机与 2-in-1 的键盘都用它润色，见 `KeyboardSession.ets`）上保留。
+      networkSection={
+        showNetwork && onNetworkChange ? (
+          <NetworkProxySection value={network} disabled={disabled} onChange={onNetworkChange} />
+        ) : null
+      }
       testTools={
         client.aiAssistant && !(macosPlatform || windowsPlatform || linuxPlatform) ? (
           <AiTestToolsSection
@@ -217,7 +248,7 @@ export function AiSettingsContent({
             output={aiTestOutput}
             onInputChange={setAiTestInput}
             onTest={() => void testAi()}
-            onCopyOutput={client.copyText ? () => void client.copyText!(aiTestOutput) : undefined}
+            onCopyOutput={copyAiTestOutput}
           />
         ) : null
       }

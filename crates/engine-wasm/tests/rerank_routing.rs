@@ -83,3 +83,31 @@ fn a_reranked_first_seat_is_what_punctuation_commits() {
         );
     }
 }
+
+#[test]
+fn a_scored_runner_up_commits_the_row_shown_on_the_second_seat() {
+    let Some(resources) = eval::resources() else {
+        println!("skipped: MSIME_EVAL_RESOURCES is not set");
+        return;
+    };
+    let model = std::fs::read(resources.join("sentence-model.safetensors")).expect("model");
+    let state = tempfile::tempdir().expect("state directory");
+    let dictionaries = eval::stage(&resources, state.path());
+    let (mut host, _user, _cache) = host(&dictionaries, Some(&model));
+    let case = eval::load(&eval::eval_set("sentences-v1.tsv"))
+        .into_iter()
+        .find(|case| case.id == "s-052")
+        .expect("frozen synthetic case");
+    host.seed_context_for_eval(&case.context);
+    let shown = host.keys(&eval::typed(&case.input));
+    assert!(shown.model_on);
+    let expected = "这份文件需要经理签字后才能发出";
+    assert_eq!(shown.page[1].text, expected, "混合评分的次选应保留在推荐页");
+    assert_eq!(
+        host.pick(1).out,
+        vec![Out::Commit {
+            text: expected.into(),
+            seat: 1
+        }]
+    );
+}

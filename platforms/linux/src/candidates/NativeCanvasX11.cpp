@@ -24,6 +24,7 @@ struct NativeCanvasX11::Impl {
   std::shared_ptr<NativeCanvasAssets> assets;
   NativeCanvasContent content;
   NativeCanvasLayout layout;
+  NativeCanvasTextCache text_cache;
   nlohmann::json palette;
   double scale = 1;
   int width = 1, height = 1;
@@ -32,6 +33,7 @@ struct NativeCanvasX11::Impl {
   int cursor_x = 0, cursor_y = 0, cursor_height = 0;
 
   void close() {
+    text_cache.clear();
     animation_timer.reset();
     input.reset();
     if (display) {
@@ -144,6 +146,7 @@ struct NativeCanvasX11::Impl {
     return work;
   }
   bool measure() {
+    text_cache.clear();
     const auto work = workArea();
     auto *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     auto *cr = cairo_create(surface);
@@ -224,7 +227,7 @@ struct NativeCanvasX11::Impl {
     auto *cr = cairo_create(buffer);
     cairo_scale(cr, scale, scale);
     const auto elapsed_ms = (fcitx::now(CLOCK_MONOTONIC) - animation_started_us) / 1000;
-    paint_native_canvas(cr, *assets, content, layout, palette, elapsed_ms, {hovered, pressed});
+    paint_native_canvas(cr, *assets, content, layout, palette, elapsed_ms, {hovered, pressed}, &text_cache);
     if (!composited) {
       cairo_surface_flush(buffer);
       const int stride = cairo_image_surface_get_stride(buffer);
@@ -329,6 +332,7 @@ void NativeCanvasX11::hide() {
   state.visible = false;
   if (state.animation_timer) state.animation_timer->setEnabled(false);
   state.content = {};
+  state.text_cache.clear();
 }
 
 } // msime::linux_host 命名空间

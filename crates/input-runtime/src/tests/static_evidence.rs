@@ -1,5 +1,5 @@
 use super::*;
-use msime_engine::ordering::{rerank_pick, OrderRow, ScoredOrderRows, StaticEvidence};
+use msime_engine::ordering::{rerank_pick, rerank_plan, OrderRow, ScoredOrderRows, StaticEvidence};
 
 fn evidence(total: i64, characters: usize) -> Option<StaticEvidence> {
     Some(StaticEvidence {
@@ -61,6 +61,17 @@ fn incomplete_evidence_falls_back_to_the_existing_model() {
             Some(1),
             "{scores:?}"
         );
+        let mut order = [0, 1];
+        rerank_plan(
+            &mut model,
+            "",
+            0,
+            false,
+            &ScoredOrderRows::new(&rows, &scores),
+        )
+        .unwrap()
+        .apply(&mut order);
+        assert_eq!(order, [1, 0], "缺失静态证据时仍只提升原模型首选");
     }
 }
 
@@ -338,4 +349,164 @@ fn large_static_rerank_lists_preserve_fallback_and_key_rules() {
             );
         }
     }
+}
+
+#[test]
+fn ranked_runner_ups_keep_their_scores_before_the_presentation_limit() {
+    let mut runtime = Runtime::new(
+        Fixture {
+            words: vec![
+                "甲甲甲".into(),
+                "丙丙丙".into(),
+                "丁丁丁".into(),
+                "乙乙乙".into(),
+            ],
+            codes: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            positions: vec![11, 22, 33, 44],
+            sources: vec![LATTICE_SOURCE; 4],
+            text: "a".into(),
+            ..Fixture::default()
+        },
+        3,
+    )
+    .unwrap();
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    runtime.cached.candidate_static_evidence = vec![
+        evidence(0, 3),
+        evidence(-12000, 3),
+        evidence(-24000, 3),
+        evidence(-54000, 3),
+    ];
+    runtime.set_settled_reranker(Some(Reranker::new(std::sync::Arc::new(favouring_model(
+        &['甲', '乙', '丙', '丁'],
+        &['乙'],
+    )))));
+    assert!(
+        runtime.rerank_settled(),
+        "首选未变时，次选也应按已有混合评分更新"
+    );
+    assert_eq!(
+        runtime.cached.candidates,
+        ["甲甲甲", "乙乙乙", "丙丙丙", "丁丁丁"]
+    );
+    assert_eq!(runtime.cached.candidate_codes, ["a", "d", "b", "c"]);
+    assert_eq!(runtime.cached.candidate_positions, [11, 44, 22, 33]);
+    assert_eq!(
+        runtime.cached.candidate_annotations,
+        ["(0)", "(3)", "(1)", "(2)"]
+    );
+    assert_eq!(runtime.engine_order, [0, 3, 1, 2]);
+    assert_eq!(
+        runtime.cached.candidate_static_evidence,
+        [
+            evidence(0, 3),
+            evidence(-54000, 3),
+            evidence(-12000, 3),
+            evidence(-24000, 3),
+        ]
+    );
+    assert!(!runtime.rerank_settled(), "重复落定应保持同分和已评分次序");
+    let second = runtime.view().candidates[1].clone();
+    assert_eq!(
+        runtime.dispatch(Action::Select(second.id)).unwrap().commit,
+        Some("乙乙乙".into())
+    );
+}
+
+#[test]
+fn scored_runner_ups_keep_unscored_slots_and_equal_score_order() {
+    let mut rows = vec![
+        row("甲甲甲"),
+        row("online"),
+        row("丙丙丙"),
+        row("丁丁丁"),
+        row("乙乙乙"),
+        row("catalog"),
+        row("乙乙乙"),
+    ];
+    rows[1].source = 3;
+    rows[5].source = 5;
+    let evidence = vec![
+        evidence(0, 3),
+        None,
+        evidence(-12000, 3),
+        evidence(-24000, 3),
+        evidence(-54000, 3),
+        None,
+        evidence(-54000, 3),
+    ];
+    let mut model = Reranker::new(std::sync::Arc::new(favouring_model(
+        &['甲', '乙', '丙', '丁'],
+        &['乙'],
+    )));
+    let plan = rerank_plan(
+        &mut model,
+        "",
+        0,
+        false,
+        &ScoredOrderRows::new(&rows, &evidence),
+    )
+    .unwrap();
+    let mut order: Vec<_> = (0..rows.len()).collect();
+    plan.apply(&mut order);
+    assert_eq!(order, [0, 1, 4, 6, 2, 5, 3]);
+}
+
+#[test]
+fn scored_runner_ups_keep_the_nine_row_budget_and_bounded_allocations() {
+    let run = |count| {
+        let mut rows = vec![row("甲"); count];
+        let mut evidence = vec![evidence(-40000, 1); count];
+        for candidate in rows.iter_mut().take(9).skip(1) {
+            *candidate = row("乙");
+        }
+        evidence[8] = Some(StaticEvidence {
+            log_prob_milli_nats: -1000,
+            characters: 1,
+        });
+        for index in 9..count {
+            rows[index] = OrderRow {
+                source: 3,
+                ..row("乙")
+            };
+            evidence[index] = None;
+        }
+        let scored = ScoredOrderRows::new(&rows, &evidence);
+        let mut model = model();
+        assert!(rerank_plan(&mut model, "甲", 0, false, &scored).is_some());
+        let (plan, allocations, bytes) =
+            allocations::count_bytes(|| rerank_plan(&mut model, "甲", 0, false, &scored));
+        let mut order: Vec<_> = (0..count).collect();
+        plan.unwrap().apply(&mut order);
+        assert_eq!(order[0], 8);
+        assert!(order
+            .iter()
+            .enumerate()
+            .skip(9)
+            .all(|(seat, index)| seat == *index));
+        (allocations, bytes)
+    };
+    let baseline = run(9);
+    for count in [128, 129, 1024] {
+        assert_eq!(run(count), baseline);
+    }
+
+    let rows = vec![row("甲"); 10];
+    let mut evidence = vec![evidence(-40000, 1); 10];
+    evidence[9] = Some(StaticEvidence {
+        log_prob_milli_nats: 0,
+        characters: 1,
+    });
+    assert!(
+        rerank_plan(
+            &mut model(),
+            "",
+            0,
+            false,
+            &ScoredOrderRows::new(&rows, &evidence)
+        )
+        .is_none(),
+        "第十条的高分不能进入九条评分预算"
+    );
 }

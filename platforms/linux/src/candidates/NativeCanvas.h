@@ -285,6 +285,19 @@ struct NativeCanvasLayout {
   double width = 0, height = 0;
 };
 
+// 缓存只属于当前窗口的这一版内容；内容、配色或测量上下文变化时由宿主清空。
+struct NativeCanvasTextCache {
+  std::vector<std::shared_ptr<PangoLayout>> layouts;
+  void clear() { layouts.clear(); }
+  template<typename Make>
+  PangoLayout *get(std::size_t slot, Make make) {
+    if (layouts.size() <= slot) layouts.resize(slot + 1);
+    auto &line = layouts[slot];
+    if (!line) line.reset(make(), g_object_unref);
+    return static_cast<PangoLayout *>(g_object_ref(line.get()));
+  }
+};
+
 inline PangoLayout *native_canvas_text_layout(cairo_t *cr, const std::string &font,
     const std::string &text, double max_width = -1, double font_size = 0) {
   auto *layout = pango_cairo_create_layout(cr);
@@ -605,7 +618,7 @@ inline void native_canvas_image(cairo_t *cr, cairo_surface_t *image, const Nativ
 
 inline void paint_native_canvas(cairo_t *cr, const NativeCanvasAssets &assets, const NativeCanvasContent &content,
                                  const NativeCanvasLayout &layout, const nlohmann::json &palette,
-                                 std::uint64_t elapsed_ms = 0, NativeCanvasPointer pointer = {}) {
+                                 std::uint64_t elapsed_ms = 0, NativeCanvasPointer pointer = {}, NativeCanvasTextCache *cache = nullptr) {
   const auto frame = [elapsed_ms](const NativeCanvasImage &image, const std::shared_ptr<const NativeCanvasAnimation> &animation) {
     return animation ? animation->frames[sample_native_canvas_animation(*animation, elapsed_ms).index].get() : image.get();
   };
@@ -674,9 +687,12 @@ inline void paint_native_canvas(cairo_t *cr, const NativeCanvasAssets &assets, c
         std::max(0.0, panel.height - 2 * half)}, {radius, radius, radius, radius});
     cairo_set_line_width(cr, border_width); cairo_stroke(cr);
   }
-  const auto text = [&](const std::string &value, const NativeCanvasRect &rect, const std::string &font_name,
+  const auto line_at = [&](std::size_t slot, auto make) {
+    return cache ? cache->get(slot, make) : make();
+  };
+  const auto text = [&](std::size_t slot, const std::string &value, const NativeCanvasRect &rect, const std::string &font_name,
                         const char *key, const char *fallback, double max_width = -1) {
-    auto *line = native_canvas_text_layout(cr, font_name, value, max_width);
+    auto *line = line_at(slot, [&] { return native_canvas_text_layout(cr, font_name, value, max_width); });
     native_canvas_color(cr, colors, key, fallback);
     cairo_move_to(cr, rect.x, rect.y);
     pango_cairo_show_layout(cr, line);
@@ -691,12 +707,12 @@ inline void paint_native_canvas(cairo_t *cr, const NativeCanvasAssets &assets, c
     native_canvas_round_rect(cr, background, {radius, radius, radius, radius}); cairo_fill(cr);
     native_canvas_color(cr, colors, "preedit_divider", "#00000000");
     cairo_rectangle(cr, background.x, background.y + background.height - 1, background.width, 1); cairo_fill(cr);
-    text(content.preedit, layout.preedit, metrics.font, "preedit_text", "#202020", layout.preedit_width);
+    text(0, content.preedit, layout.preedit, metrics.font, "preedit_text", "#202020", layout.preedit_width);
     if (!content.menu && content.preedit_cursor >= 0 &&
         static_cast<std::size_t>(content.preedit_cursor) <= content.preedit.size() &&
         (static_cast<std::size_t>(content.preedit_cursor) == content.preedit.size() ||
          (static_cast<unsigned char>(content.preedit[content.preedit_cursor]) & 0xc0) != 0x80)) {
-      auto *line = native_canvas_text_layout(cr, metrics.font, content.preedit, layout.preedit_width);
+      auto *line = line_at(0, [&] { return native_canvas_text_layout(cr, metrics.font, content.preedit, layout.preedit_width); });
       PangoRectangle strong{}, weak{};
       pango_layout_get_cursor_pos(line, content.preedit_cursor, &strong, &weak);
       native_canvas_color(cr, colors, "preedit_caret", "#3584e4");
@@ -727,26 +743,34 @@ inline void paint_native_canvas(cairo_t *cr, const NativeCanvasAssets &assets, c
     }
     const auto &item = content.items[at];
     const auto text_width = layout.item_text_widths[at];
-    const auto text_height = native_canvas_item_size(cr, metrics, item, content.horizontal, text_width).second;
-    const auto label_size = native_canvas_text_size(cr, metrics.number_font, item.label);
+    // 普通与按下/选中文字分别保留，悬停和动画帧不重新塑形；测量直接复用待绘制布局。
+    auto *line = line_at(3 + at * 3 + (selected || pressed ? 1 : 0), [&] {
+      return native_canvas_item_layout(cr, metrics, item, content.horizontal, colors, selected || pressed, text_width);
+    });
+    auto *label = line_at(2 + at * 3, [&] { return native_canvas_text_layout(cr, metrics.number_font, item.label); });
+    int text_height = 0, label_width = 0, label_height = 0;
+    pango_layout_get_pixel_size(line, nullptr, &text_height);
+    pango_layout_get_pixel_size(label, &label_width, &label_height);
     const double top = rect.y;
     const bool centered = metrics.custom_height || metrics.number_scale != 1 || !assets.font_family.empty();
     rect.x += metrics.number_inset;
     if (metrics.number_scale > 0 && !item.label.empty()) {
-      rect.y = top + (centered ? (rect.height - label_size.second) / 2 : 4);
-      text(item.label, rect, metrics.number_font, selected || pressed ? "selected_number" : "number", "#555555");
+      rect.y = top + (centered ? (rect.height - label_height) / 2 : 4);
+      native_canvas_color(cr, colors, selected || pressed ? "selected_number" : "number", "#555555");
+      cairo_move_to(cr, rect.x, rect.y);
+      pango_cairo_show_layout(cr, label);
     }
     // 序号字号为 0 时不画字形，但来源仍保留最小 9 DIP 序号栏与间距。
     if (!item.label.empty()) rect.x += std::max(metrics.number_min_width,
-        metrics.number_scale == 0 ? 0 : label_size.first) + metrics.number_gap;
+        metrics.number_scale == 0 ? 0.0 : static_cast<double>(label_width)) + metrics.number_gap;
     rect.y = top + (centered ? (rect.height - text_height) / 2 : 4);
-    auto *line = native_canvas_item_layout(cr, metrics, item, content.horizontal, colors, selected || pressed, text_width);
     native_canvas_color(cr, colors, selected || pressed ? "selected_text" : "text", "#202020");
     cairo_move_to(cr, rect.x, rect.y);
     pango_cairo_show_layout(cr, line);
     g_object_unref(line);
+    g_object_unref(label);
   }
-  text(content.auxiliary, layout.auxiliary, metrics.font, "secondary", "#555555", layout.auxiliary_width);
+  text(1, content.auxiliary, layout.auxiliary, metrics.font, "secondary", "#555555", layout.auxiliary_width);
   if (layout.pager.visible) {
     const auto &pager = layout.pager;
     if (pager.divider_width > 0) {

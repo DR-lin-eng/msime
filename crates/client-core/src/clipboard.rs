@@ -196,6 +196,10 @@ impl ClipboardHistoryStore {
     }
 
     fn push_validated(&mut self, text: String) -> std::io::Result<bool> {
+        // 验证码只用于短时填入提示，不写历史、导出或后续学习语料。
+        if crate::input_assistance::verification_code(&text).is_some() {
+            return Ok(false);
+        }
         let _lock = self.lock_writer()?;
         let mut latest = Self::open_with_limit(&self.path, self.limit);
         latest.load()?;
@@ -1249,5 +1253,22 @@ mod export_tests {
         store.clear().unwrap();
         assert_eq!(store.export_text(), "水杉剪贴板历史，共 0 条\n");
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod verification_code_history_tests {
+    use super::*;
+    #[test]
+    fn ordinary_clipboard_is_recorded_but_otp_stays_ephemeral() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.json");
+        let mut history = ClipboardHistoryStore::open(&path);
+        assert!(history.push_mobile("合成剪贴板记录".into()).unwrap());
+        assert!(!history.push_mobile("合成短信验证码 482615".into()).unwrap());
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("482615"));
+        let mut reopened = ClipboardHistoryStore::open(&path);
+        reopened.load().unwrap();
+        assert_eq!(reopened.entries()[0].text, "合成剪贴板记录");
     }
 }

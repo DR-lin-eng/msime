@@ -27,7 +27,7 @@ public final class ClipboardHistoryPolicy {
      * <p>Apple names each of these to the user, because they ask for different things: shorten the
      * text, or unpin something. A single "could not save" leaves a full history looking broken.
      */
-    public enum Rejection { EMPTY, TOO_LONG, FULL }
+    public enum Rejection { EMPTY, TOO_LONG, FULL, VERIFICATION_CODE }
 
     /** The shared store's reason for refusing a capture. */
     private static final String REASON_INVALID = "invalid";
@@ -63,6 +63,7 @@ public final class ClipboardHistoryPolicy {
 
     /** The shared store's `reason` turned into the refusal this host words. */
     public static Rejection rejectionFor(String reason) {
+        if ("verification_code".equals(reason)) return Rejection.VERIFICATION_CODE;
         if (REASON_FULL.equals(reason)) return Rejection.FULL;
         if (REASON_INVALID.equals(reason)) return Rejection.TOO_LONG;
         // A reason this host does not recognise is still a refusal, and the text is the thing the
@@ -121,6 +122,7 @@ public final class ClipboardHistoryPolicy {
         if (rejection == null) throw new IllegalArgumentException("No clipboard rejection");
         return switch (rejection) {
             // Android has no paste permission prompt, so the Apple wording drops that clause.
+            case VERIFICATION_CODE -> "验证码仅作短时填入提示，不保存到历史";
             case EMPTY -> "剪贴板中没有可保存的文本";
             case TOO_LONG -> "这段文本无法保存，请缩短或去掉其中的控制字符后重试";
             case FULL -> limit + " 条历史均已固定，请先取消固定或删除一条";

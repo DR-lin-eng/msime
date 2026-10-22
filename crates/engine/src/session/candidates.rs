@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use super::input::InputSession;
 use crate::assets;
 use crate::diagnostics;
-use crate::ime::personal_rerank::personal_context_rerank_order;
+use crate::ime::personal_rerank::personal_context_rerank_with_history;
 use crate::ime::queries::{
     keep_expressive_rows_off_the_lead, MixedJapaneseRow, MODE_ENGLISH_LIMIT,
 };
@@ -118,17 +118,18 @@ impl InputSession {
         self.personal_reranked = false;
         // 日文整段转换只算一次：个人上下文重排生效时下面要混排两张表。
         let japanese = self.mixed_japanese_conversion();
-        // 提交链起点没有上下文，候选偏好由词频设置负责。
-        let reordered = match self.chain.previous.as_deref() {
-            Some(previous) if self.personal_context_applies() => {
+        // 没有新鲜提交链时，仍可使用宿主提供的本地长上下文。
+        let reordered = match self.personal_context_applies() {
+            true => {
                 let journal = self.journal_path();
                 let context = self.pinyin_ranking_context();
                 let model = self.personal_context.model();
-                personal_context_rerank_order(
+                personal_context_rerank_with_history(
                     &decoded,
                     &model,
                     self.chain.earlier.as_deref(),
-                    previous,
+                    self.chain.previous.as_deref(),
+                    &self.prediction_context,
                     &mut |leader: &str| is_pinned_candidate(journal, &context, leader),
                 )
             }

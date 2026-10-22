@@ -17,6 +17,15 @@ enum ClipboardCapturePrompt {
 ///
 /// 带标题栏时（默认）面板独自盖住键盘：卡片上方依次是一行 44pt 的控件（含「返回」）、保存按钮和状态行。不带标题栏时（`showsHeader: false`）面板放在工具栏下方的按键区里，背景透明、透出键盘的背景：一行紧凑的 32pt 控件放「本机」/「云端」分段、保存、搜索、刷新和清空，下面只有一行状态。这时搜索由它自己的按钮开关，因为工具栏会关闭面板。
 final class KeyboardClipboardView: UIView, UITableViewDataSource, UITableViewDelegate {
+  private var verificationCode: AppleInputAssistance.Code?
+  private var verificationExpiry: Timer?
+  private let codeButton = UIButton(type: .system)
+  private let codeReadButton = UIButton(type: .system)
+  private let systemCodeButton = UIButton(type: .system)
+  private let readCodeText: () -> String
+  private let allowsCode: () -> Bool
+  private let onCode: (String) -> Void
+  private let onSystemCode: () -> Void
   private let store: ClipboardHistoryStore
   private var items: [ClipboardHistoryItem] = []
   private var historyLimit = 50
@@ -65,6 +74,43 @@ final class KeyboardClipboardView: UIView, UITableViewDataSource, UITableViewDel
     height.priority = .init(999)
     return height
   }()
+
+  /// 明确点按以后才读系统粘贴板；iOS 的粘贴授权由系统处理。
+  private func readVerificationCode() {
+    guard hasFullAccess, allowsCode() else { status.text = "当前隐私设置下不读取验证码"; return }
+    let text = readCodeText()
+    guard let value = AppleInputAssistance.verificationCode(text, explicit: true) else {
+      verificationCode = nil
+      codeButton.isHidden = true
+      status.text = "未找到单个验证码；短信自动填充请使用系统键盘"
+      return
+    }
+    verificationCode = .init(value: value, received: ProcessInfo.processInfo.systemUptime)
+    codeButton.setTitle("填入 \(value)", for: .normal)
+    codeButton.isHidden = false
+    status.text = "仅本次使用，五分钟后失效，不保存到历史"
+    verificationExpiry?.invalidate()
+    verificationExpiry = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
+      self?.verificationCode = nil
+      self?.codeButton.isHidden = true
+    }
+  }
+
+  private func fillVerificationCode() {
+    guard allowsCode(), let code = verificationCode, code.live(at: ProcessInfo.processInfo.systemUptime) else {
+      verificationCode = nil; codeButton.isHidden = true; return
+    }
+    verificationCode = nil
+    verificationExpiry?.invalidate()
+    codeButton.isHidden = true
+    onCode(code.value)
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window == nil { verificationCode = nil; verificationExpiry?.invalidate(); codeButton.isHidden = true }
+  }
+
   static let searchLimit = 32
   static let fullAccessMessage = "请在系统键盘设置中开启「允许完全访问」，再使用剪贴板历史。"
   /// 与 Android 隐私闸门挡下保存时的提示相同。
@@ -77,7 +123,14 @@ final class KeyboardClipboardView: UIView, UITableViewDataSource, UITableViewDel
 
   init(hasFullAccess: Bool, store: ClipboardHistoryStore = ClipboardHistoryStore(), cloud: KeyboardCloudClipboard? = nil,
        capturesHistory: @escaping () -> Bool = { true },
+       readCodeText: @escaping () -> String = { UIPasteboard.general.string ?? "" },
+       allowsCode: @escaping () -> Bool = { false },
+       onCode: @escaping (String) -> Void = { _ in }, onSystemCode: @escaping () -> Void = {},
        showsHeader: Bool = true, onInsert: @escaping (String) -> Void, onClose: @escaping () -> Void) {
+    self.readCodeText = readCodeText
+    self.allowsCode = allowsCode
+    self.onCode = onCode
+    self.onSystemCode = onSystemCode
     self.store = store
     self.onInsert = onInsert
     self.cloud = cloud
@@ -159,6 +212,16 @@ final class KeyboardClipboardView: UIView, UITableViewDataSource, UITableViewDel
       guard captured else { return }
       capture.configuration = captureConfiguration(newCopy: false)
     }, for: .primaryActionTriggered)
+    codeReadButton.setTitle("粘贴验证码", for: .normal)
+    codeReadButton.accessibilityIdentifier = "pasteVerificationCode"
+    codeReadButton.isEnabled = hasFullAccess
+    codeReadButton.addAction(UIAction { [weak self] _ in self?.readVerificationCode() }, for: .primaryActionTriggered)
+    systemCodeButton.setTitle("使用系统验证码", for: .normal)
+    systemCodeButton.accessibilityIdentifier = "systemVerificationCode"
+    systemCodeButton.addAction(UIAction { [weak self] _ in self?.onSystemCode() }, for: .primaryActionTriggered)
+    codeButton.accessibilityIdentifier = "fillVerificationCode"
+    codeButton.isHidden = true
+    codeButton.addAction(UIAction { [weak self] _ in self?.fillVerificationCode() }, for: .primaryActionTriggered)
     status.font = .systemFont(ofSize: showsHeader ? 12 : 11.5)
     status.textColor = skin.secondary
     status.numberOfLines = showsHeader ? 2 : 1
@@ -215,11 +278,20 @@ final class KeyboardClipboardView: UIView, UITableViewDataSource, UITableViewDel
       ])
     }
     header.tintColor = skin.accent
-    let children: [UIView] = showsHeader ? [header, capture, status, table, letterPad] : [header, status, table, letterPad]
+    let codeActions = UIStackView(arrangedSubviews: [codeReadButton, systemCodeButton, codeButton])
+    codeActions.axis = .horizontal
+    codeActions.spacing = 8
+    codeActions.distribution = .fillProportionally
+    codeActions.accessibilityIdentifier = "verificationCodeActions"
+    for button in [codeReadButton, systemCodeButton, codeButton] { button.titleLabel?.font = .systemFont(ofSize: 12) }
+    let children: [UIView] = showsHeader ? [header, capture, codeActions, status, table, letterPad] : [header, codeActions, status, table, letterPad]
     for child in children {
       child.translatesAutoresizingMaskIntoConstraints = false
       addSubview(child)
     }
+    codeActions.heightAnchor.constraint(equalToConstant: 36).isActive = true
+    codeActions.leadingAnchor.constraint(equalTo: header.leadingAnchor).isActive = true
+    codeActions.trailingAnchor.constraint(equalTo: header.trailingAnchor).isActive = true
     let sideInset: CGFloat = showsHeader ? 12 : 4
     let headerHeight: CGFloat = showsHeader ? 44 : 32
     // 约束先放进有类型的数组再激活：整个写在 activate 的字面量里时，CI 上的编译器会在类型推断上超时。
@@ -242,10 +314,12 @@ final class KeyboardClipboardView: UIView, UITableViewDataSource, UITableViewDel
       NSLayoutConstraint.activate([
         capture.topAnchor.constraint(equalTo: header.bottomAnchor), capture.leadingAnchor.constraint(equalTo: header.leadingAnchor),
         capture.trailingAnchor.constraint(equalTo: header.trailingAnchor), captureHeight,
-        status.topAnchor.constraint(equalTo: capture.bottomAnchor, constant: 4),
+        codeActions.topAnchor.constraint(equalTo: capture.bottomAnchor, constant: 2),
+        status.topAnchor.constraint(equalTo: codeActions.bottomAnchor, constant: 2),
       ])
     } else {
-      status.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2).isActive = true
+      codeActions.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2).isActive = true
+      status.topAnchor.constraint(equalTo: codeActions.bottomAnchor, constant: 2).isActive = true
     }
     if hasFullAccess { reload() }
     else { status.text = Self.fullAccessMessage }

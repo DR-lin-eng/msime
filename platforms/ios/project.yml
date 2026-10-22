@@ -73,6 +73,8 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         # 界面只有中文，所以界面里内嵌的系统控件（Sign in with Apple、`ContentUnavailableView.search`、系统弹出面板）也要请求中文；不声明本地化时，不管设备语言是什么，它们都会回落到英文的开发区域。
+        UIBackgroundModes: [processing]
+        BGTaskSchedulerPermittedIdentifiers: [app.msime.ios.night-learning]
         CFBundleDevelopmentRegion: zh-Hans
         CFBundleLocalizations: [zh-Hans]
     sources:
@@ -121,6 +123,8 @@ targets:
       - path: ../../resources/licenses/vi-MIT.txt
         buildPhase: resources
       - path: ../../resources/licenses/ewts-MIT.txt
+        buildPhase: resources
+      - path: ../../resources/licenses/adaptive-inference-NOTICES.txt
         buildPhase: resources
       # 同一个 Engine 编入了拆字反查的部件拼音表，它改编自開放詞典的漢語拆字字典（CC BY 3.0），署名与改动说明随每个 Engine 构建分发。
       - path: ../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt

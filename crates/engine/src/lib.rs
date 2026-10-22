@@ -4,6 +4,7 @@
 //!
 //! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
 
+pub mod adaptive;
 pub mod assets;
 pub mod backend;
 mod cache;

@@ -337,6 +337,7 @@ private struct MacAccountView: View {
           .disabled(remaining > 0 || model.providers[model.channel] != true || model.target.isEmpty)
         if model.challenge != nil {
           TextField("6 位验证码", text: $model.code)
+            .textContentType(.oneTimeCode)
           Button("登录") { model.codeLogin() }
             .disabled(model.expiresAt <= timeline.date || model.code.utf8.count != 6 || !model.code.utf8.allSatisfy { (48...57).contains($0) })
         }

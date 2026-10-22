@@ -5,6 +5,7 @@
 #import "InputSourceRegistration.h"
 #import "../settings/PreferencesWindowController.h"
 #import "../settings/RuntimeOptions.h"
+#import "InputAssistance.h"
 #import "../settings/RuntimeOptionsRefresh.h"
 #import "../settings/AppearancePreferences.h"
 #import "../core/FloatingToolbarPanel.h"
@@ -163,7 +164,9 @@ int main(int argc, const char *argv[]) {
         if ([shared respondsToSelector:@selector(startClipboardCaptureWithOptions:)]) {
             [shared performSelector:@selector(startClipboardCaptureWithOptions:) withObject:MSIMELoadRuntimeOptions() ?: @{}];
         }
+        MSIMEStartNightLearning();
         [NSApp run];
+        MSIMEStopNightLearning();
         if ([shared respondsToSelector:@selector(stopClipboardCapture)]) [shared performSelector:@selector(stopClipboardCapture)];
         [sourceMonitor stop];
         MSIMEUsageReportingStop();

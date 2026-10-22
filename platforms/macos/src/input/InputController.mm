@@ -8,6 +8,7 @@
 #include "msime_client.h"
 #include "../../../common/HostApiString.h"
 #import "../candidate/CandidatePlacement.h"
+#import "InputAssistance.h"
 #import "../candidate/CandidateWindowLevel.h"
 #import "../candidate/CandidateGlossSenses.h"
 #import "InputSourceRegistration.h"
@@ -1170,6 +1171,7 @@ static NSImage *MSIMECandidateLogoImage() {
 
 @implementation MSIMEInputController {
     MSIMEClientSession *_session;
+    MSIMEInputAssistance *_inputAssistance;
     // Stands in for TISEnableInputSource when set, so a test can see which opt-in mode a scheme change enables.
     OSStatus (^_optInInputModeEnabler)(NSString *identifier);
     // 设置后代替菜单栏状态项，测试由此看到状态项被摆成哪个模式（nil 表示隐藏），不在测试进程里真的建 NSStatusItem。
@@ -4318,6 +4320,7 @@ static __weak MSIMEInputController *MSIMEFocusedController;
     return (!MSIMEVoiceProviderSocket() && [provider.lowercaseString isEqual:@"doubao"]) || [self usesLocalModelVoice];
 }
 - (void)dealloc {
+    [_inputAssistance stop];
     [_capsLockTapTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
@@ -5063,6 +5066,29 @@ static __weak MSIMEInputController *MSIMEFocusedController;
     [self refreshTypingEffectFullscreen];
     [self requestCloudCandidatesConsentIfNeeded];
     [self commitPendingEmojiForClient:sender];
+    [_inputAssistance stop];
+    __weak MSIMEInputController *weakController=self;
+    _inputAssistance=[[MSIMEInputAssistance alloc] initWithPasteboard:NSPasteboard.generalPasteboard
+        preferences:^NSDictionary * {
+            MSIMEInputController *controller=weakController;
+            return controller ? controller->_session.hostOptions[@"preferences"] : nil;
+        } isCurrent:^BOOL {
+            MSIMEInputController *controller=weakController;
+            if (!controller || controller->_activeClient!=sender || [controller secureEventInputActive] ||
+                [controller->_view[@"editing_text"] length] || [controller->_view[@"preedit"] length]) return NO;
+            NSString *target=[(id<IMKTextInput>)sender bundleIdentifier];
+            return target && [NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier isEqual:target];
+        } caret:^NSRect {
+            NSRect caret=NSZeroRect;
+            [(id<IMKTextInput>)sender attributesForCharacterIndex:0 lineHeightRectangle:&caret];
+            return caret;
+        } insert:^(NSString *code) {
+            MSIMEInputController *controller=weakController;
+            if (!controller || controller->_activeClient!=sender) return;
+            [controller invalidateSmartPunctuationShadow];
+            [(id<IMKTextInput>)sender insertText:code replacementRange:NSMakeRange(NSNotFound,0)];
+        }];
+    [_inputAssistance start];
 }
 
 - (void)resolveCloudCandidatesConsentWithOptions:(NSDictionary *)options {
@@ -5674,6 +5700,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (_session) [self apply:[_session setFocused:NO error:nil]];
     [self resetCandidateAnchor];
     [self hideCandidatePanel:"focus_out"];
+    [_inputAssistance stop];
+    _inputAssistance=nil;
     _activeClient = nil;
     if (MSIMEFocusedController == self) MSIMEFocusedController = nil;
     [super deactivateServer:sender];

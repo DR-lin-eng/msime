@@ -345,6 +345,7 @@ public final class MSIMEInputService extends InputMethodService {
     /** 本地设置 `platform.android.clipboard_suggestion` 的值；工具栏是否真的显示最近复制，还要看剪贴板历史开没开，一律问 {@link #recentClipEnabled()}。 */
     boolean clipboardSuggestionEnabled = true;
     /** 工具栏上的「最近复制」（#5692）。 */
+    boolean verificationCodeShown;
     final RecentClipboardSuggestion recentClip = new RecentClipboardSuggestion();
     /** 占工具栏那一行位置的「最近复制」：粘贴按钮和关闭按钮；有内容可显示时替换工具栏。 */
     LinearLayout recentClipRow;
@@ -1631,6 +1632,8 @@ public final class MSIMEInputService extends InputMethodService {
             theme = getResources().getIdentifier("Theme.MSIME.InputMethod", "style", "app.msime.android");
         if (theme != 0) setTheme(theme);
         super.onCreate();
+        InputAssistance.setListener(this::render);
+        NightLearningJobService.schedule(this);
         LauncherIcons.normalize(this);
         hardwareKeyboardAttached = hardwareKeyboardAttached(getResources().getConfiguration());
         productName = getApplicationInfo().loadLabel(getPackageManager()).toString();
@@ -1687,6 +1690,7 @@ public final class MSIMEInputService extends InputMethodService {
             refreshPreferencesOnInputView();
             updateAutomaticCapitalization();
             // 键盘进程不在时复制的那一条，监听收不到；弹出键盘时看一眼是不是刚复制的。
+            captureClipboard(ClipboardCapturePolicy.Trigger.PANEL_OPENED, false);
             offerRecentClip(false);
             render();
         };
@@ -1847,6 +1851,8 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     @Override public void onDestroy() {
+        InputAssistance.setListener(null);
+        InputAssistance.clear();
         clearQuickDeleteUndo();
         deviceInfoCopyGeneration++;
         ClipboardManager clipboard = getSystemService(ClipboardManager.class);
@@ -6885,6 +6891,8 @@ public final class MSIMEInputService extends InputMethodService {
                 return;
             }
             if (clip.sensitive()) return;
+            String body=clip.text();
+            if (body != null && body.length()<=4096) preferencesWorker.execute(() -> InputAssistance.offer(getApplicationContext(),body));
             String identity = clip.identity();
             if (!ClipboardCapturePolicy.captures(trigger, identity, handledClipIdentity())) return;
             // The shared store refuses rather than throws, and says which refusal it is. Deciding
@@ -6958,11 +6966,23 @@ public final class MSIMEInputService extends InputMethodService {
      * 剪贴板历史刚由实时偏好变成开着：补看一次刚复制的那一条。键盘进程冷启动时开关在实时偏好到来前是字段初始值（关），弹出键盘时的补看因此跳过了，不补的话键盘进程不在时复制的那一条就不会出现。调用方随后会重画。
      */
     private void offerRecentClipOnHistoryEnabled(boolean previousClipboard) {
-        if (!previousClipboard && clipboardHistoryEnabled) offerRecentClip(false);
+        if (!previousClipboard && clipboardHistoryEnabled) {
+            // 冷启动时复制事件可能先于实时偏好到达；按已有身份去重补读，删除过的条目不回来。
+            captureClipboard(ClipboardCapturePolicy.Trigger.PANEL_OPENED, false);
+            offerRecentClip(false);
+        }
     }
 
     /** 点工具栏上的「最近复制」：粘贴它（是图片时发送它），这一条不再出现。 */
     void pasteRecentClip() {
+        String code=InputAssistance.code(this, clipboardHistoryEnabled);
+        if (verificationCodeShown && code != null) {
+            // 验证码直接交给当前输入框，不经过选词学习、上文缓存或打字统计。
+            if (connection != null && !incognitoEnabled && !EditorPolicy.excludesKeyStatistics(editorInputType, allowLearning ? 0 : EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING)
+                    && connection.commitText(code,1)) InputAssistance.clear();
+            render();
+            return;
+        }
         long now = System.currentTimeMillis();
         if (recentClip.imageMimeType(now) != null) {
             sendRecentImage(now);
@@ -7086,6 +7106,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     void dismissRecentClip() {
+        InputAssistance.clear();
         recentClip.dismiss();
         render();
     }
@@ -9652,10 +9673,16 @@ public final class MSIMEInputService extends InputMethodService {
         String recent = recentAllowed ? recentClip.text(nowMs) : null;
         // 图片只在当前输入框收得下时才占这一行（#6781）。
         boolean recentImage = recentAllowed && recentImageSendable(nowMs);
+        boolean blocked=incognitoEnabled || EditorPolicy.excludesKeyStatistics(editorInputType,allowLearning ? 0 : EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        InputAssistance.privateInput(blocked);
+        String code=toolbarRow && !keysCollapsed && recentPanelAllowed && connection != null ? InputAssistance.code(this, clipboardHistoryEnabled) : null;
+        verificationCodeShown=code != null;
+        if (code != null) { recent="填入验证码 " + code; recentImage=false; }
         imeToolbar.updateRecentClipRow(recent, recentImage);
+        if (code != null && recentClipButton != null) recentClipButton.setContentDescription("填入短信或剪贴板验证码");
         main.removeCallbacks(recentClipExpiry);
         boolean recentShown = recent != null || recentImage;
-        if (recentShown) main.postDelayed(recentClipExpiry, recentClip.remainingMs(nowMs) + 50);
+        if (recentShown) main.postDelayed(recentClipExpiry, (code != null ? InputAssistance.remaining() : recentClip.remainingMs(nowMs)) + 50);
         if (shortcutToolbar != null)
             ViewPolicy.setVisible(shortcutToolbar, toolbarRow && !recentShown);
         if (candidateLine != null)

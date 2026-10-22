@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["device-inference"]
+device-inference = ["dep:ort"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# 动态运行时由宿主提供；未安装时使用纯 Rust CPU，不在构建或输入时下载。
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "load-dynamic"], optional = true }
+
 [dependencies]
 msime-path-trust = { path = "../path-trust" }
 chinese-ime-lm = { git = "https://github.com/metasequoiaime/chinese-ime-lm", rev = "15caab4fdeb59c11f452b91884371cf30e2e5608" }

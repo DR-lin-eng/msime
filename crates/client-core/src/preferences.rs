@@ -1033,6 +1033,12 @@ pub struct Preferences {
     #[serde(default = "default_candidate_fallback_fonts")]
     pub candidate_fallback_fonts: Vec<String>,
     pub learning: bool,
+    /// 仅本机的充电夜间优化；平台提供电源和空闲状态，仍受学习开关约束。
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
+    pub charging_night_learning: bool,
+    /// Apple 宿主的验证码粘贴提示；不读取系统短信数据库。
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
+    pub verification_code_suggestions: bool,
     #[serde(default)]
     pub quanpin: QuanpinPreferences,
     #[serde(default)]
@@ -2435,6 +2441,8 @@ impl Default for Preferences {
             candidate_english_font: None,
             candidate_fallback_fonts: default_candidate_fallback_fonts(),
             learning: true,
+            charging_night_learning: true,
+            verification_code_suggestions: true,
             quanpin: QuanpinPreferences::default(),
             fuzzy_pinyin: FuzzyPinyinPreferences::default(),
             quanpin_helpcode: default_quanpin_helpcode(),

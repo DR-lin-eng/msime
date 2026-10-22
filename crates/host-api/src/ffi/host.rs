@@ -2006,6 +2006,9 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
                 Ok(json!({"entries": history.entries(), "limit": history.limit()}))
             }
             MobileClipboardAction::Capture { text } => {
+                if msime_client_core::input_assistance::verification_code(&text).is_some() {
+                    return Ok(json!({"captured": false, "reason": "verification_code"}));
+                }
                 if !msime_client_core::clipboard::mobile_text_is_valid(&text) {
                     return Ok(json!({"captured": false, "reason": "invalid"}));
                 }

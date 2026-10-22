@@ -103,10 +103,30 @@ export function InputSharedSettingsSection({
     />
   );
   const learningRow = (
-    <LearningSection
-      value={preferences.learning}
-      onChange={(learning) => onPreferencesChange({ learning })}
-    />
+    <>
+      <LearningSection
+        value={preferences.learning}
+        onChange={(learning) => onPreferencesChange({ learning })}
+      />
+      {showInputModeStatusItem && (
+        <>
+          <SwitchRow
+            title="充电夜间自学习"
+            description="接通电源、空闲且本地 0–6 点时优化个人排序"
+            checked={preferences.charging_night_learning ?? true}
+            onChange={(charging_night_learning) => onPreferencesChange({ charging_night_learning })}
+          />
+          <SwitchRow
+            title="验证码粘贴提示"
+            description="剪贴板历史开启时，为新复制的验证码提供点击填入提示；不读取短信收件箱"
+            checked={preferences.verification_code_suggestions ?? true}
+            onChange={(verification_code_suggestions) =>
+              onPreferencesChange({ verification_code_suggestions })
+            }
+          />
+        </>
+      )}
+    </>
   );
   const cloudCandidatesRow = (
     <CloudCandidatesSection

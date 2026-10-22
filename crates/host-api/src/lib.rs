@@ -72,6 +72,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// `msime_client_account` 在 #8201 新增的操作。
 mod account_ops;
 mod bounded_file;
+mod input_assistance;
+pub use input_assistance::msime_client_input_assistance;
 mod chinese_english_spacing;
 /// 多分类自动云同步的驱动；C 入口在 `ffi::cloud_sync`。与 `cloud_dictionary` 一样和 C 入口模块同名，所以公开，免得遮住 `ffi` 的同名模块。
 pub mod cloud_sync;

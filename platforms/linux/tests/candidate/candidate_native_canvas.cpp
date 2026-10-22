@@ -517,7 +517,66 @@ void pager_layout() {
   }
 }
 
+void text_cache_pixels() {
+  for (const bool horizontal : {false, true}) for (const double scale : {1.0, 2.0}) {
+    host::NativeCanvasAssets assets;
+    assets.card_radius = assets.item_radius = 9;
+    assets.page_arrows = true;
+    auto animation = std::make_shared<host::NativeCanvasAnimation>();
+    animation->frames = {image(12, 12, 0x112233), image(12, 12, 0x334455)};
+    animation->delays_ms = {40, 60};
+    assets.panel = animation->frames.front(); assets.panel_animation = animation;
+    host::NativeCanvasContent content;
+    content.horizontal = horizontal; content.font = "Sans 14";
+    content.preedit = "synthetic 合成"; content.preedit_cursor = 10;
+    content.auxiliary = "synthetic page 1/2"; content.next = true; content.selected = 0;
+    content.items = {{"1.", "合成候选", "n. synthetic translation", " suffix"},
+        {"2.", "合成换行候选\nsecond line", "v. translation", " suffix"}};
+    for (auto &item : content.items)
+      item.translation_runs = Json::array({{{"start", 0}, {"length", 2}, {"role", "pos"}}});
+    Json palette{{"text", "#203040"}, {"selected_text", "#ffffff"},
+        {"selected", "#3584e4"}, {"translation_pos", "#337711"}, {"selected_translation_pos", "#ffff00"}};
+    auto measurement = image(1, 1, 0);
+    auto *measure_cr = cairo_create(measurement.get());
+    auto layout = host::measure_native_canvas(measure_cr, assets, content, horizontal ? 420 : 240);
+    host::NativeCanvasTextCache cache;
+    const auto render = [&](host::NativeCanvasTextCache *retained, host::NativeCanvasPointer pointer, std::uint64_t elapsed) {
+      host::NativeCanvasImage output(cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+          static_cast<int>(std::ceil(layout.width * scale)), static_cast<int>(std::ceil(layout.height * scale))), cairo_surface_destroy);
+      auto *cr = cairo_create(output.get());
+      cairo_scale(cr, scale, scale);
+      host::paint_native_canvas(cr, assets, content, layout, palette, elapsed, pointer, retained);
+      cairo_destroy(cr); cairo_surface_flush(output.get());
+      const auto *begin = cairo_image_surface_get_data(output.get());
+      const auto length = cairo_image_surface_get_stride(output.get()) * cairo_image_surface_get_height(output.get());
+      return std::vector<unsigned char>(begin, begin + length);
+    };
+    // 缓存绘制必须逐像素等于即时绘制，包括换帧、光标、译文配色和按下状态。
+    for (const auto pointer : {host::NativeCanvasPointer{}, {1, -1}, {1, 1}, {0, 0}, {-3, -1}, {-3, -3}})
+      for (const auto elapsed : {0u, 40u, 99u, 100u})
+        assert(render(&cache, pointer, elapsed) == render(nullptr, pointer, elapsed));
+    const auto retained = cache.layouts;
+    render(&cache, {}, 0);
+    assert(cache.layouts == retained && cache.layouts.size() <= 2 + 3 * content.items.size());
+    // 宿主重排后失效：候选、预编辑、字体、颜色及菜单不能沿用上一版字形。
+    for (const bool menu : {false, true}) {
+      content.menu = menu; content.font = "Sans 18";
+      content.preedit = "replacement 合成"; content.preedit_cursor = 12;
+      content.items[0].text = "replacement 候选"; content.selected = 1;
+      palette["selected_translation_pos"] = "#ff00ff";
+      layout = host::measure_native_canvas(measure_cr, assets, content, horizontal ? 380 : 210);
+      cache.clear();
+      assert(cache.layouts.empty());
+      assert(render(&cache, {1, 1}, 40) == render(nullptr, {1, 1}, 40));
+    }
+    cache.clear();
+    assert(cache.layouts.empty());
+    cairo_destroy(measure_cr);
+  }
+}
+
 int main() {
+  text_cache_pixels();
   pager_layout();
   skin_layout();
   skin_appearance();

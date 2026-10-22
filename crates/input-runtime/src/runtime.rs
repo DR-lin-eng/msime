@@ -3,8 +3,7 @@
 
 use super::*;
 use msime_engine::ordering::{
-    apply_order_with, ensure_engine_order, rerank_pick, rotate_to_front, runner_up_order,
-    ParallelOrderRows,
+    apply_order_with, ensure_engine_order, rerank_plan, runner_up_order, ParallelOrderRows,
 };
 // 排序决策搬进了 `msime_engine::ordering`；`tests.rs` 仍按原来的 crate 内名字引用这几项，这里为它们重新导出。
 #[cfg(test)]
@@ -2029,9 +2028,9 @@ impl<E: InputEngine> Runtime<E> {
         {
             return false;
         }
-        // 方案、五笔表码和上文窗口的判断都在 `rerank_pick` 里，这里同步旋转候选元数据和引擎座位映射。
+        // 共享层决定首选和已评分次选次序，这里把同一计划同步到元数据和引擎座位映射。
         let rows = order_rows(snapshot);
-        let Some(promote) = rerank_pick(
+        let Some(plan) = rerank_plan(
             reranker,
             &self.prediction_context,
             snapshot.scheme,
@@ -2042,17 +2041,17 @@ impl<E: InputEngine> Runtime<E> {
         };
         ensure_engine_order(&mut self.engine_order, count);
         let snapshot = &mut self.cached;
-        rotate_to_front(&mut snapshot.candidates, promote);
-        rotate_to_front(&mut snapshot.candidate_codes, promote);
-        rotate_to_front(&mut snapshot.candidate_annotations, promote);
-        rotate_to_front(&mut snapshot.candidate_sources, promote);
-        rotate_to_front(&mut snapshot.candidate_positions, promote);
-        rotate_to_front(&mut snapshot.candidate_corrected, promote);
-        rotate_to_front(&mut snapshot.candidate_answers_key, promote);
+        plan.apply(&mut snapshot.candidates);
+        plan.apply(&mut snapshot.candidate_codes);
+        plan.apply(&mut snapshot.candidate_annotations);
+        plan.apply(&mut snapshot.candidate_sources);
+        plan.apply(&mut snapshot.candidate_positions);
+        plan.apply(&mut snapshot.candidate_corrected);
+        plan.apply(&mut snapshot.candidate_answers_key);
         if snapshot.candidate_static_evidence.len() == count {
-            rotate_to_front(&mut snapshot.candidate_static_evidence, promote);
+            plan.apply(&mut snapshot.candidate_static_evidence);
         }
-        rotate_to_front(&mut self.engine_order, promote);
+        plan.apply(&mut self.engine_order);
         true
     }
 

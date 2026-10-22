@@ -1724,6 +1724,30 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     return try callOptions(msimeClientDictionary, ["options": options, "action": action])
   }
 
+  /// 原生设置与初始化共用搜狗词库服务；只传 JSON 字节，不创建输入会话。
+  static func sogouDictionary(_ action: [String: Any]) throws -> [String: Any] {
+    guard let resources = PersonalDictionaryBridge.packagedResources else { throw InputBridgeFailure.unavailable }
+    let root = sharedStateDirectory
+    var options: [String: Any] = ["api_version": 1, "resources": resources.path,
+      "user_data": root + "/user", "cache": root + "/cache", "dictionaries": root + "/user/dictionaries",
+      "preferences_directory": root, "preferences": loadSharedPreferences() ?? [:]]
+    if !MSIMEAppEdition.isFull { options["edition"] = MSIMEAppEdition.identifier }
+    var action = action
+    action["operation"] = "sogou"
+    return try callOptions(msimeClientDictionary, ["options": options, "action": action])
+  }
+
+  /// 键盘空闲时有界应用集合队列；不联网，不逐词重建会话。
+  func synchronizeSogouDictionaries() throws {
+    guard let root = options["preferences_directory"] as? String,
+          FileManager.default.fileExists(atPath: root + "/SogouDictionaries/settings.json") else { return }
+    let pendingRequest: [String: Any] = ["options": options, "action": ["operation": "sogou", "command": "pending"]]
+    let pending = try Self.callOptions(msimeClientDictionary, pendingRequest)
+    guard (pending["pending_count"] as? Int ?? 0) > 0 else { return }
+    let request: [String: Any] = ["options": options, "action": ["operation": "sogou", "command": "synchronize"]]
+    _ = try withDictionaryMaintenance { try Self.callOptions(msimeClientDictionary, request) }
+  }
+
   /// 后台任务不建键盘会话；共享门禁和词库租约阻止与活动输入竞争。
   static func nightLearning(charging: Bool, idle: Bool, hour: Int, cancel: Bool = false) throws -> [String: Any] {
     guard let resources = PersonalDictionaryBridge.packagedResources,

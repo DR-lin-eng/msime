@@ -55,6 +55,7 @@ public final class LexiconPage extends ReloadingDetailPage {
     private record Model(DictionaryCollectionsStore.View view, long builtinCount, boolean learning, String failure) {}
 
     @Nullable private Model model;
+    @Nullable private SogouSection sogouSection;
     @Nullable private JSONObject updateStatus;
     private int updateGeneration;
     @Nullable private List<CommunityCatalog.Item> discover;
@@ -83,6 +84,8 @@ public final class LexiconPage extends ReloadingDetailPage {
 
     @Override protected void onContentDestroyed() {
         updateGeneration++;
+        if (sogouSection != null) sogouSection.dispose();
+        sogouSection = null;
         installing.clear();
     }
 
@@ -175,6 +178,9 @@ public final class LexiconPage extends ReloadingDetailPage {
         if (updateStatus != null && updateStatus.optBoolean("can_rollback")) {
             updates.nav("恢复上一版词库", "恢复后关闭自动更新，下次启动生效", null, () -> updateDictionary("rollback", null)).setEnabled(!updating);
         }
+
+        if (sogouSection == null) sogouSection = new SogouSection(getViewLifecycleOwner(), context, sectionColumn(target, "已安装"), false);
+        else sogouSection.attach(sectionColumn(target, "已安装"));
 
         GroupCard community = GroupCard.add(sectionColumn(target, "社区"), "发现词库").withDividers(58);
         List<CommunityCatalog.Item> items = discover;

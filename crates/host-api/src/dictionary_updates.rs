@@ -13,6 +13,12 @@ pub(crate) fn request(
     command: &str,
     enabled: Option<bool>,
 ) -> Result<Value, String> {
+    if command == "automatic" {
+        let _ = crate::sogou::request(
+            options,
+            &msime_client_services::dictionary::sogou::Action::Automatic,
+        );
+    }
     let state = options
         .preferences_directory
         .as_deref()

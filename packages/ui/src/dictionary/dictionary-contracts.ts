@@ -55,6 +55,7 @@ export interface DictionaryUpdateStatus {
 }
 
 export interface DictionaryClient {
+  sogou?(action: SogouAction): Promise<SogouStatus | SogouCatalog>;
   /** 浏览包含内置行的全部词库；语言资源没有安装时 `available` 为假。 */
   browse?(
     offset: number,
@@ -113,4 +114,31 @@ export interface DictionaryClient {
   count?(kind: LocalDictionaryKind): Promise<number>;
   /** 五笔查码（词库请求 `wubi_codes`，只读）：`text` 里每个汉字和整段词的 86、98 五笔编码。宿主提供它时，五笔的设置下面出现「五笔查码」。 */
   wubiCodes?(text: string): Promise<WubiCodeLookup>;
+}
+
+/** 搜狗订阅只保存本机选择，不上传用户输入。 */
+export type SogouAction =
+  | { command: "status" | "check" | "automatic" }
+  | { command: "catalog"; group: number; page: number }
+  | { command: "configure"; groups: number[]; dictionaries: number[]; automatic: boolean }
+  | { command: "install" | "remove"; id: number }
+  | { command: "set_enabled"; id: number; enabled: boolean };
+export interface SogouCatalog {
+  entries: { id: number; name: string }[];
+  has_more: boolean;
+  group: number;
+  page: number;
+}
+export interface SogouStatus {
+  groups: { id: number; name: string }[];
+  settings: {
+    groups: number[];
+    dictionaries: number[];
+    automatic: boolean;
+    phase: string;
+    error: string | null;
+    limited: boolean;
+  };
+  installed: { id: number; name: string; enabled: boolean; entries: number }[];
+  max_dictionaries: number;
 }

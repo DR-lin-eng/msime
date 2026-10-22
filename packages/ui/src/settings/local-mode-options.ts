@@ -11,6 +11,11 @@ const localModeRows: readonly LocalModeRow[] = [
     "中文模式下按 Shift+T，再输入 rq / riqi / date 输入日期，sj / shijian / time 输入时间，xq / xingqi / week 输入星期，nl / nongli / yinli 输入农历。打开时，拼音（含九键）直接输入 riqi / rq、shijian / sj、xingqi / xq、nongli / nl，日期、时间、星期、农历也会排在对应的词后面",
   ],
   [
+    "date_time_menu",
+    "日期格式入口",
+    "日期时间混入候选时，在第三位放一个「📅日期」入口，选中后候选窗换成该组的全部日期格式，和 T 模式相同",
+  ],
+  [
     "unicode",
     "Unicode 便捷录入(U 模式)",
     "中文模式下按 Shift+U，再输入十六进制码位（如 4e00 / +1f600）。空格上屏；Shift+数字选词",
@@ -24,6 +29,11 @@ const localModeRows: readonly LocalModeRow[] = [
     "kaomoji",
     "颜文字快捷输入(M 模式)",
     "中文模式下按 Shift+M，再输入全拼 / 简拼 / 双拼 / 英文关键词。空格上屏；数字选词",
+  ],
+  [
+    "symbol",
+    "符号快捷输入(S 模式)",
+    "中文模式下按 Shift+S，再输入分组码（xl 希腊字母、sx 数学、szq 带圈数字、jt 箭头等）或符号名（alpha、infinity）。空格上屏；数字选词",
   ],
   [
     "super_jianpin",
@@ -82,6 +92,7 @@ const iosLocalModeDescriptions: Partial<Record<LocalModeKey, string>> = {
   unicode: `${iosLocalModeEntry("Unicode 码点")}再输入十六进制码位（如 4e00 / +1f600）。空格或点候选上屏`,
   emoji: `${iosLocalModeEntry("表情")}再输入全拼 / 简拼 / 双拼 / 英文关键词。空格或点候选上屏`,
   kaomoji: `${iosLocalModeEntry("颜文字")}再输入全拼 / 简拼 / 双拼 / 英文关键词。空格或点候选上屏`,
+  symbol: `${iosLocalModeEntry("符号")}再输入分组码（xl 希腊字母、sx 数学、szq 带圈数字、jt 箭头等）或符号名（alpha、infinity）。空格或点候选上屏`,
   super_jianpin: `${iosLocalModeEntry("超级简拼")}每个字母作为简拼；双拼按当前方案转换声母。空格或点候选上屏`,
   temporary_english: `${iosLocalModeEntry("英文补全")}之后按英文处理。空格上屏当前输入，也可以点候选；上屏后回到中文`,
   temporary_japanese: `${iosLocalModeEntry("临时日语")}之后按日语罗马字处理。空格上屏首选，也可以点候选；上屏后回到中文`,

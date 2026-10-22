@@ -116,6 +116,12 @@ fn host_page_size(requested: u8) -> u8 {
     requested.min(ffi::host::compiled_platform().max_candidate_page_size())
 }
 
+/// 会话的候选窗是否竖排：桌面宿主按 `candidate_layout` 画候选窗，触屏宿主的候选栏总是横排，不读这一项（它的缺省是竖排，照读会让外接键盘的左右键不再选词）。
+fn host_vertical_candidates(layout: msime_client_core::preferences::CandidateLayout) -> bool {
+    ffi::host::compiled_platform().is_desktop()
+        && layout == msime_client_core::preferences::CandidateLayout::Vertical
+}
+
 /// 会话实际用的中英混输触发字符数：本库编译到的平台不读这一项时（macOS、Windows 和 Linux 三个桌面宿主，`HostPlatform::reads_mixed_input_minimum_prefix`）固定为默认值，文档里存的数不起作用，设置页也不再给出这一行。
 fn host_english_minimum_prefix(stored: u8) -> u8 {
     english_minimum_prefix_for(ffi::host::compiled_platform(), stored)
@@ -263,6 +269,8 @@ thread_local! {
 struct HostSession {
     runtime: Runtime,
     options: EngineOptions,
+    /// HostOptions 里宿主声明的「快捷短语混进普通候选」能力（macOS、Linux 请求）：偏好重建 `options` 时和 `mixed_input.quick_phrase` 相与；记在会话上是因为 `options` 里那个字段已经和能力与偏好相与过，认不出宿主原来要不要这项能力。
+    quick_phrase_candidates_requested: bool,
     /// HostOptions 记录的版本：偏好里的方案只在本版本提供的方案里取，回退到本版本的默认方案。
     edition: &'static Edition,
     applied: Preferences,
@@ -370,12 +378,47 @@ fn punctuation_lock_code(lock: msime_client_core::preferences::PunctuationLock) 
 /// The Engine's sentence association switches. The desktop model switch is not among them: it gates the runtime's settled reranker (`Runtime::set_settled_rerank_enabled`), the only place that model runs.
 fn engine_sentence_association(
     preferences: &msime_client_core::preferences::SentenceAssociationPreferences,
+    state_root: Option<&std::path::Path>,
 ) -> msime_engine::host::SentenceAssociationOptions {
+    // 选中的语法模型装好后才有文件路径；选中但没装（或包装在别处的 state_root
+    // 下没发布）时留空，引擎逐字节退回无模型基线。
+    let pack = match preferences.grammar_model {
+        msime_client_core::preferences::GrammarModel::None => None,
+        msime_client_core::preferences::GrammarModel::Wanxiang => {
+            Some(ResourcePack::GrammarWanxiang)
+        }
+        msime_client_core::preferences::GrammarModel::BaguwenWord => {
+            Some(ResourcePack::GrammarBaguwen)
+        }
+        msime_client_core::preferences::GrammarModel::BaguwenCompact => {
+            Some(ResourcePack::GrammarBaguwenCompact)
+        }
+        msime_client_core::preferences::GrammarModel::Baishuang => {
+            Some(ResourcePack::GrammarBaishuang)
+        }
+    };
+    let collocation_model = state_root
+        .zip(pack)
+        .and_then(|(root, pack)| {
+            pack.set()
+                .artifacts
+                .first()
+                .and_then(|artifact| resource_packs::installed_file(root, pack, &artifact.name))
+        })
+        .unwrap_or_default();
     msime_engine::host::SentenceAssociationOptions {
         word_lattice: preferences.word_lattice,
         neural_keyboard: preferences.neural_keyboard,
         show_next_on_duplicate: preferences.show_next_on_duplicate,
+        collocation_model,
+        collocation_rerank: pack.is_some(),
+        ..Default::default()
     }
+}
+
+/// 资源包卸载前摘掉引擎进程内的 `.gram` 映射，避免 Windows 删除目录时仍被文件句柄占用。
+pub fn evict_grammar_model(path: &std::path::Path) {
+    msime_engine::octagram::GramDb::evict_shared(path);
 }
 
 /// 引擎的引号与方头括号样式，由 client-core 从偏好解析（`corner_when_traditional` 在那里按繁体开关定下）。View 报告的是同一个解析结果。
@@ -387,6 +430,8 @@ fn apply_punctuation_marks(
     options.corner_quotes = marks.quotes == msime_client_core::punctuation::QuoteMarks::Corner;
     options.hollow_brackets =
         marks.brackets == msime_client_core::preferences::BracketStyle::Hollow;
+    options.enumeration_comma_backslash = marks.enumeration_comma_backslash;
+    options.enumeration_comma_slash = marks.enumeration_comma_slash;
 }
 
 /// The switch the Engine is handed. Windows turns the punctuation switch on whenever punctuation is locked to Chinese, while the Engine drops Chinese punctuation whenever its switch is off, so a lock to Chinese has to carry the switch with it.
@@ -456,8 +501,37 @@ impl HostSession {
         self.ai_provider_cache.as_ref()
     }
     fn ai_query_is_current(&self, query: &OnlineQuery) -> bool {
-        self.ai_provider_config()
-            .is_some_and(|config| query.ai_assistant.as_ref() == Some(config))
+        self.english_query_allowed(query)
+            && self
+                .ai_provider_config()
+                .is_some_and(|config| query.ai_assistant.as_ref() == Some(config))
+    }
+    fn english_query_allowed(&self, query: &OnlineQuery) -> bool {
+        if query.mode != msime_engine::OnlineInputMode::English {
+            return true;
+        }
+        let enabled = self
+            .requested
+            .as_ref()
+            .map_or(self.applied.english_online_candidates, |snapshot| {
+                snapshot.preferences.english_online_candidates
+            });
+        enabled
+            && self.runtime.online_query().is_ok_and(|live| {
+                live.is_some_and(|live| {
+                    live.mode == query.mode
+                        && live.scheme == query.scheme
+                        && live.session_id == query.session_id
+                        && live.generation == query.generation
+                        && live.identity == query.identity
+                        && live.query_text == query.query_text
+                        && live.cache_key == query.cache_key
+                        && live.pinyin_segments == query.pinyin_segments
+                        && live.ai_context == query.ai_context
+                        && live.cloud_eligible == query.cloud_eligible
+                        && live.ai_eligible == query.ai_eligible
+                })
+            })
     }
     fn set_ai_provider_cache(&mut self, preferences: &Preferences) {
         let ai = &preferences.ai_assistant;
@@ -467,6 +541,7 @@ impl HostSession {
             model: ai.model.clone(),
             endpoint: ai.endpoint.clone(),
             candidate_limit: host_ai_candidate_limit(ai.candidate_limit),
+            thinking: ai.thinking.clone(),
             prompt_id: ai.prompt_id.clone(),
             prompt_custom_1: ai.prompt_custom_1.clone(),
             prompt_custom_2: ai.prompt_custom_2.clone(),
@@ -479,9 +554,13 @@ impl HostSession {
             .requested
             .as_ref()
             .map_or(&self.applied, |snapshot| &snapshot.preferences);
-        self.cloud_candidates_enabled()
+        self.english_query_allowed(query)
+            && self.cloud_candidates_enabled()
             && query.cloud_request.as_ref().map_or_else(
-                || preferences.cloud_candidate_provider == Default::default(),
+                || {
+                    query.mode != msime_engine::OnlineInputMode::English
+                        && preferences.cloud_candidate_provider == Default::default()
+                },
                 |request| request.provider_id == preferences.cloud_candidate_provider.identity(),
             )
     }
@@ -645,10 +724,12 @@ impl HostSession {
         options.shuangpin_preedit_uses_raw = preferences.shuangpin_preedit_uses_raw;
         options.single_character_only = preferences.single_character_only;
         options.learning = preferences.learning;
+        options.learn_english_on_enter = preferences.enter_learns_english_word;
         options.autocorrect_transposition = preferences.quanpin.autocorrect_transposition;
         options.autocorrect_neighbor = preferences.quanpin.autocorrect_neighbor;
         options.fuzzy_pinyin_rules = preferences.fuzzy_pinyin.active_rules();
         options.wubi_mixed_pinyin = preferences.wubi_mixed_pinyin;
+        options.wubi_z_wildcard = preferences.wubi_z_wildcard;
         options.wubi_profile = wubi_profile_code(preferences.wubi_profile);
         options.frequency_mode = preferences.frequency.mode.as_str().into();
         options.frequency_trigger_count = preferences.frequency.trigger_count;
@@ -660,8 +741,12 @@ impl HostSession {
         options.mixed_kaomoji = preferences.mixed_input.kaomoji;
         options.mixed_symbols = preferences.mixed_input.symbols;
         options.mixed_japanese = preferences.mixed_input.japanese;
+        options.quick_phrase_candidates =
+            self.quick_phrase_candidates_requested && preferences.mixed_input.quick_phrase;
+        options.quick_phrase_frequency = preferences.mixed_input.quick_phrase_frequency;
         options.local_unicode = preferences.local_modes.unicode;
         options.local_date_time = preferences.local_modes.date_time;
+        options.local_date_time_menu = preferences.local_modes.date_time_menu;
         options.local_quick_phrase = preferences.local_modes.quick_phrase;
         options.local_emoji = preferences.local_modes.emoji;
         options.local_kaomoji = preferences.local_modes.kaomoji;
@@ -672,6 +757,7 @@ impl HostSession {
         options.local_command = preferences.local_modes.command;
         options.local_mention = preferences.local_modes.mention;
         options.local_chaizi = chaizi_enabled(&preferences.local_modes);
+        options.local_symbol = preferences.local_modes.symbol;
         options.local_shift_letter_entry = preferences.local_modes.shift_letter_entry;
         // 繁体输出开着时拆字行按繁体字形去重；改这个偏好同样会让 Engine 在空闲时重建。
         options.chaizi_traditional_output = preferences.traditional_chinese_output;
@@ -680,6 +766,7 @@ impl HostSession {
         options.helpcode = helpcode.enabled;
         options.show_helpcode = helpcode.show_in_candidate_window;
         options.helpcode_schema = helpcode.schema.as_str().into();
+        options.helpcode_trigger_key = helpcode.trigger_key.bytes().next();
         let plugin_root = self.plugin_roots.installed.as_deref();
         let plugin_tables = plugin_tables::PluginTables::stamp(
             plugin_root,
@@ -688,8 +775,10 @@ impl HostSession {
             &preferences.plugins,
         );
         plugin_tables.fill(&self.plugin_tables, plugin_root, &mut options);
-        options.sentence_association =
-            engine_sentence_association(&preferences.sentence_association);
+        options.sentence_association = engine_sentence_association(
+            &preferences.sentence_association,
+            self.state_root.as_deref(),
+        );
         // 引擎按宿主的每页候选数决定全长组要不要并入补全词；和下面交给 runtime 的值同源。
         let page_size = host_page_size(
             self.page_size_override
@@ -712,6 +801,7 @@ impl HostSession {
         let mut engine = Session::new(&options).map_err(|e| e.to_string())?;
         // 云候选席位不是 EngineOptions；新引擎默认关闭，每次重建都要恢复当前偏好。
         engine.set_cloud_candidates_enabled(preferences.cloud_candidates);
+        engine.set_english_online_candidates_enabled(preferences.english_online_candidates);
         if self.punctuation_override.is_some() || self.punctuation_lock_override.is_some() {
             engine
                 .set_chinese_punctuation_enabled(engine_chinese_punctuation(
@@ -869,11 +959,15 @@ impl HostSession {
             state_root,
             Path::new(&self.options.resources),
         ));
+        let grammar_model =
+            engine_sentence_association(&self.applied.sentence_association, state_root)
+                .collocation_model;
         if cantonese == self.options.cantonese_dictionary
             && zhuyin == self.options.zhuyin_dictionary
             && stroke == self.options.stroke_dictionary
             && japanese == self.options.japanese_dictionary
             && wubi == self.options.wubi_dictionary
+            && grammar_model == self.options.sentence_association.collocation_model
         {
             return;
         }
@@ -1024,18 +1118,34 @@ impl HostSession {
             .clone();
         self.set_ai_provider_cache(&requested_preferences);
         self.runtime
+            .set_english_online_candidates_enabled(requested_preferences.english_online_candidates)
+            .map_err(|e| e.to_string())?;
+        self.runtime
             .set_cloud_candidates_enabled(requested_preferences.cloud_candidates)
             .map_err(|e| e.to_string())?;
         // 宿主状态，不是 Engine 状态：跟着最新请求的偏好走，不必等这次偏好重建 Engine，也不必等组字结束。
         self.runtime
             .set_backspace_reverts_selection(requested_preferences.backspace_reverts_selection);
+        // Esc 保留已选词同样是宿主状态：改完下一次 Esc 就按新开关解释。
+        self.runtime
+            .set_escape_keeps_selected_word(requested_preferences.escape_keeps_selected_word);
         // 左右键的候选回退（`navigation.left_right`）同样是宿主状态：改完立刻生效，左右键不必等 Engine 重建。
         self.runtime
             .set_left_right_navigation(requested_preferences.navigation.left_right);
         self.runtime
+            .set_vertical_candidates(host_vertical_candidates(
+                requested_preferences.candidate_layout,
+            ));
+        self.runtime
             .set_wubi_auto_commit_unique(requested_preferences.wubi_auto_commit_unique);
+        // 顶字同样是宿主状态：纯判定在 Engine 与 runtime 之间，改偏好不必等组字结束。
+        self.runtime
+            .set_wubi_fifth_code_top_commit(requested_preferences.wubi_fifth_code_top_commit);
         self.runtime
             .set_wubi_candidate_selection(requested_preferences.wubi_candidate_selection.clone());
+        // 「二三候选」键也是宿主编排状态：跟着最新请求的偏好走，下一键生效。
+        self.runtime
+            .set_second_third_candidate(requested_preferences.second_third_candidate);
         self.sound.update(key_sound::SoundSettings::new(
             &requested_preferences.plugins,
             &self.plugin_roots,
@@ -1622,6 +1732,26 @@ pub(crate) fn effective_scheme(
     )
 }
 
+/// 偏好里的双拼辅助码触发方式 → 引擎侧同名字段；写入端已归一，这里对消费端再归一一次兜底。
+fn shuangpin_helpcode_modes(
+    modes: msime_client_core::preferences::ShuangpinHelpcodeModes,
+) -> msime_engine::ShuangpinHelpcodeModes {
+    let modes = modes.normalized();
+    msime_engine::ShuangpinHelpcodeModes {
+        direct: modes.direct,
+        trigger_backtick: modes.trigger_backtick,
+        trigger_semicolon: modes.trigger_semicolon,
+        trigger_uppercase: modes.trigger_uppercase,
+        mid_sentence: modes.mid_sentence,
+        mid_sentence_backtick: modes.mid_sentence_backtick,
+        mid_sentence_semicolon: modes.mid_sentence_semicolon,
+        mid_sentence_uppercase: modes.mid_sentence_uppercase,
+        direct_helpcode: modes.direct_helpcode,
+        direct_helpcode_slash: modes.direct_helpcode_slash,
+        direct_helpcode_uppercase: modes.direct_helpcode_uppercase,
+    }
+}
+
 /// The helpcode settings for the scheme actually run, which differs from `Preferences::active_helpcode` only when `effective_scheme` fell back.
 fn helpcode_for_scheme(
     preferences: &Preferences,
@@ -1659,7 +1789,7 @@ struct HostOptions {
     /// the field would otherwise show nothing for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     phrase_preedit: Option<bool>,
-    /// macOS 把普通组字里的快捷短语也作为候选显示；缺省关闭以保持其他宿主和旧文档的入口契约。
+    /// macOS 和 Linux 的两个宿主把普通组字里的快捷短语也作为候选显示；缺省关闭以保持其他宿主和旧文档的入口契约。建会话时写进 `EngineOptions`，偏好变更重建 Engine 时沿用同一份选项。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quick_phrase_candidates: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1793,10 +1923,12 @@ impl HostOptions {
             shuangpin_preedit_uses_raw: self.preferences.shuangpin_preedit_uses_raw,
             single_character_only: self.preferences.single_character_only,
             learning: self.preferences.learning,
+            learn_english_on_enter: self.preferences.enter_learns_english_word,
             autocorrect_transposition: self.preferences.quanpin.autocorrect_transposition,
             autocorrect_neighbor: self.preferences.quanpin.autocorrect_neighbor,
             fuzzy_pinyin_rules: self.preferences.fuzzy_pinyin.active_rules(),
             wubi_mixed_pinyin: self.preferences.wubi_mixed_pinyin,
+            wubi_z_wildcard: self.preferences.wubi_z_wildcard,
             wubi_profile: wubi_profile_code(self.preferences.wubi_profile),
             frequency_mode: self.preferences.frequency.mode.as_str().into(),
             frequency_trigger_count: self.preferences.frequency.trigger_count,
@@ -1811,6 +1943,7 @@ impl HostOptions {
             mixed_japanese: self.preferences.mixed_input.japanese,
             local_unicode: self.preferences.local_modes.unicode,
             local_date_time: self.preferences.local_modes.date_time,
+            local_date_time_menu: self.preferences.local_modes.date_time_menu,
             local_quick_phrase: self.preferences.local_modes.quick_phrase,
             local_emoji: self.preferences.local_modes.emoji,
             local_kaomoji: self.preferences.local_modes.kaomoji,
@@ -1821,17 +1954,22 @@ impl HostOptions {
             local_command: self.preferences.local_modes.command,
             local_mention: self.preferences.local_modes.mention,
             local_chaizi: chaizi_enabled(&self.preferences.local_modes),
+            local_symbol: self.preferences.local_modes.symbol,
             local_shift_letter_entry: self.preferences.local_modes.shift_letter_entry,
             chaizi_traditional_output: self.preferences.traditional_chinese_output,
             command_table: Vec::new(),
             plugin_commands: Vec::new(),
             mention_entries: Vec::new(),
             quick_phrase_table: Vec::new(),
-            quick_phrase_candidates: false,
+            // 宿主声明能力、用户在设置里打开，两个条件都满足才把快捷短语混进普通候选；`mixed_input.quick_phrase` 缺键的旧文档读作开，保住 macOS/Linux 升级前的行为。
+            quick_phrase_candidates: self.quick_phrase_candidates.unwrap_or(false)
+                && self.preferences.mixed_input.quick_phrase,
+            quick_phrase_frequency: self.preferences.mixed_input.quick_phrase_frequency,
             helpcode_table: None,
             helpcode_fallback_resources: self.helpcode_fallback_resources,
             sentence_association: engine_sentence_association(
                 &self.preferences.sentence_association,
+                absolute_state_root(self.preferences_directory.as_deref()).as_deref(),
             ),
             rescoring_context: String::new(),
             sentence_alternatives: true,
@@ -1844,7 +1982,10 @@ impl HostOptions {
             wubi_dictionary: wubi,
             helpcode: helpcode.enabled,
             show_helpcode: helpcode.show_in_candidate_window,
+            // 双拼专属的触发方式；其它方案给默认值，引擎只在双拼下读它。手改出互斥组合的文档在消费端再归一一次，与 `PreferencesStore::save` 的写入端归一一致。
+            shuangpin_helpcode_modes: shuangpin_helpcode_modes(helpcode.modes),
             helpcode_schema: helpcode.schema.as_str().into(),
+            helpcode_trigger_key: helpcode.trigger_key.bytes().next(),
             chinese_punctuation: engine_chinese_punctuation(
                 self.preferences.chinese_punctuation,
                 punctuation_lock_code(self.preferences.punctuation_lock),
@@ -1853,6 +1994,8 @@ impl HostOptions {
             punctuation_lock: punctuation_lock_code(self.preferences.punctuation_lock),
             corner_quotes: false,
             hollow_brackets: false,
+            enumeration_comma_backslash: true,
+            enumeration_comma_slash: false,
         };
         apply_punctuation_marks(&mut options, &self.preferences);
         // 建会话没有地方带原因，表不能用时按小鹤建起来就够了；之后的偏好变更会在诊断里报告原因。

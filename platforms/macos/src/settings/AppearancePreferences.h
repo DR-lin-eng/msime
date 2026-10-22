@@ -118,9 +118,13 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic, copy) NSString *defaultImeMode;
 @property(nonatomic, copy) NSString *imeModeScope;
 - (void)activateInputModeForApplication:(NSString *)identifier;
+/// Vim 模式（共享偏好 `vim_mode_apps`）：这个 bundle id 的前台应用是否把无修饰 Esc 搭车切英文。
+- (BOOL)vimModeEnabledForApplication:(NSString *)identifier;
 - (void)lockActiveInputMode;
 - (void)resetRememberedInputModes;
 @property(nonatomic) BOOL inputModeShortcut;
+/// 中日英循环切换（共享偏好 `keybindings.trilingual_cycle`，默认关）：打开后「切换中英文」那一组快捷键按 中 → 日 → 英 → 中 转圈。顺序和「有组字时先上屏原始字母」在共享层，见 `crates/client-core/src/language_cycle.rs`。
+@property(nonatomic) BOOL trilingualCycle;
 @property(nonatomic) BOOL shiftTapShortcut;
 @property(nonatomic) BOOL controlTapShortcut;
 /// 单按 Caps Lock 切换中英文（共享偏好 `keybindings.switch_language_caps_lock`），缺省为关。

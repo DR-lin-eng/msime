@@ -28,6 +28,17 @@ RUST_ONLY: dict[str, set[str]] = {
         # 快捷符号当前只有 iOS 原生设置页提供编辑，其他宿主保留共享字段，不在 React 设置页重复增加入口。
         "touch_quick_punctuation_symbols",
     },
+    "KeybindingPreferences": {
+        # 三个切换热键（中英/全半角/标点）的文档契约先进共享层：宿主按键路由和设置页的录入控件在后续切片接入，这里先登记占位，控件落地时移出。
+        "toggle_english_candidates",
+        "toggle_full_width",
+        "toggle_punctuation",
+    },
+    "TouchToolbarPreferences": {
+        # 撤销与重做仅在 Android 原生工具栏设置页提供入口，其他宿主保留共享字段，React 设置页不显示。
+        "undo",
+        "redo",
+    },
 }
 
 

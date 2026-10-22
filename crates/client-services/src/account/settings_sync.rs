@@ -608,15 +608,31 @@ pub(super) fn insert_input_settings(
             BracketStyle::Hollow => "hollow",
         },
     );
+    // 顿号自定义两个键。服务端字段表收录它们之前，上传前的过滤会去掉它们（与 quote_style 相同的情形）。
+    insert_bool(
+        settings,
+        "input.enumeration_comma_backslash",
+        preferences.enumeration_comma_backslash,
+    );
+    insert_bool(
+        settings,
+        "input.enumeration_comma_slash",
+        preferences.enumeration_comma_slash,
+    );
     insert_bool(settings, "input.wubi_code_hint", preferences.wubi_code_hint);
     insert_bool(
         settings,
         "input.wubi_auto_commit_unique",
         preferences.wubi_auto_commit_unique,
     );
+    insert_bool(
+        settings,
+        "input.wubi_fifth_code_top_commit",
+        preferences.wubi_fifth_code_top_commit,
+    );
 }
 
-/// 桌面宿主（Windows）导出成账号文档的键值：只有各平台共有的 `input.*` 键。桌面专属的设置（候选窗口、快捷键、皮肤）在账号文档里只有 `platform.macos.*`，那是 macOS 原生偏好的映射，Windows 不写，免得改掉 macOS 的设置。调用方再按版本（`edition::filter_uploaded_account_settings`）和服务端字段表过滤，然后合并上传。
+/// 桌面宿主（Windows、Linux）导出成账号文档的键值：只有各平台共有的 `input.*` 键。桌面专属的设置（候选窗口、快捷键、皮肤）在账号文档里只有 `platform.macos.*`，那是 macOS 原生偏好的映射，Windows 和 Linux 不写，免得改掉 macOS 的设置。调用方再按版本（`edition::filter_uploaded_account_settings`）和服务端字段表过滤，然后合并上传。
 pub fn export_desktop_settings(
     preferences: &Preferences,
 ) -> BTreeMap<String, AccountPreferenceValue> {
@@ -944,11 +960,21 @@ fn apply_input_settings(applier: &mut Applier<'_>) -> Result<(), AccountError> {
         };
         Some(())
     })?;
+    // 「至少留一个」不在写入时归一：远端理论上的「两个都关」由 `punctuation_marks` 读出时归一成「`\` 开」。
+    applier.set_bool("input.enumeration_comma_backslash", |preferences, value| {
+        preferences.enumeration_comma_backslash = value
+    })?;
+    applier.set_bool("input.enumeration_comma_slash", |preferences, value| {
+        preferences.enumeration_comma_slash = value
+    })?;
     applier.set_bool("input.wubi_code_hint", |preferences, value| {
         preferences.wubi_code_hint = value
     })?;
     applier.set_bool("input.wubi_auto_commit_unique", |preferences, value| {
         preferences.wubi_auto_commit_unique = value
+    })?;
+    applier.set_bool("input.wubi_fifth_code_top_commit", |preferences, value| {
+        preferences.wubi_fifth_code_top_commit = value
     })?;
     Ok(())
 }
@@ -990,7 +1016,7 @@ pub fn apply_desktop_settings(
     })
 }
 
-/// Windows「设置同步」的上传：本机的 `input.*` 设置按版本过滤（单方案版本不上传方案，多方案版本只上传本版本提供的方案）、只留服务端字段表收录的键，合并进云端文档，再按读到云端文档时的会话代次上传，期间退出或换号就取消。一个键都没有时报告服务不可用。共享应用（`windows_settings_sync.rs`）和原生设置窗口（host-api 的 `msime_client_account`）都调这里。
+/// Windows 和 Linux「设置同步」的上传：本机的 `input.*` 设置按版本过滤（单方案版本不上传方案，多方案版本只上传本版本提供的方案）、只留服务端字段表收录的键，合并进云端文档，再按读到云端文档时的会话代次上传，期间退出或换号就取消。一个键都没有时报告服务不可用。共享应用（`desktop_settings_sync.rs`，Windows 和 Linux）和原生设置窗口（host-api 的 `msime_client_account`）都调这里。
 pub fn upload_desktop_settings<A: super::AccountApi, S: super::AccountSessionStorage>(
     session: &super::BackendAccountSession<A, S>,
     store: &crate::preferences::PreferencesStore,
@@ -1013,7 +1039,7 @@ pub fn upload_desktop_settings<A: super::AccountApi, S: super::AccountSessionSto
     session.put_preferences_with_generation(&merged, generation, &user_id)
 }
 
-/// Windows「设置同步」的应用：把页面刚下载的账号设置（`preferences`）按版本过滤（单方案版本不应用方案，多方案版本把本版本没有的方案当作缺失）后应用到本机偏好，返回读到本机偏好时的修订号和应用后的偏好，由调用方按这个修订号比较并交换写回。`user_id` 是页面下载时的账号，期间退出、换号或重新登录就以 `Cancelled` 失败。共享应用和原生设置窗口都调这里。
+/// Windows 和 Linux「设置同步」的应用：把页面刚下载的账号设置（`preferences`）按版本过滤（单方案版本不应用方案，多方案版本把本版本没有的方案当作缺失）后应用到本机偏好，返回读到本机偏好时的修订号和应用后的偏好，由调用方按这个修订号比较并交换写回。`user_id` 是页面下载时的账号，期间退出、换号或重新登录就以 `Cancelled` 失败。共享应用和原生设置窗口都调这里。
 pub fn prepare_desktop_settings_apply<A: super::AccountApi, S: super::AccountSessionStorage>(
     session: &super::BackendAccountSession<A, S>,
     store: &crate::preferences::PreferencesStore,

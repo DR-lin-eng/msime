@@ -35,7 +35,8 @@ pub const CHAT_AUDIO_MAX_WAV_BYTES: usize = 7_000_000;
 pub fn asr_request_format(provider: &str) -> Option<&'static str> {
     match provider {
         "doubao" => Some(ASR_REQUEST_DOUBAO_WEBSOCKET),
-        "openai" | "siliconflow" | "groq" | "everyapi" | "mistral" => Some(ASR_REQUEST_MULTIPART),
+        "openai" | "siliconflow" | "groq" | "everyapi" | "mistral" | "zhipu" | "minimax"
+        | "custom" => Some(ASR_REQUEST_MULTIPART),
         "bailian" => Some(ASR_REQUEST_CHAT_AUDIO),
         "local" => Some(ASR_REQUEST_LOCAL),
         _ => None,
@@ -77,12 +78,10 @@ pub struct MobileVoiceProviderConfiguration {
     pub model_path: String,
 }
 
-/// The optional rewrite that runs over a transcript, resolved the same way the provider is.
+/// 按服务配置解析的可选转写润色；未启用时返回 `None`，不视为错误。
 ///
-/// `None` means the user did not ask for it, which is the common case and not an error. The prompt
-/// itself is not resolved here: the shipped preset bodies live in `shared/voice/PolishPrompt.h`,
-/// and the host that sends the request reads them from there so there is one copy of the wording
-/// that tells the model the transcript is data rather than instructions.
+/// 这里只传递方案与自定义槽位，不解析正文。内置正文归 `polish_catalog` 所有，
+/// 宿主通过静态导出的 `shared/voice/PolishPromptCatalog.h` 读取同一份内容。
 #[derive(Debug, PartialEq, Eq)]
 pub struct MobileVoicePolishConfiguration {
     pub endpoint: String,
@@ -118,6 +117,59 @@ pub fn valid_mobile_voice_endpoint(endpoint: &str, websocket: bool) -> bool {
     reqwest::Url::parse(endpoint)
         .ok()
         .is_some_and(|url| crate::endpoint::valid_endpoint_shape(endpoint, &url, expected_scheme))
+}
+
+/// Android 流式 WebSocket 传输消费的唯一 URL 解释结果。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct VoiceWebSocketEndpoint {
+    /// 传给普通 socket 和 TLS 连接器的主机文本，不带 IPv6 方括号。
+    pub socket_host: String,
+    /// 地址中的端口；未写端口时为安全 WebSocket 默认端口 443。
+    pub port: u16,
+    /// Host 头的值，包含 IPv6 方括号和非默认端口。
+    pub host_header: String,
+    /// 已百分号编码的路径和查询串，保留显式空查询。
+    pub request_target: String,
+}
+
+/// 为所有原生传输层统一解析并序列化安全流式地址。
+pub fn websocket_endpoint_descriptor(endpoint: &str) -> Option<VoiceWebSocketEndpoint> {
+    if !valid_mobile_voice_endpoint(endpoint, true) {
+        return None;
+    }
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    let host = url.host_str()?.to_owned();
+    let socket_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(&host)
+        .to_owned();
+    if socket_host.is_empty() {
+        return None;
+    }
+    let port = url.port_or_known_default()?;
+    let host_header = if socket_host.contains(':') {
+        if port == 443 {
+            format!("[{socket_host}]")
+        } else {
+            format!("[{socket_host}]:{port}")
+        }
+    } else if port == 443 {
+        socket_host.clone()
+    } else {
+        format!("{socket_host}:{port}")
+    };
+    let mut request_target = url.path().to_owned();
+    if let Some(query) = url.query() {
+        request_target.push('?');
+        request_target.push_str(query);
+    }
+    Some(VoiceWebSocketEndpoint {
+        socket_host,
+        port,
+        host_header,
+        request_target,
+    })
 }
 
 fn bounded_resolved_voice_fields(fields: &ResolvedVoiceFields) -> bool {
@@ -159,6 +211,8 @@ pub fn polish_provider_defaults(provider: &str) -> Option<(&'static str, &'stati
     {
         return Some((preset.endpoint, preset.model));
     }
+    // dashscope/moonshot 是 Windows 目录里的旧 id，对应目录中的 qwen/kimi；
+    // 与 everyapi/mistral 一样只解析不进目录。
     Some(match provider {
         "everyapi" => (
             "https://api.everyapi.ai/v1/chat/completions",
@@ -167,6 +221,14 @@ pub fn polish_provider_defaults(provider: &str) -> Option<(&'static str, &'stati
         "mistral" => (
             "https://api.mistral.ai/v1/chat/completions",
             "mistral-small-latest",
+        ),
+        "dashscope" => (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "qwen-plus",
+        ),
+        "moonshot" => (
+            "https://api.moonshot.cn/v1/chat/completions",
+            "kimi-k2-0905-preview",
         ),
         _ => return None,
     })
@@ -614,6 +676,62 @@ mod tests {
             ("wss://fixture.invalid/path#fragment", true),
         ] {
             assert!(!valid_mobile_voice_endpoint(endpoint, websocket));
+        }
+    }
+
+    #[test]
+    fn websocket_endpoint_descriptor_uses_one_serialized_url_representation() {
+        let descriptor =
+            websocket_endpoint_descriptor("wss://例子.invalid:8443/合成🍃/%2F?lang=zh+cn&empty=")
+                .expect("valid websocket endpoint");
+        assert_eq!(descriptor.socket_host, "xn--fsqu00a.invalid");
+        assert_eq!(descriptor.port, 8443);
+        assert_eq!(descriptor.host_header, "xn--fsqu00a.invalid:8443");
+        assert_eq!(
+            descriptor.request_target,
+            "/%E5%90%88%E6%88%90%F0%9F%8D%83/%2F?lang=zh+cn&empty="
+        );
+    }
+
+    #[test]
+    fn websocket_endpoint_descriptor_formats_ipv6_and_default_port() {
+        let descriptor =
+            websocket_endpoint_descriptor("wss://[::1]/stream?").expect("valid websocket endpoint");
+        assert_eq!(descriptor.socket_host, "::1");
+        assert_eq!(descriptor.port, 443);
+        assert_eq!(descriptor.host_header, "[::1]");
+        assert_eq!(descriptor.request_target, "/stream?");
+    }
+
+    #[test]
+    fn websocket_endpoint_descriptor_matches_shared_validation_and_url_serialization() {
+        for endpoint in [
+            "wss://fixture.invalid:0/stream",
+            "wss://fixture.invalid/%zz?value=%",
+        ] {
+            assert!(valid_mobile_voice_endpoint(endpoint, true));
+            let url = reqwest::Url::parse(endpoint).unwrap();
+            let descriptor = websocket_endpoint_descriptor(endpoint).unwrap();
+            assert_eq!(descriptor.port, url.port_or_known_default().unwrap());
+            let expected = if let Some(query) = url.query() {
+                format!("{}?{query}", url.path())
+            } else {
+                url.path().to_owned()
+            };
+            assert_eq!(descriptor.request_target, expected);
+        }
+    }
+
+    #[test]
+    fn websocket_endpoint_descriptor_rejects_invalid_ports_and_controls() {
+        for endpoint in [
+            "wss://fixture.invalid:65536/stream",
+            "wss://fixture.invalid/stream\nX: y",
+        ] {
+            assert!(
+                websocket_endpoint_descriptor(endpoint).is_none(),
+                "{endpoint}"
+            );
         }
     }
 }

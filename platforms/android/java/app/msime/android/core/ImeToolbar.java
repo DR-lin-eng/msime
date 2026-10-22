@@ -3,6 +3,10 @@ package app.msime.android;
 import app.msime.android.LayoutPolicy;
 
 import android.graphics.Color;
+import android.os.SystemClock;
+import android.view.KeyCharacterMap;
+import android.view.KeyEvent;
+import android.view.inputmethod.InputConnection;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -31,9 +35,6 @@ final class ImeToolbar {
     /** 「最近复制」那一行自己的剪贴板入口和收起键，和工具栏上的同一套配色。 */
     private Button recentClipHistoryButton;
     private Button recentClipCollapseButton;
-    /** 最近一次按在读音上的位置（读音视图自己的坐标）。 */
-    private float preeditTouchX;
-    private float preeditTouchY;
     private String styleCacheKey;
     private int iconColor;
     private int activeIconColor;
@@ -55,7 +56,7 @@ final class ImeToolbar {
         s.dismissShortcutButton = dismissButton;
         shortcutButtons = new Button[] {s.emojiShortcutButton, s.phraseShortcutButton,
             s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton,
-            s.textEditShortcutButton};
+            s.textEditShortcutButton, s.undoShortcutButton, s.redoShortcutButton};
         for (Button button : shortcutButtons) bindEditor(button);
         for (Button button : new Button[] {s.moreButton, dismissButton}) {
             bindEditor(button);
@@ -118,6 +119,8 @@ final class ImeToolbar {
                 case SCHEME -> s.schemeButton;
                 case FLOATING -> s.floatingShortcutButton;
                 case TEXT_EDIT -> s.textEditShortcutButton;
+                case UNDO -> s.undoShortcutButton;
+                case REDO -> s.redoShortcutButton;
             };
             // 算式结果保留为中间滚动区的第一项，两端按钮不参与排序。
             s.shortcutBar.addView(button, index + 1);
@@ -139,17 +142,10 @@ final class ImeToolbar {
             s.imePanels.showLocalInputMenu();
             return true;
         });
-        // 组字时轻点读音把组字光标移到点中的字母前（#5613）；落点在按下时记下，抬手成为一次点击时才换算成光标位置。render 只在组字可以移光标时让它可点。
-        s.preedit.setOnTouchListener((view, event) -> {
-            if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
-                preeditTouchX = event.getX();
-                preeditTouchY = event.getY();
-            }
-            return false;
-        });
+        // 点击现有标题进入临时放大编辑，不在细小的标题里直接定位。
         s.preedit.setOnClickListener(ignored -> {
             s.imeKeyFeedback.playFeedback(s.preedit);
-            s.movePreeditCaret(s.preedit.getOffsetForPosition(preeditTouchX, preeditTouchY));
+            s.imeCompositionEditor.open();
         });
         ViewPolicy.setClickable(s.preedit, false);
         LinearLayout preeditFrame = LayoutPolicy.row(s);
@@ -194,7 +190,7 @@ final class ImeToolbar {
         s.phraseShortcutButton.setContentDescription("常用语");
         s.clipboardShortcutButton = s.shortcutButton(s.shortcutBar, "剪贴板",
             KeyboardShortcutIconPolicy.Icon.CLIPBOARD,
-            panelToggle(() -> s.clipboardScroll, s.imePanels::showClipboardHistory));
+            panelToggle(() -> s.clipboardSurface, s.imePanels::showClipboardHistory));
         s.clipboardShortcutButton.setContentDescription("剪贴板");
         // 浮动键盘按钮默认不在工具栏上，用户在设置「键盘工具栏」里打开（#5621）。
         s.floatingShortcutButton = s.shortcutButton(s.shortcutBar, "浮动键盘",
@@ -205,6 +201,12 @@ final class ImeToolbar {
             KeyboardShortcutIconPolicy.Icon.TEXT_EDIT,
             panelToggle(() -> s.textEditPanel, s.imeTextEditPanel::show));
         s.textEditShortcutButton.setContentDescription("文本编辑");
+        s.undoShortcutButton = s.shortcutButton(s.shortcutBar, "撤销",
+            KeyboardShortcutIconPolicy.Icon.UNDO, () -> performHistory(false));
+        s.undoShortcutButton.setContentDescription("撤销");
+        s.redoShortcutButton = s.shortcutButton(s.shortcutBar, "重做",
+            KeyboardShortcutIconPolicy.Icon.REDO, () -> performHistory(true));
+        s.redoShortcutButton.setContentDescription("重做");
         s.voiceShortcutButton = s.shortcutButton(s.shortcutBar, "语音",
             KeyboardShortcutIconPolicy.Icon.VOICE, s::showVoiceResult);
         s.voiceShortcutButton.setContentDescription("打开语音结果");
@@ -236,12 +238,33 @@ final class ImeToolbar {
         s.exitLocalModeButton.setContentDescription("退出本地模式");
         ViewPolicy.clearPadding(s.exitLocalModeButton);
         s.imeStyler.styleButton(s.exitLocalModeButton, true);
-        bindToolbarAction(s.exitLocalModeButton, () -> s.command(3));
+        bindToolbarAction(s.exitLocalModeButton, s::clearCurrentInput);
         ViewPolicy.clearMinimumHeight(s.exitLocalModeButton);
         candidateHeader.addView(s.exitLocalModeButton, new LinearLayout.LayoutParams(
             s.pixels(32), LinearLayout.LayoutParams.MATCH_PARENT));
         candidateRegion.addView(candidateHeader, LayoutPolicy.matchWidthHeightPx(
             s.pixels(READING_ROW_DP)));
+    }
+
+    /** 历史由编辑器持有；仅发送一次快捷键，不采集文本，也不以投递成功冒充已撤销。 */
+    private void performHistory(boolean redo) {
+        InputConnection target = s.connection;
+        if (target == null || EditorPolicy.password(s.editorInputType)) return;
+        if (s.session != 0 && s.hasEngineComposition()) s.command(2);
+        if (s.connection != target) return;
+        try {
+            target.finishComposingText();
+        } catch (RuntimeException ignored) { return; }
+        s.selectionEcho.invalidate();
+        int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
+        if (redo) meta |= KeyEvent.META_SHIFT_ON | KeyEvent.META_SHIFT_LEFT_ON;
+        long down = SystemClock.uptimeMillis();
+        // 无论按下是否被接收都尝试松开，连接可在任意一步断开；不追加另一种撤销命令。
+        for (int action : new int[] {KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP})
+            InputConnectionGuard.sendKeyEvent(target, new KeyEvent(down,
+                SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_Z, 0, meta,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+                KeyEvent.FLAG_SOFT_KEYBOARD | KeyEvent.FLAG_KEEP_TOUCH_MODE));
     }
 
     private void bindToolbarAction(Button button, Runnable action) {
@@ -304,7 +327,7 @@ final class ImeToolbar {
         LayoutPolicy.setPaddingDp(row, s, 2, 4, 2, 4);
         row.setContentDescription("最近复制");
         Button history = s.shortcutButton(row, "剪贴板", KeyboardShortcutIconPolicy.Icon.CLIPBOARD,
-            panelToggle(() -> s.clipboardScroll, s.imePanels::showClipboardHistory));
+            panelToggle(() -> s.clipboardSurface, s.imePanels::showClipboardHistory));
         history.setContentDescription("剪贴板");
         history.setLayoutParams(LayoutPolicy.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
         recentClipHistoryButton = history;

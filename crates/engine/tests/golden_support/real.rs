@@ -182,6 +182,7 @@ pub fn product_options(options: &mut SessionOptions) {
     options.local_modes = LocalModeOptions {
         unicode: true,
         date_time: true,
+        date_time_menu: true,
         quick_phrase: true,
         emoji: true,
         kaomoji: true,
@@ -192,6 +193,7 @@ pub fn product_options(options: &mut SessionOptions) {
         command: false,
         mention: false,
         chaizi: false,
+        symbol: true,
         shift_letter_entry: true,
     };
     options.wubi.mixed_pinyin = false;

@@ -1,35 +1,32 @@
 #pragma once
 #import <AppKit/AppKit.h>
+#import <QuartzCore/CAShapeLayer.h>
 #import "CandidateTypography.h"
 #import "CandidateTextMetrics.h"
-#include "CandidateItemLayout.h"
+#include "../../../../shared/candidate/CandidateItemLayout.h"
 #include "CandidateSkin.h"
+#include "CandidateShadow.h"
 #import "CandidatePronunciation.h"
 #import "CandidateMotion.h"
 #import "CandidateCanvas.h"
 // Drawing adapted from MSIME-Apple b637828e15eafcb5e459edd270a962dd14517285.
-static const CGFloat MSIMECandidateTranslationOpacity = 0.62;
-// A reading is quieter than the gloss it follows, relative to the gloss colour.
-static const CGFloat MSIMECandidatePronunciationOpacity = 0.72;
-// The translation under or beside a candidate is a fixed 12pt run at every candidate size (design-input-surfaces §2.1), so a large candidate font does not grow a gloss the eye only glances at.
-static const CGFloat MSIMECandidateTranslationPointSize = 12.0;
-// The top row of the card: the reading on the left, then 「1 / 3」 and the two page arrows on the right.
-static const CGFloat MSIMECandidateHeaderHeight = 26.0;
-// Room kept between a horizontal card that grows past half the screen and each edge of the visible area.
-static const CGFloat MSIMECandidateScreenMargin = 16.0;
-// 「1 / 3」 is set at the design's 13pt in the secondary colour (dc.html L1324), a point above the translation run.
-static const CGFloat MSIMECandidatePageIndicatorPointSize = 13.0;
-static const CGFloat MSIMECandidatePageArrowWidth = 28.0;
-static const CGFloat MSIMECandidatePageIndicatorGap = 4.0;
-// A row keeps 6 points above and below its text, and a gloss under the text 2 points on each side of its lines.
-static const CGFloat MSIMECandidateRowPadding = 12.0;
-static const CGFloat MSIMECandidateGlossPadding = 4.0;
-static const CGFloat MSIMECandidateTextRight = 8.0;
+// 尺寸和透明度与 Linux 的 X11 原生画布共用 shared/candidate/CandidateChromeMetrics.h，含义见那里。
+static const CGFloat MSIMECandidateTranslationOpacity = msime::candidate::kCandidateTranslationOpacity;
+static const CGFloat MSIMECandidatePronunciationOpacity = msime::candidate::kCandidatePronunciationOpacity;
+static const CGFloat MSIMECandidateTranslationPointSize = msime::candidate::kCandidateTranslationPointSize;
+static const CGFloat MSIMECandidateHeaderHeight = msime::candidate::kCandidateHeaderHeight;
+static const CGFloat MSIMECandidateScreenMargin = msime::candidate::kCandidateScreenMargin;
+static const CGFloat MSIMECandidatePageIndicatorPointSize = msime::candidate::kCandidatePageIndicatorPointSize;
+static const CGFloat MSIMECandidatePageArrowWidth = msime::candidate::kCandidatePageArrowWidth;
+static const CGFloat MSIMECandidatePageIndicatorGap = msime::candidate::kCandidatePageIndicatorGap;
+static const CGFloat MSIMECandidateRowPadding = msime::candidate::kCandidateRowPadding;
+static const CGFloat MSIMECandidateGlossPadding = msime::candidate::kCandidateGlossPadding;
+static const CGFloat MSIMECandidateTextRight = msime::candidate::kCandidateTextRight;
 
 // Every length below is the window at 100%; `scale` is candidate_scale_percent as a factor, which the candidate fonts are already set at.
 static inline CGFloat MSIMECandidateTextLeft(BOOL showSelectedBar, CGFloat scale = 1.0)
 {
-    return (8.0 + (showSelectedBar ? 6.0 : 0.0)) * scale;
+    return msime::candidate::CandidateTextLeft(showSelectedBar, scale);
 }
 
 // One set of attributes for measuring and drawing a run, so a wrapped run is drawn in exactly the height the layout measured for it. A run that fits clips instead of wrapping.
@@ -67,9 +64,9 @@ static inline CGFloat MSIMECandidateGlossHeight(NSString *text, NSFont *font, CG
 }
 
 // Metrics of a candidate row. The annotation is drawn at the candidate font, the gloss at glossFont; `chrome` is the width of the number, bar and paddings around the content.
-static inline msime::mac::CandidateLayoutMetrics MSIMECandidateLayoutMetrics(NSFont *font, NSFont *glossFont, CGFloat candidateRow, CGFloat chrome, CGFloat scale = 1.0)
+static inline msime::candidate::CandidateLayoutMetrics MSIMECandidateLayoutMetrics(NSFont *font, NSFont *glossFont, CGFloat candidateRow, CGFloat chrome, CGFloat scale = 1.0)
 {
-    msime::mac::CandidateLayoutMetrics metrics;
+    msime::candidate::CandidateLayoutMetrics metrics;
     metrics.candidateRow = candidateRow;
     metrics.chrome = chrome;
     // 注释包在括号里紧贴候选字（「你好(wqvb)」），括号本身就是分隔，不再留空隙。
@@ -80,9 +77,9 @@ static inline msime::mac::CandidateLayoutMetrics MSIMECandidateLayoutMetrics(NSF
     return metrics;
 }
 
-static inline msime::mac::CandidateItemWidths MSIMECandidateItemWidths(NSString *text, NSString *annotation, NSString *translation, NSFont *font, NSFont *glossFont, CGFloat scale = 1.0)
+static inline msime::candidate::CandidateItemWidths MSIMECandidateItemWidths(NSString *text, NSString *annotation, NSString *translation, NSFont *font, NSFont *glossFont, CGFloat scale = 1.0)
 {
-    msime::mac::CandidateItemWidths widths;
+    msime::candidate::CandidateItemWidths widths;
     widths.text = MSIMECandidateSingleLineWidth(text, font);
     widths.annotation = MSIMECandidateSingleLineWidth(annotation, font);
     widths.translation = MSIMECandidateSingleLineWidth(translation, glossFont);
@@ -91,17 +88,17 @@ static inline msime::mac::CandidateItemWidths MSIMECandidateItemWidths(NSString 
 }
 
 // Wrapped height of each run, as the layout asks for it: the text keeps the row's padding, a gloss its own.
-static inline msime::mac::CandidateRunMeasure MSIMECandidateRunMeasure(NSString *text, NSString *annotation, NSString *translation, NSFont *font, NSFont *glossFont, CGFloat scale = 1.0, CGFloat rowPadding = -1.0)
+static inline msime::candidate::CandidateRunMeasure MSIMECandidateRunMeasure(NSString *text, NSString *annotation, NSString *translation, NSFont *font, NSFont *glossFont, CGFloat scale = 1.0, CGFloat rowPadding = -1.0)
 {
     if (rowPadding < 0.0) rowPadding = MSIMECandidateRowPadding * scale;
-    return [text = [text copy], annotation = [annotation copy], translation = [translation copy], font, glossFont, scale, rowPadding](msime::mac::CandidateRun run, double width) -> double {
+    return [text = [text copy], annotation = [annotation copy], translation = [translation copy], font, glossFont, scale, rowPadding](msime::candidate::CandidateRun run, double width) -> double {
         switch (run)
         {
-        case msime::mac::CandidateRun::text:
+        case msime::candidate::CandidateRun::text:
             return MSIMECandidateWrappedHeight(text, font, width) + rowPadding;
-        case msime::mac::CandidateRun::annotation:
+        case msime::candidate::CandidateRun::annotation:
             return MSIMECandidateWrappedHeight(annotation, font, width);
-        case msime::mac::CandidateRun::translation:
+        case msime::candidate::CandidateRun::translation:
             return MSIMECandidateWrappedHeight(translation, glossFont, width) + MSIMECandidateGlossPadding * scale;
         }
         return 0.0;
@@ -198,7 +195,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 // 脚本插件给这一行加的注释，已经过 MSIMECandidateScriptAnnotationRun 收拾；画在释义行的最后一行，斜体，从不上屏，也不替换引擎的 annotation。没有时为空。
 @property(nonatomic, copy) NSString *scriptAnnotation;
 // Geometry from the panel's page layout; frames, drawing and hit testing all come from it. Without one the button lays itself out in its bounds.
-@property(nonatomic) msime::mac::CandidateItemLayout itemLayout;
+@property(nonatomic) msime::candidate::CandidateItemLayout itemLayout;
 @property(nonatomic) BOOL hasItemLayout;
 // Where the candidate text starts, the same for every row of a page so their text lines up. Zero derives it from the number drawn.
 @property(nonatomic) CGFloat contentLeft;
@@ -268,13 +265,20 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
         [self removeTrackingArea:_candidateTrackingArea];
     _candidateTrackingArea = [[NSTrackingArea alloc]
         initWithRect:NSZeroRect
-             options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+             options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
                owner:self
             userInfo:nil];
     [self addTrackingArea:_candidateTrackingArea];
+    self.candidateHovered = NO;
+    self.needsDisplay = YES;
     [super updateTrackingAreas];
 }
 - (void)mouseEntered:(NSEvent *)event
+{
+    // 候选窗也会出现在静止、隐藏的指针下；收到区域内的移动消息后才显示悬停。
+    [self mouseExited:event];
+}
+- (void)mouseMoved:(NSEvent *)event
 {
     (void)event;
     self.candidateHovered = YES;
@@ -289,7 +293,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 - (CGPathRef)createSelectionFillPath
 {
     if (!self.hasCornerRadii) return nullptr;
-    return MSIMECreateCandidateCornerPath(NSInsetRect(self.bounds, 1, 1), self.cornerRadii, self.isFlipped);
+    return MSIMECreateCandidateCornerPath(self.bounds, self.cornerRadii, self.isFlipped);
 }
 - (void)drawRect:(NSRect)dirtyRect
 {
@@ -309,7 +313,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
             CGContextFillPath(context);
             CGPathRelease(path);
         } else {
-            [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 1, 1) xRadius:self.cornerRadius yRadius:self.cornerRadius] fill];
+            [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:self.cornerRadius yRadius:self.cornerRadius] fill];
         }
     }
     if (self.candidateHighlighted && self.showSelectedBar)
@@ -366,24 +370,24 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
     const NSSize wordSize = [word sizeWithAttributes:titleAttributes];
     NSFont *glossFont = self.translationFont ?: [NSFont systemFontOfSize:MSIMECandidateTranslationPointSize * scale];
     const CGFloat contentLeft = self.contentLeft > 0.0 ? self.contentLeft : textLeft + numberSize.width + MSIMECandidateNumberGap * scale;
-    msime::mac::CandidateItemLayout layout = self.itemLayout;
+    msime::candidate::CandidateItemLayout layout = self.itemLayout;
     if (!self.hasItemLayout)
     {
         // A button nobody laid out lays itself out in its own bounds, with the same rule the panel uses.
-        const msime::mac::CandidateLayoutMetrics metrics =
+        const msime::candidate::CandidateLayoutMetrics metrics =
             MSIMECandidateLayoutMetrics(self.font, glossFont, MAX(boundsHeight, MSIMECandidateTextHeight(word, self.font) + MSIMECandidateRowPadding * scale),
                                         contentLeft + textRight, scale);
-        layout = msime::mac::LayoutCandidateItem(MSIMECandidateItemWidths(word, annotation, translation, self.font, glossFont, scale),
+        layout = msime::candidate::LayoutCandidateItem(MSIMECandidateItemWidths(word, annotation, translation, self.font, glossFont, scale),
                                                  self.bounds.size.width - contentLeft - textRight, metrics,
                                                  self.translationBelow, MSIMECandidateRunMeasure(word, annotation, translation, self.font, glossFont, scale));
     }
     // The number sits on the text's first line.
-    CGFloat textTop = (layout.textHeight - wordSize.height) / 2;
+    CGFloat textTop = layout.contentTop + (layout.textHeight - wordSize.height) / 2;
     CGFloat firstLine = wordSize.height;
     if (layout.textWrapped)
     {
         const CGFloat drawn = MSIMECandidateWrappedHeight(word, self.font, layout.textWidth);
-        textTop = MAX(0.0, (layout.textHeight - drawn) / 2);
+        textTop = layout.contentTop + MAX(0.0, (layout.textHeight - drawn) / 2);
         firstLine = MSIMECandidateTextHeight(@"", self.font);
         [word drawInRect:box(contentLeft, textTop, layout.textWidth, drawn) withAttributes:MSIMECandidateRunAttributes(self.font, titleColor, YES)];
     }
@@ -395,7 +399,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
         withAttributes:numberAttributes];
     if (annotation.length && layout.annotation.width > 0.0)
     {
-        const msime::mac::CandidateRunBox &run = layout.annotation;
+        const msime::candidate::CandidateRunBox &run = layout.annotation;
         if (run.below)
             [annotation drawInRect:box(contentLeft + run.x, run.y, run.width, run.height) withAttributes:MSIMECandidateRunAttributes(self.font, titleColor, YES)];
         else
@@ -406,7 +410,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
     }
     if (translation.length && layout.translation.width > 0.0)
     {
-        const msime::mac::CandidateRunBox &run = layout.translation;
+        const msime::candidate::CandidateRunBox &run = layout.translation;
         NSColor *glossColor = self.translationColor ?: [titleColor colorWithAlphaComponent:MSIMECandidateTranslationOpacity];
         NSMutableAttributedString *glossText = [[NSMutableAttributedString alloc] initWithString:translation
             attributes:MSIMECandidateRunAttributes(glossFont, glossColor, run.below)];
@@ -434,7 +438,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 }
 @end
 
-@interface MSIMECandidateChromeView : NSView
+@interface MSIMECandidateChromeView : NSView <MSIMECandidateWindowShadowHost>
 @property(nonatomic, weak) id appearanceTarget;
 @property(nonatomic) SEL appearanceAction;
 @property(nonatomic, copy) NSColor *fillColor;
@@ -450,14 +454,18 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 // 候选列表的实际区域；画布平移时与真实按钮一起移动。
 @property(nonatomic) NSRect candidateRowsRect;
 @property(nonatomic) BOOL candidateRowsTouchTop;
+@property(nonatomic) BOOL clipsCandidateContent;
 // 系统主题允许原生玻璃；旧系统和降低透明度时仍画原有卡片。
 @property(nonatomic) BOOL liquidGlassEnabled;
 @property(nonatomic, readonly) BOOL liquidGlassActive;
 @property(nonatomic, strong, readonly) NSView *candidateContentView;
 @property(nonatomic) msime::mac::SkinInsets canvasOuterInsets;
+@property(nonatomic) msime::mac::SkinInsets shadowOuterInsets;
+@property(nonatomic) msime::mac::CandidateShadow candidateShadow;
 @property(nonatomic) BOOL canvasPanelLoaded;
 @property(nonatomic, strong, readonly) MSIMECandidateCanvasAssets *canvasAssets;
 - (void)drawCandidateCard;
+- (void)notifyCandidateAppearanceChanged;
 - (void)configureCanvas:(const msime::mac::SkinCanvas &)canvas assets:(MSIMECandidateCanvasAssets *)assets;
 - (void)setCanvasPlaybackVisible:(BOOL)visible anchor:(CFTimeInterval)anchor;
 @end
@@ -469,6 +477,16 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 - (BOOL)isOpaque { return NO; }
 - (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
 - (void)drawRect:(NSRect)dirtyRect { (void)dirtyRect; [self.owner drawCandidateCard]; }
+@end
+@interface MSIMECandidateContentView : NSView
+@property(nonatomic, weak) MSIMECandidateChromeView *owner;
+@end
+@implementation MSIMECandidateContentView
+- (void)viewDidChangeEffectiveAppearance
+{
+    [super viewDidChangeEffectiveAppearance];
+    [self.owner notifyCandidateAppearanceChanged];
+}
 @end
 @implementation MSIMECandidateChromeView
 {
@@ -485,7 +503,9 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
         _cardBackground.owner = self;
         _cardBackground.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [self addSubview:_cardBackground];
-        _candidateContentView = [[NSView alloc] initWithFrame:self.bounds];
+        MSIMECandidateContentView *content = [[MSIMECandidateContentView alloc] initWithFrame:self.bounds];
+        content.owner = self;
+        _candidateContentView = content;
         _candidateContentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [self addSubview:_candidateContentView];
         [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self
@@ -496,6 +516,7 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 }
 - (NSView *)candidateContentView { return _candidateContentView; }
 - (BOOL)liquidGlassActive { return _glassBackground != nil; }
+- (BOOL)nativeWindowShadowEnabled { return self.candidateShadow.nativeWindow; }
 - (void)dealloc
 {
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
@@ -507,7 +528,10 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 }
 - (NSRect)cardBounds
 {
-    const auto outer = self.canvasOuterInsets;
+    auto outer = self.canvasOuterInsets;
+    const auto shadow = self.shadowOuterInsets;
+    outer.top += shadow.top; outer.right += shadow.right;
+    outer.bottom += shadow.bottom; outer.left += shadow.left;
     return NSMakeRect(NSMinX(self.bounds) + outer.left, NSMinY(self.bounds) + outer.bottom,
                      MAX(0.0, NSWidth(self.bounds) - outer.left - outer.right),
                      MAX(0.0, NSHeight(self.bounds) - MAX(0.0, self.cardTopInset) - outer.top - outer.bottom));
@@ -560,6 +584,19 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 {
     [super layout];
     [self updateGlassBackground];
+    if (self.clipsCandidateContent) {
+        const CGFloat halfBorder = MAX(0.0, self.lineWidth) / 2.0;
+        const NSRect bounds = NSInsetRect(_candidateContentView.bounds, halfBorder, halfBorder);
+        const CGFloat radius = MAX(0.0, self.cornerRadius - halfBorder);
+        CAShapeLayer *mask = [CAShapeLayer layer];
+        CGPathRef path = CGPathCreateWithRoundedRect(NSRectToCGRect(bounds), radius, radius, nullptr);
+        mask.path = path;
+        CGPathRelease(path);
+        _candidateContentView.wantsLayer = YES;
+        _candidateContentView.layer.mask = mask;
+    } else {
+        _candidateContentView.layer.mask = nil;
+    }
 }
 - (BOOL)isOpaque { return NO; }
 - (void)viewDidMoveToWindow
@@ -571,6 +608,10 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 - (void)viewDidChangeEffectiveAppearance
 {
     [super viewDidChangeEffectiveAppearance];
+    [self notifyCandidateAppearanceChanged];
+}
+- (void)notifyCandidateAppearanceChanged
+{
     if (self.appearanceTarget != nil && self.appearanceAction != nullptr)
     {
 #pragma clang diagnostic push
@@ -607,13 +648,31 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 }
 - (void)drawCandidateCard
 {
+    const NSRect shadowBounds = self.cardBounds;
+    NSBezierPath *shadowPath = [NSBezierPath bezierPathWithRoundedRect:shadowBounds
+        xRadius:self.cornerRadius yRadius:self.cornerRadius];
+    // 阴影只落在卡片外，半透明底色不会被阴影压暗；不透明遮罩与底色透明度无关。
+    for (const auto &pass : self.candidateShadow.passes) {
+        if (pass.alpha <= 0) continue;
+        [NSGraphicsContext saveGraphicsState];
+        NSBezierPath *clip = [NSBezierPath bezierPathWithRect:self.bounds];
+        [clip appendBezierPath:shadowPath];
+        clip.windingRule = NSWindingRuleEvenOdd;
+        [clip addClip];
+        NSShadow *shadow = [NSShadow new];
+        shadow.shadowOffset = NSMakeSize(pass.x, -pass.y);
+        shadow.shadowBlurRadius = pass.blur;
+        shadow.shadowColor = [NSColor colorWithWhite:0 alpha:pass.alpha];
+        [shadow set];
+        [NSColor.blackColor setFill];
+        [shadowPath fill];
+        [NSGraphicsContext restoreGraphicsState];
+    }
     // 原生玻璃提供底色和边缘高光，不再叠一层不透明填色把材质盖住。
     if (_glassBackground || self.canvasPanelLoaded) return;
     // 坐标未翻转：装饰带在顶部，卡片只占下面的部分。
-    const NSRect bounds = self.cardBounds;
-    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:bounds
-                                                         xRadius:self.cornerRadius
-                                                         yRadius:self.cornerRadius];
+    const NSRect bounds = shadowBounds;
+    NSBezierPath *path = shadowPath;
     [(self.fillColor != nil ? self.fillColor : NSColor.windowBackgroundColor) setFill];
     [path fill];
     NSImage *background = self.backgroundImage;

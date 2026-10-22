@@ -200,6 +200,7 @@ final class ImeLetterRows {
         final float[] downY = new float[1];
         final boolean[] triggered = new boolean[1];
         final boolean[] optionsShown = new boolean[1];
+        final boolean[] directLetterOnRelease = new boolean[1];
         Runnable hold = () -> {
             if (triggered[0] || !key.isPressed()) return;
             triggered[0] = true;
@@ -222,6 +223,7 @@ final class ImeLetterRows {
                     downY[0] = DimensionPolicy.fromPixels(s, event.getY());
                     triggered[0] = false;
                     optionsShown[0] = false;
+                    directLetterOnRelease[0] = false;
                     s.imeLayoutRows.dismissNineKeyHoldOptions();
                     // 气泡读按下这一刻的键面：大小写变化是就地改键面（refreshLetterCase），建键时的键面可能已经过时。
                     if (touchPreference(AndroidLocalSettings.KEY_POPUP)) showKeyPreview(key, key.getText().toString());
@@ -234,23 +236,33 @@ final class ImeLetterRows {
                 case MotionEvent.ACTION_MOVE -> {
                     if (optionsShown[0]) {
                         s.imeLayoutRows.moveLetterOptions(key, event);
-                    } else if (hint != null && !triggered[0]
-                            && touchPreference(AndroidLocalSettings.SWIPE_DOWN_SYMBOLS)) {
-                        String direction = s.localSettings.choice(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION);
-                        String opposite = SwipeHintPolicy.UP.equals(direction) ? SwipeHintPolicy.DOWN : SwipeHintPolicy.UP;
+                    } else if (hint != null && !triggered[0]) {
                         float currentY = DimensionPolicy.fromPixels(s, event.getY());
-                        if (SwipeHintPolicy.swiped(direction, downY[0], currentY)) {
+                        // 当滑动输入关闭时，Android 15 可能因手指离开按键而取消 Button 的默认 click。
+                        // 仍把这次手势当作原字母点按，保证「关闭滑动」在不同 API 的触摸分发上一致。
+                        if (!touchPreference(AndroidLocalSettings.SWIPE_DOWN_SYMBOLS)) {
+                            if (Math.abs(currentY - downY[0]) > SwipeHintPolicy.THRESHOLD_DP) {
+                                triggered[0] = true;
+                                directLetterOnRelease[0] = true;
+                                key.removeCallbacks(hold);
+                                hideKeyPreview(key);
+                            }
+                        } else {
+                            String direction = s.localSettings.choice(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION);
+                            String opposite = SwipeHintPolicy.UP.equals(direction) ? SwipeHintPolicy.DOWN : SwipeHintPolicy.UP;
+                            if (SwipeHintPolicy.swiped(direction, downY[0], currentY)) {
                             triggered[0] = true;
                             key.removeCallbacks(hold);
                             if (keyPreview != null && keyPreviewOwner == key)
                                 keyPreview.setLabel(LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()));
-                        } else if (!s.dedicatedEnglish && !s.letterCaseSchemeActive()
-                                && SwipeHintPolicy.swiped(opposite, downY[0], currentY)) {
+                            } else if (!s.dedicatedEnglish && !s.letterCaseSchemeActive()
+                                    && SwipeHintPolicy.swiped(opposite, downY[0], currentY)) {
                             triggered[0] = true;
                             optionsShown[0] = true;
                             key.removeCallbacks(hold);
                             hideKeyPreview(key);
-                            s.imeLayoutRows.showLetterOptions(key, input);
+                                s.imeLayoutRows.showLetterOptions(key, input);
+                            }
                         }
                     }
                     return triggered[0];
@@ -267,7 +279,8 @@ final class ImeLetterRows {
                     if (optionsShown[0] && s.imeLayoutRows.finishLetterOptions(key, event)) return true;
                     s.imeKeyFeedback.playFeedback(key);
                     s.countKey(key);
-                    if (!optionsShown[0]) s.imeLayoutRows.commitLetterHint(input);
+                    if (directLetterOnRelease[0]) s.type(input.charAt(0));
+                    else if (!optionsShown[0]) s.imeLayoutRows.commitLetterHint(input);
                     return true;
                 }
                 case MotionEvent.ACTION_CANCEL -> {

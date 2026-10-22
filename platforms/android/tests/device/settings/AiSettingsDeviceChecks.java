@@ -46,7 +46,8 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
         JSONObject original = new JSONObject(ai().toString());
         try {
             JSONObject seed = new JSONObject(original.toString()).put("enabled", false).put("provider", "deepseek")
-                .put("endpoint", "").put("model", "").put("tokens", new JSONObject()
+                .put("endpoint", "").put("model", "").put("endpoints", new JSONObject()).put("models", new JSONObject())
+                .put("tokens", new JSONObject()
                     .put("https://api.openai.com:443", "synthetic-openai")
                     .put("https://fixture.invalid:443", "synthetic-other"));
             writeAi(seed);
@@ -84,6 +85,9 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
             clickPage("服务商");
             tap(option("DeepSeek"));
             awaitAi("provider", "deepseek");
+            awaitAi("model", "deepseek-v4-flash");
+            clickPage("服务商");
+            tap(option("OpenAI"));
             awaitAi("model", "synthetic-custom-model");
 
             stage = "fetch and select models through the native product page";
@@ -110,7 +114,7 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
                 server.release();
                 awaitNotBusy();
                 checkNoFetchedModels();
-                awaitAi("model", "synthetic-current");
+                awaitAi("model", "synthetic-custom-model");
             }
 
             stage = "credential edits discard a delayed model catalog";
@@ -166,7 +170,11 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
         String raw = (String) nativeType.getMethod("aiProviderCatalog").invoke(null);
         Method parse = settingsType.getMethod("parseCatalog", String.class);
         List<?> catalog = (List<?>) parse.invoke(null, raw);
-        check(catalog.size() == 13, "完整共享目录包含既有全部服务");
+        var ids = new java.util.HashSet<String>();
+        for (Object provider : catalog) ids.add((String) provider.getClass().getMethod("id").invoke(provider));
+        check(ids.equals(new java.util.HashSet<>(java.util.Arrays.asList("everyapi", "openai", "anthropic", "gemini",
+            "deepseek", "qwen", "kimi", "zhipu", "minimax", "volcengine", "siliconflow", "groq", "openrouter", "ollama", "custom"))),
+            "共享目录包含完整服务标识，允许 JNI 严格解析后逐项保留");
         JSONObject wrong = new JSONObject(raw).put("ok", "true");
         reject(parse, wrong);
         JSONObject duplicate = new JSONObject(raw);
@@ -181,8 +189,13 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
             .put("tokens", new JSONObject().put("https://fixture.invalid:443", "合成凭据🍃"))
             .put("prompt_custom_2", "合成提示词");
         settingsType.getMethod("switchProvider", JSONObject.class, String.class).invoke(null, ai, "openai");
-        check("https://fixture.invalid/custom".equals(ai.getString("endpoint")), "自定义地址不被预设覆盖");
-        check("synthetic-custom".equals(ai.getString("model")), "自定义模型保留");
+        check("https://api.openai.com/v1/chat/completions".equals(ai.getString("endpoint")), "新提供方使用自己的默认地址");
+        check("gpt-4.1-mini".equals(ai.getString("model")), "新提供方使用自己的默认模型");
+        check("https://fixture.invalid/custom".equals(ai.getJSONObject("endpoints").getString("deepseek")), "自定义地址记在原提供方槽位");
+        check("synthetic-custom".equals(ai.getJSONObject("models").getString("deepseek")), "自定义模型记在原提供方槽位");
+        settingsType.getMethod("switchProvider", JSONObject.class, String.class).invoke(null, ai, "deepseek");
+        check("https://fixture.invalid/custom".equals(ai.getString("endpoint")), "切回原提供方恢复自定义地址");
+        check("synthetic-custom".equals(ai.getString("model")), "切回原提供方恢复自定义模型");
         check("合成凭据🍃".equals(ai.getJSONObject("tokens").getString("https://fixture.invalid:443")), "合成 origin 凭据不变");
         check("合成提示词".equals(ai.getString("prompt_custom_2")), "切换保留提示词槽");
     }

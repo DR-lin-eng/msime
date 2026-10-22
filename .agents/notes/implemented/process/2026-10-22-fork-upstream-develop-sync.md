@@ -30,3 +30,5 @@ Status: implemented
 固定 Rust 1.97.1 / Debian 12 Docker 中，七个共享 crate 的单元与集成回归分别通过；继承的 ABI 旧断言修正后，host-api 927 项、input-runtime 367 项通过，新增后台完整排列回归实际执行。七 crate 全部 targets 的 `clippy -D warnings` 和格式检查通过，`--quick` 完成工作区、Linux 设置壳、Linux 原生构建及测试。机械性的测试初始化、冗余 Result 闭包与许可证末尾空行同时修正，没有扩大失败基线。
 
 iOS App/键盘扩展构建、安装、启动及 12 项 UIKit 回归通过；包内同时有 audio 与 processing 后台模式。macOS 原生输入法构建及 shortcut、input-assistance 两项测试通过。Android 256 项 JVM 冒烟、215 个设备用例源码编译，以及 API 28 上四个共享客户端 crate 的整套测试通过；原生库的 ELF/16KB 对齐和开发 APK 构建通过。UI 类型检查、构建和笔记检查独立通过。远端 CI、真实 Apple 短信、系统整夜调度和设备 NPU/GPU 性能不由这些本地结果推断。
+
+Android 原生 AI 目录验收核对完整的 15 个服务标识，并验证切回提供方后恢复其自定义地址和模型；夹具清空自己的临时槽位，在 finally 恢复原文档。核心冒烟从旧目录断言失败处接续，前面已通过的打字、编辑、剪贴板、数字层和词库导入保留原记录，不重复运行。

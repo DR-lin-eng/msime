@@ -143,7 +143,9 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
             throw new AssertionError("Preview did not extend above the keyboard");
         await(node -> equalsText(text, node.getText()) && !node.isLongClickable());
         Rect editorAfter = new Rect();
-        await(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused)).getBoundsInScreen(editorAfter);
+        // 全文浮层覆盖编辑器时，旧系统会把仍有焦点的编辑器标成不可见；此处核对焦点和位置。
+        AccessibilityNodeInfo editorNode = awaitAny(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused));
+        editorNode.getBoundsInScreen(editorAfter);
         Rect cardAfter = new Rect();
         await(node -> node.isLongClickable() && node.getText() != null
             && node.getText().toString().startsWith("Synthetic preview line 0")).getBoundsInScreen(cardAfter);

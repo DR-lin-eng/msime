@@ -29,6 +29,7 @@ import app.msime.android.VoicePolishSettingsPolicy;
 import app.msime.android.VoiceProviderCatalog;
 import app.msime.android.VoiceProviderPolicy;
 import app.msime.android.VoiceProviderSettings;
+import app.msime.android.VoiceLanguageCatalog;
 import app.msime.android.VoiceRecognitionActivity;
 import app.msime.android.core.InputViewValuePolicy;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
@@ -57,8 +58,6 @@ public final class VoicePage extends ReloadingDetailPage {
         return java.util.List.of("识别", "服务", "模型", "润色", "隐私");
     }
 
-    private static final String[] LANGUAGES = {"zh-cn", "yue", "en", "auto"};
-    private static final String[] LANGUAGE_LABELS = {"普通话", "粤语", "英语", "普通话 + 英语"};
     private static final String[] TRIGGER_LABELS = {"长按空格", "工具栏按钮", "无"};
     private static final int TRIGGER_SPACE = 0;
     private static final int TRIGGER_TOOLBAR = 1;
@@ -247,7 +246,7 @@ public final class VoicePage extends ReloadingDetailPage {
             .setEnabled(state.catalog().available());
         if (!VoiceProviderPolicy.network(provider)) return;
 
-        String box = InputViewValuePolicy.textOr(voice, "asr_token", "").trim();
+        String box = TextPolicy.trimUnicodeWhitespace(InputViewValuePolicy.textOr(voice, "asr_token", ""));
         JSONObject slots = voice.optJSONObject("asr_tokens");
         boolean hasToken = hasToken(box, slots, provider);
         String endpoint = InputViewValuePolicy.textOr(voice, "asr_endpoint", "").trim();
@@ -255,7 +254,7 @@ public final class VoicePage extends ReloadingDetailPage {
             boolean legacy = VoiceProviderPolicy.legacyAuth(InputViewValuePolicy.textOr(voice, "doubao_auth_mode", ""));
             service.nav("鉴权方式", null, legacy ? "App ID + Access Token" : "API Key", () -> pickAuthMode(legacy));
             if (legacy) {
-                String appId = InputViewValuePolicy.textOr(voice, "asr_app_key", "").trim();
+                String appId = TextPolicy.trimUnicodeWhitespace(InputViewValuePolicy.textOr(voice, "asr_app_key", ""));
                 service.nav("App ID", null, appId.isEmpty() ? "未设置" : "已设置",
                     () -> editAppId(provider, appId));
             }
@@ -526,7 +525,7 @@ public final class VoicePage extends ReloadingDetailPage {
             JSONObject voice = KeyboardSheets.child(preferences, "voice_input");
             if (!provider.equals(InputViewValuePolicy.textOr(voice, prefix + "_provider", "")))
                 throw new JSONException("provider changed");
-            voice.put(prefix + "_token", values.get(0).trim());
+            voice.put(prefix + "_token", TextPolicy.trimUnicodeWhitespace(values.get(0)));
             KeyboardSheets.child(voice, prefix + "_tokens").remove(provider);
         }));
         dialog.show();
@@ -540,7 +539,7 @@ public final class VoicePage extends ReloadingDetailPage {
             field.setError(valid ? null : "含有不能用的字符");
             return valid;
         });
-        dialog.setPrimary("保存", values -> saveVoice("asr_app_key", values.get(0).trim()));
+        dialog.setPrimary("保存", values -> saveVoice("asr_app_key", TextPolicy.trimUnicodeWhitespace(values.get(0))));
         dialog.show();
     }
 
@@ -573,7 +572,8 @@ public final class VoicePage extends ReloadingDetailPage {
     }
 
     private static boolean hasToken(String direct, @Nullable JSONObject slots, String provider) {
-        return !direct.isEmpty() || (slots != null && !slots.optString(provider, "").trim().isEmpty());
+        return !direct.isEmpty() || (slots != null
+            && !TextPolicy.trimUnicodeWhitespace(slots.optString(provider, "")).isEmpty());
     }
 
     /** 「润色」组：开关，打开后是服务、密钥、模型、接口、方案和「测试」。键盘读的同样是这些 `polish_*` 字段。 */
@@ -582,7 +582,7 @@ public final class VoicePage extends ReloadingDetailPage {
         boolean enabled = VoicePolishPolicy.requested(voice.optBoolean("polish_enabled", false),
             voice.optBoolean("polish_text", false));
         String provider = InputViewValuePolicy.textOr(voice, "polish_provider", "");
-        String box = InputViewValuePolicy.textOr(voice, "polish_token", "").trim();
+        String box = TextPolicy.trimUnicodeWhitespace(InputViewValuePolicy.textOr(voice, "polish_token", ""));
         JSONObject slots = voice.optJSONObject("polish_tokens");
         boolean hasToken = hasToken(box, slots, provider);
         String status = VoicePolishSettingsPolicy.status(enabled, state.polishConfigured(), hasToken);
@@ -673,10 +673,10 @@ public final class VoicePage extends ReloadingDetailPage {
 
     private void pickLanguage(String selected, GroupCard.Row row) {
         OptionSheet sheet = new OptionSheet(requireContext(), "识别语言", null);
-        String current = selected.isEmpty() ? LANGUAGES[0] : selected;
-        for (int index = 0; index < LANGUAGES.length; index++) {
-            String value = LANGUAGES[index];
-            String label = LANGUAGE_LABELS[index];
+        String current = selected.isEmpty() ? VoiceLanguageCatalog.defaultValue() : selected;
+        for (VoiceLanguageCatalog.Language language : VoiceLanguageCatalog.mobile()) {
+            String value = language.value();
+            String label = language.title();
             sheet.option(label, value.equals(current), () -> {
                 row.setValue(label);
                 saveVoice("language", value);
@@ -772,10 +772,6 @@ public final class VoicePage extends ReloadingDetailPage {
 
     /** 未设置时按普通话显示（键盘的默认识别语言）；其他平台写入的语言原样显示。 */
     private static String languageLabel(String value) {
-        if (value.isEmpty()) return LANGUAGE_LABELS[0];
-        for (int index = 0; index < LANGUAGES.length; index++) {
-            if (LANGUAGES[index].equals(value)) return LANGUAGE_LABELS[index];
-        }
-        return "ja".equals(value) ? "日语" : value;
+        return VoiceLanguageCatalog.title(value);
     }
 }

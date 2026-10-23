@@ -173,6 +173,7 @@ pub fn product_options(options: &mut SessionOptions) {
     options.english = EnglishInputOptions {
         mixed_candidates: true,
         minimum_prefix: 5,
+        first_page_count: 1,
     };
     options.expressive = MixedExpressiveOptions {
         emoji_candidates: false,
@@ -182,6 +183,7 @@ pub fn product_options(options: &mut SessionOptions) {
     options.local_modes = LocalModeOptions {
         unicode: true,
         date_time: true,
+        date_time_inline: true,
         date_time_menu: true,
         quick_phrase: true,
         emoji: true,
@@ -314,7 +316,8 @@ mod tests {
             options.english,
             EnglishInputOptions {
                 mixed_candidates: true,
-                minimum_prefix: 5
+                minimum_prefix: 5,
+                first_page_count: 1,
             }
         );
         assert_eq!(options.autocorrect_types, 0);

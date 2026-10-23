@@ -104,8 +104,12 @@ pub struct EngineOptions {
     pub frequency_mode: String,
     pub frequency_trigger_count: u8,
     pub frequency_linear_step: u8,
+    /// 候选混输总开关（Windows `utility.mixed_candidates`，`SessionOptions::mixed_candidates`）：关掉后英文、emoji、颜文字、符号、日文混输行、行内日期时间和快捷短语都不再混进普通候选，各分成员原值保留。
+    pub mixed_candidates: bool,
     pub mixed_english: bool,
     pub english_minimum_prefix: u8,
+    /// 中文状态下首页最多展示几个英文候选（Windows `general.cn_en_mixed_input_first_page_count`，1–3，`EnglishInputOptions::first_page_count`）。
+    pub english_first_page_count: u8,
     pub mixed_emoji: bool,
     pub mixed_kaomoji: bool,
     /// 打拼音出符号（`MixedExpressiveOptions::symbol_candidates`）。默认关，宿主按共享偏好 `mixed_input.symbols` 打开；引擎层关着，golden 基准、句子转换评测和网页引擎才不受影响。
@@ -113,8 +117,11 @@ pub struct EngineOptions {
     /// 日文混输（实验，`SessionOptions::japanese_mixing`）。宿主只在会话带日文、日文模型在场时打开它。
     pub mixed_japanese: bool,
     pub local_unicode: bool,
+    /// Shift+T 日期时间快捷输入模式（`LocalModeOptions::date_time`）。行内日期时间混入普通候选由 `local_date_time_inline` 单独开关。
     pub local_date_time: bool,
-    /// 「📅日期」入口（`LocalModeOptions::date_time_menu`），依附 `local_date_time`。
+    /// 行内日期时间混入普通候选（`LocalModeOptions::date_time_inline`）。
+    pub local_date_time_inline: bool,
+    /// 「📅日期」入口（`LocalModeOptions::date_time_menu`），依附 `local_date_time_inline`。
     pub local_date_time_menu: bool,
     pub local_quick_phrase: bool,
     pub local_emoji: bool,
@@ -235,14 +242,17 @@ pub fn prepare_options_for(
         frequency_mode: FrequencyAdjustmentMode::Promote.name().to_owned(),
         frequency_trigger_count: 1,
         frequency_linear_step: 1,
+        mixed_candidates: true,
         mixed_english: true,
         english_minimum_prefix: 5,
+        english_first_page_count: 1,
         mixed_emoji: false,
         mixed_kaomoji: false,
         mixed_symbols: false,
         mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
+        local_date_time_inline: true,
         local_date_time_menu: true,
         local_quick_phrase: true,
         local_emoji: true,
@@ -365,9 +375,11 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         trigger_count: i32::from(options.frequency_trigger_count),
         linear_step: i32::from(options.frequency_linear_step),
     };
+    session.mixed_candidates = options.mixed_candidates;
     session.english = EnglishInputOptions {
         mixed_candidates: options.mixed_english,
         minimum_prefix: usize::from(options.english_minimum_prefix),
+        first_page_count: usize::from(options.english_first_page_count),
     };
     session.expressive = MixedExpressiveOptions {
         emoji_candidates: options.mixed_emoji,
@@ -378,6 +390,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.local_modes = LocalModeOptions {
         unicode: options.local_unicode,
         date_time: options.local_date_time,
+        date_time_inline: options.local_date_time_inline,
         date_time_menu: options.local_date_time_menu,
         quick_phrase: options.local_quick_phrase,
         emoji: options.local_emoji,

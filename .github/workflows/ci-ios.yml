@@ -35,7 +35,7 @@ jobs:
   changes:
     name: Decide whether iOS needs building
     # 判定只跑十几秒，却挡在后面所有构建之前。GitHub 托管的 ubuntu-24.04 在多个 PR 同时推送时要排队（2026-10-09 十三个 PR 一起更新，中位 57 秒、p90 176 秒），Depot 的只要 1 秒，和 ci-platforms.yml 的 Decide platform scope 一样放在 Depot 上。
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
       build: ${{ steps.decide.outputs.build }}
@@ -104,7 +104,7 @@ jobs:
     # test build before a case ran, then thirty-seven cases on a Simulator half the speed of an arm64
     # one. The handwriting cases are their own job now, so neither waits on the other.
     # Depot 的 depot-macos-15 镜像最高只有 Xcode 26.1.1，下面钉的 26.3 只在 depot-macos-26 上有，所以 iOS 的 arm64 job 跑在 macOS 26 宿主上。
-    runs-on: depot-macos-26
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-macos-26' || 'macos-26' }}
     # 这个上限盖住整个 job,比里面那一步还先到期 —— 2026-09-18 砍掉一次 `all` 范围的运行就是它:job 跑到 60 分 24 秒被砍,而那一步自己才 58 分。两处要一起调,只改里面那个不起作用。
     timeout-minutes: 95
     env:
@@ -208,7 +208,7 @@ jobs:
     # The interface suite does not, and used to be dragged onto Intel with it: a twenty-five minute
     # test build before a case ran, then thirty-seven cases on a Simulator half the speed of an arm64
     # one. The handwriting cases are their own job now, so neither waits on the other.
-    runs-on: depot-macos-26
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-macos-26' || 'macos-26' }}
     # 这个上限盖住整个 job,比里面那一步还先到期 —— 2026-09-18 砍掉一次 `all` 范围的运行就是它:job 跑到 60 分 24 秒被砍,而那一步自己才 58 分。两处要一起调,只改里面那个不起作用。
     timeout-minutes: 95
     env:

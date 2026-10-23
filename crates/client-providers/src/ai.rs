@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::preferences::AI_PROVIDERS;
 
 pub mod endpoint;
+pub mod jev;
 pub mod provider_catalog;
 pub mod settings;
 
@@ -427,6 +428,7 @@ fn legacy_provider_origin(provider: &str) -> Option<&'static str> {
         "siliconflow" => "https://api.siliconflow.cn:443",
         "groq" => "https://api.groq.com:443",
         "openrouter" => "https://openrouter.ai:443",
+        "jev" => "https://api.typesafe.ai:443",
         _ => return None,
     })
 }

@@ -503,6 +503,9 @@ struct KeyboardView {
   /** View 的 `punctuation_marks`：引号与方头括号样式，符号键和 123 层的键面跟着它画。 */
   @State cornerQuotes: boolean = false;
   @State hollowBrackets: boolean = false;
+  /** View 的 `punctuation_marks` 顿号开关：顿号键面跟它画。 */
+  @State enumerationCommaBackslash: boolean = true;
+  @State enumerationCommaSlash: boolean = false;
   /** Fullwidth ASCII, mirrored from the session for the panel's 全 tile. */
   @State fullWidth: boolean = false;
   /** Candidate translations, mirrored from the session for the panel's 译 tile and the strip's 译 pill. */
@@ -912,6 +915,8 @@ struct KeyboardView {
       this.nineKeyStrokes = state.nineKeyStrokes;
       this.cornerQuotes = state.cornerQuotes;
       this.hollowBrackets = state.hollowBrackets;
+      this.enumerationCommaBackslash = state.enumerationCommaBackslash;
+      this.enumerationCommaSlash = state.enumerationCommaSlash;
       this.engineScheme = state.scheme;
       this.candidateListOpen = state.candidateListOpen;
       this.japanese = state.scheme === JAPANESE_SCHEME && !state.english
@@ -1202,7 +1207,9 @@ struct KeyboardView {
    * Zhuyin: a mark whose ASCII key is a Dachen phonetic or tone key would compose rather than be typed, so the conversion is finished and the mark typed after it, in Chinese while the punctuation switch says so.
    */
   private typeZhuyinMark(symbol: string): void {
-    const chinese: string | undefined = ChineseSymbolFaces.face(symbol, this.cornerQuotes, this.hollowBrackets);
+    const chinese: string | undefined = ChineseSymbolFaces.face(
+      symbol, this.cornerQuotes, this.hollowBrackets,
+      this.enumerationCommaBackslash, this.enumerationCommaSlash);
     KeyboardSession.shared.commitThenInsert(
       this.chinesePunctuation && chinese !== undefined ? chinese : symbol);
   }
@@ -2910,7 +2917,9 @@ struct KeyboardView {
 
   /** A symbol wears the face of what it will insert, which in Chinese is not the ASCII on the cap. */
   private symbolFace(symbol: string): string {
-    const chinese: string | undefined = ChineseSymbolFaces.face(symbol, this.cornerQuotes, this.hollowBrackets);
+    const chinese: string | undefined = ChineseSymbolFaces.face(
+      symbol, this.cornerQuotes, this.hollowBrackets,
+      this.enumerationCommaBackslash, this.enumerationCommaSlash);
     // 韩语、越南语和藏文的标点就是键帽上的 ASCII。
     return !this.english && !this.koreanFace() && !this.vietnameseFace() && !this.tibetanFace()
       && chinese !== undefined

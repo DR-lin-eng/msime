@@ -419,6 +419,9 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
   /// View 的 `punctuation_marks`：中文标点下 `'` 出「」、`"` 出『』（直角引号），`[` `]` 出〖〗（空心括号）。host-api 已按繁体输出开关解析好 `corner_when_traditional`，键盘画键面和补全成对标点时读它，不自己解析偏好。
   let cornerQuotes: Bool
   let hollowBrackets: Bool
+  /// View 的 `punctuation_marks`：顿号 `\` 键与 `/` 键各自开着与否（契约 `enumerationComma` 段，host-api 已归一「至少一个开」），符号面板选顿号时按它挑发给 Engine 的键。
+  let enumerationCommaBackslash: Bool
+  let enumerationCommaSlash: Bool
 
   var isInLocalMode: Bool { !localMode.isEmpty && localMode != "none" }
 
@@ -439,7 +442,8 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
        diagnosticText: String? = nil, localMode: String = "none",
        nineKeySpellings: [String] = [], nineKeyReading: String = "", nineKeySingleCharacter: Bool = false,
        nineKeyStrokes: String = "", editingText: String = "", caretPosition: Int = 0,
-       cornerQuotes: Bool = false, hollowBrackets: Bool = false) {
+       cornerQuotes: Bool = false, hollowBrackets: Bool = false,
+       enumerationCommaBackslash: Bool = true, enumerationCommaSlash: Bool = false) {
     self.isHandled = isHandled
     self.commitText = commitText
     self.preedit = preedit
@@ -466,6 +470,8 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
     self.caretPosition = caretPosition
     self.cornerQuotes = cornerQuotes
     self.hollowBrackets = hollowBrackets
+    self.enumerationCommaBackslash = enumerationCommaBackslash
+    self.enumerationCommaSlash = enumerationCommaSlash
   }
 }
 
@@ -1616,7 +1622,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
 
   /// Create and focus a session, then restore the state the prepared options do not carry.
   ///
-  /// 九键和 14 键的网格在会话上，所以每条销毁再重建会话的路径都要把它再设一次。词库维护和快照激活与恢复一样频繁地重建会话：把重放留给调用方时，键盘出现后第一次刷新个人词库，宿主画的还是九键，引擎却已经回到 26 键。
+  /// 九键和 14 键的网格在会话上，所以每条销毁再重建会话的路径都要把它再设一次。词库维护（应用编辑、导出）和快照激活也会重建会话：把重放留给调用方时，键盘出现后第一次刷新个人词库（那时列表也走维护路径），宿主画的还是九键，引擎却已经回到 26 键。
   private func createFocusedSession() throws {
     // 选中只吃掉部分输入的候选时，让运行时把已选的那一段留在组字里而不是立刻上屏：用户还在打后
     // 半截，前半截已经进了文档的话，搜索框会拿半个词去搜，编辑器为它记一次撤销。键盘把它画在候选
@@ -1774,15 +1780,15 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     return try WubiCodeLookup.decode(callOptions(msimeClientDictionary, ["options": options, "action": action]))
   }
 
-  /// One page of the dictionary. Without a kind it is the user's own words; a code prefix within one kind, or the quick phrases, is looked up in the dictionary itself, so bundled rows come back marked `source: bundled` and can be re-weighted or deleted through the queue.
+  /// 词库的一页。不带种类时是用户自己的词条；在某个种类里按编码前缀查，或者列快捷短语时，查的是整份词库，内置行带 `source: bundled` 返回，可以经队列调权重或删除。
+  ///
+  /// 列表不经 `withDictionaryMaintenance`，活着的会话原样保留：host-api 的 `list` 只取共享租约（`DictionaryAccess::try_session`），和会话自己持有的共享租约并存，只有维护者在场时才报 `dictionary maintenance busy`；它读的个人词条行由会话在上屏时直接写进日志，不在会话的延迟写队列里，销毁会话也不会让列表多出什么。键盘每次出现都强制刷新一次这个列表，原来每次都要为它销毁、重建并聚焦一遍刚在 `viewWillAppear` 建好的会话。
   func personalEntries(atOffset offset: UInt, kind: PersonalWordKind? = nil, query: String = "") throws -> [String: Any] {
     var action: [String: Any] = ["operation": "list", "offset": offset, "limit": 100]
     if let kind { action["kind"] = kind.bridgeName }
     if !query.isEmpty { action["query"] = query }
     let request: [String: Any] = ["options": options, "action": action]
-    var result = try withDictionaryMaintenance {
-      try Self.callOptions(msimeClientDictionary, request)
-    }
+    var result = try Self.callOptions(msimeClientDictionary, request)
     if let hasMore = result.removeValue(forKey: "has_more") { result["hasMore"] = hasMore }
     return result
   }
@@ -2008,7 +2014,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       editingText: editingText,
       caretPosition: caretPosition,
       cornerQuotes: marks["quotes"] as? String == "corner",
-      hollowBrackets: marks["brackets"] as? String == "hollow")
+      hollowBrackets: marks["brackets"] as? String == "hollow",
+      enumerationCommaBackslash: marks["enumeration_comma_backslash"] as? Bool ?? true,
+      enumerationCommaSlash: marks["enumeration_comma_slash"] as? Bool ?? false)
   }
 
   private static func strictInt(_ value: Any?, fallback: Int, range: ClosedRange<Int>) throws -> Int {

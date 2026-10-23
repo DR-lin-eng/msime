@@ -1,9 +1,13 @@
-//! 导出共享 UI 与 Windows 原生设置使用的语音语言目录；不读取偏好或凭据。
+//! 导出共享 UI、Windows 和 Android 原生设置使用的语音语言目录；不读取偏好或凭据。
 
 use msime_client_providers::voice::language_catalog::LANGUAGES;
 use std::path::Path;
 
 fn cxx(value: &str) -> Result<String, serde_json::Error> {
+    serde_json::to_string(value)
+}
+
+fn java(value: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(value)
 }
 
@@ -26,6 +30,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     header.push_str("}};\n} // 命名空间 msime::voice\n");
+    let mut android = String::from(
+        "package app.msime.android;\n\n// 由共享 Rust 语音语言目录导出；通过 export_voice_language_catalog 更新。\nimport java.util.ArrayList;\nimport java.util.List;\n\npublic final class VoiceLanguageCatalog {\n    public record Language(String id, String value, String title) {}\n\n    private static final Language[] ALL = {\n",
+    );
+    for language in LANGUAGES {
+        android.push_str(&format!(
+            "        new Language({}, {}, {}),\n",
+            java(language.id)?,
+            java(language.mobile_value)?,
+            java(language.mobile_title)?,
+        ));
+    }
+    android.push_str(
+        "    };\n\n    private VoiceLanguageCatalog() {}\n\n    public static List<Language> mobile() {\n        var result = new ArrayList<Language>();\n        for (Language language : ALL) {\n            if (!language.value().isEmpty()) result.add(language);\n        }\n        return List.copyOf(result);\n    }\n\n    public static String defaultValue() {\n        return ALL[0].value();\n    }\n\n    public static String title(String value) {\n        if (value == null || value.isEmpty()) return ALL[0].title();\n        for (Language language : ALL) {\n            if (language.id().equals(value)) return language.title();\n        }\n        return value;\n    }\n}\n",
+    );
+    let mut swift = String::from(
+        "// 由共享 Rust 语音语言目录导出；通过 export_voice_language_catalog 更新。\nenum VoiceLanguageCatalog {\n  static let mobile: [(id: String, title: String)] = [\n",
+    );
+    for language in LANGUAGES
+        .iter()
+        .filter(|language| !language.mobile_value.is_empty())
+    {
+        swift.push_str(&format!(
+            "    ({:?}, {:?}),\n",
+            language.mobile_value, language.mobile_title
+        ));
+    }
+    swift.push_str("  ]\n}\n");
 
     let write = match std::env::args().nth(1).as_deref() {
         None => {
@@ -43,6 +74,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             generated,
         ),
         ("shared/voice/VoiceLanguageCatalog.h", header),
+        (
+            "platforms/android/java/app/msime/android/voice/VoiceLanguageCatalog.java",
+            android,
+        ),
+        (
+            "platforms/ios/App/Services/VoiceLanguageCatalog.swift",
+            swift,
+        ),
     ] {
         let path = root.join(relative);
         if write {

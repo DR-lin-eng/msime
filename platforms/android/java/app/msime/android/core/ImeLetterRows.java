@@ -196,6 +196,8 @@ final class ImeLetterRows {
      * @param input 键的字母，提示字符按它查 {@link LetterHintTable}
      */
     private void bindLetterGestures(Button key, String input) {
+        if (key instanceof KeyboardPressButton press)
+            press.setTouchDownFeedback(() -> s.imeKeyFeedback.onKeyDown(key, ImeKeyFeedback.KEY_STANDARD));
         final String hint = LetterHintTable.hint(input);
         final float[] downY = new float[1];
         final boolean[] triggered = new boolean[1];

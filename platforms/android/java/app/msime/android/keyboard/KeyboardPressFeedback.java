@@ -3,7 +3,7 @@ package app.msime.android;
 
 import app.msime.android.KeyboardGeometry;
 
-import android.provider.Settings;
+import android.animation.ValueAnimator;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
@@ -35,7 +35,7 @@ public final class KeyboardPressFeedback {
         // top of it would fight over the same scale and translation.
         else if (KeyPressAnimator.isAnimating(view)) return;
         view.animate().cancel();
-        if (!view.isAttachedToWindow() || !view.isEnabled() || !animationsEnabled(view)) {
+        if (!view.isAttachedToWindow() || !view.isEnabled() || !ValueAnimator.areAnimatorsEnabled()) {
             reset(view);
             return;
         }
@@ -59,15 +59,4 @@ public final class KeyboardPressFeedback {
         view.setScaleY(1f);
     }
 
-    private static boolean animationsEnabled(View view) {
-        try {
-            float animatorScale = Settings.Global.getFloat(view.getContext().getContentResolver(),
-                Settings.Global.ANIMATOR_DURATION_SCALE, 1f);
-            float transitionScale = Settings.Global.getFloat(view.getContext().getContentResolver(),
-                Settings.Global.TRANSITION_ANIMATION_SCALE, 1f);
-            return animatorScale > 0f && transitionScale > 0f;
-        } catch (RuntimeException error) {
-            return true;
-        }
-    }
 }

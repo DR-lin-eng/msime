@@ -566,6 +566,11 @@ impl Session {
         self.inner.wubi_mixed_pinyin()
     }
 
+    /// 下一次字符动作的可选触点；旧按键接口保持不变。
+    pub fn set_touch_point(&mut self, point: Option<(u8, crate::pinyin::touch::TouchPoint)>) {
+        self.inner.set_touch_point(point);
+    }
+
     /// `CHARACTER_MUST_BE_ASCII` above 127.
     pub fn character(&mut self, value: u8, shift: bool) -> Result<EngineResult> {
         require_ascii(value, diagnostics::CHARACTER_MUST_BE_ASCII)?;

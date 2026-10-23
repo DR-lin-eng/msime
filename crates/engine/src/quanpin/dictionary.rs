@@ -48,14 +48,14 @@ use crate::user_dictionary::journal::record_user_insert;
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
 use crate::user_dictionary::typo_profile::PersonalTypoProfile;
 
+#[cfg(test)]
+use super::series::resolve_series_query;
 use super::series::{
     append_unique_words, fold_reading, mark_autocorrect_candidates, merge_alternative_rows,
-    merge_alternative_segmentations, merge_series_by_coverage, resolve_series_query,
-    series_cache_key, SeriesResolution, ALTERNATIVE_SEGMENTATION_CANDIDATE_LIMIT,
-    AUTOCORRECT_CUT_KBEST, LONGER_PHRASE_EXTRA_SYLLABLES, LONGER_PHRASE_LIMIT,
-    MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS,
+    merge_alternative_segmentations, merge_series_by_coverage, series_cache_key, SeriesResolution,
+    ALTERNATIVE_SEGMENTATION_CANDIDATE_LIMIT, AUTOCORRECT_CUT_KBEST, LONGER_PHRASE_EXTRA_SYLLABLES,
+    LONGER_PHRASE_LIMIT, MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS,
 };
-use super::typo_edges::collect_typo_edges;
 
 #[cfg(test)]
 mod marking_buffer_tests;
@@ -150,6 +150,7 @@ impl Drop for RowCacheBatch<'_> {
 }
 
 pub struct QuanpinDictionary {
+    touch_points: Vec<Option<crate::pinyin::touch::TouchPoint>>,
     database: PinyinDatabase,
     paths: RuntimePaths,
     sentence_tables: SentenceNgramTables,
@@ -216,6 +217,7 @@ impl QuanpinDictionary {
         let typo_profile = PersonalTypoProfile::shared(&journal);
         let typo_generation = typo_profile.generation();
         let mut dictionary = Self {
+            touch_points: Vec::new(),
             database,
             paths: paths.clone(),
             sentence_tables,
@@ -281,6 +283,17 @@ impl QuanpinDictionary {
             &self.alternative_segmentations,
         );
         result
+    }
+
+    /// 解析和整句答案依赖触点；原始查词页仍可复用，不把坐标写入持久缓存。
+    pub fn set_touch_points(&mut self, points: &[Option<crate::pinyin::touch::TouchPoint>]) {
+        if self.touch_points != points {
+            self.touch_points.clear();
+            self.touch_points.extend_from_slice(points);
+            self.resolution_cache.clear();
+            self.series_cache.clear();
+            self.personal_scored_keys.clear();
+        }
     }
 
     /// 九键同步借用完整行筛选；只有核对失效后的系列热页允许提前排名。
@@ -740,7 +753,12 @@ impl QuanpinDictionary {
                     let segments = segments.get_or_insert_with(|| {
                         resolve_cached_segments(segmentation_cache, raw, segmentation)
                     });
-                    resolve_series_query(raw, segments, types)
+                    super::series::resolve_series_query_with_touch(
+                        raw,
+                        segments,
+                        types,
+                        &self.touch_points,
+                    )
                 },
                 |resolution| {
                     // 热命中也发布本次标记；高成本读法仍算纠错。
@@ -1145,7 +1163,16 @@ impl QuanpinDictionary {
         let span_cache = &mut self.typo_span_cache;
         let profile = &*self.typo_profile;
         let mut typo_edges = |literal_best: &SentencePath| {
-            collect_typo_edges(database, span_cache, profile, segments, literal_best, types)
+            super::typo_edges::collect_typo_edges_with_touch(
+                database,
+                span_cache,
+                profile,
+                segments,
+                literal_best,
+                types,
+                raw,
+                &self.touch_points,
+            )
         };
         let typo_source: Option<&mut TypoEdgeSource<'_>> = if typo_eligible {
             Some(&mut typo_edges)
@@ -1360,7 +1387,12 @@ impl QuanpinDictionary {
             types,
             || {
                 let segments = resolve_cached_segments(segmentation_cache, raw, segmentation);
-                resolve_series_query(raw, &segments, types)
+                super::series::resolve_series_query_with_touch(
+                    raw,
+                    &segments,
+                    types,
+                    &self.touch_points,
+                )
             },
             project,
         )

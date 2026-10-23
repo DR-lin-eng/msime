@@ -990,6 +990,8 @@ impl Default for ShuangpinHelpcodeModes {
 /// What a scheme turns its composition into for the providers. Built fresh on every refresh; providers never mutate it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryRequest {
+    /// 与原始 ASCII 字节对齐的可选触点；分隔符和普通按键为 None，不持久化或发往在线服务。
+    pub touch_points: Vec<Option<crate::pinyin::touch::TouchPoint>>,
     pub scheme: SchemeType,
     /// Lowercased, apostrophes kept.
     pub raw_input: String,

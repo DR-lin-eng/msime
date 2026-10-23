@@ -483,6 +483,20 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_characterRaw(JN
     }
     return response(env, msime_client_character(static_cast<uint64_t>(handle), static_cast<uint8_t>(ascii), shift == JNI_TRUE));
 }
+
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_characterWithTouchRaw(
+        JNIEnv *env, jclass, jlong handle, jint ascii, jboolean shift, jfloat x, jfloat y,
+        jfloatArray centers) {
+    if (!centers || env->GetArrayLength(centers) != 52 || ascii < 0 || ascii > 127) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Invalid touch character");
+        return nullptr;
+    }
+    jfloat values[52];
+    env->GetFloatArrayRegion(centers, 0, 52, values);
+    if (env->ExceptionCheck()) return nullptr;
+    return response(env, msime_client_character_with_touch(static_cast<uint64_t>(handle),
+        static_cast<uint8_t>(ascii), shift == JNI_TRUE, x, y, values, 52));
+}
 // 14 键的一键：送这一组的首字母，组外的字母由引擎回 handled=false。只拦非 ASCII，免得截断成 uint8 后变成另一个字母。
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_gridKeyRaw(JNIEnv *env, jclass, jlong handle, jint letter) {
     if (letter < 0 || letter > 127) {

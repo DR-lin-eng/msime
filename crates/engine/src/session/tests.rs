@@ -19,6 +19,95 @@ use crate::types::{
 use crate::user_dictionary::ngram_store::flush_all;
 use crate::KeyGrid;
 
+mod touch_regression_tests {
+    use super::*;
+    use crate::pinyin::touch::{qwerty_point, TouchPoint};
+
+    fn touched(session: &mut Session, key: u8, x: f32) -> TouchPoint {
+        let point = qwerty_point(key, x, 0.0);
+        session.set_touch_point(Some((key, point)));
+        assert!(session.character(key, false).handled);
+        session.set_touch_point(None);
+        point
+    }
+
+    #[test]
+    fn touch_caret_edits_keep_repeated_letters_at_their_exact_positions() {
+        let fixture = Fixture::new(QUANPIN_FIXTURE);
+        let mut session = fixture.session();
+        let original: Vec<_> = b"nihao"
+            .iter()
+            .enumerate()
+            .map(|(index, &key)| Some(touched(&mut session, key, index as f32 * 0.04)))
+            .collect();
+        assert_eq!(session.input.engine.request().touch_points, original);
+        session.set_caret(Some(2));
+        let extra = touched(&mut session, b'i', -0.3);
+        let mut expected = original;
+        expected.insert(2, Some(extra));
+        assert_eq!(session.input.engine.request().raw_input, "niihao");
+        assert_eq!(session.input.engine.request().touch_points, expected);
+        session.set_caret(Some(1));
+        session.command(Command::DeleteForward);
+        expected.remove(1);
+        assert_eq!(session.input.engine.request().raw_input, "nihao");
+        assert_eq!(session.input.engine.request().touch_points, expected);
+        session.set_caret(Some(3));
+        session.command(Command::Backspace);
+        expected.remove(2);
+        assert_eq!(session.input.engine.request().touch_points, expected);
+    }
+
+    #[test]
+    fn touch_partial_commit_reset_and_plain_keys_do_not_reuse_coordinates() {
+        let fixture = Fixture::new(QUANPIN_FIXTURE);
+        let mut session = fixture.session();
+        let original: Vec<_> = b"nihao"
+            .iter()
+            .map(|&key| Some(touched(&mut session, key, 0.1)))
+            .collect();
+        let index = session
+            .snapshot()
+            .candidates
+            .iter()
+            .position(|row| row.word == "你")
+            .unwrap();
+        session.select(index);
+        assert_eq!(session.input.engine.request().raw_input, "hao");
+        assert_eq!(session.input.engine.request().touch_points, original[2..]);
+        session.character(b'm', false);
+        assert_eq!(
+            session.input.engine.request().touch_points.last(),
+            Some(&None)
+        );
+        session.command(Command::Cancel);
+        type_text(&mut session, "ni");
+        assert!(session.input.engine.request().touch_points.is_empty());
+        session.command(Command::Cancel);
+        session.set_touch_point(Some((b'x', qwerty_point(b'x', 0.4, 0.0))));
+        session.character(b'n', false);
+        session.set_touch_point(None);
+        assert!(session.input.engine.request().touch_points.is_empty());
+    }
+
+    #[test]
+    fn touch_switching_scheme_and_other_sessions_clear_the_side_channel() {
+        let fixture = Fixture::new(QUANPIN_FIXTURE);
+        let mut first = fixture.session();
+        let mut second = fixture.session();
+        touched(&mut first, b'n', 0.4);
+        second.character(b'n', false);
+        assert!(second.input.engine.request().touch_points.is_empty());
+        first.switch_scheme(SchemeType::Shuangpin).unwrap();
+        assert!(first.input.engine.request().touch_points.is_empty());
+        touched(&mut first, b'n', 0.3);
+        first.character(b'i', false);
+        assert_eq!(first.input.engine.request().touch_points.len(), 2);
+        assert!(first.input.engine.request().touch_points[0].is_some());
+        assert!(first.input.engine.request().touch_points[1].is_none());
+    }
+}
+
 /// test_input_session.cpp:390-430 (fixture M), the rows the portable-selection, caret and edge cases read.
 const QUANPIN_FIXTURE: &str =
     "CREATE TABLE tbl_2_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\

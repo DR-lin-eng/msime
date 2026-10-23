@@ -43,6 +43,80 @@ pub fn collect_shuangpin_typo_edges(
     )
 }
 
+/// 双拼概率必须用实际输入的两键编码计算，不能把全拼字母坐标套到声韵母上。
+#[allow(clippy::too_many_arguments)]
+pub fn collect_shuangpin_typo_edges_with_touch(
+    database: &PinyinDatabase,
+    span_cache: &mut FifoCache<String, Vec<DictRow>>,
+    profile: &'static ShuangpinProfile,
+    codes: &[&str],
+    segments: &[String],
+    literal_best: &SentencePath,
+    autocorrect_types: u32,
+    points: &[Option<crate::pinyin::touch::TouchPoint>],
+) -> Vec<TypoEdge> {
+    if points.is_empty() {
+        return collect_shuangpin_typo_edges(
+            database,
+            span_cache,
+            profile,
+            codes,
+            segments,
+            literal_best,
+            autocorrect_types,
+        );
+    }
+    if crate::pinyin::touch::centered_segment(points, 0, codes.iter().map(|code| code.len()).sum())
+    {
+        return Vec::new();
+    }
+    let table = typo_table(profile);
+    crate::quanpin::typo_edges::collect_span_typo_edges_with_cost(
+        database,
+        span_cache,
+        segments,
+        literal_best,
+        autocorrect_types & SHUANGPIN_TYPO_TYPES,
+        |position| table_typos(table, codes[position]),
+        |position| !crate::pinyin::touch::centered_segment(points, position * 2, 2),
+        |position, typo| {
+            let code = codes[position].as_bytes();
+            let mut best: Option<f64> = None;
+            let mut consider = |candidate: [u8; 2]| {
+                if decode(profile, &candidate).as_deref() != Some(&typo.syllable) {
+                    return;
+                }
+                let intended = std::str::from_utf8(&candidate).expect("双拼编码为 ASCII");
+                if let Some(cost) = crate::pinyin::touch::replacement_cost(
+                    points,
+                    position * 2,
+                    codes[position],
+                    intended,
+                    crate::pinyin::typos::base_cost(typo.kind),
+                ) {
+                    best = Some(best.map_or(cost, |old| old.min(cost)));
+                }
+            };
+            match typo.kind {
+                SyllableTypoKind::Transposition => consider([code[1], code[0]]),
+                SyllableTypoKind::Neighbor => {
+                    for index in 0..2 {
+                        for key in b'a'..=b'z' {
+                            if keys_adjacent(key, code[index]) {
+                                let mut candidate = [code[0], code[1]];
+                                candidate[index] = key;
+                                consider(candidate);
+                            }
+                        }
+                    }
+                }
+                SyllableTypoKind::MissingOrExtra => {}
+            }
+            best
+        },
+    )
+}
+
 type TypoTable = HashMap<String, Vec<SyllableTypo>>;
 
 /// 一个两键编码在方案下可能想打的音节，便宜的类型在前；不是合法编码时为空。
@@ -147,6 +221,57 @@ fn add_variant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn touch_costs_follow_the_two_typed_keys_and_center_gate_skips_spans() {
+        use crate::pinyin::touch::qwerty_point;
+        use crate::quanpin::fixture::Fixture;
+        let fixture = Fixture::new();
+        fixture.insert("ni'hui", "你会", 999999);
+        let database = PinyinDatabase::open(&fixture.database());
+        let mut cache = FifoCache::new(96);
+        let profile = profile(ShuangpinProfileKind::Xiaohe).unwrap();
+        let segments = vec!["ni".to_owned(), "hao".to_owned()];
+        let literal = SentencePath {
+            sentence: "你好".to_owned(),
+            key: "ni'hao".to_owned(),
+            words: vec!["你".to_owned(), "好".to_owned()],
+            log_prob: 0.0,
+            typo_edges: 0,
+        };
+        let mut points: Vec<_> = b"nihc"
+            .iter()
+            .map(|&key| Some(qwerty_point(key, 0.0, 0.0)))
+            .collect();
+        assert!(collect_shuangpin_typo_edges_with_touch(
+            &database,
+            &mut cache,
+            profile,
+            &["ni", "hc"],
+            &segments,
+            &literal,
+            autocorrect_type::NEIGHBOR,
+            &points
+        )
+        .is_empty());
+        points[3] = Some(qwerty_point(b'c', 0.49, 0.0));
+        let edges = collect_shuangpin_typo_edges_with_touch(
+            &database,
+            &mut cache,
+            profile,
+            &["ni", "hc"],
+            &segments,
+            &literal,
+            autocorrect_type::NEIGHBOR,
+            &points,
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.value == "你会" && edge.penalty < 20.0),
+            "{edges:?}"
+        );
+    }
     use crate::shuangpin::custom::custom_profile;
     use crate::shuangpin::profile::profile;
     use crate::types::{ShuangpinCustomTable, ShuangpinProfileKind};

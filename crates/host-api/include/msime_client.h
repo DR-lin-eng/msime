@@ -780,6 +780,9 @@ char *msime_client_set_punctuation_lock(uint64_t session, uint8_t lock);
 /* 每页候选数的会话内覆盖，size 为 1–10；本平台排不下那么多时（Windows、iOS、鸿蒙最多 9）按平台上限截断，view.page_size 是实际值。组字中调用时等组字结束才生效。 */
 char *msime_client_set_candidate_page_size(uint64_t session, uint8_t size);
 char *msime_client_character(uint64_t session, uint8_t ascii, bool shift);
+// 可选触点旁路：x/y 相对命中键中心，以键宽归一化；centers 为 a..z 的相对 x/y 共 52 个 float，不可见键用两个 NaN。
+char *msime_client_character_with_touch(uint64_t session, uint8_t ascii, bool shift,
+                                      float x, float y, const float *centers, size_t length);
 // Explicit native punctuation: finish the highlighted composition, then translate.
 // Invalid non-punctuation bytes fail without modifying the session.
 char *msime_client_punctuation(uint64_t session, uint8_t ascii);

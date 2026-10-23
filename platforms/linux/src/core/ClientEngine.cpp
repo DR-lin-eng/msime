@@ -487,6 +487,8 @@ struct State {
   // anything. An empty value means the mark was committed at the start of the
   // document and there is nothing to fingerprint.
   std::string space_convert_mark;
+  // `、` 上屏时产生它的键：顿号有两个可配键，空格反查按它和 View 的顿号开关定 ASCII 孪生。
+  char space_convert_key = 0;
   std::string space_convert_preceding;
   std::string punctuation_lock = "follow";
   std::string preedit_style = "raw";
@@ -819,6 +821,7 @@ struct State {
     last_smart_punctuation_time = 0;
     smart_punctuation_rejected = 0;
     space_convert_mark.clear();
+    space_convert_key = 0;
     space_convert_preceding.clear();
     paired_tracker.clear();
     japanese_conversion.reset();
@@ -2058,8 +2061,10 @@ std::optional<std::string> surrounding_following_character(const State &s) {
 bool convert_smart_punctuation_space(IBusEngine *engine) {
   auto &s = state(engine);
   const auto mark = std::move(s.space_convert_mark);
+  const auto convert_key = s.space_convert_key;
   const auto expected_preceding = std::move(s.space_convert_preceding);
   s.space_convert_mark.clear();
+  s.space_convert_key = 0;
   s.space_convert_preceding.clear();
   if (mark.empty() || !s.smart_punctuation ||
       !s.smart_punctuation_space_convert || !s.chinese_punctuation)
@@ -2067,7 +2072,8 @@ bool convert_smart_punctuation_space(IBusEngine *engine) {
   if (!s.view.value("editing_text", std::string{}).empty() ||
       !s.view.value("candidates", Json::array()).empty())
     return false;
-  const auto replacement = msime::linux_host::space_conversion_ascii_text(mark);
+  const auto replacement = msime::linux_host::space_conversion_ascii_text(
+      mark, convert_key, view_punctuation_marks(s.view));
   if (replacement.empty())
     return false;
   const auto characters = surrounding_preceding_characters(s, 2);
@@ -2175,7 +2181,8 @@ Json prefer_online_translations(const Json &glosses, const Json &online) {
 }
 bool apply(IBusEngine *engine, char *raw,
            PunctuationPairMode pair_mode = PunctuationPairMode::Unpaired,
-           std::optional<std::string> space_convert_preceding = std::nullopt);
+           std::optional<std::string> space_convert_preceding = std::nullopt,
+           char space_convert_key = 0);
 void render(IBusEngine *engine, const Json &view);
 void exit_translation_candidates(IBusEngine *engine);
 void render_translation_candidates(IBusEngine *engine);
@@ -4412,7 +4419,8 @@ bool commit_translation_candidate(IBusEngine *engine, size_t index) {
   return true;
 }
 bool apply(IBusEngine *engine, char *raw, PunctuationPairMode pair_mode,
-           std::optional<std::string> space_convert_preceding) {
+           std::optional<std::string> space_convert_preceding,
+           char space_convert_key) {
   auto result = response(raw);
   const auto &commit = result.at("commit");
   if (commit.is_string()) {
@@ -4420,9 +4428,11 @@ bool apply(IBusEngine *engine, char *raw, PunctuationPairMode pair_mode,
     auto &s = state(engine);
     const auto context = result.value("commit_context", Json(nullptr));
     text = traditional_display(s, context, std::move(text));
+    // `、` 的 ASCII 孪生按产生它的键和 View 的顿号开关定（enumerationComma 段）。
     const auto space_convert_ascii =
         space_convert_preceding
-            ? msime::linux_host::smart_punctuation_ascii_mark(text)
+            ? msime::linux_host::smart_punctuation_ascii_mark(
+                  text, space_convert_key, view_punctuation_marks(s.view))
             : 0;
     const auto space_convert_mark =
         space_convert_ascii == 0 ? std::string{} : text;
@@ -4456,6 +4466,7 @@ bool apply(IBusEngine *engine, char *raw, PunctuationPairMode pair_mode,
       if (space_convert_ascii != 0 && !inserted_pair) {
         // Preserve Engine's actual half (notably opening/closing quotes).
         s.space_convert_mark = space_convert_mark;
+        s.space_convert_key = space_convert_key;
         s.space_convert_preceding = std::move(*space_convert_preceding);
       }
       if (inserted_pair) {
@@ -5216,7 +5227,7 @@ void focus_out(IBusEngine *engine) {
     floating_toolbar_focus_out(engine);
   });
 }
-// 「宣传水杉输入法」：先把正在输入的组字上屏，再插入固定的产品介绍（kPromotionText），不改动用户常用语。Ctrl+Shift+P 和工具栏菜单项共用。
+// 「宣传水杉输入法」：先把正在输入的组字上屏，再插入固定的产品介绍（kPromotionText），不改动用户常用语。由工具栏菜单项进入。
 void commit_promotion(IBusEngine *engine) {
   auto &s = state(engine);
   if (s.session && !s.view.at("editing_text").get<std::string>().empty())
@@ -7029,17 +7040,6 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   if (key == IBUS_Control_R) s.right_ctrl_down = !release;
   if (key == IBUS_Control_L) s.left_ctrl_down = !release;
   if (ctrl_key) s.ctrl_down = s.right_ctrl_down || s.left_ctrl_down;
-  // Ctrl+Shift+P 插入固定的产品介绍，不改动用户常用语。
-  const bool promotion_shortcut = !release && (key == 'p' || key == 'P') &&
-      (flags & IBUS_CONTROL_MASK) != 0 && (flags & IBUS_SHIFT_MASK) != 0 &&
-      (flags & (IBUS_MOD1_MASK | IBUS_MOD4_MASK | IBUS_SUPER_MASK | IBUS_META_MASK | IBUS_HYPER_MASK)) == 0;
-  const guint promotion_stroke = keycode != 0 ? keycode : 0x80000000u | static_cast<guint>('p');
-  if (promotion_shortcut) {
-    s.host_shortcut_strokes.insert(promotion_stroke);
-    guarded(engine, "process_key", [&] { commit_promotion(engine); });
-    return TRUE;
-  }
-
   const guint chord_modifiers = flags &
       (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_MOD4_MASK | IBUS_SUPER_MASK |
        IBUS_META_MASK | IBUS_HYPER_MASK | IBUS_MOD5_MASK);
@@ -7349,6 +7349,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   // can take it back; anything else means the user moved on.
   if (!s.space_convert_mark.empty() && !(key == IBUS_space && modifiers == 0)) {
     s.space_convert_mark.clear();
+    s.space_convert_key = 0;
     s.space_convert_preceding.clear();
   }
   bool handled = false;
@@ -8055,7 +8056,8 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
       const bool arm_space_convert =
           !without_host_punctuation && s.smart_punctuation && s.smart_punctuation_space_convert &&
           s.chinese_punctuation &&
-          msime::linux_host::is_space_conversion_key(ascii) &&
+          msime::linux_host::is_space_conversion_key(
+              ascii, view_punctuation_marks(s.view)) &&
           !has_composition && !candidate_active;
       std::string armed_preceding;
       if (arm_space_convert) {
@@ -8069,7 +8071,8 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
       handled = apply(
           engine,
           msime_client_punctuation(s.session, static_cast<uint8_t>(ascii)),
-          PunctuationPairMode::Unpaired, std::move(space_convert_preceding));
+          PunctuationPairMode::Unpaired, std::move(space_convert_preceding),
+          ascii);
       if (!handled)
         handled = fullwidth_idle_commit(key);
       if (is_smart_punctuation_key(key))

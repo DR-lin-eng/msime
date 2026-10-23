@@ -468,6 +468,8 @@ pub unsafe extern "C" fn msime_client_smart_punctuation_arm(
                 smart,
                 session.applied.smart_punctuation_space_convert,
                 value.editor_generation,
+                value.ascii,
+                &msime_client_core::punctuation::punctuation_marks(&session.applied),
             );
             Ok(json!({
                 "repeat": repeat.map(|armed| json!({

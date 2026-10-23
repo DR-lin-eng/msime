@@ -93,6 +93,8 @@ extension MetasequoiaInputSnapshot {
       nineKeySpellings: nineKeySpellings, nineKeyReading: nineKeyReading,
       nineKeySingleCharacter: nineKeySingleCharacter, nineKeyStrokes: nineKeyStrokes,
       editingText: editingText, caretPosition: caretPosition,
-      cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets)
+      cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets,
+      enumerationCommaBackslash: enumerationCommaBackslash,
+      enumerationCommaSlash: enumerationCommaSlash)
   }
 }

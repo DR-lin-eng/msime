@@ -43,11 +43,11 @@ Status: implemented
 
 ## 未做（有意留给后续）
 
-- **触屏键面与空格反查的本地表同步**（契约 README 要求的跟随清单）：macOS `PairedPunctuation.h`、Linux `SmartPunctuationSpace.h`/`PairedPunctuation.h`、iOS `KeyboardPunctuationContext.swift` 等、Android `ChineseSymbolFaces.java` 等、HarmonyOS `ChineseSymbolFaces.ts` 等。View 已报告两个布尔，宿主表跟进时可读它。
+- **触屏键面与空格反查的本地表同步**（契约 README 要求的跟随清单）：已落地，见 [六宿主本地标点表跟进契约与顿号空格反查随开关](./2026-10-22-punctuation-host-tables-enum-comma-space.md)。
 - **新架构 Windows 的 Server→TIP 新帧** `EnumerationCommaKeysChanged`（载荷 `'1'/'2'/'3'`）：`windows_ipc.h` 追加帧、`ReplyCodec.cpp` 发帧、TIP 侧 `PunctuationTable` 与 `Global::StyledPunctuation` 接住。本轮 Windows Server 读偏好 JSON 时只看到 `quote_style`/`bracket_style`，顿号键仍是「只有 `\`」（旧 TIP 的历史行为，兼容）。
 - **各平台原生设置页**：Windows 原生设置页、iOS/Android 原生标点页、HarmonyOS 原生页的本机控件。共享 React 页已覆盖 macOS/Linux/HarmonyOS（ArkWeb）。
 - **msime-cloud 的 `internal/account/preferences_fields.json`**：外部仓库，两个键在字段表收录前只本地生效（上传被过滤）。收录后同步即刻生效，代码已在 `settings_sync.rs`。
-- **`、` 的空格反查（D4）**：`ascii_for_chinese_mark` 仍把 `、` 对 `/`（现状本就如此），不按当前启用的键选；随宿主本地表同步一并定规则。
+- **`、` 的空格反查（D4）**：已随宿主表同步一并定规则并落地——`source` 是开着的顿号键时转回它，否则 `\` 优先、`/` 其次，两个都关按 `\`；实现与逐宿主表结论见 [六宿主本地标点表跟进契约与顿号空格反查随开关](./2026-10-22-punctuation-host-tables-enum-comma-space.md)。
 - **多个引擎层的「两个都关」兜底**：归一只在偏好解析处和设置页，引擎照开关执行，不再重复守。
 
 ## 历史检索

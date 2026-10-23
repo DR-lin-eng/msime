@@ -42,6 +42,31 @@ test("默认值不写入槽位，多个提供方各自记忆", () => {
   expect(back.model).toBe("deepseek-v4-flash");
 });
 
+test("空槽位按目录默认值回填，地址与模型独立处理", () => {
+  const openai = AI_PROVIDER_OPTIONS.find((option) => option.id === "openai")!;
+  for (const [endpoint, model, expectedEndpoint, expectedModel] of [
+    ["", "", openai.endpoint, openai.model],
+    ["", "synthetic-model", openai.endpoint, "synthetic-model"],
+    [
+      "https://fixture.example/v1/chat/completions",
+      "",
+      "https://fixture.example/v1/chat/completions",
+      openai.model,
+    ],
+  ] as const) {
+    const current = {
+      ...base(),
+      endpoints: { openai: endpoint },
+      models: { openai: model },
+    };
+    const patch = aiProviderUpdate("openai", current);
+    expect(patch.endpoint).toBe(expectedEndpoint);
+    expect(patch.model).toBe(expectedModel);
+    expect(current.endpoints).toEqual({ openai: endpoint });
+    expect(current.models).toEqual({ openai: model });
+  }
+});
+
 test("编辑接口地址/模型时同步当前提供方的槽位", () => {
   const start = base();
   const edited = { ...start, ...aiEndpointUpdate("https://gateway.internal/v1", start) };

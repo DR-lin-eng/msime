@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "packages/ui/src/voice/polish-prompt-catalog.json"
@@ -111,13 +112,25 @@ else:
     with tempfile.TemporaryDirectory(prefix="msime-polish-swift-") as directory:
         source = Path(directory) / "main.swift"
         program = Path(directory) / "catalog"
-        source.write_text('''import Foundation
-let presets = VoicePolishPresetCatalog.builtIns.map { ["id": $0.id, "title": $0.title] }
-FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: presets))
+        # 只用标准库输出码点，避免目录探针为序列化结果冷编译 Foundation；控制字符也能无损比较。
+        source.write_text('''for preset in VoicePolishPresetCatalog.builtIns {
+  for value in [preset.id, preset.title] {
+    print(value.unicodeScalars.map { String($0.value) }.joined(separator: " "))
+  }
+}
 ''', encoding="utf-8")
-        subprocess.run([swiftc, str(ROOT / "platforms/ios/App/Services/VoicePolishPresetCatalog.swift"),
-                        str(source), "-o", str(program)], check=True, timeout=60)
-        projected = json.loads(subprocess.check_output([str(program)], timeout=10))
+        # 保留版本和阶段命令，下一次超时才能区分前端编译与链接；失败也记录实际耗时。
+        print(f"polish prompt catalog: Swift 编译开始（{swiftc}，限时 60 秒）", flush=True)
+        started = time.monotonic()
+        try:
+            subprocess.run([swiftc, "-v", str(ROOT / "platforms/ios/App/Services/VoicePolishPresetCatalog.swift"),
+                            str(source), "-o", str(program)], check=True, timeout=60)
+        finally:
+            print(f"polish prompt catalog: Swift 编译用时 {time.monotonic() - started:.3f} 秒", flush=True)
+        lines = subprocess.check_output([str(program)], timeout=10).decode("ascii").splitlines()
+        values = ["".join(chr(int(value)) for value in line.split()) for line in lines]
+        projected = [dict(zip(("id", "title"), values[index:index + 2]))
+                     for index in range(0, len(values), 2)]
         assert projected == [{"id": preset["id"], "title": preset["title"]} for preset in PRESETS], \
             "iOS 润色方案 id、名称或顺序与共享目录不同"
     print("polish prompt catalog: iOS 展示目录与共享目录一致")

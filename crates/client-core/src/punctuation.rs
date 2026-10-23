@@ -204,10 +204,21 @@ pub fn should_replace_repeat(
     chinese_mark(context.ascii)
 }
 
+/// `、` 的 ASCII 孪生按当前开着的顿号键判（契约 `enumerationComma` 段）：`source` 是产生它的键，开着时原样转回；不是顿号键（候选上屏）时按契约序取开着的那个——`\` 优先、`/` 其次；两个都关按归一的 `\`。
+pub fn enumeration_comma_ascii(source: u8, marks: &PunctuationMarks) -> u8 {
+    match source {
+        b'\\' if marks.enumeration_comma_backslash => b'\\',
+        b'/' if marks.enumeration_comma_slash => b'/',
+        _ if marks.enumeration_comma_backslash => b'\\',
+        _ if marks.enumeration_comma_slash => b'/',
+        _ => b'\\',
+    }
+}
+
 /// The ASCII twin of a Chinese punctuation mark, or `None` where there is none.
 ///
-/// Both quote directions map to the same ASCII quote: a straight quote has no handedness. 直角引号和空心方头括号是同一个键的另一组字（`quote_style`、`bracket_style`），同样转回那个键。
-pub fn ascii_for_chinese_mark(chinese: char) -> Option<u8> {
+/// Both quote directions map to the same ASCII quote: a straight quote has no handedness. 直角引号和空心方头括号是同一个键的另一组字（`quote_style`、`bracket_style`），同样转回那个键。顿号按 `source`（产生它的键，没有时传 0）和 `marks` 里开着的顿号键定。
+pub fn ascii_for_chinese_mark(chinese: char, source: u8, marks: &PunctuationMarks) -> Option<u8> {
     Some(match chinese {
         '。' => b'.',
         '\u{ff0c}' => b',',
@@ -215,7 +226,7 @@ pub fn ascii_for_chinese_mark(chinese: char) -> Option<u8> {
         '？' => b'?',
         '；' => b';',
         '\u{ff1a}' => b':',
-        '、' => b'/',
+        '、' => enumeration_comma_ascii(source, marks),
         '\u{201c}' | '\u{201d}' => b'"',
         '\u{2018}' | '\u{2019}' => b'\'',
         '『' | '』' => b'"',
@@ -250,6 +261,8 @@ pub fn arm_space_convert(
     smart_punctuation: bool,
     space_convert: bool,
     editor_generation: u64,
+    source: u8,
+    marks: &PunctuationMarks,
 ) -> Option<SpaceConvertSnapshot> {
     if !smart_punctuation || !space_convert || auto_closed_pair {
         return None;
@@ -261,7 +274,7 @@ pub fn arm_space_convert(
     }
     Some(SpaceConvertSnapshot {
         chinese,
-        ascii: ascii_for_chinese_mark(chinese)?,
+        ascii: ascii_for_chinese_mark(chinese, source, marks)?,
         editor_generation,
     })
 }
@@ -573,6 +586,7 @@ mod tests {
 
     #[test]
     fn space_conversion_covers_the_marks_the_source_maps_and_no_others() {
+        let marks = PunctuationMarks::default();
         for (chinese, ascii) in [
             ('。', b'.'),
             ('\u{ff0c}', b','),
@@ -580,7 +594,6 @@ mod tests {
             ('？', b'?'),
             ('；', b';'),
             ('\u{ff1a}', b':'),
-            ('、', b'/'),
             ('【', b'['),
             ('】', b']'),
             ('《', b'<'),
@@ -588,13 +601,17 @@ mod tests {
             ('（', b'('),
             ('）', b')'),
         ] {
-            assert_eq!(ascii_for_chinese_mark(chinese), Some(ascii), "{chinese}");
+            assert_eq!(
+                ascii_for_chinese_mark(chinese, 0, &marks),
+                Some(ascii),
+                "{chinese}"
+            );
         }
         // Both directions of a quote map to the one straight quote, which has no handedness.
-        assert_eq!(ascii_for_chinese_mark('\u{201c}'), Some(b'"'));
-        assert_eq!(ascii_for_chinese_mark('\u{201d}'), Some(b'"'));
-        assert_eq!(ascii_for_chinese_mark('\u{2018}'), Some(b'\''));
-        assert_eq!(ascii_for_chinese_mark('\u{2019}'), Some(b'\''));
+        assert_eq!(ascii_for_chinese_mark('\u{201c}', 0, &marks), Some(b'"'));
+        assert_eq!(ascii_for_chinese_mark('\u{201d}', 0, &marks), Some(b'"'));
+        assert_eq!(ascii_for_chinese_mark('\u{2018}', 0, &marks), Some(b'\''));
+        assert_eq!(ascii_for_chinese_mark('\u{2019}', 0, &marks), Some(b'\''));
         // 直角引号与空心括号转回同一个键。
         for (chinese, ascii) in [
             ('「', b'\''),
@@ -604,42 +621,98 @@ mod tests {
             ('〖', b'['),
             ('〗', b']'),
         ] {
-            assert_eq!(ascii_for_chinese_mark(chinese), Some(ascii), "{chinese}");
+            assert_eq!(
+                ascii_for_chinese_mark(chinese, 0, &marks),
+                Some(ascii),
+                "{chinese}"
+            );
         }
         for other in ['中', 'a', '.', '…', '—'] {
-            assert_eq!(ascii_for_chinese_mark(other), None, "{other}");
+            assert_eq!(ascii_for_chinese_mark(other, 0, &marks), None, "{other}");
         }
+    }
+
+    /// 顿号空格反查随当前开着的键判：按下的键开着时转回它，否则 `\` 优先、`/` 其次；关掉 `/` 后 `/` 不再被当成顿号来源。
+    #[test]
+    fn enumeration_comma_space_reverse_follows_the_enabled_keys() {
+        let marks = |backslash, slash| PunctuationMarks {
+            enumeration_comma_backslash: backslash,
+            enumeration_comma_slash: slash,
+            ..PunctuationMarks::default()
+        };
+        // 缺省「只有 `\`」：按 `\` 出的顿号转回 `\`，候选上屏的顿号也转回 `\`，`/` 不再是来源。
+        let backslash_only = marks(true, false);
+        for source in [b'\\', b'/', 0] {
+            assert_eq!(
+                ascii_for_chinese_mark('、', source, &backslash_only),
+                Some(b'\\'),
+                "source {source}"
+            );
+            assert_eq!(
+                enumeration_comma_ascii(source, &backslash_only),
+                b'\\',
+                "source {source}"
+            );
+        }
+        // 只有 `/`：转回 `/`，按 `\` 出的顿号也归到开着的那个键。
+        let slash_only = marks(false, true);
+        for source in [b'\\', b'/', 0] {
+            assert_eq!(
+                enumeration_comma_ascii(source, &slash_only),
+                b'/',
+                "source {source}"
+            );
+        }
+        // 两个都开：按下的键开着时转回它，候选上屏按契约序归 `\`。
+        let both = marks(true, true);
+        assert_eq!(enumeration_comma_ascii(b'\\', &both), b'\\');
+        assert_eq!(enumeration_comma_ascii(b'/', &both), b'/');
+        assert_eq!(enumeration_comma_ascii(0, &both), b'\\');
+        // 两个都关（未经归一的值）：按归一的 `\`。
+        assert_eq!(enumeration_comma_ascii(b'/', &marks(false, false)), b'\\');
+        // 反查落到快照里：关掉 `/` 后，`、` 的空格转换不再把 `/` 转回。
+        let armed = arm_space_convert("、", false, true, true, 7, b'\\', &backslash_only);
+        assert_eq!(
+            decide_space_convert(armed, b' ', Some('、'), false, 7),
+            Some(b'\\')
+        );
+        let armed = arm_space_convert("、", false, true, true, 7, b'/', &slash_only);
+        assert_eq!(
+            decide_space_convert(armed, b' ', Some('、'), false, 7),
+            Some(b'/')
+        );
     }
 
     #[test]
     fn space_conversion_arms_only_a_lone_mark_the_user_finished_typing() {
-        assert!(arm_space_convert("。", false, true, true, 1).is_some());
+        let marks = PunctuationMarks::default();
+        assert!(arm_space_convert("。", false, true, true, 1, 0, &marks).is_some());
         assert!(
-            arm_space_convert("。", true, true, true, 1).is_none(),
+            arm_space_convert("。", true, true, true, 1, 0, &marks).is_none(),
             "auto-closed pair"
         );
         assert!(
-            arm_space_convert("好。", false, true, true, 1).is_none(),
+            arm_space_convert("好。", false, true, true, 1, 0, &marks).is_none(),
             "not the only scalar"
         );
         assert!(
-            arm_space_convert("中", false, true, true, 1).is_none(),
+            arm_space_convert("中", false, true, true, 1, 0, &marks).is_none(),
             "not a mark"
         );
-        assert!(arm_space_convert("", false, true, true, 1).is_none());
+        assert!(arm_space_convert("", false, true, true, 1, 0, &marks).is_none());
         assert!(
-            arm_space_convert("。", false, false, true, 1).is_none(),
+            arm_space_convert("。", false, false, true, 1, 0, &marks).is_none(),
             "smart punctuation off"
         );
         assert!(
-            arm_space_convert("。", false, true, false, 1).is_none(),
+            arm_space_convert("。", false, true, false, 1, 0, &marks).is_none(),
             "the switch is off"
         );
     }
 
     #[test]
     fn space_converts_only_when_the_mark_is_still_there() {
-        let armed = arm_space_convert("，", false, true, true, 4);
+        let armed = arm_space_convert("，", false, true, true, 4, 0, &PunctuationMarks::default());
         assert_eq!(
             decide_space_convert(armed, b' ', Some('\u{ff0c}'), false, 4),
             Some(b',')

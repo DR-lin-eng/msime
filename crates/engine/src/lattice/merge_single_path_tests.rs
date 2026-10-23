@@ -3,6 +3,30 @@ use super::*;
 use crate::ime::personal_rerank::allocations::count;
 use crate::lattice::decode::tests::{lookup, syllables, table, Table};
 
+/// 当前实现：解码后交给 `merge_decoded`，与生产路径同一组合。
+#[allow(clippy::too_many_arguments)]
+fn merge_lattice_graph(
+    candidates: &mut Vec<WordItem>,
+    syllables: &[String],
+    typed_pinyin: &str,
+    options: &LatticeOptions<'_>,
+    typo_source: Option<&mut TypoEdgeSource<'_>>,
+    rerankers: &mut [NeuralReranker],
+    rescoring_context: &str,
+    graph: crate::lattice::decode::Graph,
+) -> Option<TypoSentence> {
+    let decoded = decode_graph_sentences(syllables, options, typo_source, &graph);
+    merge_decoded(
+        candidates,
+        syllables,
+        typed_pinyin,
+        options,
+        rerankers,
+        rescoring_context,
+        decoded,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn baseline_merge_lattice_graph(
     candidates: &mut Vec<WordItem>,

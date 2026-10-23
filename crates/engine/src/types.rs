@@ -946,7 +946,7 @@ impl Default for FirstPageRows {
     }
 }
 
-/// 双拼辅助码的触发方式开关（Windows v0.11.1 `[helpcode]` 组的双拼专属键），随 `QueryRequest` 交给双拼引擎。默认值与 Windows 出厂配置一致；当前引擎只读 `direct`，其余键在输入串契约扩展后逐层生效（`trigger_*` 末尾间接、`mid_sentence*` 句中间接、`direct_helpcode*` 万象式直接）。
+/// 双拼辅助码的触发方式开关（Windows v0.11.1 `[helpcode]` 组的双拼专属键），随 `QueryRequest` 交给双拼引擎。默认值与 Windows 出厂配置一致；`direct` 控制末尾直接，`trigger_*` 控制末尾间接，`mid_sentence*` 控制句中间接，`direct_helpcode*` 控制逐音节直接。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShuangpinHelpcodeModes {
     /// 末尾直接：完整音节基座后的裸字母按辅助码读。关闭后只认触发键开启的段。
@@ -987,6 +987,17 @@ impl Default for ShuangpinHelpcodeModes {
     }
 }
 
+/// 一个音节上的辅助码约束（`core/syllable_helpcode.h` 的 `SyllableHelpcode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyllableHelpcode {
+    /// 受约束的音节，按去掉辅助码段之后的双拼切分计，0 起。
+    pub syllable: usize,
+    /// 第一码，小写字母；0 表示这一段还没敲码。
+    pub first: u8,
+    /// 第二码，小写字母；0 表示没有第二码，只按第一码筛。
+    pub second: u8,
+}
+
 /// What a scheme turns its composition into for the providers. Built fresh on every refresh; providers never mutate it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryRequest {
@@ -996,6 +1007,18 @@ pub struct QueryRequest {
     /// Lowercased, apostrophes kept.
     pub raw_input: String,
     pub raw_input_with_cases: String,
+    /// 输入串里带辅助码段（'`' 句中、'|' 末尾）时，`raw_input` / `raw_input_with_cases` 是每段换成
+    /// `'`（末尾的末尾段去掉）的去段串，原串（用户敲的原样）在这里。没有段时为空。
+    pub raw_input_with_helpcode_marks: String,
+    /// 句中辅助码约束；段敲进串里就带着，是否参与筛查看 `shuangpin_helpcode_modes.mid_sentence`。
+    pub syllable_helpcodes: Vec<SyllableHelpcode>,
+    /// 末尾段敲下的辅码（小写，至多两个），只在段位于输入串末尾时非空；查询时一码重排、两码筛选。
+    pub end_helpcodes: String,
+    /// 去段串（`raw_input_with_cases`）到原串（`raw_input_with_helpcode_marks`）的下标映射，末尾
+    /// 多一项等于原串长度；选词推进与音节边界用它把去段位置换回显示位置。
+    pub helpcode_source_index: Vec<usize>,
+    /// 每段原样的文本及它挂在哪个音节后面，预编辑据此还原显示。
+    pub helpcode_decorations: Vec<(usize, String)>,
     /// The dictionary key: no apostrophes.
     pub normalized_input: String,
     pub raw_segmentation: String,
@@ -1312,12 +1335,15 @@ impl Default for FrequencyAdjustmentOptions {
     }
 }
 
-/// Which local modes may be entered. The Shift+letter modes of the reference are on by default, symbol mode (`S`) among them, as the reference's factory configuration ships it on; expression (`V`), command (`/`), mention (`@`) and 拆字 (`C`) are off, because entering them takes a key that used to reach the host as text. 拆字的默认值由宿主按形态决定：host-api 在触屏宿主上打开它，桌面宿主等用户在设置里打开。
+/// Which local modes may be entered. The Shift+letter modes of the reference are on by default, symbol mode (`S`) among them, as the reference's factory configuration ships it on; expression (`V`) follows the reference's `v_mode` factory and is on, command (`/`) and mention (`@`) are off, because entering them takes a key that used to reach the host as text. 拆字 (`C`) 在共享偏好层默认开（对齐参考的 `radical_mode` 出厂值），host-api 把未写偏好的文档读作开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalModeOptions {
     pub unicode: bool,
+    /// Shift+T 日期时间快捷输入模式（参考 `utility.date_time_mode`）。行内日期时间混入普通候选由 `date_time_inline` 单独开关（参考 `utility.date_time_candidates`，出厂关）。
     pub date_time: bool,
-    /// 「📅日期」入口：日期时间混进普通候选时，第三位放一个入口，选中后候选窗换成这一组的全部格式（参考 `utility.date_time_menu`，出厂开）。依附 `date_time`。
+    /// 全拼输入 `riqi`/`sj`/`xq`/`nongli` 时把当前日期、时间、星期或农历接在对应的词后面（参考 `utility.date_time_candidates`）。与 T 模式独立：T 模式关着时行内混入仍可开。
+    pub date_time_inline: bool,
+    /// 「📅日期」入口：日期时间混进普通候选时，第三位放一个入口，选中后候选窗换成这一组的全部格式（参考 `utility.date_time_menu`，出厂开）。依附 `date_time_inline`。
     pub date_time_menu: bool,
     pub quick_phrase: bool,
     pub emoji: bool,
@@ -1341,6 +1367,7 @@ impl Default for LocalModeOptions {
         Self {
             unicode: true,
             date_time: true,
+            date_time_inline: true,
             date_time_menu: true,
             quick_phrase: true,
             emoji: true,
@@ -1404,6 +1431,8 @@ pub struct EnglishInputOptions {
     pub mixed_candidates: bool,
     /// 补全与英文领先的触发字符数，范围 1..=8；26 键中更短的完整词可选，但不抢占中文首选。
     pub minimum_prefix: usize,
+    /// 中文状态下首页最多展示几个英文候选（Windows `general.cn_en_mixed_input_first_page_count`），范围 1..=3：第一行英文进优先位置之后，其余英文紧跟它继续占首页的空位，放不下的照旧接在列表末尾。
+    pub first_page_count: usize,
 }
 
 impl Default for EnglishInputOptions {
@@ -1411,6 +1440,7 @@ impl Default for EnglishInputOptions {
         Self {
             mixed_candidates: false,
             minimum_prefix: 2,
+            first_page_count: 1,
         }
     }
 }

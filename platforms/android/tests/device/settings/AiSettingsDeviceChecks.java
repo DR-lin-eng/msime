@@ -17,7 +17,9 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -170,11 +172,15 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
         String raw = (String) nativeType.getMethod("aiProviderCatalog").invoke(null);
         Method parse = settingsType.getMethod("parseCatalog", String.class);
         List<?> catalog = (List<?>) parse.invoke(null, raw);
-        var ids = new java.util.HashSet<String>();
-        for (Object provider : catalog) ids.add((String) provider.getClass().getMethod("id").invoke(provider));
-        check(ids.equals(new java.util.HashSet<>(java.util.Arrays.asList("everyapi", "openai", "anthropic", "gemini",
-            "deepseek", "qwen", "kimi", "zhipu", "minimax", "volcengine", "siliconflow", "groq", "openrouter", "ollama", "custom"))),
-            "共享目录包含完整服务标识，允许 JNI 严格解析后逐项保留");
+        JSONArray catalogEntries = new JSONObject(raw).getJSONArray("value");
+        Set<String> required = Set.of("everyapi", "openai", "anthropic", "gemini", "deepseek", "qwen",
+            "kimi", "zhipu", "minimax", "volcengine", "siliconflow", "groq", "openrouter", "ollama", "custom");
+        Set<String> actual = new HashSet<>();
+        for (int index = 0; index < catalogEntries.length(); index++) actual.add(catalogEntries.getJSONObject(index).getString("id"));
+        check(actual.containsAll(required), "完整共享目录包含既有全部服务");
+        Set<String> parsedIds = new HashSet<>();
+        for (Object provider : catalog) parsedIds.add((String) provider.getClass().getMethod("id").invoke(provider));
+        check(parsedIds.equals(actual) && catalog.size() == catalogEntries.length(), "JNI 严格解析后逐项保留完整共享服务目录");
         JSONObject wrong = new JSONObject(raw).put("ok", "true");
         reject(parse, wrong);
         JSONObject duplicate = new JSONObject(raw);
@@ -188,14 +194,20 @@ public abstract class AiSettingsDeviceChecks extends DeviceSmoke {
             .put("endpoint", "https://fixture.invalid/custom").put("model", "synthetic-custom")
             .put("tokens", new JSONObject().put("https://fixture.invalid:443", "合成凭据🍃"))
             .put("prompt_custom_2", "合成提示词");
-        settingsType.getMethod("switchProvider", JSONObject.class, String.class).invoke(null, ai, "openai");
-        check("https://api.openai.com/v1/chat/completions".equals(ai.getString("endpoint")), "新提供方使用自己的默认地址");
-        check("gpt-4.1-mini".equals(ai.getString("model")), "新提供方使用自己的默认模型");
-        check("https://fixture.invalid/custom".equals(ai.getJSONObject("endpoints").getString("deepseek")), "自定义地址记在原提供方槽位");
-        check("synthetic-custom".equals(ai.getJSONObject("models").getString("deepseek")), "自定义模型记在原提供方槽位");
-        settingsType.getMethod("switchProvider", JSONObject.class, String.class).invoke(null, ai, "deepseek");
-        check("https://fixture.invalid/custom".equals(ai.getString("endpoint")), "切回原提供方恢复自定义地址");
-        check("synthetic-custom".equals(ai.getString("model")), "切回原提供方恢复自定义模型");
+        // 每个服务商各记一份接口地址和模型（#9250）：切走时现值写进原服务商的槽位，目标服务商没有槽位就用它的预设，切回来按槽位原样恢复。
+        JSONObject openai = null;
+        for (int index = 0; index < catalogEntries.length(); index++)
+            if ("openai".equals(catalogEntries.getJSONObject(index).getString("id"))) openai = catalogEntries.getJSONObject(index);
+        check(openai != null, "共享目录包含 openai");
+        Method switchProvider = settingsType.getMethod("switchProvider", JSONObject.class, String.class);
+        switchProvider.invoke(null, ai, "openai");
+        check(openai.getString("endpoint").equals(ai.getString("endpoint")), "切到没有槽位的服务商时用它的预设地址");
+        check(openai.getString("model").equals(ai.getString("model")), "切到没有槽位的服务商时用它的预设模型");
+        check("https://fixture.invalid/custom".equals(ai.getJSONObject("endpoints").getString("deepseek")), "自定义地址存进原服务商的槽位");
+        check("synthetic-custom".equals(ai.getJSONObject("models").getString("deepseek")), "自定义模型存进原服务商的槽位");
+        switchProvider.invoke(null, ai, "deepseek");
+        check("https://fixture.invalid/custom".equals(ai.getString("endpoint")), "切回时恢复自定义地址");
+        check("synthetic-custom".equals(ai.getString("model")), "切回时恢复自定义模型");
         check("合成凭据🍃".equals(ai.getJSONObject("tokens").getString("https://fixture.invalid:443")), "合成 origin 凭据不变");
         check("合成提示词".equals(ai.getString("prompt_custom_2")), "切换保留提示词槽");
     }

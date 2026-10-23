@@ -3356,15 +3356,18 @@ public:
   bool apply(char *raw,
              std::optional<std::string> spaceConvertPreceding = std::nullopt,
              msime::linux_host::PunctuationPairMode pairMode =
-                 msime::linux_host::PunctuationPairMode::Unpaired) {
+                 msime::linux_host::PunctuationPairMode::Unpaired,
+             char spaceConvertKey = 0) {
     auto result = response(raw);
     pair_inserted_ = false;
     if (result.contains("commit") && result["commit"].is_string()) {
       auto text = result["commit"].get<std::string>();
       if (traditionalApplies()) text = msime_linux_simplified_to_traditional(text, traditional_variant_);
+      // `、` 的 ASCII 孪生按产生它的键和 View 的顿号开关定（enumerationComma 段）。
       const auto spaceConvertAscii =
           spaceConvertPreceding
-              ? msime::linux_host::smart_punctuation_ascii_mark(text)
+              ? msime::linux_host::smart_punctuation_ascii_mark(
+                    text, spaceConvertKey, viewPunctuationMarks())
               : 0;
       pair_inserted_ = msime::linux_host::normalize_punctuation_pair(text, pairMode);
       // An ASCII mark smart punctuation kept can be taken back to Chinese by
@@ -3397,6 +3400,7 @@ public:
       if (spaceConvertAscii != 0 && !pair_inserted_) {
         // Preserve Engine's actual half (notably opening/closing quotes).
         space_convert_mark_ = text;
+        space_convert_key_ = spaceConvertKey;
         space_convert_preceding_ = std::move(*spaceConvertPreceding);
       }
     }
@@ -3525,7 +3529,7 @@ public:
     const auto ascii = static_cast<char>(value);
     const bool arm = smart_punctuation_ && smart_punctuation_space_convert_ &&
                      chinese_punctuation_ &&
-                     msime::linux_host::is_space_conversion_key(ascii) &&
+                     msime::linux_host::is_space_conversion_key(ascii, viewPunctuationMarks()) &&
                      !(paired_punctuation_ &&
                        msime::linux_host::is_auto_paired_opening_key(ascii)) &&
                      !composingOrCandidates();
@@ -3552,7 +3556,7 @@ public:
                            msime::linux_host::strict_json_value(view_, "scheme", 0u) != 3 && !withoutHostPunctuation();
     const bool handled =
         apply(msime_client_punctuation_with_context(session_, value, preceding),
-              std::move(spaceConvertPreceding), pairMode);
+              std::move(spaceConvertPreceding), pairMode, ascii);
     if (handled && smart_punctuation_rejected_ == ascii)
       forgetSmartPunctuationRepeat();
     if (!handled && keptAscii) {
@@ -3674,15 +3678,17 @@ public:
   // A successful rewrite consumes the Space.
   bool convertSmartPunctuationSpace() {
     const auto mark = std::move(space_convert_mark_);
+    const auto convertKey = space_convert_key_;
     const auto expected = std::move(space_convert_preceding_);
     space_convert_mark_.clear();
+    space_convert_key_ = 0;
     space_convert_preceding_.clear();
     if (mark.empty() || !smart_punctuation_ ||
         !smart_punctuation_space_convert_ || !chinese_punctuation_ ||
         composingOrCandidates())
       return false;
-    const auto replacement =
-        msime::linux_host::space_conversion_ascii_text(mark);
+    const auto replacement = msime::linux_host::space_conversion_ascii_text(
+        mark, convertKey, viewPunctuationMarks());
     const auto characters = precedingCharacters(2);
     if (replacement.empty() || !characters ||
         !msime::linux_host::space_conversion_matches_document(mark, expected,
@@ -4125,6 +4131,8 @@ public:
   // disarms. The fingerprint is there because the same mark usually appears more
   // than once and moving the caret inside a window is not a focus change.
   std::string space_convert_mark_;
+  // `、` 上屏时产生它的键：顿号有两个可配键，空格反查按它和 View 的顿号开关定 ASCII 孪生。
+  char space_convert_key_ = 0;
   std::string space_convert_preceding_;
   uint8_t punctuation_lock_ = 0;
   std::string online_socket_, online_query_;

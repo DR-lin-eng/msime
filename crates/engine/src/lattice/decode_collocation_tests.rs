@@ -177,3 +177,25 @@ fn a_real_baguwen_model_corrects_the_frequency_winner() {
         "真实模型要把「北京+大学」拉回首位"
     );
 }
+
+/// 调参真的进打分：同一 fixture 上把命中惩罚 -14 收紧到 -30，原本被搭配分顶回的
+/// 「医生」让位给词频首选（命中项 20-30=-10 落到未命中常数 -6 之下）。偏好键
+/// `sentence_collocation_penalty` 经 host-api 写进 `collocation_grammar` 后走的就是这条路径。
+#[test]
+fn a_stiffer_collocation_penalty_surrenders_to_the_frequency_winner() {
+    let dir = tempfile::tempdir().unwrap();
+    let rows = rows();
+    let db = fixture_db(dir.path());
+    let config = GramConfig {
+        collocation_penalty: -30.0,
+        ..GramConfig::default()
+    };
+    let scorer = |tail: &str, word: &str, is_rear: bool| {
+        db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
+    };
+    let scored = decode_with(&rows, Some(&scorer), 1.0);
+    assert_eq!(
+        scored[0].sentence, "一名一生",
+        "命中惩罚收紧后词频首选应回到首位"
+    );
+}

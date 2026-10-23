@@ -70,6 +70,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private weak var compositionContainer: CandidateCanvasHostView?
   private let replyModel = ReplyKeyboardModel()
   private var personalDictionaryTimer: Timer?
+  private let idleMaintenance = IdleMaintenancePoll()
   private var lastKeyTouchTime: TimeInterval = -.infinity
   private var synchronizingPersonalDictionary = false
   private let preeditButton = UIButton()
@@ -451,6 +452,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 最近一次快照报告的引号与方头括号样式（View 的 `punctuation_marks`）。
   private var currentCornerQuotes = false
   private var currentHollowBrackets = false
+  /// View 的 `punctuation_marks` 顿号开关：`\` 缺省开、`/` 缺省关，快照里读到什么用什么。
+  private var currentEnumerationCommaBackslash = true
+  private var currentEnumerationCommaSlash = false
   private var currentNineKeySpellings: [String] = []
   private var currentNineKeySingleCharacter = false
   private var currentNineKeyStrokes = ""
@@ -608,19 +612,32 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// The key input remains ASCII so the Engine chooses the punctuation mark (including quote alternation and book-title nesting) and smart punctuation; only the visible face changes. English and local-input modes keep the literal ASCII face.
   static let chineseSymbolFaces: [String: String] = [
     ",": "，", ".": "。", "?": "？", "!": "！", ";": "；", ":": "：",
-    "(": "（", ")": "）", "[": "【", "]": "】", "\\": "、",
+    "(": "（", ")": "）", "[": "【", "]": "】", "\\": "、", "/": "、",
     "<": "《", ">": "》", "'": "‘", "\"": "“", "_": "——",
   ]
 
-  /// 按引号与方头括号样式（View 的 `punctuation_marks`）取中文键面：直角引号下 `'` 画「、`"` 画『，空心括号下 `[` `]` 画〖〗，其余与 `chineseSymbolFaces` 相同。这些键经 Engine 上屏，键面与写出的字一致。不是 private：键面测试会固定它。
-  static func chineseSymbolFace(_ ascii: String, cornerQuotes: Bool, hollowBrackets: Bool) -> String? {
+  /// 按引号与方头括号样式（View 的 `punctuation_marks`）取中文键面：直角引号下 `'` 画「、`"` 画『，空心括号下 `[` `]` 画〖〗，其余与 `chineseSymbolFaces` 相同。这些键经 Engine 上屏，键面与写出的字一致。顿号键随 View 的顿号开关：`\` 关着时画 `\`，`/` 开着时画 `、`。不是 private：键面测试会固定它。
+  static func chineseSymbolFace(_ ascii: String, cornerQuotes: Bool, hollowBrackets: Bool,
+                                enumerationCommaBackslash: Bool = true,
+                                enumerationCommaSlash: Bool = false) -> String? {
     switch ascii {
     case "'" where cornerQuotes: return "「"
     case "\"" where cornerQuotes: return "『"
     case "[" where hollowBrackets: return "〖"
     case "]" where hollowBrackets: return "〗"
+    case "\\": return enumerationCommaBackslash ? "、" : ascii
+    case "/": return enumerationCommaSlash ? "、" : ascii
     default: return chineseSymbolFaces[ascii]
     }
+  }
+
+  /// 英文模式下标点锁定为中文时，按当前 View 的顿号开关选择发给 Engine 的键。nonisolated：纯函数，SmartPunctuationTests 这类非隔离测试可直接钉住。
+  nonisolated static func lockedEnglishPunctuationInput(
+    for symbol: String, enumerationCommaBackslash: Bool, enumerationCommaSlash: Bool) -> String? {
+    KeyboardPunctuationContext.engineInput(
+      for: symbol, japanese: false,
+      enumerationCommaBackslash: enumerationCommaBackslash,
+      enumerationCommaSlash: enumerationCommaSlash)
   }
 
   /// Whether Chinese punctuation is on for marks the keyboard writes itself rather than through the Engine (the Zhuyin symbol panel): a 中文 lock, or the 中文标点 switch under 跟随中英文; an 英文 lock turns it off. Not private: the scheme tests pin it.
@@ -642,9 +659,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// What a Zhuyin symbol-panel key writes: the Chinese mark for an ASCII mark that has one while Chinese punctuation is on, else the key itself. Not private: the scheme tests pin it.
   static func zhuyinSymbolText(_ symbol: String, chinesePunctuation: Bool, cornerQuotes: Bool = false,
-                               hollowBrackets: Bool = false) -> String {
+                               hollowBrackets: Bool = false,
+                               enumerationCommaBackslash: Bool = true,
+                               enumerationCommaSlash: Bool = false) -> String {
     chinesePunctuation
-      ? chineseSymbolFace(symbol, cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets) ?? symbol : symbol
+      ? chineseSymbolFace(symbol, cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets,
+                          enumerationCommaBackslash: enumerationCommaBackslash,
+                          enumerationCommaSlash: enumerationCommaSlash) ?? symbol : symbol
   }
 
   /// Whether the Zhuyin symbol panel writes Chinese marks now.
@@ -747,15 +768,34 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     snapshotWorker.tick(idle: !hasComposition && !isInLocalMode, fullAccess: hasFullAccess, force: true)
     personalDictionaryTimer?.invalidate()
     personalDictionaryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-      MainActor.assumeIsolated {
-        guard let self else { return }
-        // 异步首键尚未渲染时也在输入；词间的短暂停顿不触发同步权限和词库维护。
-        guard !self.hasComposition, !self.isInLocalMode, !self.session.hasPendingCharacters,
-              ProcessInfo.processInfo.systemUptime - self.lastKeyTouchTime >= 0.3 else { return }
-        let fullAccess = self.hasFullAccess
-        self.synchronizePersonalDictionary(force: false, fullAccess: fullAccess)
-        self.snapshotWorker.tick(idle: true, fullAccess: fullAccess)
+      MainActor.assumeIsolated { self?.startIdleMaintenance() }
+    }
+  }
+
+  /// 异步首键尚未渲染时也在输入；词间的短暂停顿不触发同步权限和词库维护。
+  private var idleForMaintenance: Bool {
+    !hasComposition && !isInLocalMode && !session.hasPendingCharacters
+      && ProcessInfo.processInfo.systemUptime - lastKeyTouchTime >= 0.3
+  }
+
+  /// 两秒一轮的词库维护。读两份共享文件放到后台，主线程只在读完、并且仍然空闲时做真正要做的同步；通常两边都无事可做，主线程这一轮只读一次完全访问权限。
+  private func startIdleMaintenance() {
+    guard idleForMaintenance, !idleMaintenance.isRunning else { return }
+    let fullAccess = hasFullAccess
+    guard fullAccess else {
+      // 没有完全访问时个人词库不同步，快照工作者停下并归还租约，两边都不读共享目录。
+      snapshotWorker.tick(idle: true, fullAccess: false)
+      return
+    }
+    idleMaintenance.start(readSnapshotState: snapshotWorker.stateReader()) { [weak self] outcome in
+      // 后台读文件期间用户可能已经开始输入：这一轮让给按键，下一次定时器再来。
+      guard let self, self.idleForMaintenance else { return }
+      switch outcome.personalDictionary {
+      case .success(true): self.synchronizePersonalDictionary(force: false, fullAccess: fullAccess)
+      case .success(false): break
+      case .failure(let error): self.showDiagnostic(error.localizedDescription)
       }
+      self.snapshotWorker.tick(idle: true, fullAccess: fullAccess, prefetched: outcome.snapshotState)
     }
   }
 
@@ -992,6 +1032,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidateGlossTimer = nil
     personalDictionaryTimer?.invalidate()
     personalDictionaryTimer = nil
+    idleMaintenance.cancel()
     closeKeyboardPicker()
     // 键盘收起时还在调整高度就当作取消：没点「完成」的预览不保存，与 Android onFinishInputView 一致。
     closeInlineHeight(commit: false)
@@ -3590,7 +3631,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
          commitEnglishBoundary(symbol) { return }
       // 标点锁定为中文 keeps Chinese marks in English mode too; the shared route decides, as it does in Chinese mode.
       if session.sharedPreferences?["punctuation_lock"] as? String == "chinese",
-         let punctuation = KeyboardPunctuationContext.engineInput(for: symbol, japanese: false) {
+         let punctuation = Self.lockedEnglishPunctuationInput(
+           for: symbol, enumerationCommaBackslash: currentEnumerationCommaBackslash,
+           enumerationCommaSlash: currentEnumerationCommaSlash) {
         let preceding = KeyboardPunctuationContext.precedingScalar(textDocumentProxy.documentContextBeforeInput)
         let snapshot = session.handlePunctuationWithContext(punctuation, preceding: preceding)
         if snapshot.isHandled {
@@ -3607,8 +3650,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // Zhuyin spells with the digit row and with , . / ; -, so the symbol panel cannot hand its keys to the Engine: they would type ㄅ or ㄝ or pick a list row. The panel commits the conversion and types the mark itself, as the key draws it: the Chinese face for an ASCII mark that has one while Chinese punctuation is on, the ASCII mark otherwise.
     if typesZhuyin {
       render(session.finishComposition())
-      insertDirectText(Self.zhuyinSymbolText(symbol, chinesePunctuation: zhuyinWritesChinesePunctuation,
-                                             cornerQuotes: currentCornerQuotes, hollowBrackets: currentHollowBrackets))
+      insertDirectText(Self.zhuyinSymbolText(
+        symbol, chinesePunctuation: zhuyinWritesChinesePunctuation,
+        cornerQuotes: currentCornerQuotes, hollowBrackets: currentHollowBrackets,
+        enumerationCommaBackslash: currentEnumerationCommaBackslash,
+        enumerationCommaSlash: currentEnumerationCommaSlash))
       return
     }
 
@@ -3665,7 +3711,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
 
     guard let punctuation = KeyboardPunctuationContext.engineInput(
-      for: symbol, japanese: inputScheme.isJapanese, asciiMarks: typesKorean || typesCasedLetters) else {
+      for: symbol, japanese: inputScheme.isJapanese, asciiMarks: typesKorean || typesCasedLetters,
+      enumerationCommaBackslash: currentEnumerationCommaBackslash,
+      enumerationCommaSlash: currentEnumerationCommaSlash) else {
       render(session.finishComposition())
       insertDirectText(symbol)
       return
@@ -4770,7 +4818,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     do {
       try session.synchronizeSogouDictionaries()
       let state = try store.read()
-      guard force || state.pendingCount > 0 || state.refreshID != state.completedRefreshID else { return }
+      guard force || state.needsKeyboardSynchronization else { return }
       synchronizingPersonalDictionary = true
       defer { synchronizingPersonalDictionary = false }
       try store.synchronize(apply: { request in
@@ -5463,8 +5511,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 日语的逗号写作 、，手机底行的逗号键就画 、，按下也发 、。
     let japaneseComma = writesJapaneseComma
     for face in symbolKeyFaces where face.key !== quickPunctuationButton || (phoneBottomRowShown && !usesCustomQuickPunctuation) {
-      let styled = Self.chineseSymbolFace(face.ascii, cornerQuotes: currentCornerQuotes,
-                                          hollowBrackets: currentHollowBrackets) ?? face.chinese
+      let styled = Self.chineseSymbolFace(
+        face.ascii, cornerQuotes: currentCornerQuotes, hollowBrackets: currentHollowBrackets,
+        enumerationCommaBackslash: currentEnumerationCommaBackslash,
+        enumerationCommaSlash: currentEnumerationCommaSlash) ?? face.chinese
       let chinese = japaneseComma && face.key === quickPunctuationButton ? "、" : styled
       let title = sendsChinesePunctuation ? chinese : face.ascii
       guard face.key.configuration?.title != title || face.key.accessibilityLabel != "符号 \(title)" else { continue }
@@ -6278,9 +6328,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
     currentLocalMode = snapshot.localMode
     // 样式在偏好改动后空闲重建时才变；变了就重画受影响的键面。
-    if currentCornerQuotes != snapshot.cornerQuotes || currentHollowBrackets != snapshot.hollowBrackets {
+    if currentCornerQuotes != snapshot.cornerQuotes || currentHollowBrackets != snapshot.hollowBrackets
+      || currentEnumerationCommaBackslash != snapshot.enumerationCommaBackslash
+      || currentEnumerationCommaSlash != snapshot.enumerationCommaSlash {
       currentCornerQuotes = snapshot.cornerQuotes
       currentHollowBrackets = snapshot.hollowBrackets
+      currentEnumerationCommaBackslash = snapshot.enumerationCommaBackslash
+      currentEnumerationCommaSlash = snapshot.enumerationCommaSlash
       updateSymbolKeyFaces()
       if !symbolLayerKeys.isEmpty { updateSymbolLayerFaces() }
     }

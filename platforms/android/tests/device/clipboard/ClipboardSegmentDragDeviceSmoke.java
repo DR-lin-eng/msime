@@ -134,7 +134,8 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         byte[] before = Files.readAllBytes(history.toPath());
         Bitmap beforePreview = automation.takeScreenshot();
         Rect editorBounds = new Rect();
-        await(field("msime-test-plain")).getBoundsInScreen(editorBounds);
+        AccessibilityNodeInfo editorNode = await(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused));
+        editorNode.getBoundsInScreen(editorBounds);
         Rect card = openFloatingPreview();
         AccessibilityNodeInfo scroll = awaitStableBounds(described("剪贴板全文滚动区域"));
         Rect bounds = new Rect();
@@ -143,7 +144,10 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
             throw new AssertionError("Preview did not extend above the keyboard");
         await(node -> equalsText(text, node.getText()) && !node.isLongClickable());
         Rect editorAfter = new Rect();
-        await(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused)).getBoundsInScreen(editorAfter);
+        // Android 9 会从交互窗口列表移除被浮层盖住的编辑器；刷新展开前取得的同一节点核对焦点和位置。
+        if (!editorNode.refresh() || !editorNode.isFocused())
+            throw new AssertionError("Floating preview changed editor focus");
+        editorNode.getBoundsInScreen(editorAfter);
         Rect cardAfter = new Rect();
         await(node -> node.isLongClickable() && node.getText() != null
             && node.getText().toString().startsWith("Synthetic preview line 0")).getBoundsInScreen(cardAfter);

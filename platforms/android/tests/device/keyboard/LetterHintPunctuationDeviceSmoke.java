@@ -188,7 +188,13 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
                 configureSwipe(false, "down", true, false);
                 stage = "disabled " + direction + " swipe keeps the letter";
                 simpleSwipe("v", direction);
-                expect("v");
+                try { expect("v"); }
+                catch (AssertionError error) {
+                    // 这里只读取本套件自己的合成编辑器，便于区分组字内容与手势分发失败。
+                    AccessibilityNodeInfo editor = awaitAny(field(PLAIN));
+                    throw new AssertionError("Disabled swipe synthetic editor text=" + editor.getText()
+                        + " selection=" + editor.getTextSelectionStart() + ":" + editor.getTextSelectionEnd(), error);
+                }
                 assertNoOptions();
             }
             configureSwipe(false, "down", true, true);

@@ -46,6 +46,10 @@ pub struct Session {
 }
 
 impl Session {
+    /// 宿主对下一次字符调用提供的触点，不改变既有按键类型。
+    pub fn set_touch_point(&mut self, point: Option<(u8, crate::pinyin::touch::TouchPoint)>) {
+        self.input.engine.set_touch_point(point);
+    }
     /// Validates the paths and every option (`INVALID_SESSION_OPTIONS`, `UNKNOWN_HELPCODE_SCHEMA`), loads the helpcode table and applies the options in the reference order (session.cpp:11-30, 57-66).
     pub fn new(options: SessionOptions) -> Result<Session> {
         options.paths.validate()?;

@@ -204,6 +204,17 @@ enum Operation {
         offset: usize,
         limit: usize,
     },
+    /// 搜狗订阅只操作独立集合与激活队列，不打开输入会话。
+    Sogou {
+        command: String,
+        group: Option<u32>,
+        page: Option<u32>,
+        groups: Option<Vec<u32>>,
+        dictionaries: Option<Vec<u32>>,
+        automatic: Option<bool>,
+        id: Option<u32>,
+        enabled: Option<bool>,
+    },
     /// 官方词库独立更新，不需要输入会话释放个人词库。
     Updates {
         command: String,
@@ -761,6 +772,45 @@ fn queued_import(
     Ok((words, result))
 }
 
+/// 显式列出外层字段，再由共享动作校验每个命令的精确字段；避免两个内部标记枚举嵌套 flatten。
+fn sogou_request(
+    options: &HostOptions,
+    operation: &Operation,
+) -> Option<Result<serde_json::Value, String>> {
+    let Operation::Sogou {
+        command,
+        group,
+        page,
+        groups,
+        dictionaries,
+        automatic,
+        id,
+        enabled,
+    } = operation
+    else {
+        return None;
+    };
+    let mut document = json!({"command":command});
+    for (name, value) in [
+        ("group", json!(group)),
+        ("page", json!(page)),
+        ("groups", json!(groups)),
+        ("dictionaries", json!(dictionaries)),
+        ("automatic", json!(automatic)),
+        ("id", json!(id)),
+        ("enabled", json!(enabled)),
+    ] {
+        if !value.is_null() {
+            document[name] = value;
+        }
+    }
+    Some(
+        serde_json::from_value(document)
+            .map_err(|_| "sogou_invalid".to_owned())
+            .and_then(|action| crate::sogou::request(options, &action)),
+    )
+}
+
 pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
     if bytes.len() > DICTIONARY_REQUEST_LIMIT {
         return Err("invalid dictionary buffer".into());
@@ -775,6 +825,9 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
         .preferences
         .validate()
         .map_err(|_| "invalid dictionary options".to_owned())?;
+    if let Some(result) = sogou_request(&request.options, &request.action) {
+        return result;
+    }
     if let Operation::Updates { command, enabled } = &request.action {
         return crate::dictionary_updates::request(&request.options, command, *enabled);
     }
@@ -873,6 +926,7 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
                 }
             }
         }
+        Operation::Sogou { .. } => Err("sogou_invalid".into()),
         Operation::Updates { .. } => Err("dictionary_update_invalid".into()),
         Operation::List {
             offset,
@@ -1250,6 +1304,9 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
         .preferences
         .validate()
         .map_err(|_| "invalid dictionary options".to_owned())?;
+    if let Some(result) = sogou_request(&request.options, &request.action) {
+        return result;
+    }
     if let Operation::Updates { command, enabled } = &request.action {
         return crate::dictionary_updates::request(&request.options, command, *enabled);
     }
@@ -1262,6 +1319,7 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
         .ok_or("personal dictionary shared directory unavailable")?;
     let store = PersonalDictionaryStore::new(Path::new(directory).join("PersonalDictionary"));
     match request.action {
+        Operation::Sogou { .. } => Err("sogou_invalid".into()),
         Operation::Updates { .. } => Err("dictionary_update_invalid".into()),
         // The kind and prefix travel with the page request, and the keyboard answers them from the user's whole store. The entries returned here are the last page it confirmed, which `page_kind` and `page_query` describe.
         Operation::List {

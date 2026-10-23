@@ -16,6 +16,7 @@ import {
 import { useSettingsForm } from "../settings-form-context";
 import { SubPageEntries } from "./sub-page-entries";
 import { GroupList } from "../../core/platform-controls";
+import { SogouDictionaries } from "../sogou-dictionaries";
 import { DictionaryUpdates } from "../dictionary-updates";
 import { DictionaryManifestCard } from "../dictionary-manifest-card";
 import { PersonalDictionaryImportCard } from "../personal-dictionary-import-card";
@@ -174,6 +175,7 @@ export function DictionarySettingsPage() {
             {client.dictionary?.updates && (
               <DictionaryUpdates request={client.dictionary.updates} />
             )}
+            {client.dictionary?.sogou && <SogouDictionaries request={client.dictionary.sogou} />}
             <HarmonyPhoneDictionary />
             {contribution}
           </>
@@ -192,6 +194,9 @@ export function DictionarySettingsPage() {
       </div>
       {!mobilePlatform && feedback}
       {contribution}
+      {page === "dictionary" && client.dictionary?.sogou && (
+        <SogouDictionaries request={client.dictionary.sogou} />
+      )}
       {/* 先是词库本身（查、看、加），再是成批的导入导出和云词库，然后是只读的词库信息和别的入口，清除学习数据这种危险操作放在页末。 */}
       {panel(
         "lookup",

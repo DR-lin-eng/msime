@@ -195,7 +195,9 @@ final class ImeLetterRows {
      *
      * @param input 键的字母，提示字符按它查 {@link LetterHintTable}
      */
-    private void bindLetterGestures(Button key, String input) {
+    private void bindLetterGestures(Button key, String input, KeyTouchSample[] touch) {
+        if (key instanceof KeyboardPressButton press)
+            press.setTouchDownFeedback(() -> s.imeKeyFeedback.onKeyDown(key, ImeKeyFeedback.KEY_STANDARD));
         final String hint = LetterHintTable.hint(input);
         final float[] downY = new float[1];
         final boolean[] triggered = new boolean[1];
@@ -220,6 +222,8 @@ final class ImeLetterRows {
         key.setOnTouchListener((view, event) -> {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN -> {
+                    touch[0] = input == null ? null : KeyTouchSample.capture(key, event,
+                        s.shuangpinKeyButtons, s.shuangpinKeyInputs);
                     downY[0] = DimensionPolicy.fromPixels(s, event.getY());
                     triggered[0] = false;
                     optionsShown[0] = false;
@@ -251,16 +255,16 @@ final class ImeLetterRows {
                             String direction = s.localSettings.choice(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION);
                             String opposite = SwipeHintPolicy.UP.equals(direction) ? SwipeHintPolicy.DOWN : SwipeHintPolicy.UP;
                             if (SwipeHintPolicy.swiped(direction, downY[0], currentY)) {
-                            triggered[0] = true;
-                            key.removeCallbacks(hold);
-                            if (keyPreview != null && keyPreviewOwner == key)
-                                keyPreview.setLabel(LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()));
+                                triggered[0] = true;
+                                key.removeCallbacks(hold);
+                                if (keyPreview != null && keyPreviewOwner == key)
+                                    keyPreview.setLabel(LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()));
                             } else if (!s.dedicatedEnglish && !s.letterCaseSchemeActive()
                                     && SwipeHintPolicy.swiped(opposite, downY[0], currentY)) {
-                            triggered[0] = true;
-                            optionsShown[0] = true;
-                            key.removeCallbacks(hold);
-                            hideKeyPreview(key);
+                                triggered[0] = true;
+                                optionsShown[0] = true;
+                                key.removeCallbacks(hold);
+                                hideKeyPreview(key);
                                 s.imeLayoutRows.showLetterOptions(key, input);
                             }
                         }
@@ -271,6 +275,7 @@ final class ImeLetterRows {
                     key.removeCallbacks(hold);
                     hideKeyPreview(key);
                     if (!triggered[0]) return false;
+                    touch[0] = null;
                     MotionEvent cancel = MotionEvent.obtain(event);
                     cancel.setAction(MotionEvent.ACTION_CANCEL);
                     key.onTouchEvent(cancel);
@@ -284,6 +289,7 @@ final class ImeLetterRows {
                     return true;
                 }
                 case MotionEvent.ACTION_CANCEL -> {
+                    touch[0] = null;
                     key.removeCallbacks(hold);
                     hideKeyPreview(key);
                     s.imeLayoutRows.cancelLetterOptions(key);
@@ -760,8 +766,13 @@ final class ImeLetterRows {
                 koreanKeyButtons.add(keyButton);
                 koreanKeyInputs.add(input);
             } else if (s.keyboardLayer == KeyboardLayout.Layer.LETTERS) {
+                KeyTouchSample[] touch = new KeyTouchSample[1];
                 ShuangpinHintButton hintButton = s.shuangpinKeyboardKey(
-                    face, face, () -> s.type(input.charAt(0)));
+                    face, face, () -> {
+                        KeyTouchSample sample = touch[0];
+                        touch[0] = null;
+                        s.typeWithTouch(input.charAt(0), sample);
+                    });
                 keyButton = hintButton;
                 s.shuangpinKeyButtons.add(hintButton);
                 s.shuangpinKeyInputs.add(input);
@@ -769,7 +780,7 @@ final class ImeLetterRows {
                 hintButton.setCornerHint(standardLetters
                     ? LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()) : null);
                 KeyboardTypographyPolicy.setKeyTextSize(hintButton, 22);
-                bindLetterGestures(hintButton, standardLetters ? input : null);
+                bindLetterGestures(hintButton, standardLetters ? input : null, touch);
             } else {
                 keyButton = s.keyboardKey(face, face, () -> s.type(input.charAt(0)));
             }

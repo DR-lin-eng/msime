@@ -1041,6 +1041,7 @@ function makeClient(
   const dictionaryReply = <T,>(action: Record<string, unknown>): T =>
     unwrap<T>(native.dictionary(JSON.stringify(action)));
   const dictionary: DictionaryClient = {
+    sogou: async (action) => dictionaryReply({ operation: "sogou", ...action }),
     updates: async (command, enabled) =>
       dictionaryReply({
         operation: "updates",
@@ -1568,6 +1569,7 @@ function HarmonyWelcomeFlow({
   return (
     <WelcomeFlowPage
       actions={{
+        sogou: client.dictionary?.sogou,
         platform: "harmony",
         mobileSettings,
         // 资源由键盘启动时就绪，这里没有单独的步骤要执行；流程需要的是这个 promise，而不是实际工作。

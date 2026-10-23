@@ -11,6 +11,20 @@ public class KeyboardPressButton extends Button {
     private boolean dispatchingTouch;
     private boolean staleRelease;
     private Runnable pressReleaseListener;
+    private Runnable touchDownFeedback;
+    private boolean touchFeedbackPlayed;
+    private int pendingTouchFeedback;
+    private int touchFeedbackGeneration;
+
+    /** 字母键的声音、触感和动画随按下触发，文字动作仍由框架在松手时决定。 */
+    public void setTouchDownFeedback(Runnable feedback) {
+        touchDownFeedback = feedback;
+    }
+
+    /** 当前触摸或已排队的点击已播过反馈；无障碍点击没有这段触摸状态。 */
+    public boolean touchDownFeedbackPlayed() {
+        return touchFeedbackPlayed || pendingTouchFeedback > 0;
+    }
     private KeyboardSkin faceSkin;
     private KeyboardKeyRole faceRole;
     private boolean faceSelected;
@@ -63,9 +77,23 @@ public class KeyboardPressButton extends Button {
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
         boolean outer = dispatchingTouch;
         dispatchingTouch = true;
-        boolean handled = super.dispatchTouchEvent(event);
-        dispatchingTouch = outer;
-        return handled;
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) touchFeedbackPlayed = false;
+        try {
+            return super.dispatchTouchEvent(event);
+        } finally {
+            dispatchingTouch = outer;
+            if (action == MotionEvent.ACTION_UP && touchFeedbackPlayed) {
+                // 框架已把 performClick 放进主线程队列；排在它后面清理，既不双振，也不吞下一次按下。
+                int generation = touchFeedbackGeneration;
+                pendingTouchFeedback++;
+                post(() -> {
+                    if (generation == touchFeedbackGeneration) pendingTouchFeedback--;
+                });
+            }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+                touchFeedbackPlayed = false;
+        }
     }
 
     // Lint 要求重写 `onTouchEvent` 的地方自己调 `performClick`；这里只记一个标记，点击仍由 `super.onTouchEvent` 决定和发出，自己再调一次就成了双击。
@@ -76,7 +104,13 @@ public class KeyboardPressButton extends Button {
             case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> staleRelease = false;
             default -> { }
         }
-        return super.onTouchEvent(event);
+        boolean handled = super.onTouchEvent(event);
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN && handled && isEnabled()
+                && isClickable() && touchDownFeedback != null) {
+            touchFeedbackPlayed = true;
+            touchDownFeedback.run();
+        }
+        return handled;
     }
 
     /** 按下状态真正清除后通知调用方；迟到且被忽略的松开不通知。 */
@@ -105,13 +139,23 @@ public class KeyboardPressButton extends Button {
     @Override protected void onDetachedFromWindow() {
         // 离开窗口时框架会在这之后用 `setPressed(false)` 撤掉还没执行的松开，那一次必须生效。
         staleRelease = false;
+        touchFeedbackGeneration++;
+        touchFeedbackPlayed = false;
+        pendingTouchFeedback = 0;
         KeyPressAnimator.cancel(this);
         animate().cancel();
         KeyboardPressFeedback.reset(this);
         super.onDetachedFromWindow();
     }
 
+    /** 有即时自绘状态的工具按钮可保留位置，其余按键使用已有按压动画。 */
+    protected boolean animatesPress() { return true; }
+
     private void updatePressFeedback() {
-        KeyboardPressFeedback.update(this, isPressed());
+        if (animatesPress()) KeyboardPressFeedback.update(this, isPressed());
+        else {
+            animate().cancel();
+            KeyboardPressFeedback.reset(this);
+        }
     }
 }

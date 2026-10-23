@@ -1,3 +1,5 @@
+import { SogouDictionaries } from "../settings/sogou-dictionaries";
+import type { DictionaryClient } from "../dictionary/dictionary-contracts";
 import { useCallback, useRef, useState } from "react";
 import type { InputSourceStartupStatus } from "../settings/input-source-startup-model";
 import { ActionButton } from "../core/action-button";
@@ -49,9 +51,11 @@ function resultLead(status: InputSourceStartupStatus): string {
 export function MacosInstallPage({
   client,
   onComplete,
+  sogou,
 }: {
   client: MacosInstallClient;
   onComplete: () => void;
+  sogou?: DictionaryClient["sogou"];
 }) {
   const [phase, setPhase] = useState<Phase>("ready");
   const [progress, setProgress] = useState(0);
@@ -125,6 +129,14 @@ export function MacosInstallPage({
         </>
       ) : (
         <p className="mt-2 mb-0 text-[13px] text-secondary">适用于 macOS 13 及以上版本</p>
+      )}
+      {phase === "done" && result?.action !== "failed" && sogou && (
+        <details className="mt-5 w-full max-w-[480px]">
+          <summary>选择兴趣词库（可跳过）</summary>
+          <div className="max-h-[45vh] overflow-y-auto">
+            <SogouDictionaries compact request={sogou} />
+          </div>
+        </details>
       )}
       <div className="mt-11 flex w-[260px] flex-col items-stretch">
         {phase === "installing" ? (

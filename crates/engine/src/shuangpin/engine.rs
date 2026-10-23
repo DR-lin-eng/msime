@@ -266,6 +266,7 @@ impl ShuangpinEngine {
         let mut single_helpcode = None;
         for spelling in alternatives {
             let mut alternate = request.clone();
+            alternate.touch_points.clear();
             // 替代的声母保持原位置的大小写，辅助码与手动分隔符仍交给原查询识别。
             alternate.raw_input_with_cases = spelling
                 .bytes()
@@ -327,6 +328,7 @@ impl ShuangpinEngine {
         if !request.valid {
             return Vec::new();
         }
+        self.dictionary.set_touch_points(&request.touch_points);
         self.dictionary
             .set_sentence_alternatives(request.sentence_alternatives);
         self.dictionary

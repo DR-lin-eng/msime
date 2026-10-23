@@ -1,3 +1,5 @@
+import { SogouDictionaries } from "../settings/sogou-dictionaries";
+import type { DictionaryClient } from "../dictionary/dictionary-contracts";
 import { ControlledCheckbox } from "../core/controlled-checkbox";
 import { useEffect, useRef, useState } from "react";
 import { linuxSetupFailureMessage } from "./linux-setup-errors";
@@ -107,12 +109,14 @@ export function LinuxSetupPage({
   client,
   edition,
   onComplete,
+  sogou,
 }: {
   status: LinuxSetupStatus;
   client: LinuxSetupClient;
   /** 本安装包所属的版本（`HostCapabilities.edition`），决定页面上的产品名和终端命令。 */
   edition?: EditionInfo;
   onComplete: () => void;
+  sogou?: DictionaryClient["sogou"];
 }) {
   const names = linuxEditionNames(edition);
   const updating = status.prepared && status.dictionaryOutdated === true;
@@ -273,6 +277,14 @@ export function LinuxSetupPage({
               copyText={client.copyText}
             />
           </div>
+        )}
+        {phase === "done" && result?.prepared && sogou && (
+          <details className="mt-5 w-full max-w-[480px]">
+            <summary>选择兴趣词库（可跳过）</summary>
+            <div className="max-h-[45vh] overflow-y-auto">
+              <SogouDictionaries compact request={sogou} />
+            </div>
+          </details>
         )}
         <div className="mt-7 flex w-[260px] shrink-0 flex-col items-stretch">
           {phase === "running" ? (

@@ -267,6 +267,39 @@ pub extern "C" fn msime_client_character(handle: u64, ascii: u8, shift: bool) ->
     )
 }
 
+/// 字符与触点在同一次会话派发中绑定；无效几何不改变组字。
+///
+/// # Safety
+/// `centers` 必须指向调用期间可读的 `length` 个 f32；长度必须为 52。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_character_with_touch(
+    handle: u64,
+    ascii: u8,
+    shift: bool,
+    x: f32,
+    y: f32,
+    centers: *const f32,
+    length: usize,
+) -> *mut c_char {
+    if centers.is_null() || length != 52 {
+        return response(|| Err("touch centers must contain 52 floats".into()));
+    }
+    // 指针与长度由上面的检查和调用方的 C ABI 契约保证。
+    let centers = unsafe { std::slice::from_raw_parts(centers, length) };
+    let Some(point) = msime_engine::TouchPoint::new(ascii, x, y, centers) else {
+        return response(|| Err("invalid touch coordinates".into()));
+    };
+    dispatch_call_with_touch(
+        handle,
+        Action::Character {
+            value: ascii,
+            shift,
+        },
+        None,
+        Some((ascii, point)),
+    )
+}
+
 /// 14 键的一键：`letter` 是这一组里的任一小写字母（宿主约定送首字母）。不在 14 键下、或不是 `a`–`z` 时 handled=false，会话不变。
 #[no_mangle]
 pub extern "C" fn msime_client_grid_key(handle: u64, letter: u8) -> *mut c_char {

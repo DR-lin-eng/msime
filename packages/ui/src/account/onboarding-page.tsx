@@ -1,3 +1,5 @@
+import { SogouDictionaries } from "../settings/sogou-dictionaries";
+import type { DictionaryClient } from "../dictionary/dictionary-contracts";
 import type { EditionInfo } from "../core/host-capabilities";
 import type { InputScheme } from "../core/input-scheme";
 import { useCallback, useRef, useState, type PointerEvent } from "react";
@@ -39,6 +41,7 @@ export interface OnboardingChoices {
 }
 
 export interface OnboardingActions {
+  sogou?: DictionaryClient["sogou"];
   platform?: "android" | "harmony" | "ios";
   /** The host's `mobile_settings` capability. A HarmonyOS 2-in-1 reports false: it is a desktop, so the flow takes the desktop look (a centred sheet with a button bar) and never opens on the splash. */
   mobileSettings?: boolean;
@@ -631,7 +634,10 @@ export function WelcomeFlowPage({
           {page === 0 && desktop ? "设为系统输入法" : harmonyStepTitles[page]}
         </h1>
         <p className={onboarding.hLead}>{lead}</p>
-        <div className={onboarding.hContent}>{stepContent}</div>
+        <div className={onboarding.hContent}>
+          {stepContent}
+          {page === 3 && actions.sogou && <SogouDictionaries compact request={actions.sogou} />}
+        </div>
       </div>
     );
     const errorLine = error && (
@@ -955,6 +961,7 @@ export function WelcomeFlowPage({
             </div>
           </section>
         )}
+        {page === 3 && actions.sogou && <SogouDictionaries compact request={actions.sogou} />}
         {page === 3 && (
           <section className={onboarding.section}>
             <h2 className={onboarding.sectionTitle}>一个账号，多台设备</h2>

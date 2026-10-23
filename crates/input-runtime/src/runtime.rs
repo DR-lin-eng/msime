@@ -81,6 +81,7 @@ pub(crate) struct PhraseSelection {
 
 pub struct Runtime<E: InputEngine = Session> {
     pub(crate) engine: E,
+    pending_touch: Option<(u8, msime_engine::TouchPoint)>,
     pub(crate) session: u64,
     pub(crate) generation: u64,
     pub(crate) focused: bool,
@@ -1007,6 +1008,7 @@ impl<E: InputEngine> Runtime<E> {
         let cached = engine.snapshot()?;
         Ok(Self {
             engine,
+            pending_touch: None,
             session,
             generation: 0,
             ai_context: String::new(),
@@ -2862,6 +2864,26 @@ impl<E: InputEngine> Runtime<E> {
         }
     }
 
+    /// 旁路与字符动作由 Host API 在同一次会话调用内设置、派发并清除。
+    pub fn set_touch_point(&mut self, point: Option<(u8, msime_engine::TouchPoint)>) {
+        self.pending_touch = point;
+    }
+
+    /// 自动提交、模式编排完成后才把触点交给真正处理该字母的引擎。
+    fn character_with_touch(
+        &mut self,
+        value: u8,
+        shift: bool,
+    ) -> Result<EngineResult, RuntimeError> {
+        let point = self
+            .pending_touch
+            .filter(|(key, _)| value.eq_ignore_ascii_case(key));
+        self.engine.set_touch_point(point);
+        let result = self.engine.character(value, shift);
+        self.engine.set_touch_point(None);
+        result
+    }
+
     pub(crate) fn dispatch_action(&mut self, action: Action) -> Result<Transition, RuntimeError> {
         // 每次调用都从空白开始，提前返回的路径（报错、失焦）也不会留下上一键的事实。
         self.facts = DispatchFacts::default();
@@ -3052,7 +3074,7 @@ impl<E: InputEngine> Runtime<E> {
                 self.engine
                     .select(self.engine_index(0))
                     .and_then(|mut committed| {
-                        let next = self.engine.character(value, shift)?;
+                        let next = self.character_with_touch(value, shift)?;
                         let tail = if next.has_commit {
                             next.commit
                         } else if !next.handled {
@@ -3078,7 +3100,7 @@ impl<E: InputEngine> Runtime<E> {
                 self.punctuation(value)
             }
             Action::Character { value, shift } => {
-                self.engine.character(value, shift).and_then(|result| {
+                self.character_with_touch(value, shift).and_then(|result| {
                     // 九键和 14 键的分词键 `'` 是键面上的切分动作，不是中文引号标点。
                     if !result.handled && self.cached.key_grid.is_some() && value == b'\'' {
                         return Ok(result);

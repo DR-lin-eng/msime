@@ -66,6 +66,7 @@ pub enum CollectionSource {
     User,
     Import { format: String },
     Community { resource_id: Uuid, revision: u32 },
+    Sogou { dictionary_id: u32, sha256: String },
 }
 
 /// `index.json` 里的一项。
@@ -423,6 +424,27 @@ impl DictionaryCollectionsStore {
         }
     }
 
+    /// 状态轮询只读元数据，避免每两秒载入所有词库正文。
+    pub fn metadata(&self) -> Result<Vec<CollectionMetadata>> {
+        let lock = self.lock()?;
+        let index: Option<CollectionIndex> =
+            self.read_json(&lock.directory, INDEX_FILE.as_ref(), MAX_INDEX_BYTES)?;
+        let Some(index) = index else {
+            return Ok(Vec::new());
+        };
+        validate_index(&index)?;
+        Ok(index.collections)
+    }
+
+    /// 空闲探测只读待发队列；无待处理操作时无需重建输入会话。
+    pub fn pending_count(&self) -> Result<usize> {
+        let lock = self.lock()?;
+        let outbox: OutboxFile = self
+            .read_json(&lock.directory, OUTBOX_FILE.as_ref(), MAX_OUTBOX_BYTES)?
+            .unwrap_or_default();
+        Ok(outbox.operations.len() + self.personal.read()?.pending_count())
+    }
+
     pub fn load(&self) -> Result<DictionaryCollectionsView> {
         let lock = self.lock()?;
         let state = self.read_state(&lock.directory)?;
@@ -610,6 +632,57 @@ impl DictionaryCollectionsStore {
         let mut view = state.view();
         view.import = Some(report);
         Ok(view)
+    }
+
+    /// 完整校验后按搜狗编号替换独立集合；保留启停、重命名及已有个人词条保护。
+    pub fn install_sogou(
+        &self,
+        dictionary_id: u32,
+        bytes: &[u8],
+    ) -> Result<DictionaryCollectionsView> {
+        use sha2::{Digest, Sha256};
+        if dictionary_id == 0 {
+            return Err(DictionaryCollectionsError::Invalid);
+        }
+        let converted = scel::decode(bytes).map_err(scel_error)?;
+        let (words, report) = parse_import(
+            PersonalWordKind::Pinyin,
+            SCEL_FORMAT,
+            &converted.text,
+            None,
+            &HashSet::new(),
+            MAX_COLLECTION_ENTRIES,
+        )?;
+        if report.truncated {
+            return Err(DictionaryCollectionsError::Limit);
+        }
+        if report.failed != 0 || words.is_empty() {
+            return Err(DictionaryCollectionsError::Invalid);
+        }
+        let source = CollectionSource::Sogou {
+            dictionary_id,
+            sha256: hex::encode(Sha256::digest(bytes)),
+        };
+        let name = if converted.name.is_empty() {
+            format!("搜狗词库 {dictionary_id}")
+        } else {
+            converted.name
+        };
+        self.change(|state| {
+            let existing = state.index.collections.iter().find(|item|
+                matches!(item.source, CollectionSource::Sogou { dictionary_id: id, .. } if id == dictionary_id)).cloned();
+            let Some(existing) = existing else {
+                state.insert(&name, PersonalWordKind::Pinyin, source, words)?;
+                return Ok(());
+            };
+            let incoming: HashSet<String> = words.iter().map(PersonalWord::identity).collect();
+            let stale = state.entries(existing.id).iter().map(PersonalWord::identity)
+                .filter(|identity| !incoming.contains(identity)).collect();
+            state.remove_identities(existing.id, &stale)?;
+            state.append(existing.id, words)?;
+            state.metadata_mut(existing.id)?.source = source;
+            Ok(())
+        })
     }
 
     /// 安装或更新一个社区词库。同一个资源再装一次时更新已有的集合：去掉新版本里没有的词，加上新增的词。
@@ -1350,6 +1423,14 @@ fn validate_index(index: &CollectionIndex) -> Result<()> {
     for metadata in &index.collections {
         let source_valid = match &metadata.source {
             CollectionSource::User => true,
+            CollectionSource::Sogou {
+                dictionary_id,
+                sha256,
+            } => {
+                *dictionary_id != 0
+                    && sha256.len() == 64
+                    && sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            }
             CollectionSource::Import { format } => IMPORT_FORMATS.contains(&format.as_str()),
             CollectionSource::Community {
                 resource_id,
@@ -1781,7 +1862,8 @@ fn parse_import(
 /// `bytes_base64` 的细胞词库：先按编码长度拒绝放不下的，再解码。
 /// 来源是不是第三方词库。现在只有搜狗细胞词库；以后接入别家的二进制词库时加在这里。
 fn third_party_source(source: &CollectionSource) -> bool {
-    matches!(source, CollectionSource::Import { format } if format == SCEL_FORMAT)
+    matches!(source, CollectionSource::Sogou { .. })
+        || matches!(source, CollectionSource::Import { format } if format == SCEL_FORMAT)
 }
 
 /// 核对第三方词库时比较的身份：种类（五笔 86 和 98 不分）、去掉音节分隔符和空白并转小写的编码、原样的词。

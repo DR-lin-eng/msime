@@ -3647,7 +3647,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     } catch (error) {
       return JSON.stringify({ ok: false, error: 'invalid dictionary action' });
     }
-    if (action.operation === 'updates') {
+    if (action.operation === 'updates' || action.operation === 'sogou') {
       // 更新状态与后台下载不准备工作词库，也不触碰正在组字的会话。
       try {
         const loaded: SnapshotResponse = JSON.parse(client.loadPreferences(stateRoot)) as SnapshotResponse;

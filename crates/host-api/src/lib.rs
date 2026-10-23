@@ -168,6 +168,7 @@ pub use diagnostics::{msime_client_set_diagnostic_sink, DiagnosticSink};
 mod dictionary_snapshot;
 mod dictionary_updates;
 mod key_sound;
+mod sogou;
 // 生命周期核心；`pub` 是为了让集成测试（零分配断言）直接调用纯推导函数。
 pub mod lifecycle;
 mod plugin_tables;
@@ -3026,6 +3027,15 @@ fn dispatch(handle: u64, action: Action) -> *mut c_char {
 ///
 /// 选择加入生命周期的会话按这个顺序：调用前采样并发 `input` → `runtime.dispatch`（脚本的 `candidates` 在里面的 refresh 和展开之后）→ 统计 → 读派发事实 → `complete_transition`（全角转换、再中英文之间加空格都在这里，之后才是宿主拿到的字节，宿主再做简繁转换）→ `before_commit`（脚本可以改写 body）→ 其余事件和内置消费者 → 序列化，FEEDBACK 开着时插入 `feedback`。没选择加入的会话只走原来的几步。
 fn dispatch_call(handle: u64, action: Action, host: Option<lifecycle::InputClass>) -> *mut c_char {
+    dispatch_call_with_touch(handle, action, host, None)
+}
+
+fn dispatch_call_with_touch(
+    handle: u64,
+    action: Action,
+    host: Option<lifecycle::InputClass>,
+    touch: Option<(u8, msime_engine::TouchPoint)>,
+) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
             // 大写锁定改道先于其余处理，后面看到的都是改道后的动作。
@@ -3042,7 +3052,9 @@ fn dispatch_call(handle: u64, action: Action, host: Option<lifecycle::InputClass
             // code; doing it per host would have meant six chances to forget.
             let position = selected_position(&action);
             let efficiency = position.and_then(|_| session.efficiency_candidate(&action));
+            session.runtime.set_touch_point(touch);
             let result = session.runtime.dispatch(action).map_err(|e| e.to_string());
+            session.runtime.set_touch_point(None);
             // 报错前 runtime 可能已经改了组字，生命周期照样收尾。
             let mut result = session.lifecycle_on_error(pending, result)?;
             // Text the Engine generated (a calculator result, a command, a mention) was picked, not typed, and stays out of the statistics the way it stays out of learning.

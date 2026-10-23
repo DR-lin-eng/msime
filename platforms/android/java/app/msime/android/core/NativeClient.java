@@ -742,6 +742,13 @@ public final class NativeClient {
         if (ascii < 0 || ascii > 127) throw new IllegalArgumentException("Engine character must be ASCII");
         return TextPolicy.utf8(characterRaw(session, ascii, shift));
     }
+    public static String characterWithTouch(long session, int ascii, boolean shift,
+            float x, float y, float[] centers) {
+        if (ascii < 0 || ascii > 127 || !TextPolicy.isAsciiLetter((char) ascii)
+                || centers == null || centers.length != 52)
+            throw new IllegalArgumentException("Touch input requires a letter and 52 center coordinates");
+        return TextPolicy.utf8(characterWithTouchRaw(session, ascii, shift, x, y, centers));
+    }
     public static String punctuationWithContext(long session, int ascii, int precedingCodePoint) {
         if (ascii < 0 || ascii > 127 || !SmartPunctuationContext.isAsciiPunctuation((char) ascii))
             throw new IllegalArgumentException("Engine punctuation must be ASCII punctuation");
@@ -984,6 +991,8 @@ public final class NativeClient {
     private static native byte[] setChinesePunctuationRaw(long session, boolean enabled);
     private static native byte[] setCharacterWidthRaw(long session, boolean fullwidth);
     private static native byte[] characterRaw(long session, int ascii, boolean shift);
+    private static native byte[] characterWithTouchRaw(long session, int ascii, boolean shift,
+        float x, float y, float[] centers);
     private static native byte[] balancePairedPunctuationAfterAutoCloseRaw(long session, int opening);
     private static native byte[] punctuationWithContextRaw(long session, int ascii,
         int precedingCodePoint);

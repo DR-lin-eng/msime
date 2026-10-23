@@ -103,6 +103,7 @@ import {
 } from "./core/desktop-host-services";
 
 const dictionary: DictionaryClient = {
+  sogou: (action) => invoke("dictionary_request", { action: { operation: "sogou", ...action } }),
   browse: (offset, limit, kind, query) =>
     invoke("dictionary_request", {
       action: { operation: "browse", offset, limit, kind, query },
@@ -929,6 +930,7 @@ function DesktopSettings() {
   }, []);
   const onboardingPlatform = settingsClient?.host?.platform;
   const onboardingActions: OnboardingActions = {
+    sogou: dictionary.sogou,
     platform: onboardingPlatform === "ios" ? "ios" : "android",
     prepareResources:
       onboardingPlatform === "android" || !onboardingPlatform
@@ -963,6 +965,7 @@ function DesktopSettings() {
   if (linuxSetup)
     return (
       <LinuxSetupPage
+        sogou={dictionary.sogou}
         status={linuxSetup}
         client={linuxSetupClient}
         edition={settingsClient?.host?.edition}
@@ -978,6 +981,7 @@ function DesktopSettings() {
   if (macosInstall)
     return (
       <MacosInstallPage
+        sogou={dictionary.sogou}
         client={macosInstallClient}
         onComplete={() => {
           void invoke("leave_first_install_window")

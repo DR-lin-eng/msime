@@ -130,3 +130,60 @@ fn sogou_synchronization_uses_existing_quiesce_policy() {
         ));
     }
 }
+
+#[test]
+fn sogou_background_activation_retries_a_busy_large_collection_without_losing_words() {
+    let root = tempfile::tempdir().unwrap();
+    let document = host_options_with_main_dictionary(root.path());
+    let options: crate::HostOptions = serde_json::from_value(document).unwrap();
+    let collections = DictionaryCollectionsStore::new(
+        root.path(),
+        PersonalDictionaryStore::new(root.path().join("PersonalDictionary")),
+    );
+    // 合成二音节词库跨过个人队列容量，使用真实维护租约验证后续批次。
+    let words: String = (0..513)
+        .map(|i| format!("{}蒿\tni'hao\n", char::from_u32(0x4e00 + i).unwrap()))
+        .collect();
+    collections
+        .import(
+            msime_client_services::dictionary::collections::ImportRequest {
+                id: None,
+                name: Some("合成多批词库"),
+                kind: msime_client_services::dictionary::personal::PersonalWordKind::Pinyin,
+                format: "standard",
+                text: &words,
+                readings: None,
+            },
+        )
+        .unwrap();
+    let lease = msime_client_services::dictionary::access::DictionaryAccess::try_session(
+        &root.path().join("user"),
+        &root.path().join("dictionaries"),
+    )
+    .unwrap()
+    .unwrap();
+    let before = collections.pending_count().unwrap();
+    super::drain_activation(|| {
+        crate::dictionary::synchronize_collections_with_budget(
+            &options,
+            std::time::Duration::from_millis(100),
+        )
+    });
+    assert_eq!(collections.pending_count().unwrap(), before);
+    drop(lease);
+    super::drain_activation(|| {
+        crate::dictionary::synchronize_collections_with_budget(
+            &options,
+            std::time::Duration::from_millis(100),
+        )
+    });
+    assert_eq!(collections.pending_count().unwrap(), 0);
+    let connection =
+        rusqlite::Connection::open(root.path().join("dictionaries/msime-pinyin.db")).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM tbl_2_n", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        513
+    );
+}

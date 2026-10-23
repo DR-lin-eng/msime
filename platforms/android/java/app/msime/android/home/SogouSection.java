@@ -78,7 +78,7 @@ final class SogouSection implements DefaultLifecycleObserver {
                 }
                 render();
                 JSONObject settings = status == null ? null : status.optJSONObject("settings");
-                if (settings != null && "checking".equals(settings.optString("phase"))) {
+                if (settings != null && ("checking".equals(settings.optString("phase")) || status.optInt("pending_count") > 0)) {
                     column.postDelayed(() -> { if (active && current == generation) load(action("status")); }, 2000);
                 }
             });

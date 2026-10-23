@@ -7,6 +7,35 @@ use crate::account::msime_client_account_name;
 use msime_client_core::host_surface::compiled_input_schemes;
 use sha2::{Digest, Sha256};
 
+#[test]
+fn touch_character_ffi_validates_before_dispatch_and_keeps_plain_input_working() {
+    let directory = tempfile::tempdir().unwrap();
+    let handle = test_host(directory.path());
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let mut centers = [f32::NAN; 52];
+    centers[usize::from(b'n' - b'a') * 2] = 0.0;
+    centers[usize::from(b'n' - b'a') * 2 + 1] = 0.0;
+    let typed = read(unsafe {
+        msime_client_character_with_touch(handle, b'n', false, 0.1, 0.0, centers.as_ptr(), 52)
+    });
+    assert_eq!(typed["ok"], true, "{typed}");
+    assert_eq!(typed["value"]["view"]["editing_text"], "n", "{typed}");
+    for (x, length, pointer) in [
+        (f32::NAN, 52, centers.as_ptr()),
+        (0.0, 51, centers.as_ptr()),
+        (0.0, 52, std::ptr::null()),
+    ] {
+        let rejected = read(unsafe {
+            msime_client_character_with_touch(handle, b'n', false, x, 0.0, pointer, length)
+        });
+        assert_eq!(rejected["ok"], false, "{rejected}");
+    }
+    let plain = read(msime_client_character(handle, b'i', false));
+    assert_eq!(plain["ok"], true, "{plain}");
+    assert_eq!(plain["value"]["view"]["editing_text"], "ni", "{plain}");
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 // Keep relative-path fixtures on the checkout's volume while allowing /source to be read-only in the Linux container.
 fn relative_fixture_dir(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let current = std::env::current_dir().unwrap();

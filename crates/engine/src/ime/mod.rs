@@ -80,6 +80,9 @@ struct Decoded {
 }
 
 pub struct ImeSession {
+    touch_points: Vec<Option<crate::pinyin::touch::TouchPoint>>,
+    next_touch: Option<(u8, crate::pinyin::touch::TouchPoint)>,
+    touch_edit_prepared: bool,
     scheme: Scheme,
     registry: ProviderRegistry,
     state: CompositionState,
@@ -150,6 +153,9 @@ impl ImeSession {
         registry.activate(scheme)?;
         let zhuyin = registry.take_dictionary(scheme);
         let mut session = Self {
+            touch_points: Vec::new(),
+            next_touch: None,
+            touch_edit_prepared: false,
             scheme: Scheme::new(
                 scheme,
                 profile,
@@ -283,6 +289,11 @@ impl ImeSession {
 
     /// `scheme.handle_key` then `refresh_candidates`; `SchemeKey::Requery` only refreshes.
     pub fn handle_key(&mut self, key: SchemeKey) -> bool {
+        let old_length = self.state.request.raw_input.len();
+        let touch = self.next_touch.take().and_then(|(value, point)| {
+            matches!(key, SchemeKey::Letter(letter) if letter.eq_ignore_ascii_case(&value))
+                .then_some(point)
+        });
         if let SchemeKey::Letter(letter) = key {
             if self.wubi_pinyin_continues(letter) {
                 if let Some(wubi) = self.scheme.as_wubi_mut() {
@@ -298,8 +309,56 @@ impl ImeSession {
         } else {
             false
         };
+        if changed
+            && matches!(
+                self.current_scheme_type(),
+                SchemeType::Quanpin | SchemeType::Shuangpin
+            )
+        {
+            match key {
+                SchemeKey::Letter(_) | SchemeKey::Apostrophe | SchemeKey::Semicolon => {
+                    if touch.is_some() || !self.touch_points.is_empty() {
+                        self.touch_points.resize(old_length, None);
+                        self.touch_points.push(touch);
+                    }
+                }
+                SchemeKey::Backspace => {
+                    self.touch_points.truncate(old_length.saturating_sub(1));
+                }
+                _ => {}
+            }
+        }
         self.refresh_candidates();
         changed
+    }
+
+    /// 一次字符调用范围内的旁路；键值绑定防止被模式切换或拒绝的键污染下一键。
+    pub fn set_touch_point(&mut self, point: Option<(u8, crate::pinyin::touch::TouchPoint)>) {
+        self.next_touch = point;
+    }
+
+    /// 光标编辑使用明确字节位置，重复字母也不会把邻居的触点错移过来。
+    pub fn edit_touch_points(&mut self, at: usize, remove: usize, insert: Option<u8>) {
+        if !matches!(
+            self.current_scheme_type(),
+            SchemeType::Quanpin | SchemeType::Shuangpin
+        ) {
+            return;
+        }
+        let point = self.next_touch.take().and_then(|(key, point)| {
+            insert
+                .is_some_and(|value| value.eq_ignore_ascii_case(&key))
+                .then_some(point)
+        });
+        if !self.touch_points.is_empty() || point.is_some() {
+            self.touch_points
+                .resize(self.state.request.raw_input.len(), None);
+            if at <= self.touch_points.len() && remove <= self.touch_points.len() - at {
+                self.touch_points
+                    .splice(at..at + remove, insert.map(|_| point));
+                self.touch_edit_prepared = true;
+            }
+        }
     }
 
     /// Opens what `scheme` reads (`msime-cantonese.db` for Cantonese, `msime-zhuyin.db` for Zhuyin, `msime-stroke.db` for Stroke) without switching to it, so a caller can learn that the scheme is unavailable before it discards anything; `switch_scheme` to an activated scheme cannot fail. A live Zhuyin scheme already holds `msime-zhuyin.db`, so activating Zhuyin again opens nothing.
@@ -341,12 +400,18 @@ impl ImeSession {
             }
         }
         self.bind_wubi_scheme();
+        self.touch_points.clear();
+        self.next_touch = None;
+        self.touch_edit_prepared = false;
         self.state = CompositionState::default();
         self.pinyin_tail = false;
         Ok(())
     }
 
     pub fn reset(&mut self) {
+        self.touch_points.clear();
+        self.next_touch = None;
+        self.touch_edit_prepared = false;
         self.scheme.reset();
         self.state = CompositionState::default();
         self.pinyin_tail = false;
@@ -360,6 +425,21 @@ impl ImeSession {
 
     /// Host editing for whichever scheme is active; wubi also re-derives its length allowance from the mixed-pinyin option (ime_session.cpp:103-157, 199-238).
     pub fn replace_active_raw_input(&mut self, raw: &str, raw_with_cases: &str) {
+        if !std::mem::take(&mut self.touch_edit_prepared) && !self.touch_points.is_empty() {
+            let previous = &self.state.request.raw_input;
+            let next = raw.to_ascii_lowercase();
+            if previous.ends_with(&next) {
+                self.touch_points
+                    .drain(..previous.len().saturating_sub(next.len()));
+            } else if previous.starts_with(&next) {
+                self.touch_points.truncate(next.len());
+            } else if next.starts_with(previous) {
+                self.touch_points.resize(next.len(), None);
+            } else {
+                // 任意外部替换没有触点来源，宁可丢弃证据，也不猜重复字母的对应关系。
+                self.touch_points.clear();
+            }
+        }
         // Host editing rewrites text the composition already holds, so its clip length comes from the setting, not from what the last query answered; otherwise moving the caret through a mixed composition drops everything past the fourth letter. `refresh_candidates` restores the query-derived value.
         let mixed_pinyin = self.wubi_options.mixed_pinyin;
         if let Some(wubi) = self.scheme.as_wubi_mut() {
@@ -673,6 +753,12 @@ impl ImeSession {
 
     /// The request a scratch scheme of the current type builds for `raw`, with the session's switches applied. The current scheme was activated before it became current, so building its scratch twin cannot fail, except for Zhuyin, whose `msime-zhuyin.db` connection belongs to the live editor: an invalid request stands for both, and Zhuyin keeps its caret at the end, so it never decodes a caret prefix.
     fn build_raw_request(&self, raw: &str, raw_with_cases: &str, request: &mut QueryRequest) {
+        request.touch_points.clear();
+        if self.state.request.raw_input.starts_with(raw) && self.touch_points.len() >= raw.len() {
+            request
+                .touch_points
+                .extend_from_slice(&self.touch_points[..raw.len()]);
+        }
         match self.current_scheme_type() {
             SchemeType::Quanpin => {
                 QuanpinScheme::build_request_from_raw_into(raw, raw_with_cases, request)
@@ -836,6 +922,12 @@ impl ImeSession {
     fn refresh_candidates(&mut self) {
         let mut request = std::mem::take(&mut self.state.request);
         self.scheme.build_request_into(&mut request);
+        if matches!(request.scheme, SchemeType::Quanpin | SchemeType::Shuangpin) {
+            self.touch_points.truncate(request.raw_input.len());
+            request.touch_points.clone_from(&self.touch_points);
+        } else {
+            request.touch_points.clear();
+        }
         self.apply_request_options(&mut request);
         self.apply_autocorrect_suppression(&mut request);
         apply_shuangpin_helpcode_segmentation(&mut request, self.profile);

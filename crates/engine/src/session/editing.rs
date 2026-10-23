@@ -109,6 +109,9 @@ impl InputSession {
 
     /// 从编辑文字里删掉 `removed` 后剩下 `text`。网址模式删空就退出；删掉的是末尾那个、正是进入网址模式的键（`url_reverts`）时退回组字，否则与其他模式一样替换编辑文字。
     fn delete_editing_character(&mut self, text: String, caret: usize, removed: char) -> KeyResult {
+        if !self.dedicated_english && self.local_mode == LocalInputMode::None {
+            self.engine.edit_touch_points(caret, 1, None);
+        }
         if self.local_mode == LocalInputMode::Url {
             // 网址删空后没有前缀字母可留，退出模式，否则会停在空的网址模式里吞掉后续按键。
             if text.is_empty() {
@@ -239,6 +242,9 @@ impl InputSession {
             return KeyResult::handled();
         }
         text.insert(caret, value as char);
+        if !self.dedicated_english && self.local_mode == LocalInputMode::None {
+            self.engine.edit_touch_points(caret, 0, Some(value));
+        }
         self.replace_editing_text(&text, caret + 1)
     }
 

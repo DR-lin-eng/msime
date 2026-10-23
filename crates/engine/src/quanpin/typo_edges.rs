@@ -71,6 +71,56 @@ pub fn collect_typo_edges(
     lookup_planned_edges(database, span_cache, &planned)
 }
 
+/// 全拼的逐字母证据只用于能与原文逐字对应的切分；别名或重切分继续使用原有代价。
+#[allow(clippy::too_many_arguments)]
+pub fn collect_typo_edges_with_touch(
+    database: &PinyinDatabase,
+    span_cache: &mut FifoCache<String, Vec<DictRow>>,
+    profile: &PersonalTypoProfile,
+    segments: &[String],
+    literal_best: &SentencePath,
+    autocorrect_types: u32,
+    raw: &str,
+    points: &[Option<crate::pinyin::touch::TouchPoint>],
+) -> Vec<TypoEdge> {
+    if points.is_empty() || !segments.iter().flat_map(|s| s.bytes()).eq(raw.bytes()) {
+        return collect_typo_edges(
+            database,
+            span_cache,
+            profile,
+            segments,
+            literal_best,
+            autocorrect_types,
+        );
+    }
+    let offset = |position: usize| segments[..position].iter().map(String::len).sum();
+    let planned = plan_keys_with_cost(
+        segments,
+        literal_best,
+        autocorrect_types,
+        |position| syllable_typos(&segments[position]),
+        |position, typo| profile.accepted(&segments[position], &typo.syllable),
+        |position| {
+            !crate::pinyin::touch::centered_segment(
+                points,
+                offset(position),
+                segments[position].len(),
+            )
+        },
+        |position, typo, accepted| {
+            crate::pinyin::touch::replacement_cost(
+                points,
+                offset(position),
+                &segments[position],
+                &typo.syllable,
+                discounted(base_cost(typo.kind), accepted),
+            )
+        },
+        true,
+    );
+    lookup_planned_edges(database, span_cache, &planned)
+}
+
 /// 全拼和双拼共用的规划与查词。`typos_at(i)` 给出第 i 个音节可能想打的音节（便宜的类型在前），`accepted(i, typo)` 给出用户接受过这条纠错的次数；全拼按音节拼写生成变体，双拼按当前方案的两键编码生成，之后的弱位置优先、跨度、预算、查词和罚分完全相同。
 pub(crate) fn collect_span_typo_edges<'t>(
     database: &PinyinDatabase,
@@ -87,6 +137,31 @@ pub(crate) fn collect_span_typo_edges<'t>(
         autocorrect_types,
         typos_at,
         accepted,
+    );
+    lookup_planned_edges(database, span_cache, &planned)
+}
+
+/// 双拼按原始两键编码提供概率，保持共享跨度预算与查词逻辑。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_span_typo_edges_with_cost<'t>(
+    database: &PinyinDatabase,
+    span_cache: &mut FifoCache<String, Vec<DictRow>>,
+    segments: &[String],
+    literal_best: &SentencePath,
+    autocorrect_types: u32,
+    typos_at: impl Fn(usize) -> &'t [SyllableTypo],
+    eligible: impl Fn(usize) -> bool,
+    penalty: impl Fn(usize, &SyllableTypo) -> Option<f64>,
+) -> Vec<TypoEdge> {
+    let planned = plan_keys_with_cost(
+        segments,
+        literal_best,
+        autocorrect_types,
+        typos_at,
+        |_, _| 0,
+        eligible,
+        |position, typo, _| penalty(position, typo),
+        true,
     );
     lookup_planned_edges(database, span_cache, &planned)
 }
@@ -158,6 +233,29 @@ fn plan_keys_with<'t>(
     typos_at: impl Fn(usize) -> &'t [SyllableTypo],
     accepted: impl Fn(usize, &SyllableTypo) -> i32,
 ) -> Vec<PlannedKey> {
+    plan_keys_with_cost(
+        segments,
+        literal_best,
+        autocorrect_types,
+        typos_at,
+        accepted,
+        |_| true,
+        |_, typo, accepted| Some(discounted(base_cost(typo.kind), accepted)),
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_keys_with_cost<'t>(
+    segments: &[String],
+    literal_best: &SentencePath,
+    autocorrect_types: u32,
+    typos_at: impl Fn(usize) -> &'t [SyllableTypo],
+    accepted: impl Fn(usize, &SyllableTypo) -> i32,
+    eligible: impl Fn(usize) -> bool,
+    penalty: impl Fn(usize, &SyllableTypo, i32) -> Option<f64>,
+    prefer_cost: bool,
+) -> Vec<PlannedKey> {
     let n = segments.len();
     // A syllable the best literal path spells as a lone character is where a typo most likely broke a phrase, so those positions are tried first. Word widths follow the character counts of the path's words; a path that does not tile the input marks nothing weak.
     let mut weak = WeakPositions::new(n);
@@ -186,18 +284,35 @@ fn plan_keys_with<'t>(
         if planned.len() >= TYPO_KEY_BUDGET {
             break;
         }
+        if !eligible(position) {
+            continue;
+        }
         let typos = typos_at(position);
         variants.clear();
         variants.extend(
             typos
                 .iter()
                 .filter(|typo| autocorrect_types & autocorrect_bit(typo.kind) != 0)
-                .map(|typo| (typo, accepted(position, typo))),
+                .filter_map(|typo| {
+                    let count = accepted(position, typo);
+                    penalty(position, typo, count).map(|cost| {
+                        // f64 能精确保存 i32 次数；两条路径共用原有的 16 字节元素大小。
+                        (typo, if prefer_cost { cost } else { f64::from(count) })
+                    })
+                }),
         );
-        // Kinds are already cheapest first, so a stable sort on the personal count keeps that as the tie-break.
-        variants.sort_by_key(|variant| std::cmp::Reverse(variant.1));
-        for &(typo, accepted) in &variants {
-            let penalty = discounted(base_cost(typo.kind), accepted);
+        // 普通路径保持原有个人次数排序与缓冲大小；触点路径优先展开高概率方向。
+        if prefer_cost {
+            variants.sort_by(|left, right| left.1.total_cmp(&right.1));
+        } else {
+            variants.sort_by(|left, right| right.1.total_cmp(&left.1));
+        }
+        for &(typo, rank) in &variants {
+            let penalty = if prefer_cost {
+                rank
+            } else {
+                discounted(base_cost(typo.kind), rank as i32)
+            };
             for length in MIN_TYPO_SPAN_SYLLABLES..=MAX_TYPO_SPAN_SYLLABLES.min(n) {
                 let first = (position + 1).saturating_sub(length);
                 for start in first..=position {

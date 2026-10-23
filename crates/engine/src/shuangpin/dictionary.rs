@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::query::{remove_manual_delimiters, trim_trailing_letters_preserve_delimiters};
-use super::typo_edges::{collect_shuangpin_typo_edges, SHUANGPIN_TYPO_TYPES};
+use super::typo_edges::SHUANGPIN_TYPO_TYPES;
 use super::utils::{convert_seg_shuangpin_to_seg_complete_pinyin, pinyin_segmentation};
 use super::ShuangpinProfile;
 use crate::assets;
@@ -56,6 +56,7 @@ fn double_helpcode_cache_key(pinyin: &str, help_codes: &str) -> String {
 }
 
 pub struct ShuangpinDictionary {
+    touch_points: Vec<Option<crate::pinyin::touch::TouchPoint>>,
     profile: &'static ShuangpinProfile,
     database: PinyinDatabase,
     paths: RuntimePaths,
@@ -115,6 +116,7 @@ impl ShuangpinDictionary {
             sentence_association: SentenceAssociationOptions::default(),
             rescoring_context: String::new(),
             rows_cache: FifoCache::new(CACHE_CAPACITY),
+            touch_points: Vec::new(),
             series_cache: FifoCache::new(CACHE_CAPACITY),
             single_helpcode_cache: FifoCache::new(CACHE_CAPACITY),
             reversed_single_helpcode_cache: FifoCache::new(CACHE_CAPACITY),
@@ -384,7 +386,7 @@ impl ShuangpinDictionary {
         let profile = self.profile;
         let span_cache = &mut self.typo_span_cache;
         let mut typo_edges = |literal_best: &SentencePath| {
-            collect_shuangpin_typo_edges(
+            super::typo_edges::collect_shuangpin_typo_edges_with_touch(
                 database,
                 span_cache,
                 profile,
@@ -392,6 +394,7 @@ impl ShuangpinDictionary {
                 segments,
                 literal_best,
                 types,
+                &self.touch_points,
             )
         };
         let typo_source: Option<&mut TypoEdgeSource<'_>> = if codes.is_empty() {
@@ -646,6 +649,19 @@ impl ShuangpinDictionary {
         self.reversed_single_helpcode_cache.clear();
         self.double_helpcode_cache.clear();
         self.personal_scored_keys.clear();
+    }
+
+    /// 触点变化只淘汰组装后的答案，原始词库行继续复用。
+    pub fn set_touch_points(&mut self, points: &[Option<crate::pinyin::touch::TouchPoint>]) {
+        if self.touch_points != points {
+            self.touch_points.clear();
+            self.touch_points.extend_from_slice(points);
+            self.series_cache.clear();
+            self.single_helpcode_cache.clear();
+            self.reversed_single_helpcode_cache.clear();
+            self.double_helpcode_cache.clear();
+            self.personal_scored_keys.clear();
+        }
     }
 
     /// A change clears only the series cache: those answers were assembled under the other setting (SD:151-158).

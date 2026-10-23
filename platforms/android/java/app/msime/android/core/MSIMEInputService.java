@@ -3971,6 +3971,17 @@ public final class MSIMEInputService extends InputMethodService {
         render();
     }
 
+    private KeyTouchSample characterTouch;
+    private char characterTouchKey;
+
+    /** 样本只包住一次同步字母动作，手势、硬键和无障碍点击不会借用上次触点。 */
+    void typeWithTouch(char key, KeyTouchSample sample) {
+        characterTouch = sample != null && sample.accompaniesTouchClick() ? sample : null;
+        characterTouchKey = key;
+        try { type(key); }
+        finally { characterTouch = null; }
+    }
+
     boolean character(int ascii) {
         return character(ascii, letterCase.usesUppercase());
     }
@@ -3979,7 +3990,12 @@ public final class MSIMEInputService extends InputMethodService {
         finishPendingCompositionMarkerLoss();
         clearQuickDeleteUndo();
         if (session == 0) return false;
-        try { return apply(NativeClient.character(session, ascii, shifted)); }
+        try {
+            if (characterTouch != null && Character.toLowerCase((char) ascii) == characterTouchKey)
+                return apply(NativeClient.characterWithTouch(session, ascii, shifted,
+                    characterTouch.x, characterTouch.y, characterTouch.centers));
+            return apply(NativeClient.character(session, ascii, shifted));
+        }
         catch (JSONException | LinkageError error) { fail(error); return true; }
     }
 

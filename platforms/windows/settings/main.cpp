@@ -3300,10 +3300,12 @@ struct MainWindow : WindowT<MainWindow> {
     // 设置窗口打开时补传一次打字统计（没打开上传、没登录或离上次不到十分钟时不发请求）。
     sync_typing_upload();
     dictionary_update_request(L"automatic");
+    sogou_request(sogou_action(L"status"));
     dictionary_update_timer_ = DispatcherQueue().CreateTimer();
     dictionary_update_timer_.Interval(std::chrono::seconds(2));
     dictionary_update_timer_.Tick([this](auto const &, auto const &) {
       if (!closed_ && current_page_ == "lexicon" && !dictionary_update_busy_) dictionary_update_request(L"status");
+      if (!closed_ && current_page_ == "lexicon" && !sogou_busy_) sogou_request(sogou_action(L"status"));
     });
     dictionary_update_timer_.Start();
     Activated({this, &MainWindow::on_activated});
@@ -3502,6 +3504,7 @@ private:
     // 与共享页一样，窗口获得焦点时重读打字统计并按日节流检查词库。
     poll_statistics();
     dictionary_update_request(L"automatic");
+    sogou_request(sogou_action(L"status"));
     // Another window (the tray, the shared app, another device through sync) may have changed the settings or Windows may have switched between light and dark while this window was in the background.
     bool changed = false;
     PreferencesDocument fresh;
@@ -15523,6 +15526,140 @@ private:
   }
 
   // 原生设置只显示共享状态，不复制版本判断、文件校验和自动检查的节流。每 2 秒轮询一次（与共享页相同）：组里画出来的东西（开关、版本、按钮、能否回滚）变了才重建整页，只是组末说明变了（下载进度、出错）时就地换掉那一行字，不打断搜索框里的输入和词条对话框；「词库更新」组不在页面上时（别的标签、子页）什么也不重画。
+  // 搜狗的来源、订阅和下载状态由共享 Rust 管理，WinUI 只传递选择。
+  JsonObject sogou_action(std::wstring const &command) {
+    JsonObject action;
+    action.SetNamedValue(L"operation", JsonValue::CreateStringValue(L"sogou"));
+    action.SetNamedValue(L"command", JsonValue::CreateStringValue(command));
+    return action;
+  }
+  void sogou_request(JsonObject action) {
+    if (sogou_busy_ || closed_) return;
+    const auto options = runtime_options_document();
+    if (!options) return;
+    sogou_busy_ = true;
+    run_host([options = *options, body = utf8(action.Stringify())] { return settings_dictionary_call(options, body); },
+      [this](Response const &response) {
+        sogou_busy_ = false;
+        if (!response.ok) { sogou_error_ = L"搜狗词库暂不可用，已安装词库保留。"; }
+        else try {
+          const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+          bool changed = false;
+          if (value.HasKey(L"settings")) {
+            changed = !sogou_status_ || sogou_status_->Stringify() != value.Stringify();
+            sogou_status_ = value;
+          } else { sogou_catalog_ = value; changed = true; }
+          changed = changed || !sogou_error_.empty();
+          sogou_error_.clear();
+          if (!changed) return;
+        } catch (...) { sogou_error_ = L"无法读取搜狗词库状态"; }
+        if (!closed_ && current_page_ == "lexicon") redraw_lexicon();
+      });
+  }
+  void sogou_configure(JsonArray groups, bool automatic) {
+    if (!sogou_status_) return;
+    auto action = sogou_action(L"configure");
+    action.SetNamedValue(L"groups", groups);
+    action.SetNamedValue(L"dictionaries", sogou_status_->GetNamedObject(L"settings").GetNamedArray(L"dictionaries"));
+    action.SetNamedValue(L"automatic", JsonValue::CreateBooleanValue(automatic));
+    sogou_request(action);
+  }
+  void sogou_id_request(std::wstring const &command, uint32_t id, std::optional<bool> enabled = std::nullopt) {
+    auto action = sogou_action(command);
+    action.SetNamedValue(L"id", JsonValue::CreateNumberValue(id));
+    if (enabled) action.SetNamedValue(L"enabled", JsonValue::CreateBooleanValue(*enabled));
+    sogou_request(action);
+  }
+  void sogou_catalog_request() {
+    auto action = sogou_action(L"catalog");
+    action.SetNamedValue(L"group", JsonValue::CreateNumberValue(sogou_group_));
+    action.SetNamedValue(L"page", JsonValue::CreateNumberValue(sogou_page_));
+    sogou_request(action);
+  }
+  void build_sogou_dictionaries(StackPanel const &page) {
+    auto group = add_group(page, L"搜狗词库与订阅");
+    group.Children().Append(group_note(L"选择后从搜狗官网下载，仅供本机使用。分组跟踪最新上传的 10 个词库，已安装的继续更新；最多 8 个分组、32 个集合，每库 5 万词。"));
+    if (!sogou_error_.empty()) group.Children().Append(group_note(sogou_error_));
+    if (sogou_status_) {
+      auto settings = sogou_status_->GetNamedObject(L"settings");
+      auto groups = sogou_status_->GetNamedArray(L"groups");
+      auto selected = settings.GetNamedArray(L"groups");
+      bool automatic = settings.GetNamedBoolean(L"automatic", true);
+      ComboBox browse;
+      int32_t index = 0, selected_index = 0;
+      for (auto const &raw : groups) {
+        auto item = raw.GetObject();
+        uint32_t id = static_cast<uint32_t>(item.GetNamedNumber(L"id"));
+        bool checked = false;
+        for (auto const &value : selected) if (value.GetNumber() == id) checked = true;
+        add_row(group, 0xE8F1, named_string(item, L"name"), L"订阅分组", toggle_control(named_string(item, L"name"), checked,
+          [this, selected, id, automatic](bool enabled) {
+            JsonArray next;
+            for (auto const &value : selected) if (value.GetNumber() != id) next.Append(value);
+            if (enabled) next.Append(JsonValue::CreateNumberValue(id));
+            sogou_configure(next, automatic);
+          }, !sogou_busy_, false));
+        ComboBoxItem option;
+        option.Content(box_value(hstring(named_string(item, L"name"))));
+        option.Tag(box_value(id));
+        browse.Items().Append(option);
+        if (id == sogou_group_) selected_index = index;
+        ++index;
+      }
+      add_row(group, 0xE8F1, L"自动更新已选词库", L"每天检查，设置应用运行时下载", toggle_control(L"自动更新已选词库", automatic,
+        [this, selected](bool enabled) { sogou_configure(selected, enabled); }, !sogou_busy_, false));
+      browse.SelectedIndex(selected_index);
+      browse.SelectionChanged([this](Inspectable const &sender, SelectionChangedEventArgs const &) {
+        if (auto item = sender.as<ComboBox>().SelectedItem().try_as<ComboBoxItem>()) {
+          sogou_group_ = unbox_value<uint32_t>(item.Tag()); sogou_page_ = 1; sogou_catalog_.reset();
+        }
+      });
+      append_row_frame(group, browse);
+      add_row(group, 0xE8F1, L"浏览官方分组", L"按名称挑选具体词库",
+        button_control(L"浏览", [this] { sogou_page_ = 1; sogou_catalog_request(); }, !sogou_busy_));
+      if (settings.GetNamedValue(L"error").ValueType() != JsonValueType::Null)
+        group.Children().Append(group_note(settings.GetNamedBoolean(L"limited", false)
+          ? L"集合数量已达上限，请移除不需要的词库后重试。" : L"部分词库更新失败，原词库保留，请重试。"));
+      auto installed = sogou_status_->GetNamedArray(L"installed");
+      for (auto const &raw : installed) {
+        auto item = raw.GetObject();
+        uint32_t id = static_cast<uint32_t>(item.GetNamedNumber(L"id"));
+        auto name = named_string(item, L"name");
+        add_row(group, 0xE8F1, name, std::to_wstring(static_cast<uint32_t>(item.GetNamedNumber(L"entries"))) + L" 词", toggle_control(name,
+          item.GetNamedBoolean(L"enabled"), [this, id](bool enabled) { sogou_id_request(L"set_enabled", id, enabled); }, !sogou_busy_, false));
+        add_row(group, 0xE8F1, L"移除 " + name, L"停止跟踪并移除本集合，已有个人词条保留",
+          button_control(L"移除", [this, id] { sogou_id_request(L"remove", id); }, !sogou_busy_));
+      }
+    }
+    TextBox input;
+    input.Text(hstring(sogou_id_)); input.MaxLength(9); input.PlaceholderText(L"搜狗官网词库编号");
+    A11y::SetName(input, L"搜狗词库编号");
+    input.TextChanged([this](Inspectable const &sender, TextChangedEventArgs const &) { sogou_id_ = sender.as<TextBox>().Text().c_str(); });
+    append_row_frame(group, input);
+    add_row(group, 0xE8F1, L"按编号下载并跟踪更新", L"输入官方词库详情页的编号",
+      button_control(L"下载", [this] {
+        if (sogou_id_.empty() || sogou_id_.find_first_not_of(L"0123456789") != std::wstring::npos) return;
+        try { auto id = std::stoul(sogou_id_); if (id > 0 && id <= UINT32_MAX) sogou_id_request(L"install", static_cast<uint32_t>(id)); } catch (...) {}
+      }, !sogou_busy_));
+    if (sogou_catalog_) {
+      TextBox search;
+      search.Text(hstring(sogou_query_)); search.PlaceholderText(L"筛选当前页名称或编号");
+      search.TextChanged([this](Inspectable const &sender, TextChangedEventArgs const &) { sogou_query_ = sender.as<TextBox>().Text().c_str(); });
+      append_row_frame(group, search);
+      add_row(group, 0xE8F1, L"筛选当前页", L"按名称或编号筛选", button_control(L"筛选", [this] { redraw_lexicon(); }, !sogou_busy_));
+      for (auto const &raw : sogou_catalog_->GetNamedArray(L"entries")) {
+        auto item = raw.GetObject(); uint32_t id = static_cast<uint32_t>(item.GetNamedNumber(L"id"));
+        auto name = named_string(item, L"name");
+        if (!sogou_query_.empty() && name.find(sogou_query_) == std::wstring::npos && std::to_wstring(id).find(sogou_query_) == std::wstring::npos) continue;
+        add_row(group, 0xE8F1, name, L"编号 " + std::to_wstring(id), button_control(L"下载", [this, id] { sogou_id_request(L"install", id); }, !sogou_busy_));
+      }
+      if (sogou_page_ > 1) add_row(group, 0xE8F1, L"上一页", L"", button_control(L"上一页", [this] { --sogou_page_; sogou_catalog_request(); }, !sogou_busy_));
+      if (sogou_catalog_->GetNamedBoolean(L"has_more", false)) add_row(group, 0xE8F1, L"下一页", L"", button_control(L"下一页", [this] { ++sogou_page_; sogou_catalog_request(); }, !sogou_busy_));
+    }
+    add_row(group, 0xE8F1, L"检查订阅更新", L"下载后在输入法空闲时激活", button_control(L"立即更新", [this] { sogou_request(sogou_action(L"check")); }, !sogou_busy_));
+    add_row(group, 0xE8F1, L"刷新状态", L"", button_control(L"刷新", [this] { sogou_request(sogou_action(L"status")); }, !sogou_busy_));
+  }
+
   void dictionary_update_request(std::wstring const &command, std::optional<bool> enabled = std::nullopt) {
     if (dictionary_update_busy_ || closed_) return;
     const auto options = runtime_options_document();
@@ -16035,6 +16172,7 @@ private:
     append_row_frame(io, actions).Padding(Thickness{row_inset, 10, row_inset, 10});
 
     build_dictionary_updates(page);
+    build_sogou_dictionaries(page);
 
     // 「更多」（共享页的 SubPageEntries）：进入背单词子页的一行。
     auto more = add_group(page, L"更多");
@@ -24559,6 +24697,10 @@ private:
   Grid preview_frame_{nullptr};
   Border toolbar_preview_host_{nullptr};
   TextBlock toolbar_preview_label_{nullptr};
+  std::optional<JsonObject> sogou_status_, sogou_catalog_;
+  std::wstring sogou_error_, sogou_id_, sogou_query_;
+  bool sogou_busy_ = false;
+  uint32_t sogou_group_ = 97, sogou_page_ = 1;
   std::optional<JsonObject> dictionary_update_status_;
   std::wstring dictionary_update_message_;
   bool dictionary_update_busy_ = false;

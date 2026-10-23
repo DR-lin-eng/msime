@@ -10,6 +10,7 @@ export type DictionaryCollectionKind = "pinyin" | "wubi" | "quickPhrase" | "engl
 
 export type DictionaryCollectionSource =
   | { type: "user" }
+  | { type: "sogou"; dictionary_id: number; sha256: string }
   | { type: "import"; format: string }
   | { type: "community"; resource_id: string; revision: number };
 

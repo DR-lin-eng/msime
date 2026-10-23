@@ -4768,6 +4768,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
           fullAccess ?? hasFullAccess else { return }
     let store = PersonalDictionaryStore()
     do {
+      try session.synchronizeSogouDictionaries()
       let state = try store.read()
       guard force || state.pendingCount > 0 || state.refreshID != state.completedRefreshID else { return }
       synchronizingPersonalDictionary = true

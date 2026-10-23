@@ -389,10 +389,11 @@ pub fn request(
 
 /// Only a write needs the dictionaries to itself; a list, count or export reads alongside the input sessions.
 pub fn action_requires_quiesce(action: &Value) -> bool {
-    matches!(
-        action.get("operation").and_then(Value::as_str),
-        Some("edit" | "import" | "reset")
-    )
+    (action["operation"] == "sogou" && action["command"] == "synchronize")
+        || matches!(
+            action.get("operation").and_then(Value::as_str),
+            Some("edit" | "import" | "reset")
+        )
 }
 
 /// Keep the host's reason instead of flattening every failure to "storage".

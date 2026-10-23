@@ -681,6 +681,8 @@ struct OnboardingView: View {
         .accessibilityIdentifier("openKeyboardSettingsButton")
         .accessibilityHint("打开水杉输入法的系统设置页面")
 
+        SogouDictionarySection(compact: true)
+
         if let onFinish {
           Button("已完成，进入设置", action: onFinish)
             .font(.headline)

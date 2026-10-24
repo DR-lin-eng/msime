@@ -58,6 +58,7 @@ import {
   type LinuxSetupClient,
   type MacosInstallClient,
   type LinuxSetupLine,
+  type LinuxSetupStage,
   type LinuxSetupStatus,
   type McpClientId,
   type McpFlag,
@@ -84,7 +85,7 @@ import { discoverFontReader } from "./candidate/system-font-client";
 import { DesktopKeyboard } from "./input/desktop-keyboard";
 import { createDesktopPanelClients } from "./input/desktop-panel-clients";
 import { createDesktopClipboardClient } from "./input/desktop-clipboard-client";
-import { useHostPlatform } from "./input/panel-host";
+import { useHostPlatform, usePanelHost } from "./input/panel-host";
 import { DesktopPanelTheme } from "./input/desktop-panel-theme";
 import { DesktopEmojiPanel } from "./input/desktop-emoji-panel";
 import { DesktopHandwriting } from "./input/desktop-handwriting";
@@ -102,6 +103,7 @@ import {
 } from "./core/desktop-host-services";
 
 const dictionary: DictionaryClient = {
+  sogou: (action) => invoke("dictionary_request", { action: { operation: "sogou", ...action } }),
   browse: (offset, limit, kind, query) =>
     invoke("dictionary_request", {
       action: { operation: "browse", offset, limit, kind, query },
@@ -158,17 +160,40 @@ const mobileDictionary: DictionaryClient = {
     invoke("dictionary_request", { action: { operation: "import_personal", text, request_id } }),
 };
 
+/** 在配置脚本运行期间转发它的输出和阶段事件，结束后取消订阅。 */
+async function withLinuxSetupEvents(
+  onLine: (line: LinuxSetupLine) => void,
+  onStage: ((stage: LinuxSetupStage) => void) | undefined,
+  command: () => Promise<LinuxSetupStatus>,
+): Promise<LinuxSetupStatus> {
+  const unlistenOutput = await listen<LinuxSetupLine>("linux-setup-output", (event) =>
+    onLine(event.payload),
+  );
+  const unlistenStage = await listen<LinuxSetupStage>("linux-setup-stage", (event) =>
+    onStage?.(event.payload),
+  ).catch((error: unknown) => {
+    unlistenOutput();
+    throw error;
+  });
+  try {
+    return await command();
+  } finally {
+    unlistenOutput();
+    unlistenStage();
+  }
+}
 const linuxSetupClient: LinuxSetupClient = {
-  run: async ({ download, cloudCandidates }, onLine) => {
-    const unlisten = await listen<LinuxSetupLine>("linux-setup-output", (event) =>
-      onLine(event.payload),
-    );
-    try {
-      return await invoke<LinuxSetupStatus>("run_linux_setup", { download, cloudCandidates });
-    } finally {
-      unlisten();
-    }
-  },
+  run: ({ download, cloudCandidates }, onLine, onStage) =>
+    withLinuxSetupEvents(onLine, onStage, () =>
+      invoke<LinuxSetupStatus>("run_linux_setup", { download, cloudCandidates }),
+    ),
+  update: (onLine, onStage) =>
+    withLinuxSetupEvents(onLine, onStage, () =>
+      invoke<LinuxSetupStatus>("run_linux_dictionary_update"),
+    ),
+  close: () => getCurrentWindow().close(),
+  openFcitx5Config: () => invoke<void>("open_fcitx5_configtool"),
+  copyText: (text) => invoke<void>("copy_text", { text }),
 };
 // The host resolves the plugins directory and the built-in sound packs, and shows its own picker for an import; the page never names a path.
 const plugins: PluginClient = {
@@ -199,6 +224,9 @@ const cloudDictionaryClient: CloudDictionaryPanelClient = {
   close: () => invoke("close_panel", { label: "cloud-dictionary-panel" }),
   request: (action: CloudDictionaryAction) => invoke("cloud_dictionary_request", { action }),
 };
+// 宿主把云词库导出写进「下载」，见 `createDesktopCloudDictionaryClient`；只有 Linux 的面板用它。
+const saveCloudDictionaryExport = (name: string, contents: string) =>
+  invoke<string>("save_export", { name, contents });
 // 「绑定 QQ 群助手」：Rust 侧回的是服务端的 snake_case，这里换成页面的写法。
 type QqLinkDto = { id: string; created_at: string };
 const qqLink = (link: QqLinkDto): AccountQqLink => ({ id: link.id, createdAt: link.created_at });
@@ -236,15 +264,15 @@ const macosInputModes: NonNullable<SettingsClient["macosInputModes"]> = {
   openSettings: () => invoke("open_input_source_settings"),
 };
 // 桌面按需下载的资源包（macOS 的日文词库和「粤语、注音与笔画词库」，三个桌面平台的手写模型和桌面神经联想模型）；这些命令只在桌面宿主上注册，所以只在宿主报告桌面平台时提供给页面。本机提供哪些由宿主的列表决定。
-const resourcePacks: ResourcePackClient = createTauriProgressClient<
-  ResourcePackStatus[],
-  LocalVoiceModelProgress
->(invoke, listen, {
-  list: "resource_packs",
-  install: "resource_pack_install",
-  cancel: "resource_pack_cancel",
-  progress: "resource-pack-progress",
-});
+const resourcePacks: ResourcePackClient = {
+  ...createTauriProgressClient<ResourcePackStatus[], LocalVoiceModelProgress>(invoke, listen, {
+    list: "resource_packs",
+    install: "resource_pack_install",
+    cancel: "resource_pack_cancel",
+    progress: "resource-pack-progress",
+  }),
+  remove: (id) => invoke<boolean>("resource_pack_remove", { id }),
+};
 const macosInstallClient: MacosInstallClient = {
   install: () => invoke("run_first_input_source_install"),
 };
@@ -277,6 +305,7 @@ const client: SettingsClient = {
   // 两个都是无副作用的计算（host-api 不留存的校验和内置方案的表），桌面宿主都注册了，输入页据此提供自定义双拼的编辑、导入和导出。
   validateShuangpinCustomProfile: (profile) =>
     invoke("validate_shuangpin_custom_profile", { profile }),
+  checkToggleHotkey: (request) => invoke("check_toggle_hotkey", { request }),
   builtinShuangpinTable: (name) => invoke("builtin_shuangpin_table", { name }),
   nineKeyShuangpinLayout: (request) =>
     invoke("nine_key_shuangpin_layout", {
@@ -388,6 +417,27 @@ function DesktopHandwritingSurface({ theme }: { theme: "dark" | "light" }) {
   );
 }
 
+/** 独立的表情和本地剪贴板窗口：等宿主报告平台后再挂面板，免得面板先按一种平台装好客户端、随后又整个换掉。 */
+function DesktopEmojiSurface({
+  theme,
+  initialPage,
+}: {
+  theme: "dark" | "light";
+  initialPage?: "home" | "clipboard";
+}) {
+  const host = usePanelHost(client.host);
+  return host.resolved ? (
+    <DesktopEmojiPanel
+      client={panelClients.emoji}
+      theme={theme}
+      initialPage={initialPage}
+      hostPlatform={host.host?.platform}
+    />
+  ) : (
+    <StatusMessage role="status">正在连接面板…</StatusMessage>
+  );
+}
+
 // The host reports what it supports; outside Tauri (the browser preview) there is no host.
 async function discoverHostCapabilities(): Promise<HostCapabilities | null> {
   if (!isTauri()) return null;
@@ -398,6 +448,9 @@ function DesktopSettings() {
   const [settingsClient, setSettingsClient] = useState<SettingsClient | null>(null);
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
   const [linuxSetup, setLinuxSetup] = useState<LinuxSetupStatus | null>(null);
+  // 宿主是 Linux（被叫到前台时要重看词库是否过期），以及用户在本进程里已对「词库需要更新」点过「稍后」。
+  const linuxHost = useRef(false);
+  const linuxUpdateDeferred = useRef(false);
   const [macosInstall, setMacosInstall] = useState(false);
   const [replayOnboarding, setReplayOnboarding] = useState(false);
   // 首启引导准备资源之后重新读到的版本：第一次启动时 HostOptions 由这一步写下，发现宿主能力时还读不到版本。
@@ -529,8 +582,17 @@ function DesktopSettings() {
     const disposeSubscription = isTauri()
       ? trackAsyncSubscription(
           listen<string>("settings-route", (event) => {
+            if (!active) return;
             // 未指定分区的入口只将窗口带到前台，保留当前页面。
-            if (active && event.payload) requestSettingsPage(event.payload);
+            if (event.payload) requestSettingsPage(event.payload);
+            // 设置进程可能早于宿主留下词库过期标记就在运行（关窗后还常驻十分钟），被叫到前台时（包括点「词库需要更新」通知的「打开设置」）再看一次，与启动时一样先打开「立即更新」页。用户在本进程里点过「稍后」就不再打断。
+            if (linuxHost.current && !linuxUpdateDeferred.current)
+              void invoke<LinuxSetupStatus>("linux_setup_status")
+                .then((status) => {
+                  if (active && status.prepared && status.dictionaryOutdated)
+                    setLinuxSetup((current) => current ?? status);
+                })
+                .catch(() => undefined);
           }),
           () => active,
         )
@@ -566,7 +628,12 @@ function DesktopSettings() {
           ? await invoke<boolean>("application_update_supported").catch(() => false)
           : false;
       if (!active) return;
-      if (linuxSetupStatus && !linuxSetupStatus.prepared) setLinuxSetup(linuxSetupStatus);
+      linuxHost.current = host?.platform === "linux";
+      // 还没配置，或宿主报告词库过期时先打开首次配置（更新）页；宿主已在启动时把窗口变成它的小窗口。其余情况把窗口换回设置的大小（宿主没变过窗口时这一步什么也不做）。
+      if (linuxSetupStatus && (!linuxSetupStatus.prepared || linuxSetupStatus.dictionaryOutdated))
+        setLinuxSetup(linuxSetupStatus);
+      else if (host?.platform === "linux")
+        void invoke("leave_linux_setup_window").catch(() => undefined);
       setMacosInstall(macosInstallPending);
       setBootstrapRequired((android || ios) && !ready);
       setInitialPage(page ?? undefined);
@@ -582,6 +649,13 @@ function DesktopSettings() {
                   checkForApplicationUpdate: () => invoke<void>("application_update_check"),
                 }
               : {}),
+            // Linux 设置应用每天在后台检查一次更新并发通知（不在应用里安装），关于页先显示它找到的新版本。
+            ...(host.platform === "linux"
+              ? {
+                  pendingUpdateCheck: () =>
+                    invoke<UpdateCheckResult | null>("pending_update_check"),
+                }
+              : {}),
             dictionary: isMobileHost(host.platform) ? mobileDictionary : dictionary,
             ...(!isMobileHost(host.platform) && client.cloudDictionary
               ? {
@@ -590,6 +664,7 @@ function DesktopSettings() {
                       client.cloudDictionary,
                       host.platform,
                       mobileDictionary,
+                      saveCloudDictionaryExport,
                     ),
                     ...(host.platform === "macos"
                       ? {
@@ -634,8 +709,8 @@ function DesktopSettings() {
             host.platform === "windows"
               ? { resourcePacks }
               : {}),
-            // The macOS input method writes diagnostic.log under Application Support, which the Finder hides; the host reveals it rather than asking the user to navigate there.
-            ...(host.platform === "macos"
+            // The macOS input method writes diagnostic.log under Application Support, which the Finder hides; the host reveals it rather than asking the user to navigate there. Linux 的两个宿主把它写进数据目录（通常是隐藏的 ~/.config 下），宿主同样在文件管理器里选中它。
+            ...(host.platform === "macos" || host.platform === "linux"
               ? { openDiagnosticLogDirectory: () => invoke<void>("open_diagnostic_log_directory") }
               : {}),
             // A host that has not wired 背单词 hides the page rather than offering buttons whose every press would fail.
@@ -720,10 +795,12 @@ function DesktopSettings() {
                     ),
                 }
               : {}),
+            // 云剪贴板可以改走自建中继：macOS 与 Linux 的设置页和云剪贴板面板都在这个 Tauri 进程里，按偏好选路（`cloud_clipboard_request`）；macOS 输入法菜单启动的面板、原生云剪贴板窗口和表情面板的「发到云剪贴板」也按同一个 C 入口选路。Windows 的设置窗口是原生 WinUI，那一组在它自己的设置页里。
+            ...(host.platform === "macos" || host.platform === "linux"
+              ? { cloudClipboardRelay: true }
+              : {}),
             ...(host.platform === "linux"
               ? {
-                  // 云剪贴板可以改走自建中继：Linux 的设置页和云剪贴板面板都在这个 Tauri 进程里，按偏好选路（`cloud_clipboard_request`）。macOS 的输入法菜单在没登录时仍退回原生窗口、Windows 的设置窗口是原生 WinUI，这两处接上之前不显示这一组。
-                  cloudClipboardRelay: true,
                   customTouchKeyboardSkins: true,
                   customSkinLibrary: {
                     load: () => invoke("load_custom_skin_library"),
@@ -803,15 +880,15 @@ function DesktopSettings() {
                     chooseAvatar: () => invoke<AccountProfile | null>("account_choose_avatar"),
                     removeAvatar: () => invoke<AccountProfile>("account_remove_avatar"),
                     qqLinks,
-                    // 设置同步只在 Windows 接到账号会话上；macOS 由输入法自己的账号窗口同步它的原生设置，Linux 还没有接入。
-                    ...(host.platform === "windows"
+                    // 设置同步接在 Windows 和 Linux 的账号会话上；macOS 由输入法自己的账号窗口同步它的原生设置。
+                    ...(host.platform === "windows" || host.platform === "linux"
                       ? { settingsSync: createDesktopSettingsSync(invoke) }
                       : {}),
                   } satisfies AccountClient,
                   communityCandidateSkins: createDesktopCandidateSkinCommunity(invoke),
                   communityPlugins: createDesktopPluginCommunity(invoke),
-                  // 社区词包与回复模板同理，只在 Windows 的设置应用里提供。
-                  ...(host.platform === "windows"
+                  // 社区词包与回复模板同理，在 Windows 和 Linux 的设置应用里提供。
+                  ...(host.platform === "windows" || host.platform === "linux"
                     ? { communityResources: createDesktopCommunityResources(invoke) }
                     : {}),
                 }
@@ -854,6 +931,7 @@ function DesktopSettings() {
   }, []);
   const onboardingPlatform = settingsClient?.host?.platform;
   const onboardingActions: OnboardingActions = {
+    sogou: dictionary.sogou,
     platform: onboardingPlatform === "ios" ? "ios" : "android",
     prepareResources:
       onboardingPlatform === "android" || !onboardingPlatform
@@ -888,14 +966,23 @@ function DesktopSettings() {
   if (linuxSetup)
     return (
       <LinuxSetupPage
+        sogou={dictionary.sogou}
         status={linuxSetup}
         client={linuxSetupClient}
-        onComplete={() => setLinuxSetup(null)}
+        edition={settingsClient?.host?.edition}
+        onComplete={() => {
+          if (linuxSetup.prepared && linuxSetup.dictionaryOutdated)
+            linuxUpdateDeferred.current = true;
+          void invoke("leave_linux_setup_window")
+            .catch(() => undefined)
+            .then(() => setLinuxSetup(null));
+        }}
       />
     );
   if (macosInstall)
     return (
       <MacosInstallPage
+        sogou={dictionary.sogou}
         client={macosInstallClient}
         onComplete={() => {
           void invoke("leave_first_install_window")
@@ -933,6 +1020,7 @@ function DesktopSettings() {
     panelClients.cloudDictionary,
     settingsClient.host?.platform,
     mobileDictionary,
+    saveCloudDictionaryExport,
   );
   if (mobilePanel === "voice") {
     return <VoicePanel client={mobileVoiceClient} theme="light" />;
@@ -1046,6 +1134,7 @@ function DesktopCloudDictionarySurface() {
     panelClients.cloudDictionary,
     host?.platform,
     mobileDictionary,
+    saveCloudDictionaryExport,
   );
   return <DesktopCloudDictionary client={cloudDictionary} />;
 }
@@ -1067,13 +1156,11 @@ const content =
     <DesktopCloudDictionarySurface />
   ) : panel === "clipboard" ? (
     <DesktopPanelTheme preferences={client} surface="emoji">
-      {(theme) => (
-        <DesktopEmojiPanel client={panelClients.emoji} theme={theme} initialPage="clipboard" />
-      )}
+      {(theme) => <DesktopEmojiSurface theme={theme} initialPage="clipboard" />}
     </DesktopPanelTheme>
   ) : panel === "emoji" ? (
     <DesktopPanelTheme preferences={client} surface="emoji">
-      {(theme) => <DesktopEmojiPanel client={panelClients.emoji} theme={theme} />}
+      {(theme) => <DesktopEmojiSurface theme={theme} />}
     </DesktopPanelTheme>
   ) : panel === "vocabulary" ? (
     <VocabularyReviewPanel client={vocabularyReview} />

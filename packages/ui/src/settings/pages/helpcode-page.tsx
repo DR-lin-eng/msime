@@ -9,6 +9,7 @@ import { SettingsPageFieldset } from "../settings-page-fieldset";
 
 import {
   defaultHelpcode,
+  defaultShuangpinHelpcodeModes,
   helpcodeSchemaOptions,
   type CustomHelpcodeSchema,
   type HelpcodeKey,
@@ -16,6 +17,7 @@ import {
   type HelpcodePreferences,
   type HelpcodeSchema,
   type HelpcodeSettings,
+  type ShuangpinHelpcodeModes,
 } from "../helpcode-preferences";
 
 export { defaultHelpcode } from "../helpcode-preferences";
@@ -26,6 +28,7 @@ export type {
   HelpcodePreferences,
   HelpcodeSchema,
   HelpcodeSettings,
+  ShuangpinHelpcodeModes,
 } from "../helpcode-preferences";
 
 /** 下拉框里辅助码表插件的值前缀：`pack:<插件 id>`。 */
@@ -47,6 +50,7 @@ export interface HelpcodeSettingsPageProps {
   value: HelpcodeSettings;
   mobile: boolean;
   showShiftEntry: boolean;
+  showTriggerKey?: boolean;
   disabled?: boolean;
   hidden?: boolean;
   /** Custom tables discovered by the host. They are optional for hosts without resource scanning. */
@@ -86,6 +90,7 @@ export function HelpcodeSettingsGroup({
   value: draft,
   mobile,
   showShiftEntry,
+  showTriggerKey = false,
   customSchemas = [],
   packs = [],
   activeFamily,
@@ -175,6 +180,34 @@ export function HelpcodeSettingsGroup({
     );
   };
 
+  const triggerRow = (key: HelpcodeKey, label: string) => {
+    if (!showTriggerKey) return null;
+    const current = currentOf(key);
+    return (
+      <SelectRow
+        title={`${label}辅助码触发键`}
+        description="组字末尾按所选标点，再输入一到两个辅助码字母。Shift 加字母仍可使用；微软双拼的分号优先补全韵母。"
+        disabled={!current.enabled}
+        value={current.trigger_key ?? ""}
+        onChange={(event) =>
+          onChange({
+            [key]: {
+              ...current,
+              trigger_key: event.target.value as HelpcodePreferences["trigger_key"],
+            },
+          })
+        }
+      >
+        <option value="">Shift + 字母</option>
+        {[";", "/", "\\", "`", "="].map((key) => (
+          <option key={key} value={key}>
+            {key}
+          </option>
+        ))}
+      </SelectRow>
+    );
+  };
+
   const importRow = (key: HelpcodeKey, label: string) =>
     onImport && (
       <ActionRow
@@ -208,6 +241,99 @@ export function HelpcodeSettingsGroup({
     );
   };
 
+  /** 双拼专属的辅助码触发方式；三组与 Windows v0.11.1 相同，互斥在写入端归一。 */
+  const modesRows = (key: HelpcodeKey, label: string) => {
+    if (key !== "shuangpin_helpcode") {
+      return null;
+    }
+    const current = currentOf(key);
+    const modes = { ...defaultShuangpinHelpcodeModes, ...current.modes };
+    const setModes = (patch: Partial<ShuangpinHelpcodeModes>) =>
+      onChange({ [key]: { ...current, modes: { ...modes, ...patch } } });
+    const disabled = !current.enabled;
+    return (
+      <Fragment>
+        <SwitchRow
+          title={`${label}末尾直接辅助码`}
+          description="完整音节后直接接辅助码"
+          disabled={disabled}
+          checked={modes.direct}
+          onChange={(direct) => setModes({ direct })}
+        />
+        <SwitchRow
+          title={`${label}末尾间接触发（分号）`}
+          description="完整音节后按分号，再输入一到两个辅助码字母；微软双拼的分号优先补全韵母"
+          disabled={disabled}
+          checked={modes.trigger_semicolon}
+          onChange={(trigger_semicolon) => setModes({ trigger_semicolon })}
+        />
+        <SwitchRow
+          title={`${label}末尾间接触发（反引号）`}
+          description="完整音节后按反引号，再输入一到两个辅助码字母"
+          disabled={disabled}
+          checked={modes.trigger_backtick}
+          onChange={(trigger_backtick) => setModes({ trigger_backtick })}
+        />
+        <SwitchRow
+          title={`${label}末尾间接触发（大写字母）`}
+          description="完整音节后输入大写字母作为辅助码"
+          disabled={disabled}
+          checked={modes.trigger_uppercase}
+          onChange={(trigger_uppercase) => setModes({ trigger_uppercase })}
+        />
+        <SwitchRow
+          title={`${label}句中间接辅助码`}
+          description="触发键把它前面的音节标上辅助码，约束带进整句，后面还能接着打"
+          disabled={disabled}
+          checked={modes.mid_sentence}
+          onChange={(mid_sentence) => setModes({ mid_sentence })}
+        />
+        <SwitchRow
+          title={`${label}句中触发键（反引号）`}
+          description="用反引号在句中标记辅助码"
+          disabled={disabled || !modes.mid_sentence}
+          checked={modes.mid_sentence_backtick}
+          onChange={(mid_sentence_backtick) => setModes({ mid_sentence_backtick })}
+        />
+        <SwitchRow
+          title={`${label}句中触发键（分号）`}
+          description="用分号在句中标记辅助码；微软双拼的分号优先补全韵母"
+          disabled={disabled || !modes.mid_sentence}
+          checked={modes.mid_sentence_semicolon}
+          onChange={(mid_sentence_semicolon) => setModes({ mid_sentence_semicolon })}
+        />
+        <SwitchRow
+          title={`${label}句中触发键（大写字母）`}
+          description="完整音节后输入大写字母在句中标记辅助码"
+          disabled={disabled || !modes.mid_sentence}
+          checked={modes.mid_sentence_uppercase}
+          onChange={(mid_sentence_uppercase) => setModes({ mid_sentence_uppercase })}
+        />
+        <SwitchRow
+          title={`${label}逐音节直接辅助码`}
+          description="不要引导键，逐音节接辅码；三码自动识别，四码单独敲时直接定字"
+          disabled={disabled}
+          checked={modes.direct_helpcode}
+          onChange={(direct_helpcode) => setModes({ direct_helpcode })}
+        />
+        <SwitchRow
+          title={`${label}逐音节直接（/ 结束）`}
+          description="用 / 结束一位或两位辅码"
+          disabled={disabled || !modes.direct_helpcode}
+          checked={modes.direct_helpcode_slash}
+          onChange={(direct_helpcode_slash) => setModes({ direct_helpcode_slash })}
+        />
+        <SwitchRow
+          title={`${label}逐音节直接（第二码大写结束）`}
+          description="第二位辅码敲大写来结束一段"
+          disabled={disabled || !modes.direct_helpcode}
+          checked={modes.direct_helpcode_uppercase}
+          onChange={(direct_helpcode_uppercase) => setModes({ direct_helpcode_uppercase })}
+        />
+      </Fragment>
+    );
+  };
+
   const shiftNote = showShiftEntry && (
     <SettingsGroupNote>
       全拼或双拼组字时，按 Shift
@@ -224,7 +350,9 @@ export function HelpcodeSettingsGroup({
         {schemaRow(activeFamily, activeLabel, `${activeLabel}辅助码方案`)}
         {importRow(activeFamily, activeLabel)}
         {importNote}
+        {triggerRow(activeFamily, activeLabel)}
         {displayRow(activeFamily, activeLabel)}
+        {modesRows(activeFamily, activeLabel)}
         <MoreOptions>
           {families
             .filter(([key]) => key !== activeFamily)
@@ -233,6 +361,7 @@ export function HelpcodeSettingsGroup({
                 {enabledRow(key, label)}
                 {schemaRow(key, label, `${label}辅助码方案`)}
                 {importRow(key, label)}
+                {triggerRow(key, label)}
                 {displayRow(key, label)}
               </Fragment>
             ))}
@@ -254,7 +383,9 @@ export function HelpcodeSettingsGroup({
             <Fragment key={key}>
               {enabledRow(key, label)}
               {key !== activeFamily && schemaRow(key, label, `${label}辅助码方案`)}
+              {triggerRow(key, label)}
               {displayRow(key, label)}
+              {modesRows(key, label)}
             </Fragment>
           ))}
         </MoreOptions>
@@ -272,7 +403,9 @@ export function HelpcodeSettingsGroup({
           {enabledRow(key, label)}
           {schemaRow(key, label, `${label}辅助码方案`)}
           {importRow(key, label)}
+          {triggerRow(key, label)}
           {displayRow(key, label)}
+          {modesRows(key, label)}
         </Fragment>
       ))}
     </GroupList>

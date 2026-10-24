@@ -278,7 +278,7 @@ private struct MacAccountView: View {
       if let user = model.user { MacCloudSettingsView(accountID: user.id) }
     }
     .sheet(isPresented: $clipboard) {
-      if let user = model.user { MacCloudClipboardView(accountID: user.id) }
+      if let user = model.user { MacCloudClipboardView(route: .account(userID: user.id)) }
     }
     .alert("注销账号？", isPresented: $deleting) {
       Button("取消", role: .cancel) { }
@@ -337,6 +337,7 @@ private struct MacAccountView: View {
           .disabled(remaining > 0 || model.providers[model.channel] != true || model.target.isEmpty)
         if model.challenge != nil {
           TextField("6 位验证码", text: $model.code)
+            .textContentType(.oneTimeCode)
           Button("登录") { model.codeLogin() }
             .disabled(model.expiresAt <= timeline.date || model.code.utf8.count != 6 || !model.code.utf8.allSatisfy { (48...57).contains($0) })
         }
@@ -387,8 +388,9 @@ final class BackendAccountWindow: NSWindowController, NSWindowDelegate {
   @objc func showAccount() { showWindow(nil); presentBackendWindow(window); model.load() }
   @objc func showCloudClipboard() {
     Task { @MainActor in
-      await BackendClipboardEntry.open(status: { try await BackendRustAccount.current().status() },
-        present: { BackendWindowBridge.shared.showClipboard(forAccountID: $0) },
+      await BackendClipboardEntry.open(
+        route: { try await BackendCloudClipboardRoute.selected(rust: BackendRustAccount.current()) },
+        present: { BackendWindowBridge.shared.showClipboard(route: $0) },
         signIn: { self.showAccount() })
     }
   }

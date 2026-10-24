@@ -32,6 +32,23 @@ import app.msime.android.WindowLayout;
 
 /** Separate synthetic editor app: tests the system InputConnection, not a mock. */
 public final class EditorActivity extends Activity {
+    private EditText clipboardEditor;
+    @SuppressWarnings("deprecation")
+    /** 外部编辑器夹具触发真实系统复制，不以产品包启动 instrumentation，避免停止输入法进程。 */
+    @Override protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        String text=intent.getStringExtra("msime_test_clipboard");
+        if (text != null && text.length() <= 4096) {
+            if (clipboardEditor == null) return;
+            clipboardEditor.requestFocus();
+            getSystemService(android.view.inputmethod.InputMethodManager.class).showSoftInput(clipboardEditor,0);
+            clipboardEditor.postDelayed(() -> {
+                android.content.ClipboardManager clipboard=getSystemService(android.content.ClipboardManager.class);
+                if (clipboard != null) clipboard.setPrimaryClip(android.content.ClipData.newPlainText("msime synthetic",text));
+            },800);
+        }
+    }
+
     @SuppressWarnings("deprecation")
     @Override public void onCreate(Bundle state) {
         WindowLayout.theme(this);
@@ -44,7 +61,18 @@ public final class EditorActivity extends Activity {
         TextView title = new TextView(this);
         title.setText("MSIME synthetic editor fixture");
         layout.addView(title);
-        EditText plain = new EditText(this);
+        EditText plain = new EditText(this) {
+            @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(info);
+                // 产品进程中的回归只能跨进程读取节点；仅显式启用时提供合成编辑器的真实组字范围。
+                if (!getIntent().getBooleanExtra("msime_test_composition_spans", false)) return;
+                info.getExtras().putInt("msime-test-composing-start",
+                    android.view.inputmethod.BaseInputConnection.getComposingSpanStart(getText()));
+                info.getExtras().putInt("msime-test-composing-end",
+                    android.view.inputmethod.BaseInputConnection.getComposingSpanEnd(getText()));
+            }
+        };
+        clipboardEditor=plain;
         // 需要验收真实换行的套件显式使用多行编辑器，普通单行夹具继续保留。
         plain.setInputType(InputType.TYPE_CLASS_TEXT | (getIntent().getBooleanExtra(
             "msime_test_multiline", false) ? InputType.TYPE_TEXT_FLAG_MULTI_LINE : 0));

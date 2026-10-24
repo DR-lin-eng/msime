@@ -72,6 +72,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// `msime_client_account` 在 #8201 新增的操作。
 mod account_ops;
 mod bounded_file;
+mod input_assistance;
+pub use input_assistance::msime_client_input_assistance;
 mod chinese_english_spacing;
 /// 多分类自动云同步的驱动；C 入口在 `ffi::cloud_sync`。与 `cloud_dictionary` 一样和 C 入口模块同名，所以公开，免得遮住 `ffi` 的同名模块。
 pub mod cloud_sync;
@@ -112,6 +114,12 @@ pub use ffi::*;
 /// 会话实际用的每页候选数：偏好或宿主覆盖的值，按本库编译到的平台能排的上限截断（`HostPlatform::max_candidate_page_size`）。共享文档在别的设备上存了 10 时，只排得下九个的宿主仍拿到 9。
 fn host_page_size(requested: u8) -> u8 {
     requested.min(ffi::host::compiled_platform().max_candidate_page_size())
+}
+
+/// 会话的候选窗是否竖排：桌面宿主按 `candidate_layout` 画候选窗，触屏宿主的候选栏总是横排，不读这一项（它的缺省是竖排，照读会让外接键盘的左右键不再选词）。
+fn host_vertical_candidates(layout: msime_client_core::preferences::CandidateLayout) -> bool {
+    ffi::host::compiled_platform().is_desktop()
+        && layout == msime_client_core::preferences::CandidateLayout::Vertical
 }
 
 /// 会话实际用的中英混输触发字符数：本库编译到的平台不读这一项时（macOS、Windows 和 Linux 三个桌面宿主，`HostPlatform::reads_mixed_input_minimum_prefix`）固定为默认值，文档里存的数不起作用，设置页也不再给出这一行。
@@ -160,6 +168,7 @@ pub use diagnostics::{msime_client_set_diagnostic_sink, DiagnosticSink};
 mod dictionary_snapshot;
 mod dictionary_updates;
 mod key_sound;
+mod sogou;
 // 生命周期核心；`pub` 是为了让集成测试（零分配断言）直接调用纯推导函数。
 pub mod lifecycle;
 mod plugin_tables;
@@ -261,6 +270,8 @@ thread_local! {
 struct HostSession {
     runtime: Runtime,
     options: EngineOptions,
+    /// HostOptions 里宿主声明的「快捷短语混进普通候选」能力（macOS、Linux 请求）：偏好重建 `options` 时和 `mixed_input.quick_phrase` 相与；记在会话上是因为 `options` 里那个字段已经和能力与偏好相与过，认不出宿主原来要不要这项能力。
+    quick_phrase_candidates_requested: bool,
     /// HostOptions 记录的版本：偏好里的方案只在本版本提供的方案里取，回退到本版本的默认方案。
     edition: &'static Edition,
     applied: Preferences,
@@ -325,14 +336,13 @@ struct SessionAiCredential {
 /// 本地模式由偏好开关，但它们读的词典是不可变的运行时资源。可选资源不在时，触发键不能被吞掉：在资源齐全之前，Engine 看到的这个模式必须是关的。
 ///
 /// 版本不提供的功能同样当作资源不在：五笔版的资源锁不带日文词典和键盘神经模型，临时日文、日文混输和键盘神经联想无论偏好怎么写都是关的。资源目录按版本的锁校验，本来就放不进日文词典，这里再按版本表关一次，是为了状态目录里留有下载来的日文资源包时也不会打开它。
-/// 触屏键盘宿主（iOS、Android、HarmonyOS）：屏幕键盘从菜单打开本地模式。偏好里没有拆字开关时，这些宿主读作开，桌面宿主读作关（见 `LocalModePreferences::chaizi`）。这里只按编译目标判断，Android 和 HarmonyOS 接实体键盘时也读作开，Shift+C 会进入拆字。
+/// 偏好里拆字开关的取值：用户没动过时按宿主形态决定（见 `LocalModePreferences::chaizi`）——触屏宿主读作开（屏幕键盘从菜单进入），桌面宿主读作关（打开后句首和中英混打的大写 C 会进入模式）。Windows v0.11.1 的 `radical_mode` 出厂为开，与本仓桌面缺省不同，差异已记录，是否对齐留待产品决策。
 const TOUCH_KEYBOARD_HOST: bool = cfg!(any(
     target_os = "android",
     target_os = "ios",
     target_env = "ohos"
 ));
 
-/// 偏好里拆字开关的取值；用户没动过时按宿主形态决定。
 fn chaizi_enabled(preferences: &msime_client_core::preferences::LocalModePreferences) -> bool {
     preferences.chaizi.unwrap_or(TOUCH_KEYBOARD_HOST)
 }
@@ -368,12 +378,56 @@ fn punctuation_lock_code(lock: msime_client_core::preferences::PunctuationLock) 
 /// The Engine's sentence association switches. The desktop model switch is not among them: it gates the runtime's settled reranker (`Runtime::set_settled_rerank_enabled`), the only place that model runs.
 fn engine_sentence_association(
     preferences: &msime_client_core::preferences::SentenceAssociationPreferences,
+    state_root: Option<&std::path::Path>,
 ) -> msime_engine::host::SentenceAssociationOptions {
+    // 选中的语法模型装好后才有文件路径；选中但没装（或包装在别处的 state_root
+    // 下没发布）时留空，引擎逐字节退回无模型基线。
+    let pack = match preferences.grammar_model {
+        msime_client_core::preferences::GrammarModel::None => None,
+        msime_client_core::preferences::GrammarModel::Wanxiang => {
+            Some(ResourcePack::GrammarWanxiang)
+        }
+        msime_client_core::preferences::GrammarModel::BaguwenWord => {
+            Some(ResourcePack::GrammarBaguwen)
+        }
+        msime_client_core::preferences::GrammarModel::BaguwenCompact => {
+            Some(ResourcePack::GrammarBaguwenCompact)
+        }
+        msime_client_core::preferences::GrammarModel::Baishuang => {
+            Some(ResourcePack::GrammarBaishuang)
+        }
+    };
+    let collocation_model = state_root
+        .zip(pack)
+        .and_then(|(root, pack)| {
+            pack.set()
+                .artifacts
+                .first()
+                .and_then(|artifact| resource_packs::installed_file(root, pack, &artifact.name))
+        })
+        .unwrap_or_default();
     msime_engine::host::SentenceAssociationOptions {
         word_lattice: preferences.word_lattice,
         neural_keyboard: preferences.neural_keyboard,
         show_next_on_duplicate: preferences.show_next_on_duplicate,
+        collocation_model,
+        collocation_rerank: pack.is_some(),
+        // 搭配调参系数逐字段透传；偏好层已把非法值回退到出厂值。
+        collocation_weight: preferences.sentence_collocation_weight,
+        collocation_grammar: msime_engine::octagram::GramConfig {
+            collocation_max_length: preferences.sentence_collocation_max_length,
+            collocation_min_length: preferences.sentence_collocation_min_length,
+            collocation_penalty: preferences.sentence_collocation_penalty,
+            non_collocation_penalty: preferences.sentence_collocation_non_penalty,
+            weak_collocation_penalty: preferences.sentence_collocation_weak_penalty,
+            rear_penalty: preferences.sentence_collocation_rear_penalty,
+        },
     }
+}
+
+/// 资源包卸载前摘掉引擎进程内的 `.gram` 映射，避免 Windows 删除目录时仍被文件句柄占用。
+pub fn evict_grammar_model(path: &std::path::Path) {
+    msime_engine::octagram::GramDb::evict_shared(path);
 }
 
 /// 引擎的引号与方头括号样式，由 client-core 从偏好解析（`corner_when_traditional` 在那里按繁体开关定下）。View 报告的是同一个解析结果。
@@ -385,6 +439,8 @@ fn apply_punctuation_marks(
     options.corner_quotes = marks.quotes == msime_client_core::punctuation::QuoteMarks::Corner;
     options.hollow_brackets =
         marks.brackets == msime_client_core::preferences::BracketStyle::Hollow;
+    options.enumeration_comma_backslash = marks.enumeration_comma_backslash;
+    options.enumeration_comma_slash = marks.enumeration_comma_slash;
 }
 
 /// The switch the Engine is handed. Windows turns the punctuation switch on whenever punctuation is locked to Chinese, while the Engine drops Chinese punctuation whenever its switch is off, so a lock to Chinese has to carry the switch with it.
@@ -454,8 +510,37 @@ impl HostSession {
         self.ai_provider_cache.as_ref()
     }
     fn ai_query_is_current(&self, query: &OnlineQuery) -> bool {
-        self.ai_provider_config()
-            .is_some_and(|config| query.ai_assistant.as_ref() == Some(config))
+        self.english_query_allowed(query)
+            && self
+                .ai_provider_config()
+                .is_some_and(|config| query.ai_assistant.as_ref() == Some(config))
+    }
+    fn english_query_allowed(&self, query: &OnlineQuery) -> bool {
+        if query.mode != msime_engine::OnlineInputMode::English {
+            return true;
+        }
+        let enabled = self
+            .requested
+            .as_ref()
+            .map_or(self.applied.english_online_candidates, |snapshot| {
+                snapshot.preferences.english_online_candidates
+            });
+        enabled
+            && self.runtime.online_query().is_ok_and(|live| {
+                live.is_some_and(|live| {
+                    live.mode == query.mode
+                        && live.scheme == query.scheme
+                        && live.session_id == query.session_id
+                        && live.generation == query.generation
+                        && live.identity == query.identity
+                        && live.query_text == query.query_text
+                        && live.cache_key == query.cache_key
+                        && live.pinyin_segments == query.pinyin_segments
+                        && live.ai_context == query.ai_context
+                        && live.cloud_eligible == query.cloud_eligible
+                        && live.ai_eligible == query.ai_eligible
+                })
+            })
     }
     fn set_ai_provider_cache(&mut self, preferences: &Preferences) {
         let ai = &preferences.ai_assistant;
@@ -465,6 +550,7 @@ impl HostSession {
             model: ai.model.clone(),
             endpoint: ai.endpoint.clone(),
             candidate_limit: host_ai_candidate_limit(ai.candidate_limit),
+            thinking: ai.thinking.clone(),
             prompt_id: ai.prompt_id.clone(),
             prompt_custom_1: ai.prompt_custom_1.clone(),
             prompt_custom_2: ai.prompt_custom_2.clone(),
@@ -477,9 +563,13 @@ impl HostSession {
             .requested
             .as_ref()
             .map_or(&self.applied, |snapshot| &snapshot.preferences);
-        self.cloud_candidates_enabled()
+        self.english_query_allowed(query)
+            && self.cloud_candidates_enabled()
             && query.cloud_request.as_ref().map_or_else(
-                || preferences.cloud_candidate_provider == Default::default(),
+                || {
+                    query.mode != msime_engine::OnlineInputMode::English
+                        && preferences.cloud_candidate_provider == Default::default()
+                },
                 |request| request.provider_id == preferences.cloud_candidate_provider.identity(),
             )
     }
@@ -643,23 +733,32 @@ impl HostSession {
         options.shuangpin_preedit_uses_raw = preferences.shuangpin_preedit_uses_raw;
         options.single_character_only = preferences.single_character_only;
         options.learning = preferences.learning;
+        options.learn_english_on_enter = preferences.enter_learns_english_word;
         options.autocorrect_transposition = preferences.quanpin.autocorrect_transposition;
         options.autocorrect_neighbor = preferences.quanpin.autocorrect_neighbor;
         options.fuzzy_pinyin_rules = preferences.fuzzy_pinyin.active_rules();
         options.wubi_mixed_pinyin = preferences.wubi_mixed_pinyin;
+        options.wubi_z_wildcard = preferences.wubi_z_wildcard;
         options.wubi_profile = wubi_profile_code(preferences.wubi_profile);
         options.frequency_mode = preferences.frequency.mode.as_str().into();
         options.frequency_trigger_count = preferences.frequency.trigger_count;
         options.frequency_linear_step = preferences.frequency.linear_step;
+        options.mixed_candidates = preferences.mixed_input.enabled;
         options.mixed_english = preferences.mixed_input.english;
         options.english_minimum_prefix =
             host_english_minimum_prefix(preferences.mixed_input.minimum_prefix);
+        options.english_first_page_count = preferences.mixed_input.first_page_count;
         options.mixed_emoji = preferences.mixed_input.emoji;
         options.mixed_kaomoji = preferences.mixed_input.kaomoji;
         options.mixed_symbols = preferences.mixed_input.symbols;
         options.mixed_japanese = preferences.mixed_input.japanese;
+        options.quick_phrase_candidates =
+            self.quick_phrase_candidates_requested && preferences.mixed_input.quick_phrase;
+        options.quick_phrase_frequency = preferences.mixed_input.quick_phrase_frequency;
         options.local_unicode = preferences.local_modes.unicode;
         options.local_date_time = preferences.local_modes.date_time;
+        options.local_date_time_inline = preferences.local_modes.date_time_inline;
+        options.local_date_time_menu = preferences.local_modes.date_time_menu;
         options.local_quick_phrase = preferences.local_modes.quick_phrase;
         options.local_emoji = preferences.local_modes.emoji;
         options.local_kaomoji = preferences.local_modes.kaomoji;
@@ -670,6 +769,7 @@ impl HostSession {
         options.local_command = preferences.local_modes.command;
         options.local_mention = preferences.local_modes.mention;
         options.local_chaizi = chaizi_enabled(&preferences.local_modes);
+        options.local_symbol = preferences.local_modes.symbol;
         options.local_shift_letter_entry = preferences.local_modes.shift_letter_entry;
         // 繁体输出开着时拆字行按繁体字形去重；改这个偏好同样会让 Engine 在空闲时重建。
         options.chaizi_traditional_output = preferences.traditional_chinese_output;
@@ -678,6 +778,7 @@ impl HostSession {
         options.helpcode = helpcode.enabled;
         options.show_helpcode = helpcode.show_in_candidate_window;
         options.helpcode_schema = helpcode.schema.as_str().into();
+        options.helpcode_trigger_key = helpcode.trigger_key.bytes().next();
         let plugin_root = self.plugin_roots.installed.as_deref();
         let plugin_tables = plugin_tables::PluginTables::stamp(
             plugin_root,
@@ -686,8 +787,10 @@ impl HostSession {
             &preferences.plugins,
         );
         plugin_tables.fill(&self.plugin_tables, plugin_root, &mut options);
-        options.sentence_association =
-            engine_sentence_association(&preferences.sentence_association);
+        options.sentence_association = engine_sentence_association(
+            &preferences.sentence_association,
+            self.state_root.as_deref(),
+        );
         // 引擎按宿主的每页候选数决定全长组要不要并入补全词；和下面交给 runtime 的值同源。
         let page_size = host_page_size(
             self.page_size_override
@@ -710,6 +813,7 @@ impl HostSession {
         let mut engine = Session::new(&options).map_err(|e| e.to_string())?;
         // 云候选席位不是 EngineOptions；新引擎默认关闭，每次重建都要恢复当前偏好。
         engine.set_cloud_candidates_enabled(preferences.cloud_candidates);
+        engine.set_english_online_candidates_enabled(preferences.english_online_candidates);
         if self.punctuation_override.is_some() || self.punctuation_lock_override.is_some() {
             engine
                 .set_chinese_punctuation_enabled(engine_chinese_punctuation(
@@ -855,23 +959,28 @@ impl HostSession {
                 self.settled_model.clone(),
             ));
         }
+        let downloaded = state_root.map(DownloadedDictionaries::new);
         let dictionaries = LanguageDictionaries::resolve(
-            state_root,
+            downloaded.as_ref(),
             self.recorded_language_dictionaries.as_deref(),
         );
         let cantonese = path_text(dictionaries.cantonese);
         let zhuyin = path_text(dictionaries.zhuyin);
         let stroke = path_text(dictionaries.stroke);
-        let japanese = path_text(japanese_dictionary(state_root));
+        let japanese = path_text(japanese_dictionary(downloaded.as_ref()));
         let wubi = path_text(wubi_dictionary(
-            state_root,
+            downloaded.as_ref(),
             Path::new(&self.options.resources),
         ));
+        let grammar_model =
+            engine_sentence_association(&self.applied.sentence_association, state_root)
+                .collocation_model;
         if cantonese == self.options.cantonese_dictionary
             && zhuyin == self.options.zhuyin_dictionary
             && stroke == self.options.stroke_dictionary
             && japanese == self.options.japanese_dictionary
             && wubi == self.options.wubi_dictionary
+            && grammar_model == self.options.sentence_association.collocation_model
         {
             return;
         }
@@ -1022,18 +1131,37 @@ impl HostSession {
             .clone();
         self.set_ai_provider_cache(&requested_preferences);
         self.runtime
+            .set_english_online_candidates_enabled(requested_preferences.english_online_candidates)
+            .map_err(|e| e.to_string())?;
+        self.runtime
             .set_cloud_candidates_enabled(requested_preferences.cloud_candidates)
             .map_err(|e| e.to_string())?;
         // 宿主状态，不是 Engine 状态：跟着最新请求的偏好走，不必等这次偏好重建 Engine，也不必等组字结束。
         self.runtime
             .set_backspace_reverts_selection(requested_preferences.backspace_reverts_selection);
+        // Esc 保留已选词同样是宿主状态：改完下一次 Esc 就按新开关解释。
+        self.runtime
+            .set_escape_keeps_selected_word(requested_preferences.escape_keeps_selected_word);
         // 左右键的候选回退（`navigation.left_right`）同样是宿主状态：改完立刻生效，左右键不必等 Engine 重建。
         self.runtime
             .set_left_right_navigation(requested_preferences.navigation.left_right);
         self.runtime
+            .set_vertical_candidates(host_vertical_candidates(
+                requested_preferences.candidate_layout,
+            ));
+        self.runtime
             .set_wubi_auto_commit_unique(requested_preferences.wubi_auto_commit_unique);
+        // 首页英文候选数同样是宿主状态：在线座位整理按它给英文组留位，改完下一次刷新就生效。
+        self.runtime
+            .set_english_first_page_count(requested_preferences.mixed_input.first_page_count);
+        // 顶字同样是宿主状态：纯判定在 Engine 与 runtime 之间，改偏好不必等组字结束。
+        self.runtime
+            .set_wubi_fifth_code_top_commit(requested_preferences.wubi_fifth_code_top_commit);
         self.runtime
             .set_wubi_candidate_selection(requested_preferences.wubi_candidate_selection.clone());
+        // 「二三候选」键也是宿主编排状态：跟着最新请求的偏好走，下一键生效。
+        self.runtime
+            .set_second_third_candidate(requested_preferences.second_third_candidate);
         self.sound.update(key_sound::SoundSettings::new(
             &requested_preferences.plugins,
             &self.plugin_roots,
@@ -1453,14 +1581,17 @@ impl LanguageDictionaries {
         msime_path_trust::reject_symlinked_components(path).is_ok() && path.is_file()
     }
 
-    /// 每个词库优先用 `state_root` 下已下载的资源包里的那份，没有时用 HostOptions 记录的 `recorded` 目录里的那份（随包内置或旧版本留下的），两处都没有就是缺席。
-    pub(crate) fn resolve(state_root: Option<&Path>, recorded: Option<&Path>) -> Self {
+    /// 每个词库优先用状态目录（`downloaded`）下已下载的词库更新或资源包里的那份，没有时用 HostOptions 记录的 `recorded` 目录里的那份（随包内置或旧版本留下的），两处都没有就是缺席。
+    pub(crate) fn resolve(
+        downloaded: Option<&DownloadedDictionaries>,
+        recorded: Option<&Path>,
+    ) -> Self {
         let find = |name: &str| {
-            state_root
-                .and_then(|root| {
-                    updated_dictionary_file(root, name).or_else(|| {
+            downloaded
+                .and_then(|downloaded| {
+                    downloaded.updated_file(name).or_else(|| {
                         resource_packs::installed_file(
-                            root,
+                            downloaded.root,
                             ResourcePack::LanguageDictionaries,
                             name,
                         )
@@ -1471,10 +1602,10 @@ impl LanguageDictionaries {
                         .filter(|directory| directory.is_absolute())
                         // 更新目录已在上面校验；校验失败不能再把它当作普通随包路径采用。
                         .filter(|directory| {
-                            !state_root.is_some_and(|state| {
-                                let state = std::fs::canonicalize(state)
-                                    .unwrap_or_else(|_| state.to_path_buf());
-                                directory.starts_with(state.join("dictionary-updates"))
+                            !downloaded.is_some_and(|downloaded| {
+                                directory.starts_with(
+                                    downloaded.canonical_root().join("dictionary-updates"),
+                                )
                             })
                         })
                         .map(|directory| directory.join(name))
@@ -1534,22 +1665,30 @@ impl LanguageDictionaries {
 }
 
 /// 已下载的日文资源包里的 `msime-japanese.dat`。`None` 时 Engine 读资源目录里的那份（完整发布包或开发环境内置的）。
-fn japanese_dictionary(state_root: Option<&Path>) -> Option<PathBuf> {
-    let state = state_root?;
-    updated_dictionary_file(state, "msime-japanese.dat").or_else(|| {
-        resource_packs::installed_file(state, ResourcePack::Japanese, "msime-japanese.dat")
+fn japanese_dictionary(downloaded: Option<&DownloadedDictionaries>) -> Option<PathBuf> {
+    let downloaded = downloaded?;
+    downloaded.updated_file("msime-japanese.dat").or_else(|| {
+        resource_packs::installed_file(
+            downloaded.root,
+            ResourcePack::Japanese,
+            "msime-japanese.dat",
+        )
     })
 }
 
 /// 五笔码表 `msime-wubi.db` 的位置，资源目录 `resources` 里有它时为 `None`（Engine 读资源目录里的那份）。macOS 发布包不带它，这时是词库更新里的那份或已下载的 `wubi` 资源包里的那份，都没有时为 `None`。
-fn wubi_dictionary(state_root: Option<&Path>, resources: &Path) -> Option<PathBuf> {
+fn wubi_dictionary(
+    downloaded: Option<&DownloadedDictionaries>,
+    resources: &Path,
+) -> Option<PathBuf> {
     let name = msime_engine::assets::WUBI_DICTIONARY;
     if resources.join(name).is_file() {
         return None;
     }
-    let state = state_root?;
-    updated_dictionary_file(state, name)
-        .or_else(|| resource_packs::installed_file(state, ResourcePack::Wubi, name))
+    let downloaded = downloaded?;
+    downloaded
+        .updated_file(name)
+        .or_else(|| resource_packs::installed_file(downloaded.root, ResourcePack::Wubi, name))
 }
 
 /// 五笔方案此时有没有码表可读：本平台的发布包可以不带 `msime-wubi.db`（[`ON_DEMAND_ARTIFACTS`]），资源目录里没有它，宿主也没有交来下载的那份（`wubi_dictionary` 为空）。别的平台的资源目录总是带着它，这里总为假。
@@ -1562,23 +1701,93 @@ pub(crate) fn wubi_dictionary_missing(resources: &Path, wubi_dictionary: &str) -
         && !resources.join(name).is_file()
 }
 
-/// 可选词库只读已经由设置宿主完整校验、原子发布的文件，不在聚焦输入框时联网。
-fn updated_dictionary_file(state: &Path, name: &str) -> Option<PathBuf> {
-    let edition = Edition::recorded_in(state).unwrap_or_else(Edition::full);
-    let baseline = edition.resource_set().ok()?;
-    let selected = msime_client_providers::dictionary_updates::selected(state, &baseline)?;
-    let set = std::iter::once(&selected.desktop)
-        .chain(selected.languages.iter())
-        .find(|set| set.artifacts.iter().any(|file| file.name == name))?;
-    let directory = msime_client_providers::dictionary_updates::directory(state, set).ok()?;
-    dictionary_updates::verify(state, &directory, set)?;
-    msime_client_providers::dictionary_updates::installed_file(state, &baseline, name)
+/// 一次解析（一次聚焦刷新或一次建会话）里，状态目录 `root` 下已下载词库的查找。
+///
+/// 一次解析要找粤拼、注音、笔画、日文和五笔最多五个文件，它们出自同一份词库更新：版本记录、资源锁、选择记录（`installed.json` 和它的逐层符号链接检查）、每个代次目录的规范化与校验，以及 `root` 的规范化，在这里各只做一次，这次要找的每个文件共用；文件本身的路径检查和长度检查仍逐个做。每一项都是第一次用到时才做，没用到的不做，与逐个文件查找时做的事相同。
+///
+/// 它只活在一次解析里，不跨调用保留：下一次聚焦或建会话重新读、重新做全部路径检查，所以设置应用随时换掉的选择记录下一次就会看到，没有要失效的缓存。
+pub(crate) struct DownloadedDictionaries<'a> {
+    root: &'a Path,
+    selection: std::cell::OnceCell<Option<msime_client_providers::dictionary_updates::Selection>>,
+    /// 选择记录里桌面词库代次和语言词库代次的目录，校验通过时为 `Some`。
+    verified: [std::cell::OnceCell<Option<PathBuf>>; 2],
+    canonical_root: std::cell::OnceCell<PathBuf>,
+}
+
+impl<'a> DownloadedDictionaries<'a> {
+    pub(crate) fn new(root: &'a Path) -> Self {
+        DownloadedDictionaries {
+            root,
+            selection: std::cell::OnceCell::new(),
+            verified: Default::default(),
+            canonical_root: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// 已选中的词库更新里的 `name`。可选词库只读已经由设置宿主完整校验、原子发布的文件，不在聚焦输入框时联网。
+    fn updated_file(&self, name: &str) -> Option<PathBuf> {
+        let selection = self
+            .selection
+            .get_or_init(|| {
+                let edition = Edition::recorded_in(self.root).unwrap_or_else(Edition::full);
+                let baseline = edition.resource_set().ok()?;
+                msime_client_providers::dictionary_updates::selected(self.root, &baseline)
+            })
+            .as_ref()?;
+        let (set, verified) = [Some(&selection.desktop), selection.languages.as_ref()]
+            .into_iter()
+            .zip(&self.verified)
+            .find_map(|(set, verified)| {
+                set.filter(|set| set.artifacts.iter().any(|file| file.name == name))
+                    .map(|set| (set, verified))
+            })?;
+        let directory = verified
+            .get_or_init(|| {
+                let directory =
+                    msime_client_providers::dictionary_updates::directory(self.root, set).ok()?;
+                dictionary_updates::verify(self.root, &directory, set)?;
+                Some(directory)
+            })
+            .as_ref()?;
+        msime_client_providers::dictionary_updates::generation_file(directory, set, name)
+    }
+
+    /// 规范化后的 `root`，规范化失败时是 `root` 本身。
+    fn canonical_root(&self) -> &Path {
+        self.canonical_root
+            .get_or_init(|| std::fs::canonicalize(self.root).unwrap_or_else(|_| self.root.into()))
+    }
 }
 
 /// EngineOptions 里的路径文本，没有路径（或路径不是 UTF-8）时为空。
 fn path_text(path: Option<PathBuf>) -> String {
     path.and_then(|path| path.to_str().map(str::to_owned))
         .unwrap_or_default()
+}
+
+/// 内置辅助码表的只读回退根目录（`EngineOptions::helpcode_fallback_resources`）。
+///
+/// 辅助码表随安装包放在资源目录的 `helpcodes/` 下，不在词库发布里，所以装上在线词库更新、`resources` 换成下载的代次目录后，那里没有这些表，Engine 只得到空表，辅助码什么也筛不掉。文档记了回退目录时用它（macOS 输入法、`prepare_host_with_updates` 准备出的文档）；没记时取更新记录里的随包资源目录，覆盖只经 `refresh_host_options` 换过 `resources` 的旧文档。`resources` 自己带着 `helpcodes/` 时不需要回退，也就不读更新记录。
+fn helpcode_fallback_resources(
+    recorded: Option<String>,
+    resources: &Path,
+    state_root: Option<&Path>,
+    edition: &'static Edition,
+) -> Option<String> {
+    if recorded.is_some() || resources.join("helpcodes").is_dir() {
+        return recorded;
+    }
+    recorded_helpcode_bundle(state_root?, &edition.resource_set().ok()?)
+}
+
+/// 更新记录里的随包资源目录，要求那里确实有 `helpcodes/`；`baseline` 是本版本编译进来的词库锁。
+fn recorded_helpcode_bundle(state_root: &Path, baseline: &ResourceSet) -> Option<String> {
+    let bundled =
+        msime_client_providers::dictionary_updates::bundled_resources(state_root, baseline)?;
+    if !bundled.join("helpcodes").is_dir() {
+        return None;
+    }
+    bundled.to_str().map(str::to_owned)
 }
 
 /// HostOptions 的 `preferences_directory`，只认绝对路径：按需下载的资源包装在它下面。
@@ -1620,6 +1829,26 @@ pub(crate) fn effective_scheme(
     )
 }
 
+/// 偏好里的双拼辅助码触发方式 → 引擎侧同名字段；写入端已归一，这里对消费端再归一一次兜底。
+fn shuangpin_helpcode_modes(
+    modes: msime_client_core::preferences::ShuangpinHelpcodeModes,
+) -> msime_engine::ShuangpinHelpcodeModes {
+    let modes = modes.normalized();
+    msime_engine::ShuangpinHelpcodeModes {
+        direct: modes.direct,
+        trigger_backtick: modes.trigger_backtick,
+        trigger_semicolon: modes.trigger_semicolon,
+        trigger_uppercase: modes.trigger_uppercase,
+        mid_sentence: modes.mid_sentence,
+        mid_sentence_backtick: modes.mid_sentence_backtick,
+        mid_sentence_semicolon: modes.mid_sentence_semicolon,
+        mid_sentence_uppercase: modes.mid_sentence_uppercase,
+        direct_helpcode: modes.direct_helpcode,
+        direct_helpcode_slash: modes.direct_helpcode_slash,
+        direct_helpcode_uppercase: modes.direct_helpcode_uppercase,
+    }
+}
+
 /// The helpcode settings for the scheme actually run, which differs from `Preferences::active_helpcode` only when `effective_scheme` fell back.
 fn helpcode_for_scheme(
     preferences: &Preferences,
@@ -1641,7 +1870,7 @@ fn helpcode_for_scheme(
 struct HostOptions {
     api_version: u32,
     resources: String,
-    /// 当前宿主随包提供的内置辅助码回退资源根目录；只在内存文档中注入，不要求旧配置写入。
+    /// 当前宿主随包提供的内置辅助码回退资源根目录。macOS 输入法只在内存文档中注入；`prepare_host_with_updates` 在 `resources` 换成下载代次时写它；都没有时 `helpcode_fallback_resources()` 从更新记录里找。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     helpcode_fallback_resources: Option<String>,
     user_data: String,
@@ -1657,7 +1886,7 @@ struct HostOptions {
     /// the field would otherwise show nothing for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     phrase_preedit: Option<bool>,
-    /// macOS 把普通组字里的快捷短语也作为候选显示；缺省关闭以保持其他宿主和旧文档的入口契约。
+    /// macOS 和 Linux 的两个宿主把普通组字里的快捷短语也作为候选显示；缺省关闭以保持其他宿主和旧文档的入口契约。建会话时写进 `EngineOptions`，偏好变更重建 Engine 时沿用同一份选项。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quick_phrase_candidates: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1755,13 +1984,14 @@ impl HostOptions {
     fn into_engine_options(self) -> EngineOptions {
         // 每个平台都这样查找；日文词典只有 macOS 会下载，语言词库由 macOS 和没有随包带齐它们的 Linux 安装下载，别处的状态目录里从来没有它们。
         let state_root = absolute_state_root(self.preferences_directory.as_deref());
+        let downloaded = state_root.as_deref().map(DownloadedDictionaries::new);
         let dictionaries = LanguageDictionaries::resolve(
-            state_root.as_deref(),
+            downloaded.as_ref(),
             self.language_dictionaries.as_deref().map(Path::new),
         );
-        let japanese = japanese_dictionary(state_root.as_deref());
+        let japanese = japanese_dictionary(downloaded.as_ref());
         let wubi = path_text(wubi_dictionary(
-            state_root.as_deref(),
+            downloaded.as_ref(),
             Path::new(&self.resources),
         ));
         let dictionaries = LanguageDictionaries {
@@ -1777,6 +2007,12 @@ impl HostOptions {
             edition.default_scheme,
         );
         let helpcode = helpcode_for_scheme(&self.preferences, scheme);
+        let helpcode_fallback_resources = helpcode_fallback_resources(
+            self.helpcode_fallback_resources,
+            Path::new(&self.resources),
+            state_root.as_deref(),
+            edition,
+        );
         let mut options = EngineOptions {
             resources: self.resources,
             user_data: self.user_data,
@@ -1791,24 +2027,30 @@ impl HostOptions {
             shuangpin_preedit_uses_raw: self.preferences.shuangpin_preedit_uses_raw,
             single_character_only: self.preferences.single_character_only,
             learning: self.preferences.learning,
+            learn_english_on_enter: self.preferences.enter_learns_english_word,
             autocorrect_transposition: self.preferences.quanpin.autocorrect_transposition,
             autocorrect_neighbor: self.preferences.quanpin.autocorrect_neighbor,
             fuzzy_pinyin_rules: self.preferences.fuzzy_pinyin.active_rules(),
             wubi_mixed_pinyin: self.preferences.wubi_mixed_pinyin,
+            wubi_z_wildcard: self.preferences.wubi_z_wildcard,
             wubi_profile: wubi_profile_code(self.preferences.wubi_profile),
             frequency_mode: self.preferences.frequency.mode.as_str().into(),
             frequency_trigger_count: self.preferences.frequency.trigger_count,
             frequency_linear_step: self.preferences.frequency.linear_step,
+            mixed_candidates: self.preferences.mixed_input.enabled,
             mixed_english: self.preferences.mixed_input.english,
             english_minimum_prefix: host_english_minimum_prefix(
                 self.preferences.mixed_input.minimum_prefix,
             ),
+            english_first_page_count: self.preferences.mixed_input.first_page_count,
             mixed_emoji: self.preferences.mixed_input.emoji,
             mixed_kaomoji: self.preferences.mixed_input.kaomoji,
             mixed_symbols: self.preferences.mixed_input.symbols,
             mixed_japanese: self.preferences.mixed_input.japanese,
             local_unicode: self.preferences.local_modes.unicode,
             local_date_time: self.preferences.local_modes.date_time,
+            local_date_time_inline: self.preferences.local_modes.date_time_inline,
+            local_date_time_menu: self.preferences.local_modes.date_time_menu,
             local_quick_phrase: self.preferences.local_modes.quick_phrase,
             local_emoji: self.preferences.local_modes.emoji,
             local_kaomoji: self.preferences.local_modes.kaomoji,
@@ -1819,17 +2061,22 @@ impl HostOptions {
             local_command: self.preferences.local_modes.command,
             local_mention: self.preferences.local_modes.mention,
             local_chaizi: chaizi_enabled(&self.preferences.local_modes),
+            local_symbol: self.preferences.local_modes.symbol,
             local_shift_letter_entry: self.preferences.local_modes.shift_letter_entry,
             chaizi_traditional_output: self.preferences.traditional_chinese_output,
             command_table: Vec::new(),
             plugin_commands: Vec::new(),
             mention_entries: Vec::new(),
             quick_phrase_table: Vec::new(),
-            quick_phrase_candidates: false,
+            // 宿主声明能力、用户在设置里打开，两个条件都满足才把快捷短语混进普通候选；`mixed_input.quick_phrase` 缺键的旧文档读作开，保住 macOS/Linux 升级前的行为。
+            quick_phrase_candidates: self.quick_phrase_candidates.unwrap_or(false)
+                && self.preferences.mixed_input.quick_phrase,
+            quick_phrase_frequency: self.preferences.mixed_input.quick_phrase_frequency,
             helpcode_table: None,
-            helpcode_fallback_resources: self.helpcode_fallback_resources,
+            helpcode_fallback_resources,
             sentence_association: engine_sentence_association(
                 &self.preferences.sentence_association,
+                absolute_state_root(self.preferences_directory.as_deref()).as_deref(),
             ),
             rescoring_context: String::new(),
             sentence_alternatives: true,
@@ -1842,7 +2089,10 @@ impl HostOptions {
             wubi_dictionary: wubi,
             helpcode: helpcode.enabled,
             show_helpcode: helpcode.show_in_candidate_window,
+            // 双拼专属的触发方式；其它方案给默认值，引擎只在双拼下读它。手改出互斥组合的文档在消费端再归一一次，与 `PreferencesStore::save` 的写入端归一一致。
+            shuangpin_helpcode_modes: shuangpin_helpcode_modes(helpcode.modes),
             helpcode_schema: helpcode.schema.as_str().into(),
+            helpcode_trigger_key: helpcode.trigger_key.bytes().next(),
             chinese_punctuation: engine_chinese_punctuation(
                 self.preferences.chinese_punctuation,
                 punctuation_lock_code(self.preferences.punctuation_lock),
@@ -1851,6 +2101,8 @@ impl HostOptions {
             punctuation_lock: punctuation_lock_code(self.preferences.punctuation_lock),
             corner_quotes: false,
             hollow_brackets: false,
+            enumeration_comma_backslash: true,
+            enumeration_comma_slash: false,
         };
         apply_punctuation_marks(&mut options, &self.preferences);
         // 建会话没有地方带原因，表不能用时按小鹤建起来就够了；之后的偏好变更会在诊断里报告原因。
@@ -2170,6 +2422,10 @@ fn prepare_host_with_updates(
             }
             if let Some(model) = settled_model_beside(&original) {
                 document["settled_model"] = json!(model);
+            }
+            // 辅助码表也不在词库发布里，下载的代次目录没有 `helpcodes/`。这里直接记下当前安装包的目录：iOS 每次 App 更新都换安装路径，更新记录里的随包目录会失效，`helpcode_fallback_resources()` 只能从记录里找。
+            if original.join("helpcodes").is_dir() {
+                document["helpcode_fallback_resources"] = json!(original);
             }
             if let Some(languages) = dictionary_updates::languages(state_root, edition)
                 .and_then(|p| p.to_str().map(str::to_owned))
@@ -2881,6 +3137,15 @@ fn dispatch(handle: u64, action: Action) -> *mut c_char {
 ///
 /// 选择加入生命周期的会话按这个顺序：调用前采样并发 `input` → `runtime.dispatch`（脚本的 `candidates` 在里面的 refresh 和展开之后）→ 统计 → 读派发事实 → `complete_transition`（全角转换、再中英文之间加空格都在这里，之后才是宿主拿到的字节，宿主再做简繁转换）→ `before_commit`（脚本可以改写 body）→ 其余事件和内置消费者 → 序列化，FEEDBACK 开着时插入 `feedback`。没选择加入的会话只走原来的几步。
 fn dispatch_call(handle: u64, action: Action, host: Option<lifecycle::InputClass>) -> *mut c_char {
+    dispatch_call_with_touch(handle, action, host, None)
+}
+
+fn dispatch_call_with_touch(
+    handle: u64,
+    action: Action,
+    host: Option<lifecycle::InputClass>,
+    touch: Option<(u8, msime_engine::TouchPoint)>,
+) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
             // 大写锁定改道先于其余处理，后面看到的都是改道后的动作。
@@ -2897,7 +3162,9 @@ fn dispatch_call(handle: u64, action: Action, host: Option<lifecycle::InputClass
             // code; doing it per host would have meant six chances to forget.
             let position = selected_position(&action);
             let efficiency = position.and_then(|_| session.efficiency_candidate(&action));
+            session.runtime.set_touch_point(touch);
             let result = session.runtime.dispatch(action).map_err(|e| e.to_string());
+            session.runtime.set_touch_point(None);
             // 报错前 runtime 可能已经改了组字，生命周期照样收尾。
             let mut result = session.lifecycle_on_error(pending, result)?;
             // Text the Engine generated (a calculator result, a command, a mention) was picked, not typed, and stays out of the statistics the way it stays out of learning.

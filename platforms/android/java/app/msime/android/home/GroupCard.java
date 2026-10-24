@@ -170,8 +170,16 @@ public final class GroupCard {
         TextView text = ViewPolicy.styledLabel(context, label.apply(control.value()), 13, 400, ThemeColorPolicy.subText(context));
         ViewPolicy.setEndCenteredVertically(text);
         ViewPolicy.setSingleLine(text);
-            ViewPolicy.hideFromAccessibility(text);
-        row.view.addView(text, new LinearLayout.LayoutParams(DimensionPolicy.pixels(context, Ui.SLIDER_LABEL_WIDTH),
+        ViewPolicy.hideFromAccessibility(text);
+        // 按当前字体为所有可选数值预留宽度，避免大字体裁字或拖动时数值变长把滑块挤动。
+        int labelWidth = DimensionPolicy.pixels(context, Ui.SLIDER_LABEL_WIDTH);
+        for (int slot = 0; slot <= control.getMax(); slot++) {
+            int width = (int) Math.ceil(android.text.Layout.getDesiredWidth(
+                label.apply(min + slot * step), text.getPaint()))
+                + text.getCompoundPaddingLeft() + text.getCompoundPaddingRight();
+            labelWidth = Math.max(labelWidth, width);
+        }
+        row.view.addView(text, new LinearLayout.LayoutParams(labelWidth,
             ViewGroup.LayoutParams.WRAP_CONTENT));
         control.setOnValueChange(current -> {
             CharSequence shown = label.apply(current);
@@ -292,6 +300,11 @@ public final class GroupCard {
 
         public void setSubtitle(@Nullable CharSequence text) {
             ViewPolicy.setTextAndVisibility(subtitle, text);
+        }
+
+        /** 限制副标题摘要的行数，完整内容仍由原记录和编辑入口持有。 */
+        public void setSubtitleMaxLines(int lines) {
+            ViewPolicy.setMaxLinesEllipsized(subtitle, lines);
         }
 
         /** 改写行尾的值（导航行、值行、滑块行的数值标签）。 */

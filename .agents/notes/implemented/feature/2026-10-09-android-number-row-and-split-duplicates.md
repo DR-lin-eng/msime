@@ -6,6 +6,8 @@ Status: implemented
 
 数字层标点入口的决定已由[数字层中英文标点切换](../../implemented/feature/2026-10-14-android-number-layer-punctuation-toggle.md)取代；数字行和分离式键盘的其余决定仍然有效。
 
+大屏竖屏的方向条件由[竖屏分离选项](2026-10-23-android-portrait-split.md)扩展；本篇的重复 G/V、中缝与键宽决定继续适用。
+
 ## Problem
 
 #6022（基于 0.3.1）有两个请求。一是 26 键字母上方加一行可开关的数字行 1–0：现在打数字要点左下角进 123 层，那一层里又没有切换中英文标点的键，来回切层很麻烦。二是平板横屏的分离式键盘右半边也放 G 和 V：现在 G（第二行）和 V（第三行）只在左半边，左右不对称，用双拼时右手够不着这两个键。
@@ -52,3 +54,7 @@ Android 的字母层只有 `KeyboardLayout` 的三行字母，`ImeLetterRows.reb
 
 - `ANDROID_SDK_ROOT=… bash platforms/android/check-host.sh`：`KeyboardLayoutSmoke`（数字行内容、只在 26 键和韩文的字母层画、关着时不画、手机横屏的窗口高度不画、窗口高度未知时照画）、`SplitKeyboardPolicySmoke`（哪几行重复、扣掉一个键宽后的空隙份额与整行总份额、第二三行两段等宽、重复的是字母不是缩进或 ⇧、微软双拼十键行和韩文九键行）、`DeclinedKeyPolicySmoke`（组字中被拒的数字先结束组合，字母不算）、`AndroidLocalSettingsSmoke`（数字行默认关、不同步）、`SettingsSearchIndexSmoke`（「数字行」进了键盘页的搜索关键词）。
 - Gradle `compileFullReleaseJavaWithJavac` 编译 `ImeLetterRows`、`KeyboardOptionsPage` 的改动。
+
+## 上下文自动开启
+
+[密码与 SSH 工具自动数字行](../../implemented/feature/2026-10-21-issue-8972-automatic-number-row.md) 补充临时开启状态，与手动开关取或；本篇的键面、高度和数字输入规则继续适用。

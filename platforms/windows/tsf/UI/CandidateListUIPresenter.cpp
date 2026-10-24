@@ -1,3 +1,5 @@
+#include <nlohmann/json.hpp>
+#include "../../common/CandidateSources.h"
 #include "../../common/GameCompatProfile.h"
 #include "FanyDefines.h"
 #include "Globals.h"
@@ -152,7 +154,7 @@ HRESULT CMetasequoiaIME::_HandleCandidateFinalize(TfEditCookie ec, _In_ ITfConte
             // 宿主会话拥有组字时，空格在宿主会话里选中同一个高亮候选，和数字键一样（_HandleCandidateWorker）。以前这里只写 Server 回的文字，宿主会话从不前进：每次空格上屏的拼音都留在里面越积越长，Shift 切英文时整串上屏（打 nihao 空格、shijie 空格，再按 Shift 得到「你好世界nihaoshijie」）。
             if (hostOwnsComposition)
             {
-                const HRESULT selected = _SelectHighlightedHostCandidate(ec, pContext);
+                const HRESULT selected = _SelectHighlightedHostCandidate(ec, pContext, &serverCandidateString);
                 if (selected != S_FALSE)
                 {
                     return selected;
@@ -193,7 +195,7 @@ HRESULT CMetasequoiaIME::_HandleCandidateFinalize(TfEditCookie ec, _In_ ITfConte
             // 空格只选中了一段：宿主会话同样选中这一段，组字显示「已选汉字 + 剩下的拼音」。以前宿主会话没有前进，组字又显示成整段拼音（选了「你好」后是「你好nihaoshijie」），Shift 时已选的「你好」也丢了。下面按 Server 回的剩余原文重建按键缓冲的写法只对没有宿主会话的旧处理器有意义。
             if (hostOwnsComposition)
             {
-                const HRESULT selected = _SelectHighlightedHostCandidate(ec, pContext);
+                const HRESULT selected = _SelectHighlightedHostCandidate(ec, pContext, &serverCandidateString);
                 if (selected != S_FALSE)
                 {
                     return selected;
@@ -418,19 +420,8 @@ HRESULT CMetasequoiaIME::_HandleCandidateWorker(TfEditCookie ec, _In_ ITfContext
 
     if (auto *host = _pCompositionProcessorEngine->GetHostEngineAdapter(); host && host->valid())
     {
-        // 数字在预选的释义列（Tab）或 Ctrl+Enter 的释义页上是上屏释义：Server 已经取消了自己的组字，回 CommitExactText。宿主会话不知道这两种状态，所以先读这个键的回复；读不到（不中断管道，和 _HandleConversionKey 一样）或是别的回复时，照旧向宿主会话选词。以前这里不读回复，上屏的是宿主会话的候选而不是释义，Server 记下的上屏文字也和文档不一致。
-        if (requestId != FANY_IME_NO_REQUEST_ID)
-        {
-            const FanyImeNamedpipeDataToTsf *reply =
-                TryReadDataFromServerPipeWithTimeout(requestId, /*abortTransportOnTimeout=*/false);
-            if (reply->msg_type == Global::DataFromServerMsgType::CommitExactText)
-            {
-                const std::wstring exactText(reply->candidate_string);
-                return _CommitServerExactText(ec, pContext, exactText);
-            }
-        }
-        // Never turn a stale/failed host selection into a legacy text commit.
-        return _SelectHighlightedHostCandidate(ec, pContext);
+        // 数字和空格共用带类型的 Server 回复处理，不能在读不到回复时改选本地高亮项。
+        return _HandleCandidateFinalize(ec, pContext, requestId, prefetchedText);
     }
 
     hrReturn = _HandleCandidateFinalize(ec, pContext, requestId, prefetchedText);
@@ -445,7 +436,8 @@ Exit:
 //
 //----------------------------------------------------------------------------
 
-HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ ITfContext *pContext)
+HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ ITfContext *pContext,
+                                                         _In_opt_ const std::wstring *serverChoice)
 {
     auto *host = _pCompositionProcessorEngine ? _pCompositionProcessorEngine->GetHostEngineAdapter() : nullptr;
     if (!host || !host->valid() || !_pCandidateListUIPresenter) return S_FALSE;
@@ -457,11 +449,73 @@ HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ I
         !msime::tsf::EngineSessionAdapter::parse_result(viewRaw, &view, &error) ||
         !displayed.MatchesEngineView(view.view.session, view.view.generation))
         return S_FALSE;
-    std::string raw;
-    msime::tsf::EngineResult selected;
-    if (!host->select(displayed._EngineGeneration, displayed._EngineIndex, &raw, &error) ||
-        !msime::tsf::EngineSessionAdapter::parse_result(raw, &selected, &error))
+    // 上屏哪个词由 Server 的回复决定，再按文字到宿主会话里唯一匹配着选中（选中是为了让宿主会话跟着前进，见 2026-10-16 的笔记）。候选窗是 Server 画的，用户看见和选中的就是它那一份；TIP 的宿主会话是另一个引擎会话，两边的列表会不同步，无论照抄下标还是拿本地列表自己的文字去找，上屏的都可能是用户没看见的那一个。`serverChoice` 为空（没有回复可读）时才退回本地高亮项的文字，那是旧行为。
+    const std::wstring shown = serverChoice && !serverChoice->empty()
+                                   ? *serverChoice
+                                   : displayed._ItemString.ToWString();
+    if (shown.empty()) return S_FALSE;
+    const int targetSize = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, shown.data(),
+                                               static_cast<int>(shown.size()), nullptr, 0, nullptr, nullptr);
+    if (targetSize <= 0) return S_FALSE;
+    std::string target(static_cast<size_t>(targetSize), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, shown.data(), static_cast<int>(shown.size()),
+                            target.data(), targetSize, nullptr, nullptr) != targetSize)
         return S_FALSE;
+    if (serverChoice && !serverChoice->empty())
+    {
+        // 部分选词回复为「剩余原文\t已选前缀\t预编辑」；定位本次新增的候选文字。
+        const auto first = target.find('\t');
+        if (first != std::string::npos)
+        {
+            const auto second = target.find('\t', first + 1);
+            if (second == std::string::npos) return S_FALSE;
+            target = target.substr(first + 1, second - first - 1);
+        }
+        const auto &prefix = view.view.phrase_prefix;
+        if (!prefix.empty() && target.compare(0, prefix.size(), prefix) == 0)
+            target.erase(0, prefix.size());
+        if (target.empty()) return S_FALSE;
+    }
+    const msime::tsf::EngineCandidate *found = nullptr;
+    for (const auto &candidate : view.view.candidates)
+    {
+        if (candidate.text != target) continue;
+        // 同一页上同形的候选不止一个时不猜，交给调用方的兜底路径。
+        if (found) return S_FALSE;
+        found = &candidate;
+    }
+    std::string raw;
+    if (found)
+    {
+        // 占位席位只吃掉按键，不上屏也不前进组字。
+        if (msime::windows::candidate_source_is_pending_seat(found->source)) return S_OK;
+        if (!host->select(view.view.generation, found->index, &raw, &error)) return S_FALSE;
+    }
+    else
+    {
+        // 两个会话可能停在不同页；只按 Server 确认的文字查完整列表，不套用它的序号或代次。
+        if (!serverChoice || serverChoice->empty() || !host->all_candidates(&raw, &error)) return S_FALSE;
+        try
+        {
+            const auto response = nlohmann::json::parse(raw);
+            if (!response.value("ok", false)) return S_FALSE;
+            const auto &all = response.at("value");
+            bool matched = false;
+            std::size_t index = 0;
+            for (const auto &candidate : all.at("candidates"))
+            {
+                if (candidate.at("text").get<std::string>() != target) continue;
+                if (matched) return S_FALSE;
+                matched = true;
+                index = candidate.at("id").at("index").get<std::size_t>();
+            }
+            if (!matched || !host->select_any(all.at("generation").get<uint64_t>(), index, &raw, &error))
+                return S_FALSE;
+        }
+        catch (...) { return S_FALSE; }
+    }
+    msime::tsf::EngineResult selected;
+    if (!msime::tsf::EngineSessionAdapter::parse_result(raw, &selected, &error)) return S_FALSE;
     if (selected.has_commit && !selected.commit.empty())
     {
         const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),
@@ -520,12 +574,15 @@ HRESULT CMetasequoiaIME::_HandleCandidateArrowKey( //
 
     if (auto *host = _pCompositionProcessorEngine->GetHostEngineAdapter(); host && host->valid())
     {
+        // Home 键分两段（MSIME_FIRST_CANDIDATE_OR_HOME）：高亮不在首选时回到首选，已在首选时把光标移到输入串开头。宿主会话没接时照旧交给下面的旧候选列表。
+        HRESULT home = S_OK;
+        if (keyFunction == FUNCTION_MOVE_PAGE_TOP && _HandleHostHomeKey(ec, pContext, requestId, &home))
+            return home;
         uint32_t command = UINT32_MAX;
         switch (keyFunction)
         {
         case FUNCTION_MOVE_PAGE_UP: command = MSIME_PREVIOUS_PAGE; break;
         case FUNCTION_MOVE_PAGE_DOWN: command = MSIME_NEXT_PAGE; break;
-        case FUNCTION_MOVE_PAGE_TOP: command = MSIME_FIRST_CANDIDATE; break;
         case FUNCTION_MOVE_PAGE_BOTTOM: command = MSIME_LAST_CANDIDATE; break;
         case FUNCTION_MOVE_UP: command = MSIME_PREVIOUS_CANDIDATE; break;
         case FUNCTION_MOVE_DOWN: command = MSIME_NEXT_CANDIDATE; break;

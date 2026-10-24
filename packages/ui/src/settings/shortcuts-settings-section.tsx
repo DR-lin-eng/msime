@@ -30,6 +30,8 @@ export interface ShortcutsSettingsSectionProps {
   capsLockLanguageSwitch?: boolean;
   /** 显示「Ctrl+Shift+J 在中文和日语之间切换」（`offersJapaneseToggle`）。 */
   japaneseToggle?: boolean;
+  /** 显示「中英日循环切换」（`offersTrilingualCycle`）。 */
+  trilingualCycle?: boolean;
   navigation: NavigationPreferences;
   /** 以词定字的设置，用来在「候选操作」里列出它占用的键；没有实体键的宿主不传。 */
   wordCharacter?: WordCharacterPreferences;
@@ -40,6 +42,8 @@ export interface ShortcutsSettingsSectionProps {
   harmony: boolean;
   /** HarmonyOS 手机的外接键盘翻页键；它们只对外接键盘有意义，所以放在这一页，不放在「候选栏」页。 */
   paging?: ReactNode;
+  /** 「切换热键」录键组：宿主声明 `toggle_hotkey_chords` 且提供 `checkToggleHotkey` 时由页面上层传入。 */
+  toggleHotkeys?: ReactNode;
   /** 把 `paging` 里的翻页键恢复为默认值；「恢复默认」恢复整页，所以和 `paging` 一起传。 */
   onRestorePaging?: () => void;
 }
@@ -64,6 +68,7 @@ export function ShortcutsSettingsSection({
   windows,
   capsLockLanguageSwitch = false,
   japaneseToggle = false,
+  trilingualCycle = false,
   navigation,
   wordCharacter,
   numberRowSelection,
@@ -72,6 +77,7 @@ export function ShortcutsSettingsSection({
   showPanelShortcuts,
   harmony,
   paging,
+  toggleHotkeys,
   onRestorePaging,
 }: ShortcutsSettingsSectionProps) {
   const showToast = useToast();
@@ -101,8 +107,10 @@ export function ShortcutsSettingsSection({
             windows={windows}
             capsLockLanguageSwitch={capsLockLanguageSwitch}
             japaneseToggle={japaneseToggle}
+            trilingualCycle={trilingualCycle}
             harmonyPhone={harmonyPhone}
           />
+          {toggleHotkeys}
           <CandidateShortcutsSection
             navigation={navigation}
             wordCharacter={wordCharacter}

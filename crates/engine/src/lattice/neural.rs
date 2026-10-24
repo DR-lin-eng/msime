@@ -15,7 +15,7 @@ use crate::types::CandidateSource;
 
 pub const RERANK_LAMBDA: f64 = 0.5;
 pub const MAX_RERANK_PATHS: usize = 12;
-pub const CONTEXT_CHARACTERS: usize = 64;
+pub const CONTEXT_CHARACTERS: usize = crate::adaptive::CONTEXT_CHARACTERS;
 /// The shipped keyboard model is about 4.5 MiB; the bound leaves room for a larger compatible model without letting a stray file make a session allocate without bound.
 pub const MAX_MODEL_BYTES: u64 = 64 * 1024 * 1024;
 const MODEL_CACHE_CAPACITY: usize = 8;
@@ -132,7 +132,7 @@ impl NeuralReranker {
         }
     }
 
-    /// 按 `context` 最后64字的模型评分重排路径；返回 false 时保持原序。模型返回逐字平均对数概率，乘文本字数得到总分。
+    /// 按模型实际容量截取长上下文并评分重排路径；返回 false 时保持原序。模型返回逐字平均对数概率，乘文本字数得到总分。
     pub fn rerank(&mut self, paths: &mut [SentencePath], context: &str) -> bool {
         let mut order = [0; MAX_RERANK_PATHS];
         let Some(scored) = self.score_order_into(paths, context, &mut order) else {
@@ -173,10 +173,17 @@ impl NeuralReranker {
         for (text, path) in texts[..scored].iter_mut().zip(&paths[..scored]) {
             *text = path.sentence.as_str();
         }
-        let means = self.reranker.log_probabilities(
+        let longest = texts[..scored]
+            .iter()
+            .map(|text| text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let context = crate::ordering::rerank_context(
             last_characters(context, CONTEXT_CHARACTERS),
-            &texts[..scored],
+            self.reranker.model().context_length(),
+            longest,
         );
+        let means = self.reranker.log_probabilities(context, &texts[..scored]);
         // 模型评分数量不完整时保持原序，避免只重排部分结果。
         if means.len() != scored {
             return None;
@@ -283,7 +290,7 @@ mod tests {
     fn rerank_order_constants() {
         assert_eq!(RERANK_LAMBDA, 0.5);
         assert_eq!(MAX_RERANK_PATHS, 12);
-        assert_eq!(CONTEXT_CHARACTERS, 64);
+        assert_eq!(CONTEXT_CHARACTERS, crate::adaptive::CONTEXT_CHARACTERS);
         assert_eq!(last_characters("a你好", 2), "你好");
         assert_eq!(last_characters("a你好", 0), "");
     }
@@ -503,6 +510,7 @@ mod tests {
             word_lattice: true,
             neural_keyboard: true,
             show_next_on_duplicate: true,
+            ..Default::default()
         });
         dictionary.set_rescoring_context("今天晚上");
         let key = "womenyiqiquchifan";

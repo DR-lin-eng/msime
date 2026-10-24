@@ -57,6 +57,8 @@ public final class AndroidLocalSettings {
     public static final String VOICE_OFFLINE_FALLBACK = "platform.android.voice_offline_fallback";
 
     // ---- 只在本机的键 ----
+    public static final String SMS_CODE_PROMPTS = "platform.android.sms_code_prompts";
+    public static final String CHARGING_NIGHT_LEARNING = "platform.android.charging_night_learning";
     public static final String INCOGNITO = "platform.android.incognito";
     public static final String VOICE_CONTRIBUTE_AUDIO = "platform.android.voice_contribute_audio";
     /** 「滑行输入」（{@link GlideTypingPolicy}），默认关。服务端的同步字段表还没有这个键，所以先只在本机。 */
@@ -197,6 +199,8 @@ public final class AndroidLocalSettings {
         bool(VOICE_OFFLINE_FALLBACK, true, true);
 
         bool(INCOGNITO, false, false);
+        bool(SMS_CODE_PROMPTS, false, false);
+        bool(CHARGING_NIGHT_LEARNING, true, false);
         bool(VOICE_CONTRIBUTE_AUDIO, false, false);
         bool(GLIDE_TYPING, false, false);
         bool(LANGUAGE_KEY_CYCLE, false, false);

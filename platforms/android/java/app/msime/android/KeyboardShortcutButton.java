@@ -45,9 +45,6 @@ public final class KeyboardShortcutButton extends KeyboardPressButton {
      */
     private static final float GLYPH_SCALE = 0.62f;
 
-    /** 选中时垫在图标后面的底块占触控区短边的比例。 */
-    private static final float ACTIVE_SCALE = 0.86f;
-
     /** 工具栏按钮：40 dp 见方、圆角 12 dp 的底块，Material 图标 28 dp，收起 chevron 24 dp。 */
     private static final float ACTIVE_SIDE_DP = 40f;
     private static final float ACTIVE_RADIUS_DP = 12f;
@@ -86,20 +83,13 @@ public final class KeyboardShortcutButton extends KeyboardPressButton {
     @Override protected void onDraw(Canvas canvas) {
         int width = DimensionPolicy.contentWidth(this);
         int height = DimensionPolicy.contentHeight(this);
+        drawStateBackground(canvas, width, height);
         if (KeyboardShortcutIconPolicy.materialGlyph(icon)) {
             drawMaterial(canvas, width, height);
             return;
         }
         float size = DimensionPolicy.shorterSide(width, height) * GLYPH_SCALE;
         if (size <= 0) return;
-        if (isSelected() && Color.alpha(activeFill) > 0) {
-        float side = DimensionPolicy.shorterSide(width, height) * ACTIVE_SCALE;
-            float left = getPaddingLeft() + (width - side) / 2f;
-            float top = getPaddingTop() + (height - side) / 2f;
-            bounds.set(left, top, left + side, top + side);
-            fill.setColor(activeFill);
-            canvas.drawRoundRect(bounds, side * 0.25f, side * 0.25f, fill);
-        }
         int color = iconColor();
         if (color == Color.TRANSPARENT) color = Color.WHITE;
         paint.setColor(color);
@@ -118,9 +108,41 @@ public final class KeyboardShortcutButton extends KeyboardPressButton {
             case DISMISS -> drawDismiss(canvas);
             case GLOBE -> drawGlobe(canvas);
             case BOOKMARK -> drawBookmark(canvas);
+            case UNDO, REDO -> {
+                if (icon == KeyboardShortcutIconPolicy.Icon.REDO) {
+                    canvas.translate(100f, 0f);
+                    canvas.scale(-1f, 1f);
+                }
+                drawHistory(canvas);
+            }
             case PHRASE, CLIPBOARD, SCHEME, FLOATING, TEXT_EDIT -> { }
         }
         canvas.restore();
+    }
+
+    @Override protected boolean animatesPress() { return false; }
+
+    @Override protected void drawableStateChanged() {
+        super.drawableStateChanged();
+        // 背景由皮肤通道清空，状态变化仍须刷新自绘的按下底色。
+        invalidate();
+    }
+
+    /** 两套图标共用同尺寸状态底块；按下是轻染色，选中沿用皮肤强调色。 */
+    private void drawStateBackground(Canvas canvas, int width, int height) {
+        if (!isSelected() && (!isEnabled() || !isPressed())) return;
+        int color = isSelected() ? activeFill : ColorPolicy.withAlpha(iconColor(), 0.10f);
+        if (Color.alpha(color) == 0) return;
+        float side = BoundsPolicy.atMost(DimensionPolicy.shorterSide(width, height),
+            DimensionPolicy.floatPixels(getContext(), ACTIVE_SIDE_DP));
+        if (side <= 0) return;
+        float left = getPaddingLeft() + (width - side) / 2f;
+        float top = getPaddingTop() + (height - side) / 2f;
+        bounds.set(left, top, left + side, top + side);
+        fill.setColor(color);
+        float radius = BoundsPolicy.atMost(side / 2f,
+            DimensionPolicy.floatPixels(getContext(), ACTIVE_RADIUS_DP));
+        canvas.drawRoundRect(bounds, radius, radius, fill);
     }
 
     private void drawMaterial(Canvas canvas, int width, int height) {
@@ -129,16 +151,6 @@ public final class KeyboardShortcutButton extends KeyboardPressButton {
         if (shorter <= 0) return;
         float centerX = getPaddingLeft() + width / 2f;
         float centerY = getPaddingTop() + height / 2f;
-        if (isSelected() && Color.alpha(activeFill) > 0) {
-            float side = BoundsPolicy.atMost(shorter,
-                DimensionPolicy.floatPixels(getContext(), ACTIVE_SIDE_DP));
-            bounds.set(centerX - side / 2f, centerY - side / 2f, centerX + side / 2f,
-                centerY + side / 2f);
-            fill.setColor(activeFill);
-            float radius = BoundsPolicy.atMost(side / 2f,
-                DimensionPolicy.floatPixels(getContext(), ACTIVE_RADIUS_DP));
-            canvas.drawRoundRect(bounds, radius, radius, fill);
-        }
         int color = iconColor();
         if (color == Color.TRANSPARENT) color = Color.WHITE;
         if (!isEnabled()) color = ColorPolicy.withAlpha(color, 96f / 255f);
@@ -151,7 +163,7 @@ public final class KeyboardShortcutButton extends KeyboardPressButton {
             case FLOATING -> KeyboardIconPaths.Icon.TOOLBAR_FLOATING;
             // 和功能面板「文本编辑」磁贴同一个图标，用户在两处认得出是同一个面板。
             case TEXT_EDIT -> KeyboardIconPaths.Icon.TEXT_EDIT;
-            case DISMISS, SETTINGS, REPLY, VOICE, GLOBE, BOOKMARK ->
+            case DISMISS, SETTINGS, REPLY, VOICE, GLOBE, BOOKMARK, UNDO, REDO ->
                 KeyboardIconPaths.Icon.TOOLBAR_DISMISS;
         };
         float iconDp = icon == KeyboardShortcutIconPolicy.Icon.DISMISS
@@ -244,6 +256,19 @@ public final class KeyboardShortcutButton extends KeyboardPressButton {
         path.lineTo(50f, 68f);
         path.lineTo(28f, 86f);
         path.close();
+        canvas.drawPath(path, paint);
+    }
+
+    /** 撤销弧箭头；重做使用同一条路径水平镜像，不依赖字体字形。 */
+    private void drawHistory(Canvas canvas) {
+        path.reset();
+        path.moveTo(16f, 43f);
+        path.cubicTo(45f, 12f, 86f, 31f, 86f, 70f);
+        canvas.drawPath(path, paint);
+        path.reset();
+        path.moveTo(16f, 20f);
+        path.lineTo(16f, 43f);
+        path.lineTo(40f, 43f);
         canvas.drawPath(path, paint);
     }
 

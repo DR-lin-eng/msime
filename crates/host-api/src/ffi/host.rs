@@ -835,6 +835,58 @@ pub unsafe extern "C" fn msime_client_load_preferences(
     })
 }
 
+/// 三个可重绑切换热键（`keybindings.toggle_english_candidates`、`toggle_full_width`、
+/// `toggle_punctuation`）按共享 `KeyChord` 契约解码：每个键给出 `null`（不绑定）或
+/// `{"key": 主键规范名, "ctrl", "alt", "shift", "meta"}`，宿主按规范名认键，
+/// 写法解析只在 Rust 一侧。keybindings 缺键或值为 null 时按出厂值。
+/// # Safety
+/// `request` 指向 `length` 字节的 JSON `{"keybindings": object}`，最多 64 KiB；
+/// keybindings 不是表时返回错误。结果用 `msime_client_string_free` 释放。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_toggle_hotkey_chords(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        #[serde(default)]
+        keybindings: Value,
+    }
+    response(|| {
+        if request.is_null() || length > 64 * 1024 {
+            return Err("invalid toggle hotkey request buffer".into());
+        }
+        // SAFETY: 调用方保证缓冲区可读，上方已检查长度上限。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: Request = serde_json::from_slice(bytes)
+            .map_err(|_| "invalid toggle hotkey request".to_owned())?;
+        let keys = if request.keybindings.is_null() {
+            msime_client_core::preferences::KeybindingPreferences::default()
+        } else {
+            serde_json::from_value(request.keybindings)
+                .map_err(|_| "invalid keybindings".to_owned())?
+        };
+        Ok(json!({
+            "english_candidates": toggle_hotkey_chord(keys.english_candidates_chord()),
+            "full_width": toggle_hotkey_chord(keys.full_width_chord()),
+            "punctuation": toggle_hotkey_chord(keys.punctuation_chord()),
+        }))
+    })
+}
+
+fn toggle_hotkey_chord(chord: Option<msime_client_core::key_chord::KeyChord>) -> Value {
+    chord.map_or(Value::Null, |chord| {
+        json!({
+            "key": chord.key.to_string(),
+            "ctrl": chord.modifiers.ctrl,
+            "alt": chord.modifiers.alt,
+            "shift": chord.modifiers.shift,
+            "meta": chord.modifiers.meta,
+        })
+    })
+}
+
 /// Read or update private aggregate typing statistics without retaining submitted text.
 /// # Safety
 /// `request` points to `length` readable JSON bytes. Null is rejected.
@@ -1214,6 +1266,48 @@ struct SkinResourceRequest {
     id: String,
     relative: String,
     kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkinToolbarImageLayoutRequest {
+    toolbar: msime_client_services::skin::catalog::SkinToolbarImage,
+    shown: Vec<[String; 2]>,
+}
+
+/// 根据扫描缓存里的 `toolbarImage` 与当前显示的 `[按钮键, 状态]` 计算图片工具栏。
+/// 不读文件；状态切换时不应重新加载或解码整个皮肤。返回窗口尺寸及按钮矩形、底图和状态图。
+/// # Safety
+/// `request` 指向 `length` 字节可读 UTF-8 JSON，结果由 `msime_client_string_free` 释放。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_skin_toolbar_image_layout(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if request.is_null() || length == 0 || length > 65_536 {
+            return Err("invalid toolbar image layout request".into());
+        }
+        // 安全性：调用方保证请求缓冲可读，上面已限制长度。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: SkinToolbarImageLayoutRequest =
+            serde_json::from_slice(bytes).map_err(|_| "invalid toolbar image layout request")?;
+        if request.shown.len() > msime_client_services::skin::catalog::TOOLBAR_BUTTON_KEYS.len()
+            || request
+                .shown
+                .iter()
+                .any(|[key, state]| key.len() > 32 || state.len() > 32)
+        {
+            return Err("invalid toolbar image button request".into());
+        }
+        let layout = request.toolbar.checked_layout(
+            request
+                .shown
+                .iter()
+                .map(|[key, state]| (key.as_str(), state.as_str())),
+        )?;
+        serde_json::to_value(layout).map_err(|error| error.to_string())
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2006,6 +2100,9 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
                 Ok(json!({"entries": history.entries(), "limit": history.limit()}))
             }
             MobileClipboardAction::Capture { text } => {
+                if msime_client_core::input_assistance::verification_code(&text).is_some() {
+                    return Ok(json!({"captured": false, "reason": "verification_code"}));
+                }
                 if !msime_client_core::clipboard::mobile_text_is_valid(&text) {
                     return Ok(json!({"captured": false, "reason": "invalid"}));
                 }
@@ -2315,6 +2412,8 @@ pub unsafe extern "C" fn msime_client_account_cloud_clipboard(
             directory: Option<String>,
             #[serde(default)]
             session_store: Option<u64>,
+            #[serde(default)]
+            preferences_directory: Option<String>,
             /// 端到端加密登记本机时给其他设备看的名称（#8201 的 P6，例如鸿蒙的 marketName），规则与中继路径相同，见 [`host_device_name`]。
             #[serde(default)]
             device_name: Option<String>,
@@ -2335,6 +2434,17 @@ pub unsafe extern "C" fn msime_client_account_cloud_clipboard(
             }
         }
         crate::cloud_clipboard::validate_account_request(&request.action).map_err(|_| INVALID)?;
+        if let Some(directory) = &request.preferences_directory {
+            if directory.len() > 16384 || !std::path::Path::new(directory).is_absolute() {
+                return Err(INVALID.into());
+            }
+            if crate::cloud_clipboard::configured_relay(std::path::Path::new(directory))
+                .map_err(str::to_owned)?
+                .is_some()
+            {
+                return Err("clipboard_source_changed".into());
+            }
+        }
         let device_name = host_device_name(request.device_name);
         match source {
             super::session_store::Source::Directory(directory) => {
@@ -2378,6 +2488,8 @@ pub unsafe extern "C" fn msime_client_relay_cloud_clipboard(
         #[serde(deny_unknown_fields)]
         struct RelayRequest {
             preferences_directory: String,
+            #[serde(default)]
+            expected_revision: Option<u64>,
             directory: String,
             #[serde(default)]
             device_name: Option<String>,
@@ -2391,10 +2503,12 @@ pub unsafe extern "C" fn msime_client_relay_cloud_clipboard(
             return Err(INVALID.into());
         }
         crate::cloud_clipboard::validate_relay_request(&request.action).map_err(|_| INVALID)?;
-        let config = crate::cloud_clipboard::configured_relay(std::path::Path::new(
-            &request.preferences_directory,
-        ))
+        let config = crate::cloud_clipboard::configured_relay_at_revision(
+            std::path::Path::new(&request.preferences_directory),
+            request.expected_revision,
+        )
         .map_err(str::to_owned)?
+        .0
         .ok_or("relay_not_configured")?;
         let device_name = host_device_name(request.device_name)
             .unwrap_or_else(msime_client_services::account::cloud_clipboard_device_name);
@@ -2467,9 +2581,13 @@ pub unsafe extern "C" fn msime_client_cloud_clipboard_source(
             "invalid preferences directory encoding",
             "preferences directory must be absolute",
         )?;
-        let source = crate::cloud_clipboard::source(std::path::Path::new(directory))
-            .map_err(str::to_owned)?;
-        Ok(json!({ "source": source }))
+        let (config, revision) = crate::cloud_clipboard::configured_relay_at_revision(
+            std::path::Path::new(directory),
+            None,
+        )
+        .map_err(str::to_owned)?;
+        let source = if config.is_some() { "relay" } else { "account" };
+        Ok(json!({ "source": source, "revision": revision }))
     })
 }
 

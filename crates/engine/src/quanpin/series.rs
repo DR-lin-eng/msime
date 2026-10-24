@@ -3,9 +3,7 @@
 use std::collections::HashSet;
 use std::fmt::Write;
 
-use crate::pinyin::autocorrect::{
-    autocorrect_cut_kbest, looks_like_syllable_with_jianpin_tail, AutocorrectCut,
-};
+use crate::pinyin::autocorrect::{looks_like_syllable_with_jianpin_tail, AutocorrectCut};
 use crate::pinyin::segment::join_segments;
 use crate::pinyin::syllables::{has_only_complete_pinyin_segments, is_intact, is_prefix};
 use crate::types::{autocorrect_type, WordItem};
@@ -41,10 +39,20 @@ pub struct SeriesResolution {
 }
 
 /// QD:110-215, before memoisation.
+#[cfg(test)]
 pub fn resolve_series_query(
     raw: &str,
     segments: &[String],
     autocorrect_types: u32,
+) -> SeriesResolution {
+    resolve_series_query_with_touch(raw, segments, autocorrect_types, &[])
+}
+
+pub fn resolve_series_query_with_touch(
+    raw: &str,
+    segments: &[String],
+    autocorrect_types: u32,
+    touch_points: &[Option<crate::pinyin::touch::TouchPoint>],
 ) -> SeriesResolution {
     let mut result = SeriesResolution::default();
     // Guard order matters: the jianpin-shape predicate runs before the search so a guarded input never pays for it. Both guards say "the user did not mistype". The base segmentation is deliberately not part of the gate: the search works on the raw letters, and an empty base cut (a dropped initial such as uanli for quan'li) is often exactly the input that needs correcting.
@@ -53,7 +61,12 @@ pub fn resolve_series_query(
         && !has_only_complete_pinyin_segments(segments)
         && !looks_like_syllable_with_jianpin_tail(raw);
     if eligible {
-        let cuts = autocorrect_cut_kbest(raw, autocorrect_types, AUTOCORRECT_CUT_KBEST);
+        let cuts = crate::pinyin::autocorrect::autocorrect_cut_kbest_with_touch(
+            raw,
+            autocorrect_types,
+            AUTOCORRECT_CUT_KBEST,
+            touch_points,
+        );
         if !cuts.is_empty() {
             result.corrected_input = true;
             populate_from_cuts(&mut result, cuts, "");
@@ -67,7 +80,12 @@ pub fn resolve_series_query(
                 if !is_prefix(tail) || is_intact(tail) {
                     continue;
                 }
-                let head_cuts = autocorrect_cut_kbest(head, head_types, AUTOCORRECT_CUT_KBEST);
+                let head_cuts = crate::pinyin::autocorrect::autocorrect_cut_kbest_with_touch(
+                    head,
+                    head_types,
+                    AUTOCORRECT_CUT_KBEST,
+                    touch_points,
+                );
                 if head_cuts.is_empty() {
                     continue;
                 }
@@ -268,7 +286,16 @@ pub(super) fn merge_alternative_rows(
     merged
 }
 
-/// Deduplicate rows that are already sorted by weight while keeping the merged vector's allocation.
+/// 备选系列按匹配字母数稳定合并；词频和整句概率不作跨来源比较。
+pub(super) fn merge_series_by_coverage(result: &mut Vec<WordItem>, supplemental: Vec<WordItem>) {
+    result.extend(supplemental);
+    result.sort_by_key(|item| {
+        std::cmp::Reverse(item.pinyin.bytes().filter(|&byte| byte != b'\'').count())
+    });
+    retain_unique_sorted_rows(result);
+}
+
+/// 对已排序的行按词面去重，保留首条及原有向量容量。
 fn retain_unique_sorted_rows(rows: &mut Vec<WordItem>) {
     // 候选页规模内直接扫描已保留的词，避免为一次合并建立临时哈希表和布尔数组。
     if rows.len() <= SMALL_UNIQUE_ROWS {

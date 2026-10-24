@@ -129,9 +129,49 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_themeCatalogRaw
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceProviderCatalogRaw(JNIEnv *env, jclass) {
     return response(env, msime_client_voice_provider_catalog());
 }
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_aiProviderCatalogRaw(JNIEnv *env, jclass) {
+    return response(env, msime_client_ai_provider_catalog());
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_aiProviderUpdateRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, 16 * 1024, msime_client_ai_provider_update);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_aiModelsRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, 256 * 1024, msime_client_ai_models);
+}
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceEndpointIssueRaw(JNIEnv *env, jclass, jbyteArray endpoint, jboolean websocket) {
     return bounded_request(env, endpoint, kVoiceEndpointRequestLimit, [websocket](const uint8_t *bytes, size_t length) {
         return msime_client_voice_endpoint_issue(bytes, length, websocket == JNI_TRUE);
+    });
+}
+
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceCredentialIssueRaw(JNIEnv *env, jclass, jbyteArray provider, jbyteArray value) {
+    if (!provider || !value || env->GetArrayLength(provider) > 256
+            || env->GetArrayLength(value) > 16 * 1024) {
+        return response(env, msime_client_voice_credential_issue(nullptr, 0, nullptr, 0));
+    }
+    jsize provider_length = env->GetArrayLength(provider);
+    jsize value_length = env->GetArrayLength(value);
+    static const uint8_t empty[] = {0};
+    jbyte *provider_bytes = provider_length == 0 ? nullptr : env->GetByteArrayElements(provider, nullptr);
+    if (provider_length != 0 && !provider_bytes) return nullptr;
+    jbyte *value_bytes = value_length == 0 ? nullptr : env->GetByteArrayElements(value, nullptr);
+    if (value_length != 0 && !value_bytes) {
+        if (provider_bytes) env->ReleaseByteArrayElements(provider, provider_bytes, JNI_ABORT);
+        return nullptr;
+    }
+    char *result = msime_client_voice_credential_issue(
+        provider_length == 0 ? empty : reinterpret_cast<const uint8_t *>(provider_bytes),
+        static_cast<size_t>(provider_length),
+        value_length == 0 ? empty : reinterpret_cast<const uint8_t *>(value_bytes),
+        static_cast<size_t>(value_length));
+    if (value_bytes) env->ReleaseByteArrayElements(value, value_bytes, JNI_ABORT);
+    if (provider_bytes) env->ReleaseByteArrayElements(provider, provider_bytes, JNI_ABORT);
+    return response(env, result);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceWebSocketEndpointRaw(JNIEnv *env, jclass, jbyteArray endpoint) {
+    return bounded_request(env, endpoint, kVoiceEndpointRequestLimit, [](const uint8_t *bytes, size_t length) {
+        return msime_client_voice_websocket_endpoint(bytes, length);
     });
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceProviderUpdateRaw(JNIEnv *env, jclass, jbyteArray request) {
@@ -438,6 +478,15 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_mobileVoiceConf
     return bounded_request(env, directory, kMobileVoiceDirectoryLimit,
         msime_client_mobile_voice_configuration);
 }
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_mobileVoiceStatusRaw(
+        JNIEnv *env, jclass, jbyteArray provider, jboolean resolved,
+        jboolean platform_available, jboolean model_ready, jboolean runtime_ready) {
+    return bounded_request(env, provider, 256,
+        [resolved, platform_available, model_ready, runtime_ready](const uint8_t *bytes, size_t length) {
+            return msime_client_mobile_voice_status(bytes, length, resolved == JNI_TRUE,
+                platform_available == JNI_TRUE, model_ready == JNI_TRUE, runtime_ready == JNI_TRUE);
+        });
+}
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_simplifiedToTraditionalRaw(JNIEnv *env, jclass, jbyteArray text) {
     if (!text) return nullptr;
     jsize length = env->GetArrayLength(text);
@@ -467,6 +516,20 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_characterRaw(JN
         return nullptr;
     }
     return response(env, msime_client_character(static_cast<uint64_t>(handle), static_cast<uint8_t>(ascii), shift == JNI_TRUE));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_characterWithTouchRaw(
+        JNIEnv *env, jclass, jlong handle, jint ascii, jboolean shift, jfloat x, jfloat y,
+        jfloatArray centers) {
+    if (!centers || env->GetArrayLength(centers) != 52 || ascii < 0 || ascii > 127) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Invalid touch character");
+        return nullptr;
+    }
+    jfloat values[52];
+    env->GetFloatArrayRegion(centers, 0, 52, values);
+    if (env->ExceptionCheck()) return nullptr;
+    return response(env, msime_client_character_with_touch(static_cast<uint64_t>(handle),
+        static_cast<uint8_t>(ascii), shift == JNI_TRUE, x, y, values, 52));
 }
 // 14 键的一键：送这一组的首字母，组外的字母由引擎回 handled=false。只拦非 ASCII，免得截断成 uint8 后变成另一个字母。
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_gridKeyRaw(JNIEnv *env, jclass, jlong handle, jint letter) {

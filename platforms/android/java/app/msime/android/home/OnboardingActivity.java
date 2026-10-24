@@ -77,6 +77,7 @@ public final class OnboardingActivity extends AppCompatActivity {
     private final int pages = steps.length;
 
     private int page;
+    @Nullable private SogouSection sogouSection;
     @Nullable private JSONObject snapshot;
     private boolean loaded;
     /** 意外异常后自动重试保存的次数与间隔，见 {@link #syncChoices}。 */
@@ -361,6 +362,8 @@ public final class OnboardingActivity extends AppCompatActivity {
         perk(column, R.drawable.ic_ms_menu_book, "词库和自造词", 6);
         perk(column, R.drawable.ic_ms_palette, "皮肤与主题", 10);
         perk(column, R.drawable.ic_ms_content_paste, "云剪贴板", 10);
+        if (sogouSection != null) sogouSection.dispose();
+        sogouSection = new SogouSection(this, this, column, true);
         if (note != null) footnote(column, note);
     }
 

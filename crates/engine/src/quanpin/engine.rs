@@ -38,11 +38,12 @@ impl QuanpinEngine {
         if !request.valid {
             return Vec::new();
         }
+        self.dictionary.set_touch_points(&request.touch_points);
         // Each setter is a no-op when the value is unchanged, so this costs nothing per keystroke. The association options and the context select the series slot rather than clearing it; only a change of the sentence-alternatives answer clears the cached lists.
         self.dictionary
             .set_sentence_alternatives(request.sentence_alternatives);
         self.dictionary
-            .set_sentence_association(request.sentence_association);
+            .set_sentence_association(request.sentence_association.clone());
         self.dictionary.set_first_page_rows(request.first_page_rows);
         self.dictionary
             .set_rescoring_context(&request.rescoring_context);
@@ -174,6 +175,36 @@ mod tests {
     use crate::quanpin::fixture::Fixture;
     use crate::quanpin::QuanpinScheme;
     use crate::types::SchemeKey;
+
+    #[test]
+    fn touch_coordinates_invalidate_both_resolution_and_series_answers() {
+        use crate::pinyin::touch::qwerty_point;
+        let fixture = Fixture::new();
+        fixture
+            .insert("ni", "你", 100)
+            .insert("hao", "好", 100)
+            .insert("ni'hao", "你好", 999999);
+        let mut engine = QuanpinEngine::new(&fixture.paths);
+        let mut typed = request_with_helpcode("nihso", false);
+        typed.enable_quanpin_autocorrect_neighbor = true;
+        typed.enable_quanpin_autocorrect_transposition = true;
+        let corrected = |rows: &[WordItem]| {
+            rows.iter()
+                .any(|row| row.word == "你好" && !row.corrected_from.is_empty())
+        };
+        assert!(corrected(&engine.query(&typed, None)));
+        typed.touch_points = b"nihso"
+            .iter()
+            .map(|&key| Some(qwerty_point(key, 0.0, 0.0)))
+            .collect();
+        assert!(!corrected(&engine.query(&typed, None)));
+        typed.touch_points[3] = Some(qwerty_point(b's', -0.49, 0.0));
+        assert!(corrected(&engine.query(&typed, None)));
+        typed.touch_points[3] = Some(qwerty_point(b's', 0.49, 0.0));
+        assert!(!corrected(&engine.query(&typed, None)));
+        typed.touch_points.clear();
+        assert!(corrected(&engine.query(&typed, None)));
+    }
 
     fn request_with_helpcode(text: &str, enabled: bool) -> QueryRequest {
         let mut scheme = QuanpinScheme::new();

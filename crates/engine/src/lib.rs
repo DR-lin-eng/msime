@@ -4,6 +4,7 @@
 //!
 //! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
 
+pub mod adaptive;
 pub mod assets;
 pub mod backend;
 mod cache;
@@ -46,20 +47,25 @@ pub use error::{EngineError, Result};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub use handwriting::handwriting_recognize;
 pub use handwriting::order_handwriting_candidates;
+// 按需下载的 `.gram` 语法模型由宿主侧资源包管理，删除包时需要释放
+// `GramDb::shared` 缓存的内存映射，经这个窄出口暴露给 host-api。
+pub use lattice::octagram;
 pub use nine_key::KeyGrid;
 pub use nine_key_shuangpin::NineKeyShuangpin;
 pub use paths::RuntimePaths;
 pub use pinyin::glide::{GlideKeyboard, GlidePoint};
+pub use pinyin::touch::TouchPoint;
 pub use punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
 pub use types::{
     autocorrect_type, fuzzy_rule, request_autocorrect_mask, CandidateEdge, CandidateSource,
     Command, CommandTranslationQuery, EnglishInputOptions, FrequencyAdjustmentMode,
     FrequencyAdjustmentOptions, FuzzyPinyinOptions, KeyResult, LocalInputMode, LocalModeOptions,
-    MixedExpressiveOptions, NineKeyShuangpinKind, NineKeyShuangpinTable, OnlineQuery,
-    PersonalDictionaryEntry, PersonalDictionaryKind, PluginCommand, PluginCommandQuery, SchemeSet,
-    SchemeType, SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinProfileKind, WordItem,
-    WubiInputOptions, WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
+    MixedExpressiveOptions, NineKeyShuangpinKind, NineKeyShuangpinTable, OnlineInputMode,
+    OnlineQuery, PersonalDictionaryEntry, PersonalDictionaryKind, PluginCommand,
+    PluginCommandQuery, SchemeSet, SchemeType, SentenceAssociationOptions, ShuangpinCustomTable,
+    ShuangpinHelpcodeModes, ShuangpinProfileKind, SyllableHelpcode, WordItem, WubiInputOptions,
+    WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
 };
 pub use user_dictionary::bundled::{
     dictionary_table_entries, edit_bundled_dictionary_entry, DictionaryTableEntry,

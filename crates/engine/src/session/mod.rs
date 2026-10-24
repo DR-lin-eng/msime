@@ -10,6 +10,7 @@ mod composition;
 mod conversion;
 mod editing;
 mod glide;
+mod helpcode_entry;
 mod input;
 mod learning;
 mod literal;
@@ -45,6 +46,10 @@ pub struct Session {
 }
 
 impl Session {
+    /// 宿主对下一次字符调用提供的触点，不改变既有按键类型。
+    pub fn set_touch_point(&mut self, point: Option<(u8, crate::pinyin::touch::TouchPoint)>) {
+        self.input.engine.set_touch_point(point);
+    }
     /// Validates the paths and every option (`INVALID_SESSION_OPTIONS`, `UNKNOWN_HELPCODE_SCHEMA`), loads the helpcode table and applies the options in the reference order (session.cpp:11-30, 57-66).
     pub fn new(options: SessionOptions) -> Result<Session> {
         options.paths.validate()?;
@@ -60,14 +65,18 @@ impl Session {
         );
         nine_key.set_stroke_dictionary(options.stroke_dictionary.clone());
         nine_key.set_mixed_expressive(options.expressive);
+        nine_key.set_mixed_candidates_enabled(options.mixed_candidates);
         nine_key.set_inline_date_time(
             options
                 .local_modes
-                .date_time
+                .date_time_inline
                 .then(|| Arc::clone(&input.clock.local)),
         );
         // 九键的整句与 26 键遵守同一组句子联想设置（#6059）。
-        nine_key.set_sentence_options(options.sentence_association, options.sentence_alternatives);
+        nine_key.set_sentence_options(
+            options.sentence_association.clone(),
+            options.sentence_alternatives,
+        );
         nine_key.set_first_page_rows(FirstPageRows::new(options.first_page_rows));
         nine_key.set_rescoring_context(&options.rescoring_context);
         // 九键选中的词记进同一个个人上下文模型，开关与 26 键相同（#6185）。
@@ -87,7 +96,7 @@ impl Session {
 
     /// Replace the steady and local clocks, so tests can cross the 3 s / 8 s / 10 s personal-learning windows and the date/time mode can be pinned.
     pub fn set_clock(&mut self, clock: Clock) {
-        if self.input.local_mode_options.date_time {
+        if self.input.local_mode_options.date_time_inline {
             self.nine_key
                 .set_inline_date_time(Some(Arc::clone(&clock.local)));
         }
@@ -143,6 +152,7 @@ impl Session {
 
     /// 换触屏的组码网格，先丢掉网格里的组字，所以在换键盘布局、没有组字时调用。英文九键和注音九键只在九键下打开（注音组字会被丢掉）：14 键的英文模式画全键盘，注音没有 14 键。
     pub fn set_key_grid(&mut self, grid: Option<KeyGrid>) {
+        self.input.helpcode_entry = None;
         self.nine_key.command(Command::Cancel);
         if let Some(grid) = grid {
             self.nine_key.set_grid(grid);
@@ -171,6 +181,16 @@ impl Session {
         }
         let result = self.nine_key.character(code);
         self.after_nine_key(result)
+    }
+
+    /// 九宫格组码已经到上限时，这一键能不能先选掉首选、再接着打（`NineKeySession::limit_pick_ready`）。`grid_key` 为真时 `value` 是 `grid_key` 收到的 14 键字母，否则是 `character` 收到的九键或九键双拼数字；两条路由各自只认自己的网格。
+    pub fn grid_limit_pick_ready(&self, value: u8, grid_key: bool) -> bool {
+        let code = match self.key_grid {
+            Some(grid @ KeyGrid::FourteenKey) if grid_key => grid.code_of(value),
+            Some(KeyGrid::NineKey | KeyGrid::NineKeyShuangpin(_)) if !grid_key => Some(value),
+            _ => None,
+        };
+        code.is_some_and(|code| self.nine_key.limit_pick_ready(code))
     }
 
     /// 九宫格会话活跃时选它的拼写；否则在注音里钉目标音节的读音。
@@ -381,6 +401,11 @@ impl Session {
         self.input.set_wubi_mixed_pinyin(enabled);
     }
 
+    /// 五笔拼音混输是否打开。
+    pub fn wubi_mixed_pinyin(&self) -> bool {
+        self.input.engine.wubi_input_options().mixed_pinyin
+    }
+
     /// 宿主的清缓存动作（维护快捷键、iOS 键盘扩展的内存告警）：清掉本会话各方案的候选缓存，并放掉进程级缓存里的日文模型，让不再用它的进程能交还前缀索引和映射；本会话若正持有模型，照常用到会话结束。
     pub fn reset_cache(&mut self) {
         self.input.reset_cache();
@@ -436,6 +461,14 @@ impl Session {
     /// 让宿主把云候选的固定席位交给当前会话；关闭时立即去掉尚未回答的占位行。
     pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) {
         self.input.set_cloud_candidates_enabled(enabled);
+    }
+
+    pub fn english_online_candidates_enabled(&self) -> bool {
+        self.input.english_online_candidates_enabled
+    }
+
+    pub fn set_english_online_candidates_enabled(&mut self, enabled: bool) {
+        self.input.set_english_online_candidates_enabled(enabled);
     }
 
     /// The committed text the neural sentence models condition on, updated without rebuilding the session. Only the last 64 characters matter.
@@ -532,10 +565,12 @@ impl Session {
             candidate_answers_key: candidates
                 .iter()
                 .map(|item| {
-                    // AI 占位行和网址补全不回答按键：重排模型不能把它们提到前面。
+                    // 占位行、网址补全和联系人不交给重排模型；联系人保留本地优先顺序。
                     !matches!(
                         item.source,
-                        CandidateSource::AiPending | CandidateSource::CloudPending
+                        CandidateSource::AiPending
+                            | CandidateSource::CloudPending
+                            | CandidateSource::Contact
                     ) && !input.is_url_completion(item)
                         && input.selection_completes_composition(item)
                 })

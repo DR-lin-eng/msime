@@ -1309,6 +1309,7 @@ fn session_options(scheme: Scheme, paths: RuntimePaths) -> SessionOptions {
     options.shuangpin_profile = scheme.shuangpin_profile();
     options.wubi = WubiInputOptions {
         mixed_pinyin: false,
+        z_wildcard: false,
         profile: WubiProfileKind::Wubi86,
     };
     // 学习、个人上文（它会起一个在 wasm 上 panic 的落盘线程）、辅助码、所有本地模式（日期时间模式在 wasm 上读本地时间会 panic）、混输英文、模糊音和纠错都关掉，和测出 40.9% 的评测配置一致（D15）。辅助码只是默认关掉，页面可以用 `WebHost::set_helpcode` 打开。
@@ -1318,6 +1319,8 @@ fn session_options(scheme: Scheme, paths: RuntimePaths) -> SessionOptions {
     options.local_modes = LocalModeOptions {
         unicode: false,
         date_time: false,
+        date_time_inline: false,
+        date_time_menu: false,
         quick_phrase: false,
         emoji: false,
         kaomoji: false,
@@ -1328,6 +1331,7 @@ fn session_options(scheme: Scheme, paths: RuntimePaths) -> SessionOptions {
         command: false,
         mention: false,
         chaizi: false,
+        symbol: false,
         shift_letter_entry: false,
     };
     options.english = EnglishInputOptions {

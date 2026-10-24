@@ -1,7 +1,8 @@
+import ObjectiveC
 import UIKit
 import XCTest
 
-/// 空格长按与语音结果面板：长按直接转交主 App 开始录音，面板仍负责待插入结果；光标拖动裁决方式同 Android 的 `SpaceGesturePolicy`。
+/// 空格长按与语音结果面板：长按按住说话（会话没开时转交主 App 开启），面板仍负责待插入结果；光标拖动裁决方式同 Android 的 `SpaceGesturePolicy`。
 @MainActor
 final class SpaceVoicePanelTests: XCTestCase {
   private var storedScheme = InputSchemePreference.scheme
@@ -68,7 +69,87 @@ final class SpaceVoicePanelTests: XCTestCase {
     KeyboardLayoutPreference.spaceVoice = true
     controller.viewWillAppear(false)
     XCTAssertEqual(space.accessibilityCustomActions?.map(\.name), ["光标左移", "光标右移", "语音输入"])
-    XCTAssertTrue(space.accessibilityHint?.contains("长按打开语音输入") ?? false)
+    XCTAssertTrue(space.accessibilityHint?.contains("按住说话，松开上屏") ?? false)
+  }
+
+  /// 通过生产长按入口验证文档代理、实际步进、松手清理与输入框切换保护。
+  func testHoldingSpaceWithoutVoiceMovesTheDocumentCaret() throws {
+    let stored = KeyboardLayoutPreference.defaults.object(forKey: KeyboardLayoutPreference.spaceVoiceKey)
+    addTeardownBlock {
+      if let stored { KeyboardLayoutPreference.defaults.set(stored, forKey: KeyboardLayoutPreference.spaceVoiceKey) }
+      else { KeyboardLayoutPreference.defaults.removeObject(forKey: KeyboardLayoutPreference.spaceVoiceKey) }
+    }
+    KeyboardLayoutPreference.spaceVoice = false
+    let document = CursorDocument()
+    try attach(document)
+    let controller = makeController()
+    let space = try XCTUnwrap(spaceKeys(in: controller).first)
+    let hold = CursorHold()
+    space.addGestureRecognizer(hold)
+    func send(_ state: UIGestureRecognizer.State, x: CGFloat) {
+      hold.simulatedState = state
+      hold.x = x
+      controller.perform(NSSelectorFromString("handleSpaceVoiceHold:"), with: hold)
+    }
+    send(.began, x: 100)
+    XCTAssertEqual(space.configuration?.title, "移动光标")
+    send(.changed, x: 76)
+    XCTAssertEqual(document.offsets, [-2])
+    send(.changed, x: 88)
+    XCTAssertEqual(document.offsets, [-2, 1])
+    send(.ended, x: 88)
+    XCTAssertNotEqual(space.configuration?.title, "移动光标")
+    XCTAssertEqual(document.insertions, [], "长按不插入空格")
+
+    send(.began, x: 100)
+    document.documentIdentifier = UUID()
+    send(.changed, x: 76)
+    XCTAssertEqual(document.offsets, [-2, 1], "不能把旧手势应用到新输入框")
+    XCTAssertNotEqual(space.configuration?.title, "移动光标")
+    send(.cancelled, x: 76)
+    send(.began, x: 100)
+    send(.changed, x: 112)
+    XCTAssertEqual(document.offsets, [-2, 1, 1], "取消后下一次手势可以正常开始")
+    send(.ended, x: 112)
+  }
+
+  private final class CursorDocument: NSObject, UITextDocumentProxy {
+    var documentIdentifier = UUID()
+    var offsets: [Int] = []
+    var insertions: [String] = []
+    var documentContextBeforeInput: String? { "abcd" }
+    var documentContextAfterInput: String? { "ef" }
+    var selectedText: String? { nil }
+    var documentInputMode: UITextInputMode? { nil }
+    var hasText: Bool { true }
+    func insertText(_ text: String) { insertions.append(text) }
+    func deleteBackward() {}
+    func adjustTextPosition(byCharacterOffset offset: Int) { offsets.append(offset) }
+    func setMarkedText(_ text: String, selectedRange: NSRange) {}
+    func unmarkText() {}
+  }
+
+  private final class CursorHold: UILongPressGestureRecognizer {
+    var simulatedState: UIGestureRecognizer.State = .possible
+    var x: CGFloat = 0
+    override var state: UIGestureRecognizer.State { get { simulatedState } set { simulatedState = newValue } }
+    override func location(in view: UIView?) -> CGPoint { CGPoint(x: x, y: 0) }
+  }
+
+  /// 沿用邮箱后缀测试的代理注入方式，结束时恢复 UIKit 实现。
+  private func attach(_ document: CursorDocument) throws {
+    let selector = #selector(getter: UIInputViewController.textDocumentProxy)
+    let inherited = try XCTUnwrap(class_getInstanceMethod(UIInputViewController.self, selector))
+    let original = method_getImplementation(inherited)
+    let block: @convention(block) (AnyObject) -> AnyObject = { _ in document }
+    let replacement = imp_implementationWithBlock(block)
+    if !class_addMethod(KeyboardViewController.self, selector, replacement, method_getTypeEncoding(inherited)) {
+      method_setImplementation(try XCTUnwrap(class_getInstanceMethod(KeyboardViewController.self, selector)), replacement)
+    }
+    addTeardownBlock {
+      if let own = class_getInstanceMethod(KeyboardViewController.self, selector) { method_setImplementation(own, original) }
+      imp_removeBlock(replacement)
+    }
   }
 
   /// VoiceOver 通过空格键的 语音输入 操作进入面板。测试宿主没有完全访问权限，结果永远无法从 App 传回：键盘会直接提示这一点，而不是打开面板。
@@ -86,8 +167,8 @@ final class SpaceVoicePanelTests: XCTestCase {
   }
 
   func testThePanelSaysWhatTheOrbDoes() {
-    XCTAssertEqual(KeyboardVoicePanelView.status(for: nil), "轻点录音")
-    XCTAssertEqual(KeyboardVoicePanelView.orbLabel(for: nil), "去水杉 App 录音")
+    XCTAssertEqual(KeyboardVoicePanelView.status(for: nil), "轻点开启语音")
+    XCTAssertEqual(KeyboardVoicePanelView.orbLabel(for: nil), "去水杉 App 开启语音")
     let entry = VoiceTextHandoff(id: UUID(), text: "明天见", createdAt: Date(), expiresAt: Date().addingTimeInterval(600))
     XCTAssertEqual(KeyboardVoicePanelView.status(for: entry), "已识别：明天见")
     XCTAssertEqual(KeyboardVoicePanelView.orbLabel(for: entry), "插入语音结果")
@@ -111,11 +192,11 @@ final class SpaceVoicePanelTests: XCTestCase {
     let caption = panel.captionLabel.convert(panel.captionLabel.bounds, to: panel)
     XCTAssertEqual(status.minY - orb.maxY, 14, accuracy: 0.5)
     XCTAssertEqual(caption.minY - status.maxY, 14, accuracy: 0.5)
-    XCTAssertEqual(panel.statusLabel.text, "轻点录音")
+    XCTAssertEqual(panel.statusLabel.text, "轻点开启语音")
     XCTAssertEqual(panel.statusLabel.font.pointSize, 15)
     XCTAssertEqual(panel.captionLabel.text, "点任意处取消")
     XCTAssertEqual(panel.captionLabel.font.pointSize, 12.5)
-    XCTAssertEqual(panel.orb.accessibilityLabel, "去水杉 App 录音")
+    XCTAssertEqual(panel.orb.accessibilityLabel, "去水杉 App 开启语音")
     XCTAssertEqual(panel.orb.isPulsing, !UIAccessibility.isReduceMotionEnabled)
 
     XCTAssertTrue(panel.hitTest(CGPoint(x: orb.midX, y: orb.midY), with: nil) === panel.orb)

@@ -59,6 +59,61 @@ pub(crate) fn personal_context_rerank_order(
     blended_order_indices(&candidates[..group], &personal[..group], mu, is_pinned)
 }
 
+/// 在既有个人计数上加入长上下文神经证据；冷启动沿用原有排序。
+pub(crate) fn personal_context_rerank_with_history(
+    candidates: &[WordItem],
+    model: &PersonalNgram,
+    earlier: Option<&str>,
+    previous: Option<&str>,
+    history: &str,
+    is_pinned: &mut dyn FnMut(&str) -> bool,
+) -> Option<PersonalContextRerankOrder> {
+    let first = candidates.first()?;
+    if candidates.len() < 2 || !first.source.is_dictionary() {
+        return None;
+    }
+    let group_len = leading_group_len(candidates);
+    let group = &candidates[..group_len];
+    let context_text = if history.is_empty() {
+        previous.unwrap_or_default()
+    } else {
+        history
+    };
+    let mut words = [""; MAX_GROUP];
+    for (out, row) in words.iter_mut().zip(group) {
+        *out = &row.word;
+    }
+    let Some(neural) = model.adaptive.scores(context_text, &words[..group_len]) else {
+        return previous.and_then(|previous| {
+            personal_context_rerank_order(candidates, model, earlier, previous, is_pinned)
+        });
+    };
+    let context = model.context(earlier, previous);
+    let personal = personal_probabilities(group, model, &context);
+    let personal_sum: f64 = personal[..group_len].iter().sum();
+    let total: f64 = group.iter().map(|row| row.weight.max(1) as f64).sum();
+    let mu = if personal_sum > 0.0 {
+        context.confidence
+    } else {
+        0.0
+    };
+    let mut scored = [(0.0, 0); MAX_GROUP];
+    for (index, row) in group.iter().enumerate() {
+        let share = row.weight.max(1) as f64 / total;
+        let probability = (1.0 - mu) * share
+            + if mu > 0.0 {
+                mu * personal[index] / personal_sum
+            } else {
+                0.0
+            };
+        scored[index] = (
+            probability.ln() + f64::from(model.adaptive.confidence() * neural[index].tanh()),
+            index,
+        );
+    }
+    order_scores(group, &mut scored[..group_len], is_pinned)
+}
+
 fn personal_probabilities(
     group: &[WordItem],
     model: &PersonalNgram,
@@ -114,7 +169,14 @@ fn blended_order_indices(
             index,
         );
     }
-    let scored = &mut scored[..group.len()];
+    order_scores(group, &mut scored[..group.len()], is_pinned)
+}
+
+fn order_scores(
+    group: &[WordItem],
+    scored: &mut [(f64, usize)],
+    is_pinned: &mut dyn FnMut(&str) -> bool,
+) -> Option<PersonalContextRerankOrder> {
     // 稳定排序使同分候选保持字典顺序。
     scored.sort_by(|left, right| right.0.total_cmp(&left.0));
 

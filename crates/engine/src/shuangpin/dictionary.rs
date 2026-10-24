@@ -3,8 +3,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::mid_sentence::{
+    satisfies_syllable_helpcodes, syllable_helpcode_matches, syllable_helpcodes_signature,
+};
 use super::query::{remove_manual_delimiters, trim_trailing_letters_preserve_delimiters};
-use super::typo_edges::{collect_shuangpin_typo_edges, SHUANGPIN_TYPO_TYPES};
+use super::typo_edges::SHUANGPIN_TYPO_TYPES;
 use super::utils::{convert_seg_shuangpin_to_seg_complete_pinyin, pinyin_segmentation};
 use super::ShuangpinProfile;
 use crate::assets;
@@ -32,7 +35,7 @@ use crate::quanpin::dictionary::{
 };
 use crate::quanpin::series::fold_reading;
 use crate::text::last_characters;
-use crate::types::{CandidateSource, SentenceAssociationOptions, WordItem};
+use crate::types::{CandidateSource, SentenceAssociationOptions, SyllableHelpcode, WordItem};
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
 
 // 双拼前缀候选的短合并直接扫描已有词，避免临时哈希表和重复索引分配。
@@ -55,13 +58,32 @@ fn double_helpcode_cache_key(pinyin: &str, help_codes: &str) -> String {
     key
 }
 
+/// `filter_by_syllable_helpcodes` 只筛按拼音出的汉字候选：整词都是汉字的词库/生成/云/AI 行
+/// 才逐音节对应约束；英文、快捷短语、表情之类的不是拼音答案，留着。
+fn is_pinyin_word(item: &WordItem) -> bool {
+    matches!(
+        item.source,
+        CandidateSource::Database
+            | CandidateSource::UserDatabase
+            | CandidateSource::Generated
+            | CandidateSource::Fallback
+            | CandidateSource::NeuralKeyboard
+            | CandidateSource::CloudSuggestion
+            | CandidateSource::AiSuggestion
+    ) && crate::text::count_han_chars(&item.word) == item.word.chars().count()
+}
+
 pub struct ShuangpinDictionary {
+    touch_points: Vec<Option<crate::pinyin::touch::TouchPoint>>,
     profile: &'static ShuangpinProfile,
     database: PinyinDatabase,
     paths: RuntimePaths,
     sentence_tables: SentenceNgramTables,
     personal: Arc<PersonalNgramStore>,
     rerankers: Vec<NeuralReranker>,
+    /// octagram `.gram` 语法模型；路径由 `set_sentence_association` 给定、经
+    /// `GramDb::shared` 进程内共享，缺失或非法时为 `None` 退回无搭配打分。
+    collocation_db: Option<Arc<crate::lattice::octagram::GramDb>>,
     sentence_alternatives: bool,
     sentence_association: SentenceAssociationOptions,
     rescoring_context: String,
@@ -82,6 +104,10 @@ pub struct ShuangpinDictionary {
     typo_span_cache: FifoCache<String, Vec<DictRow>>,
     /// 当前请求的纠错类型（会话的「拼音纠错」开关，见 `ShuangpinEngine::query`）。改变时清掉整句答案的缓存，它们是按另一个设置组出来的。
     autocorrect_types: u32,
+    /// 当前请求的逐音节辅助码约束（句中间接触发）。不清缓存：约束签名进缓存键，换约束等于换键
+    /// （`set_syllable_helpcodes`）。
+    pub(super) syllable_helpcodes: Vec<SyllableHelpcode>,
+    syllable_helpcodes_signature: String,
 }
 
 impl ShuangpinDictionary {
@@ -107,10 +133,12 @@ impl ShuangpinDictionary {
             sentence_tables,
             personal,
             rerankers: Vec::new(),
+            collocation_db: None,
             sentence_alternatives: false,
             sentence_association: SentenceAssociationOptions::default(),
             rescoring_context: String::new(),
             rows_cache: FifoCache::new(CACHE_CAPACITY),
+            touch_points: Vec::new(),
             series_cache: FifoCache::new(CACHE_CAPACITY),
             single_helpcode_cache: FifoCache::new(CACHE_CAPACITY),
             reversed_single_helpcode_cache: FifoCache::new(CACHE_CAPACITY),
@@ -119,7 +147,68 @@ impl ShuangpinDictionary {
             personal_version,
             typo_span_cache: FifoCache::new(TYPO_SPAN_CACHE_CAPACITY),
             autocorrect_types: 0,
+            syllable_helpcodes: Vec::new(),
+            syllable_helpcodes_signature: String::new(),
         }
+    }
+
+    /// 逐音节辅助码约束跟着请求走；签名拼在系列/辅助码缓存键后面，同一串拼音带不同约束不共用答案。
+    pub fn set_syllable_helpcodes(&mut self, helpcodes: &[SyllableHelpcode]) {
+        self.syllable_helpcodes = helpcodes.to_vec();
+        self.syllable_helpcodes_signature = syllable_helpcodes_signature(helpcodes);
+    }
+
+    /// `rows_key + signature`：签名为空时直接借用原键，不为一次空拼接多分配。
+    /// 返回值只借 `rows_key`，不会把 `self` 钉在不可变借用上。
+    fn signed_rows_key<'a>(&self, rows_key: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.syllable_helpcodes_signature.is_empty() {
+            std::borrow::Cow::Borrowed(rows_key)
+        } else {
+            std::borrow::Cow::Owned(format!("{rows_key}{}", self.syllable_helpcodes_signature))
+        }
+    }
+
+    /// 这个字能不能落在 helpcode 约束的音节上（`accepts_syllable_char`）。
+    fn accepts_syllable_char(
+        &self,
+        helpcode: &SyllableHelpcode,
+        character: &str,
+        keymap: &HelpcodeKeymap,
+    ) -> bool {
+        keymap
+            .code(character)
+            .is_some_and(|code| syllable_helpcode_matches(helpcode, code.as_bytes()))
+    }
+
+    /// 跨度起点在 `syllable_start` 的词，每个覆盖到约束位置的字都要满足约束；跨度不含该位置时这条约束与它无关。
+    pub(super) fn span_satisfies_syllable_helpcodes(
+        &self,
+        syllable_start: usize,
+        word: &str,
+        keymap: &HelpcodeKeymap,
+    ) -> bool {
+        let chars: Vec<char> = word.chars().collect();
+        self.syllable_helpcodes.iter().all(|helpcode| {
+            let index = helpcode.syllable.wrapping_sub(syllable_start);
+            index >= chars.len()
+                || self.accepts_syllable_char(helpcode, &chars[index].to_string(), keymap)
+        })
+    }
+
+    /// 只筛按拼音出的汉字候选；英文、快捷短语之类的不是逐音节对应的，留着
+    /// （`filter_by_syllable_helpcodes`）。云和 AI 拿到的是去掉段的拼音，不知道约束，结果同样要核。
+    pub fn filter_by_syllable_helpcodes(
+        &self,
+        candidates: &mut Vec<WordItem>,
+        keymap: &HelpcodeKeymap,
+    ) {
+        if self.syllable_helpcodes.is_empty() {
+            return;
+        }
+        candidates.retain(|item| {
+            !is_pinyin_word(item)
+                || satisfies_syllable_helpcodes(&self.syllable_helpcodes, &item.word, keymap)
+        });
     }
 
     /// Series and helpcode answers carry the reranked sentence rows, which depend on the committed context. The C++ bypassed these caches while a model was loaded because its rows arrived asynchronously; scoring here is synchronous, so the trimmed context joins the key instead and a commit moves to fresh entries without clearing the context-free row cache (overlays.md §1.6.2). Without a reranker no answer reads the context, so the key stays the raw input.
@@ -231,17 +320,21 @@ impl ShuangpinDictionary {
             _ => {}
         }
         let rows_key = if raw.is_empty() { pure } else { raw };
-        let mut key = (!self.rerankers.is_empty()).then(|| self.sentence_cache_key(rows_key));
+        // 同一串拼音带不同逐音节约束不是同一个答案：系列缓存键带上约束签名
+        // （`generateSeries` 的 `cache_key + signature`），`generate` 内部的行缓存仍按原拼音走。
+        let series_key_owned = self.signed_rows_key(rows_key);
+        let series_key = series_key_owned.as_ref();
+        let mut key = (!self.rerankers.is_empty()).then(|| self.sentence_cache_key(series_key));
         self.drop_personal_scored_results();
         let cache_hit = match key.as_ref() {
             Some(key) => self.series_cache.get_ref(key).is_some(),
-            None => self.series_cache.get_ref_by(rows_key).is_some(),
+            None => self.series_cache.get_ref_by(series_key).is_some(),
         };
         if cache_hit {
             self.reset_cache_if_database_changed();
             let cached = match key.as_ref() {
                 Some(key) => self.series_cache.get_ref(key),
-                None => self.series_cache.get_ref_by(rows_key),
+                None => self.series_cache.get_ref_by(series_key),
             };
             if let Some(cached) = cached {
                 return cached.clone();
@@ -265,7 +358,7 @@ impl ShuangpinDictionary {
         ));
         self.merge_sentences(&mut candidates, &segments, segmentation, pure, rows_key);
 
-        let key = key.take().unwrap_or_else(|| rows_key.to_owned());
+        let key = key.take().unwrap_or_else(|| series_key.to_owned());
         self.series_cache.insert(key.clone(), candidates.clone());
         // Only keys long enough for the lattice carry personal scores.
         if segments.len() >= 2 {
@@ -286,7 +379,11 @@ impl ShuangpinDictionary {
         raw: &str,
         accepts: impl Fn(usize, &str) -> bool,
     ) -> Vec<WordItem> {
-        if !self.sentence_association.word_lattice {
+        let association = self.sentence_association.clone();
+        let has_collocation =
+            self.collocation_db.is_some() && association.collocation_weight != 0.0;
+        let include_collocation_best = association.collocation_rerank && has_collocation;
+        if !association.word_lattice && !include_collocation_best {
             return Vec::new();
         }
         let segments = split_segments(&convert_seg_shuangpin_to_seg_complete_pinyin(
@@ -294,6 +391,16 @@ impl ShuangpinDictionary {
             self.profile,
         ));
         let mut options = self.sentence_tables.options(self.sentence_alternatives);
+        let scorer;
+        if has_collocation {
+            let db = self.collocation_db.as_ref().expect("collocation db loaded");
+            let config = association.collocation_grammar;
+            scorer = move |tail: &str, word: &str, is_rear: bool| {
+                db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
+            };
+            options.collocation_scorer = Some(&scorer);
+            options.collocation_weight = association.collocation_weight;
+        }
         let model = self.personal.model();
         options.personal = (!model.is_empty()).then_some(&*model);
         let mut lookup = |span: &[String]| {
@@ -330,8 +437,12 @@ impl ShuangpinDictionary {
         typed: &str,
         rows_key: &str,
     ) {
-        let word_lattice = self.sentence_association.word_lattice;
-        if !word_lattice && self.rerankers.is_empty() {
+        let association = self.sentence_association.clone();
+        let word_lattice = association.word_lattice;
+        let has_collocation =
+            self.collocation_db.is_some() && association.collocation_weight != 0.0;
+        let include_collocation_best = association.collocation_rerank && has_collocation;
+        if !word_lattice && self.rerankers.is_empty() && !include_collocation_best {
             return;
         }
         let mut options = self.sentence_tables.options(self.sentence_alternatives);
@@ -339,7 +450,18 @@ impl ShuangpinDictionary {
             options.nbest = MAX_RERANK_PATHS;
         }
         options.include_lattice_best = word_lattice;
-        options.show_next_on_duplicate = self.sentence_association.show_next_on_duplicate;
+        options.include_collocation_best = include_collocation_best;
+        options.show_next_on_duplicate = association.show_next_on_duplicate;
+        let scorer;
+        if has_collocation {
+            let db = self.collocation_db.as_ref().expect("collocation db loaded");
+            let config = association.collocation_grammar;
+            scorer = move |tail: &str, word: &str, is_rear: bool| {
+                db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
+            };
+            options.collocation_scorer = Some(&scorer);
+            options.collocation_weight = association.collocation_weight;
+        }
         // Held for the whole merge: the options borrow the model.
         let model = self.personal.model();
         options.personal = (!model.is_empty()).then_some(&*model);
@@ -351,7 +473,7 @@ impl ShuangpinDictionary {
         let profile = self.profile;
         let span_cache = &mut self.typo_span_cache;
         let mut typo_edges = |literal_best: &SentencePath| {
-            collect_shuangpin_typo_edges(
+            super::typo_edges::collect_shuangpin_typo_edges_with_touch(
                 database,
                 span_cache,
                 profile,
@@ -359,6 +481,7 @@ impl ShuangpinDictionary {
                 segments,
                 literal_best,
                 types,
+                &self.touch_points,
             )
         };
         let typo_source: Option<&mut TypoEdgeSource<'_>> = if codes.is_empty() {
@@ -400,7 +523,7 @@ impl ShuangpinDictionary {
         candidates.insert(at, sentence);
     }
 
-    /// Matched groups, then the full input read as pinyin, then the unmatched rows (SD:324-375).
+    /// 辅助码命中行优先；没有命中时先保留完整前缀，避免未完成尾音节让首选变短。
     fn filter_with_single_helpcode(
         &mut self,
         candidates: Vec<WordItem>,
@@ -416,11 +539,17 @@ impl ShuangpinDictionary {
         let matches = single_helpcode_matches(&candidates, &normalized, keymap);
         let (mut result, unmatched) =
             reorder_single_helpcode_rows(candidates, matches.as_slice(), prefer_last);
-        // The whole raw input, the last letter read as pinyin instead of a helpcode. The reference segments the raw input as one chunk, `'` included; the conversion drops the empty pieces that leaves (SD:370-372).
+        let no_helpcode_match = result.is_empty();
+        // 整段输入也按普通拼音查询；参考实现把撇号一起切分，转换时丢弃空段（SD:370-372）。
         let original_segmentation = pinyin_segmentation(raw, self.profile);
         let whole = self.generate_series(raw, &original_segmentation, "");
-        // The reference appended the whole-input answer and then the unmatched rows whole, so a word already among the matched rows, or in both lists, was listed again; a word already listed keeps its first seat.
+        // 尾部裸字母也可能是下一个音节的首键；没有辅助码命中时，完整前缀行不能被较短的整段回退行挤到后面。
         append_helpcode_rows(&mut result, whole, unmatched);
+        if no_helpcode_match {
+            result.sort_by_key(|item| {
+                std::cmp::Reverse(item.pinyin.bytes().filter(|&byte| byte != b'\'').count())
+            });
+        }
         result
     }
 
@@ -439,6 +568,8 @@ impl ShuangpinDictionary {
             2 => self.sentence_cache_key(&double_helpcode_cache_key(raw, help_codes)),
             _ => String::new(),
         };
+        // 末尾辅码的答案同样受逐音节约束影响，约束签名拼到缓存键尾。
+        let cache_key = self.signed_rows_key(&cache_key).into_owned();
         if !cache_key.is_empty()
             && self
                 .helpcode_cache(help_codes.len(), reversed)
@@ -526,7 +657,7 @@ impl ShuangpinDictionary {
         debug_assert_eq!(removed, limited);
         candidates.splice(first_limited..first_limited, expanded.iter().cloned());
         if !series_key.is_empty() {
-            let key = self.sentence_cache_key(series_key);
+            let key = self.sentence_cache_key(&self.signed_rows_key(series_key));
             self.series_cache.insert(key, candidates.clone());
         }
         true
@@ -542,7 +673,8 @@ impl ShuangpinDictionary {
         if raw.is_empty() {
             return false;
         }
-        let key = self.sentence_cache_key(raw);
+        // 键与 `generate_series` 一致：带上当前请求的逐音节约束签名。
+        let key = self.sentence_cache_key(&self.signed_rows_key(raw));
         if let Some(list) = self.series_cache.get_mut(&key) {
             return replace_cached_online_candidate_batch(list, raw, words, source);
         }
@@ -570,11 +702,18 @@ impl ShuangpinDictionary {
             };
             replace_cached_online_candidate_batch(list, raw, words, source)
         };
+        let sign = |key: String| {
+            if self.syllable_helpcodes_signature.is_empty() {
+                key
+            } else {
+                format!("{key}{}", self.syllable_helpcodes_signature)
+            }
+        };
         if !help_codes.is_empty() {
-            let key = self.sentence_cache_key(&double_helpcode_cache_key(raw, help_codes));
+            let key = sign(self.sentence_cache_key(&double_helpcode_cache_key(raw, help_codes)));
             return insert(&mut self.double_helpcode_cache, &key);
         }
-        let key = self.sentence_cache_key(raw);
+        let key = sign(self.sentence_cache_key(raw));
         let single = insert(&mut self.single_helpcode_cache, &key);
         let reversed = insert(&mut self.reversed_single_helpcode_cache, &key);
         single || reversed
@@ -615,6 +754,19 @@ impl ShuangpinDictionary {
         self.personal_scored_keys.clear();
     }
 
+    /// 触点变化只淘汰组装后的答案，原始词库行继续复用。
+    pub fn set_touch_points(&mut self, points: &[Option<crate::pinyin::touch::TouchPoint>]) {
+        if self.touch_points != points {
+            self.touch_points.clear();
+            self.touch_points.extend_from_slice(points);
+            self.series_cache.clear();
+            self.single_helpcode_cache.clear();
+            self.reversed_single_helpcode_cache.clear();
+            self.double_helpcode_cache.clear();
+            self.personal_scored_keys.clear();
+        }
+    }
+
     /// A change clears only the series cache: those answers were assembled under the other setting (SD:151-158).
     pub fn set_sentence_alternatives(&mut self, enabled: bool) {
         if self.sentence_alternatives == enabled {
@@ -629,7 +781,13 @@ impl ShuangpinDictionary {
         if self.sentence_association == options {
             return;
         }
-        self.sentence_association = options;
+        // 模型路径为空或不可载时回退 `None`：与 `msime-bigram.bin` 缺失的既有降级一致。
+        self.collocation_db = if options.collocation_model.as_os_str().is_empty() {
+            None
+        } else {
+            crate::lattice::octagram::GramDb::shared(&options.collocation_model)
+        };
+        self.sentence_association = options.clone();
         self.rerankers.clear();
         if options.neural_keyboard {
             if let Some(model) =

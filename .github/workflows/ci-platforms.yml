@@ -21,7 +21,7 @@ permissions:
 jobs:
   changes:
     name: Decide platform scope
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
       android: ${{ steps.decide.outputs.android }}
@@ -103,7 +103,7 @@ jobs:
   android:
     needs: changes
     name: Android host
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,7 +176,7 @@ jobs:
   linux:
     needs: changes
     name: Linux native host
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -193,7 +193,7 @@ jobs:
   linux-desktop:
     needs: changes
     name: Linux settings app
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: sccache
@@ -223,6 +223,10 @@ jobs:
           [ -e apps/desktop/dist/index.html ] || : > apps/desktop/dist/index.html
           cargo clippy --locked -p msime-desktop --all-targets -- -D warnings
           cargo test --locked -p msime-desktop
+          # 复用已构建的 Rust 依赖，检查共享 UI 的静态语音目录没有漂移。
+          cargo run --quiet --locked -p msime-client-providers --example export_voice_provider_catalog -- --check
+          cargo run --quiet --locked -p msime-client-providers --example export_polish_prompt_catalog -- --check
+          cargo run --quiet --locked -p msime-client-providers --example export_ai_provider_catalog -- --check
       - name: Linux platform unchanged
         if: ${{ needs.changes.outputs.linux != 'true' }}
         run: echo 'No Linux or shared-platform changes; platform gate skipped.'
@@ -231,7 +235,7 @@ jobs:
   engine:
     needs: changes
     name: Rust engine
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
       RUSTC_WRAPPER: sccache
@@ -270,7 +274,7 @@ jobs:
   script-plugins:
     needs: changes
     name: Script plugins
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
       RUSTC_WRAPPER: sccache
@@ -298,6 +302,7 @@ jobs:
           # 安装 rust-toolchain.toml 钉住的工具链，再给它加上 wasm 目标。
           rustup toolchain install
           rustup target add wasm32-unknown-unknown
+          cargo test --locked -p msime-pack-tool --test sdk
           bash scripts/test-script-plugins.sh
           # 随桌面安装包分发的官方插件包：重新构建，核对 latex-symbols 的生成器没有漂移、每个包过 msime-pack validate --builtin、uuid 的内容哈希等于 plugins/official-packs.json 锁定的值。锁以这台 ubuntu 的构建为准，和发版工作流的 official-plugins 作业相同；工具链或插件源码一变哈希就变，所有用户的授权随之作废，这一步让它在 PR 里变红、在 diff 里看得见。
           bash scripts/build-official-plugins.sh --check
@@ -308,7 +313,7 @@ jobs:
   harmonyos:
     needs: changes
     name: HarmonyOS host
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -339,8 +344,9 @@ jobs:
   ui:
     needs: changes
     name: Shared settings UI
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
+    # 完整测试已接近 20 分钟；为依赖安装、类型检查和结果上传保留余量。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ needs.changes.outputs.ui == 'true' }}
@@ -382,7 +388,7 @@ jobs:
   windows:
     needs: changes
     name: Windows GNU cross build
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     # Ubuntu 24.04 的 MinGW 缺少 `msimeui` 使用的 `d2d1_3.h`，因此沿用交叉镜像的 Debian 系统依赖与线程模型，`checkout` 后复用同一别名脚本。
     container: debian:trixie-slim
     timeout-minutes: 90
@@ -544,12 +550,16 @@ jobs:
             & pwsh -NoProfile -File "platforms/windows/tests/tools/$test.ps1"
             if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
           }
+      - name: Verify Server manifest modes and unsigned launch
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: ./platforms/windows/tests/server-manifest/verify.ps1
       # The installer script itself cannot be compiled here, so these read msime_setup.iss for its lifecycle contracts. watchdog-task also registers the logon task's exact /TR text with Task Scheduler under a throwaway name and reads back what schtasks stored; the hosted runner is elevated, which that round trip needs.
       - name: Run installer script tests
         if: ${{ needs.changes.outputs.windows == 'true' }}
         shell: pwsh
         run: |
-          foreach ($test in 'lifecycle', 'watchdog-task', 'tauri-layout', 'tsf-registration', 'signpath-payload') {
+          foreach ($test in 'lifecycle', 'watchdog-task', 'tauri-layout', 'tsf-registration', 'signpath-payload', 'installer_entry') {
             Write-Host "== $test"
             & pwsh -NoProfile -File "platforms/windows/installer/tests/$test.ps1"
             if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
@@ -561,7 +571,7 @@ jobs:
   web-engine:
     needs: changes
     name: Web engine (wasm)
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
       RUSTC_WRAPPER: sccache

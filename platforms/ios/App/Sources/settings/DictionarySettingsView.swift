@@ -41,6 +41,7 @@ struct DictionarySettingsView: View {
           .accessibilityIdentifier("importDictionaryAction")
         }
         updateSection
+        SogouDictionarySection()
         DesignGroup(title: "发现词库") { discoverRows }
         DesignGroup(title: "完善公共词库", footer: "前往官网填写词语和读音，审核后随公共词库更新。个人学习的词不会自动公开。") {
           Link(destination: URL(string: "https://msime.app/words/")!) {
@@ -445,5 +446,124 @@ private struct DictionaryInfoText: View {
     .padding(.horizontal, 20)
     .frame(maxWidth: .infinity, alignment: .leading)
     .accessibilityElement(children: .combine)
+  }
+}
+
+
+/// 初始化与设置共用原生表单；选项和安装状态由共享 Rust 返回。
+struct SogouDictionarySection: View {
+  var compact = false
+  private struct Group: Decodable, Identifiable { let id: UInt32; let name: String }
+  private struct Installed: Decodable, Identifiable { let id: UInt32; let name: String; let enabled: Bool; let entries: Int }
+  private struct Settings: Decodable { let groups: [UInt32]; let dictionaries: [UInt32]; let automatic: Bool; let phase: String; let error: String?; let limited: Bool }
+  private struct Snapshot: Decodable { let groups: [Group]; let settings: Settings; let installed: [Installed]; let pending_count: Int }
+  private struct Catalog: Decodable {
+    struct Entry: Decodable, Identifiable { let id: UInt32; let name: String }
+    let entries: [Entry]; let has_more: Bool
+  }
+  @State private var status: Snapshot?
+  @State private var catalog: Catalog?
+  @State private var group: UInt32 = 97
+  @State private var page = 1
+  @State private var dictionaryID = ""
+  @State private var query = ""
+  @State private var busy = false
+  @State private var failed = false
+  @State private var removing: UInt32?
+
+  var body: some View {
+    DesignGroup(title: compact ? "选择兴趣词库（可跳过）" : "搜狗词库与订阅",
+                footer: "选择后从搜狗官网下载，仅供本机使用。分组跟踪最新上传的 10 个词库，已安装的继续更新；最多 8 个分组、32 个集合，每库 5 万词。开启键盘完全访问后在空闲时激活，稍后可在词库设置修改。") {
+      if let status {
+        ForEach(status.groups) { item in
+          Toggle(item.name, isOn: Binding(get: { status.settings.groups.contains(item.id) }, set: { enabled in
+            var groups = status.settings.groups.filter { $0 != item.id }
+            if enabled { groups.append(item.id) }
+            configure(groups: groups, automatic: status.settings.automatic)
+          })).padding(16).disabled(busy).accessibilityIdentifier("sogouGroup_\(item.id)")
+          DesignDivider(leading: 16)
+        }
+        Toggle("自动更新已选词库", isOn: Binding(get: { status.settings.automatic }, set: { automatic in
+          configure(groups: status.settings.groups, automatic: automatic)
+        })).padding(16).disabled(busy)
+        if status.settings.error != nil {
+          Text(status.settings.limited ? "集合数量已达上限，请移除不需要的词库后重试。" : "部分词库更新失败，原词库保留，请稍后重试。")
+            .foregroundStyle(.red).padding(16)
+        }
+        if status.pending_count > 0 { Text("已下载，等待键盘空闲时分批激活。").padding(16) }
+      }
+      if failed { Text("搜狗词库暂不可用，请重试。已安装词库保留。").foregroundStyle(.red).padding(16) }
+      action("刷新状态", ["command": "status"])
+      if !compact {
+        action(status?.settings.phase == "checking" ? "正在下载…" : "检查订阅更新", ["command": "check"])
+          .disabled(status?.settings.phase == "checking")
+        Picker("浏览分组", selection: $group) {
+          ForEach(status?.groups ?? []) { item in Text(item.name).tag(item.id) }
+        }.padding(16).disabled(busy)
+        Button("浏览官方分组") { page = 1; loadCatalog() }.padding(16).disabled(busy)
+        if let catalog {
+          TextField("筛选当前页名称或编号", text: $query).textFieldStyle(.roundedBorder).padding(16)
+          ForEach(catalog.entries.filter { query.isEmpty || $0.name.contains(query) || String($0.id).contains(query) }) { item in
+            action("下载 \(item.name)（\(item.id)）", ["command": "install", "id": item.id])
+          }
+          HStack {
+            Button("上一页") { page -= 1; loadCatalog() }.disabled(busy || page <= 1)
+            Spacer()
+            Text("第 \(page) 页")
+            Spacer()
+            Button("下一页") { page += 1; loadCatalog() }.disabled(busy || !catalog.has_more)
+          }.padding(16)
+        }
+        TextField("搜狗官网词库编号", text: $dictionaryID).keyboardType(.numberPad)
+          .textFieldStyle(.roundedBorder).padding(16).accessibilityIdentifier("sogouDictionaryID")
+        action("按编号下载并跟踪更新", ["command": "install", "id": UInt32(dictionaryID) ?? 0])
+          .disabled((UInt32(dictionaryID) ?? 0) == 0)
+        ForEach(status?.installed ?? []) { item in
+          Toggle("\(item.name) · \(item.entries) 词", isOn: Binding(get: { item.enabled }, set: { enabled in
+            Task { await request(["command": "set_enabled", "id": item.id, "enabled": enabled]) }
+          })).padding(16).disabled(busy)
+          Button("移除 \(item.name)", role: .destructive) { removing = item.id }.padding(16).disabled(busy)
+        }
+      }
+    }
+    .task {
+      while !Task.isCancelled {
+        await request(["command": "status"])
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+      }
+    }
+    .alert("移除这个词库？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
+      Button("取消", role: .cancel) { removing = nil }
+      Button("移除", role: .destructive) {
+        if let id = removing { Task { await request(["command": "remove", "id": id]) } }
+        removing = nil
+      }
+    } message: { Text("停止跟踪并移除本集合，已有个人词条保留。") }
+  }
+  private func action(_ title: String, _ action: [String: Any]) -> some View {
+    Button { Task { await request(action) } } label: { DesignNavRowLabel(title: title) }
+      .buttonStyle(PressFillButtonStyle()).disabled(busy)
+  }
+  private func configure(groups: [UInt32], automatic: Bool) {
+    guard let status else { return }
+    Task { await request(["command": "configure", "groups": groups, "dictionaries": status.settings.dictionaries, "automatic": automatic]) }
+  }
+  private func loadCatalog() { Task { await request(["command": "catalog", "group": group, "page": page]) } }
+  @MainActor private func request(_ action: [String: Any]) async {
+    guard !busy, let bytes = try? JSONSerialization.data(withJSONObject: action) else { return }
+    busy = true
+    defer { busy = false }
+    let reply = await Task.detached(priority: .utility) { () -> Data? in
+      guard let action = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+            let value = try? MetasequoiaInputSessionBridge.sogouDictionary(action) else { return nil }
+      return try? JSONSerialization.data(withJSONObject: value)
+    }.value
+    guard !Task.isCancelled else { return }
+    guard let reply else { failed = true; return }
+    if action["command"] as? String == "catalog" {
+      if let next = try? JSONDecoder().decode(Catalog.self, from: reply) { catalog = next; failed = false } else { failed = true }
+    } else {
+      if let next = try? JSONDecoder().decode(Snapshot.self, from: reply) { status = next; failed = false } else { failed = true }
+    }
   }
 }

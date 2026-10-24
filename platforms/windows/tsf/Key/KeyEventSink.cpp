@@ -320,16 +320,19 @@ bool IsGlossColumnShortcut(UINT code, UINT modifiers)
            (GetAsyncKeyState(VK_LWIN) & 0x8000) == 0 && (GetAsyncKeyState(VK_RWIN) & 0x8000) == 0;
 }
 
-KEYSTROKE_FUNCTION SegmentEditFunction(UINT code, UINT modifiers)
+// 分段编辑键，和 Server 的 is_segment_backspace_key / is_segment_caret_key（src/input/InputKeyPolicy.h）同一条规则：只按 Ctrl 的退格、左右键，以及只按 Shift 的左右键，都不带 Alt 和 Win。Shift+左右在所有方案里和 Ctrl+左右一样按音节移动拼音光标（全拼、双拼也是，不再换成逐个字母）；韩文、注音、越南文和藏文的光标锁在组字末尾（scheme::LocksCaret），Shift+左右在那里照旧走宿主组字的按键规则（host_composed_key_action）。Shift+退格不是分段键。调用方只在组字时接这些键，没有组字时它们属于应用（选择文字、按词跳）。
+KEYSTROKE_FUNCTION SegmentEditFunction(UINT code, UINT modifiers, int scheme)
 {
-    if ((modifiers & 0b00000111u) != 0b00000010u ||
-        (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0)
+    const UINT chord = modifiers & 0b00000111u;
+    const bool shiftCaret = chord == 0b00000001u && !msime::windows::scheme::LocksCaret(scheme);
+    if ((chord != 0b00000010u && !shiftCaret) || (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+        (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0)
     {
         return FUNCTION_NONE;
     }
     switch (code)
     {
-    case VK_BACK: return FUNCTION_BACKSPACE_SEGMENT;
+    case VK_BACK: return shiftCaret ? FUNCTION_NONE : FUNCTION_BACKSPACE_SEGMENT;
     case VK_LEFT: return FUNCTION_MOVE_LEFT_SEGMENT;
     case VK_RIGHT: return FUNCTION_MOVE_RIGHT_SEGMENT;
     default: return FUNCTION_NONE;
@@ -1062,21 +1065,22 @@ BOOL CMetasequoiaIME::_IsKeyEaten(         //
             return TRUE;
         }
 
+        // 组字时的分段编辑键（Ctrl+退格、Ctrl+左右、Shift+左右）排在其他组合键前面，见 SegmentEditFunction。
+        const KEYSTROKE_FUNCTION segmentEdit = SegmentEditFunction(*pCodeOut, shortcutModifiers, scheme);
+        if (segmentEdit != FUNCTION_NONE && _IsComposing())
+        {
+            if (pKeyState)
+            {
+                pKeyState->Category = CATEGORY_COMPOSING;
+                pKeyState->Function = segmentEdit;
+            }
+            return TRUE;
+        }
         // Other Ctrl/Alt/Windows combinations belong to the application.
         // IME-owned shortcuts are handled before this normal key classifier.
         if ((shortcutModifiers & 0b00000110u) != 0 || (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
             (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0)
         {
-            const KEYSTROKE_FUNCTION segmentEdit = SegmentEditFunction(*pCodeOut, shortcutModifiers);
-            if (segmentEdit != FUNCTION_NONE && _IsComposing())
-            {
-                if (pKeyState)
-                {
-                    pKeyState->Category = CATEGORY_COMPOSING;
-                    pKeyState->Function = segmentEdit;
-                }
-                return TRUE;
-            }
             return isTouchKeyboardSpecialKeys;
         }
 
@@ -1729,7 +1733,7 @@ bool CMetasequoiaIME::_ClassifyDeferredKeyDown(_In_ ITfContext *pContext, WPARAM
                                                    _deferredProjectedCandidateActive || _deferredProjectedPhraseActive)
                                                 : (_IsComposing() || !_pCompositionProcessorEngine->GetKeyCompositionState().rawInput.empty() ||
                                                    _candidateMode != CANDIDATE_NONE);
-    const KEYSTROKE_FUNCTION segmentEdit = SegmentEditFunction(*classifiedCode, capturedModifiers);
+    const KEYSTROKE_FUNCTION segmentEdit = SegmentEditFunction(*classifiedCode, capturedModifiers, scheme);
     if (segmentEdit != FUNCTION_NONE && !_IsKeyboardDisabled() && projectedCompositionActive)
     {
         keyState->Category = CATEGORY_COMPOSING;
@@ -3227,26 +3231,19 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
         Global::ModifiersDown = Global::CharacterModifiers(capturedModifiers, wch, code);
 
         PerfTimer writeShmTimer;
-        // Enter is finalized by the in-process TSF path. Reuse the legacy
-        // pinyin payload to carry the exact bounded text that path is about
-        // to commit, allowing the Server session to validate and clear its
-        // matching raw composition instead of rejecting an unobserved commit.
+        // 回车由进程内 TSF 上屏；校验消息必须读取同一个宿主原文。
+        // 宿主拥有组字时旧键击缓冲为空，不能用它证明 Server 应当清空哪一段。
         std::wstring localCommitObservation;
         const bool hasLocalCommitObservation =
             code == VK_RETURN && _IsComposing() && _pCompositionProcessorEngine;
         if (hasLocalCommitObservation)
         {
             localCommitObservation = GlobalIme::word_for_creating_word;
-            const CStringRange &raw = _pCompositionProcessorEngine->GetKeystrokeBuffer();
-            if (raw.Get() != nullptr)
-            {
-                localCommitObservation.append(raw.Get(), raw.GetLength());
-            }
+            const auto composition = _pCompositionProcessorEngine->GetKeyCompositionState();
+            localCommitObservation.append(composition.rawInput);
             if (localCommitObservation.size() >= 128)
             {
-                // A truncated observation is worse than an explicit fail
-                // closed response: the Server must not acknowledge text that
-                // differs from what TSF committed.
+                // 不发送截断后的观察值，避免 Server 确认与 TSF 实际上屏不同的文字。
                 localCommitObservation.clear();
             }
         }

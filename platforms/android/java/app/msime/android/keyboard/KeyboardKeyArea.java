@@ -63,6 +63,30 @@ public final class KeyboardKeyArea extends LinearLayout {
         glideTracker = tracker;
     }
 
+    /** 将空隙路由前的真实落点还原到键的局部坐标；不改变框架的命中与手势事件。 */
+    static void restoreOriginalTouch(View key, int pointerId, float[] coordinates) {
+        Matrix transform = new Matrix();
+        View current = key;
+        while (current.getParent() instanceof ViewGroup parent) {
+            transform.postConcat(current.getMatrix());
+            transform.postTranslate(current.getLeft() - parent.getScrollX(), current.getTop() - parent.getScrollY());
+            if (parent instanceof KeyboardKeyArea area
+                    && (area.routedPointers & pointerBit(pointerId)) != 0) {
+                float[] routed = coordinates.clone();
+                transform.mapPoints(routed);
+                routed[0] -= area.offsetX[pointerId];
+                routed[1] -= area.offsetY[pointerId];
+                Matrix inverse = new Matrix();
+                if (transform.invert(inverse)) {
+                    inverse.mapPoints(routed);
+                    coordinates[0] = routed[0];
+                    coordinates[1] = routed[1];
+                }
+            }
+            current = parent;
+        }
+    }
+
     /**
      * 让 `yielding` 把键帽左侧 `widthPx` 像素让给紧挨在它左边的 `receiver`：按下落在那一段里时，像落在空隙里一样挪进 `receiver` 的右边缘。底行的回车用它把与中/英之间拿不准的按下让给中/英（{@link KeyboardActionRow#RETURN_YIELD_DP}）。传 null 取消。
      */

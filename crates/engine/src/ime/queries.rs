@@ -18,7 +18,7 @@ use crate::local::expression::query_expression;
 use crate::local::jianpin::{query_jianpin, result_limit};
 use crate::local::mention::{mention_annotation, query_mentions, usable_mentions};
 use crate::local::quick_phrase::{
-    merge_quick_phrases, query_quick_phrases, usable_quick_phrase_table,
+    merge_quick_phrases, query_exact_quick_phrases, query_quick_phrases, usable_quick_phrase_table,
 };
 use crate::local::symbol_candidates::{query_mixed_symbols, SymbolRow, MIXED_SYMBOL_LIMIT};
 use crate::local::unicode::query_unicode;
@@ -119,21 +119,47 @@ impl CandidateQueries {
         self.quick_phrase_table = usable_quick_phrase_table(table);
     }
 
-    /// 把普通组字的编码匹配到快捷短语时追加到候选末尾；普通候选的顺序和来源保持不变。
-    pub fn append_quick_phrase_candidates(&self, prefix: &str, candidates: &mut Vec<WordItem>) {
-        if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_lowercase()) {
+    /// 普通组字的编码恰好是某条快捷短语的编码时，把短语并进候选：`slot` 为 `None` 时追加在末尾（`quick_phrase_frequency` 关着或还没有学习记录的默认落位）；`Some(n)` 时插在第 n 个计位候选之后（`quick_phrase_slots` 学下来的位置）。只认整个编码，不按前缀匹配（见 [`query_exact_quick_phrases`]）。
+    pub fn insert_quick_phrase_candidates(
+        &self,
+        code: &str,
+        candidates: &mut Vec<WordItem>,
+        slot: Option<usize>,
+    ) {
+        if code.is_empty() || !code.bytes().all(|byte| byte.is_ascii_lowercase()) {
             return;
         }
-        let database = query_quick_phrases(prefix, &self.paths.dictionary(assets::MAIN_DICTIONARY));
-        let merged = merge_quick_phrases(prefix, database, &self.quick_phrase_table);
-        for candidate in merged.candidates {
-            if !candidates
+        let merged = query_exact_quick_phrases(
+            code,
+            &self.paths.dictionary(assets::MAIN_DICTIONARY),
+            &self.quick_phrase_table,
+        );
+        let phrases: Vec<WordItem> = merged
+            .candidates
+            .into_iter()
+            .filter(|candidate| {
+                !candidates
+                    .iter()
+                    .any(|existing| existing.word == candidate.word)
+            })
+            .collect();
+        let Some(slot) = slot else {
+            candidates.extend(phrases);
+            return;
+        };
+        // slot 是「组前面有几个计位候选」：0 放最前，n 放第 n 个之后，超出放回末尾。
+        let index = if slot == 0 {
+            0
+        } else {
+            candidates
                 .iter()
-                .any(|existing| existing.word == candidate.word)
-            {
-                candidates.push(candidate);
-            }
-        }
+                .enumerate()
+                .filter(|(_, item)| counts_toward_quick_phrase_slot(item))
+                .nth(slot - 1)
+                .map(|(index, _)| index + 1)
+                .unwrap_or(candidates.len())
+        };
+        candidates.splice(index..index, phrases);
     }
 
     /// Keeps the entries `@` mode can use and drops the rest.
@@ -141,40 +167,63 @@ impl CandidateQueries {
         self.mentions = usable_mentions(entries);
     }
 
-    /// 普通组字里把联系人姓名的拼音映射成手机号。联系人排在本地词典前面，来源单独标记，选中后直接上屏且不写入个人词库。
+    /// 联系人按姓名、姓名加手机号成对置顶；完整匹配先于前缀，同名词典行替换为联系人来源。
     pub fn append_contact_candidates(&self, prefix: &str, candidates: &mut Vec<WordItem>) {
-        if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        if self.mentions.is_empty()
+            || prefix.is_empty()
+            || !prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'\'')
+        {
+            return;
+        }
+        let prefix = prefix.replace('\'', "");
+        if prefix.is_empty() {
             return;
         }
         let mut contacts = Vec::new();
-        for entry in &self.mentions {
-            if entry.phone.is_empty() || entry.key.is_empty() {
-                continue;
+        // 每个联系人占两行，完整匹配优先，不让较早导入的长姓名抢占精确姓名。
+        for exact in [true, false] {
+            for entry in &self.mentions {
+                if entry.phone.is_empty() || entry.key.is_empty() {
+                    continue;
+                }
+                let compact = entry.key.replace('\'', "");
+                let initials: String = entry
+                    .key
+                    .split('\'')
+                    .filter_map(|syllable| syllable.chars().next())
+                    .collect();
+                let matches = compact.starts_with(&prefix) || initials.starts_with(&prefix);
+                let is_exact = compact == prefix || initials == prefix;
+                if !matches || is_exact != exact {
+                    continue;
+                }
+                for text in [
+                    entry.text.clone(),
+                    format!("{} {}", entry.text, entry.phone),
+                ] {
+                    if contacts.iter().any(|item: &WordItem| item.word == text) {
+                        continue;
+                    }
+                    contacts.push(WordItem::new(
+                        entry.key.clone(),
+                        text,
+                        0,
+                        CandidateSource::Contact,
+                        entry.key.clone(),
+                    ));
+                }
+                if contacts.len() >= 18 {
+                    break;
+                }
             }
-            let compact = entry.key.replace('\'', "");
-            let initials: String = entry
-                .key
-                .split('\'')
-                .filter_map(|syllable| syllable.as_bytes().first().copied().map(char::from))
-                .collect();
-            if compact.starts_with(prefix) || initials.starts_with(prefix) {
-                contacts.push(WordItem::new(
-                    entry.key.clone(),
-                    entry.phone.clone(),
-                    0,
-                    CandidateSource::Contact,
-                    entry.key.clone(),
-                ));
-            }
-            if contacts.len() == 18 {
+            if contacts.len() >= 18 {
                 break;
             }
         }
-        for contact in contacts.into_iter().rev() {
-            if !candidates.iter().any(|item| item.word == contact.word) {
-                candidates.insert(0, contact);
-            }
-        }
+        candidates.retain(|item| !contacts.iter().any(|contact| contact.word == item.word));
+        candidates.splice(0..0, contacts);
     }
 
     /// Turns the embedded places of `@` mode on or off.
@@ -282,6 +331,11 @@ impl CandidateQueries {
                 shuangpin,
                 self.chaizi_traditional_output,
             )),
+            // 符号模式查两张编进引擎的表（分组码与符号名），不发诊断：表总在，输入只是没命中。
+            LocalInputMode::Symbol => rows(crate::local::symbol_groups::query_symbol_mode(
+                code,
+                crate::local::symbol_groups::SYMBOL_MODE_LIMIT,
+            )),
         }
     }
 
@@ -303,7 +357,7 @@ impl CandidateQueries {
         candidates
     }
 
-    /// 英文、emoji、颜文字、符号和日文混输行混入拼音列表，规则见 `insert_mixed_rows_with_japanese`。英文第一行默认进 candidate_queries.cpp:101-195 的优先位置（首选之后）；只有达到 `minimum_prefix`、`english_may_lead` 为真、输入拆不成完整音节（全拼 `is_complete_pinyin_input`，双拼 `is_complete_input`），且去重后剩下的第一行英文正好就是整段输入时，它才占首位。这条规则从不比较英文和拼音的权重，两边不在一个尺度上（#1040、#1063）。`japanese` 是调用方已经判定要混入的那一行日文（见 `InputSession::mixed_japanese_row`），这里只决定它的位置。符号行（打拼音出符号）另要 `symbols_allowed`：调用方在光标前缀解码和辅助码激活时传假，这两种情况下整段输入不是用户打的名称。不是全拼、双拼，在本地模式或专用英文里，或者什么都没开时原样返回。
+    /// 英文、emoji、颜文字、符号和日文混输行混入拼音列表，规则见 `insert_mixed_rows_with_japanese`。英文第一行默认进 candidate_queries.cpp:101-195 的优先位置（首选之后）；只有达到 `minimum_prefix`、`english_may_lead` 为真、输入拆不成完整音节（全拼 `is_complete_pinyin_input`，双拼 `is_complete_input`），且去重后剩下的第一行英文正好就是整段输入时，它才占首位。这条规则从不比较英文和拼音的权重，两边不在一个尺度上（#1040、#1063）。`japanese` 是调用方已经判定要混入的那一行日文（见 `InputSession::mixed_japanese_row`），这里只决定它的位置。符号行（打拼音出符号）另要 `symbols_allowed`：调用方在光标前缀解码和辅助码激活时传假，这两种情况下整段输入不是用户打的名称。`first_page_rows` 是宿主的每页候选数，英文组在首页最多占到这一行（`EnglishInputOptions::first_page_count`）。`mixed_enabled` 是候选混输总开关（`SessionOptions::mixed_candidates`），为假时各分成员不查，列表原样返回。不是全拼、双拼，在本地模式或专用英文里，或者什么都没开时原样返回。
     #[allow(clippy::too_many_arguments)]
     pub fn mixed(
         &mut self,
@@ -317,12 +371,15 @@ impl CandidateQueries {
         english_may_lead: bool,
         symbols_allowed: bool,
         japanese: Option<MixedJapaneseRow>,
+        first_page_rows: usize,
+        mixed_enabled: bool,
     ) -> Vec<WordItem> {
-        let anything_enabled = english.mixed_candidates
-            || expressive.emoji_candidates
-            || expressive.kaomoji_candidates
-            || (expressive.symbol_candidates && symbols_allowed)
-            || japanese.is_some();
+        let anything_enabled = mixed_enabled
+            && (english.mixed_candidates
+                || expressive.emoji_candidates
+                || expressive.kaomoji_candidates
+                || (expressive.symbol_candidates && symbols_allowed)
+                || japanese.is_some());
         if !anything_enabled
             || dedicated_english
             || local_mode != LocalInputMode::None
@@ -386,8 +443,31 @@ impl CandidateQueries {
             symbol_rows,
             english_lead,
             japanese,
+            english.first_page_count,
+            first_page_rows,
         )
     }
+}
+
+/// 槽位计数的普通候选（`counts_toward_quick_phrase_slot`，quick_phrase_query.cpp:123-143）：固定位置的行、快捷短语自己和混输/在线/插件/联系人行都不算。
+pub(crate) fn counts_toward_quick_phrase_slot(item: &WordItem) -> bool {
+    if item.fixed_position > 0 {
+        return false;
+    }
+    !matches!(
+        item.source,
+        CandidateSource::QuickPhrase
+            | CandidateSource::CloudSuggestion
+            | CandidateSource::CloudPending
+            | CandidateSource::AiSuggestion
+            | CandidateSource::AiPending
+            | CandidateSource::EnglishDictionary
+            | CandidateSource::Emoji
+            | CandidateSource::Kaomoji
+            | CandidateSource::MixedJapanese
+            | CandidateSource::Plugin
+            | CandidateSource::Contact
+    )
 }
 
 /// 输入能不能整段切成完整音节。全拼看严格的完整音节（不认纠错和别名），双拼看是不是每两键一个音节；其余方案不让英文、日文领先，按完整算。
@@ -428,10 +508,13 @@ fn insert_mixed_rows(
         Vec::new(),
         english_lead,
         None,
+        1,
+        0,
     )
 }
 
-/// `insert_mixed_rows` 再加上日文混输的那一行和符号行。日文行在英文之后、emoji 和颜文字之前放进列表，文字和已有候选（含刚放进去的英文）重复时不加；领先时占首位，英文已经按 `english_lead` 占了首位时排在它后面（下标 1）；不领先时进和英文相同的优先位置（`priority_slot`），排在英文那一行前面。符号行在英文之后、emoji 之前去重，所以和它文字相同的 emoji 行被去掉；比较时 emoji 去掉 U+FE0F，留下不带变体选择符的符号。符号行最后放，见 `place_symbol_rows`。
+/// `insert_mixed_rows` 再加上日文混输的那一行和符号行。日文行在英文之后、emoji 和颜文字之前放进列表，文字和已有候选（含刚放进去的英文）重复时不加；领先时占首位，英文已经按 `english_lead` 占了首位时排在它后面（下标 1）；不领先时进和英文相同的优先位置（`priority_slot`），排在英文那一行前面。`first_page_count` 是首页最多展示的英文候选数（`EnglishInputOptions::first_page_count`，1–3）：第一行英文进位之后，其余英文紧跟它继续占首页的空位，`first_page_rows`（宿主每页候选数）放不下的照旧接在列表末尾，0 表示不展开。符号行在英文之后、emoji 之前去重，所以和它文字相同的 emoji 行被去掉；比较时 emoji 去掉 U+FE0F，留下不带变体选择符的符号。符号行最后放，见 `place_symbol_rows`。
+#[allow(clippy::too_many_arguments)]
 fn insert_mixed_rows_with_japanese(
     mut candidates: Vec<WordItem>,
     mut english: Vec<WordItem>,
@@ -440,6 +523,8 @@ fn insert_mixed_rows_with_japanese(
     mut symbols: Vec<SymbolRow>,
     english_lead: Option<&str>,
     japanese: Option<MixedJapaneseRow>,
+    first_page_count: usize,
+    first_page_rows: usize,
 ) -> Vec<WordItem> {
     if english.is_empty()
         && emoji.is_empty()
@@ -501,6 +586,7 @@ fn insert_mixed_rows_with_japanese(
 
     let mut english = english.into_iter();
     let mut english_led = false;
+    let mut english_seat = None;
     if let Some(first) = english.next() {
         english_led = english_lead.is_some_and(|input| first.pinyin == input);
         let slot = if english_led {
@@ -509,7 +595,7 @@ fn insert_mixed_rows_with_japanese(
             priority_slot(&candidates)
         };
         candidates.insert(slot, first);
-        candidates.extend(english);
+        english_seat = Some(slot);
     }
     if let Some(japanese) =
         japanese.filter(|row| !candidates.iter().any(|item| item.word == row.item.word))
@@ -519,7 +605,19 @@ fn insert_mixed_rows_with_japanese(
         } else {
             priority_slot(&candidates)
         };
+        if let Some(seat) = &mut english_seat {
+            *seat += usize::from(slot <= *seat);
+        }
         candidates.insert(slot, japanese.item);
+    }
+    // 首页英文上限（Windows `cn_en_mixed_input_first_page_count`）：第一行之后的英文紧跟它继续占首页的空位，
+    // 首页放不下或只有一行时照旧接在列表末尾。第一行总能留位，所以 `first_page_count` 至少能放一个。
+    if let Some(seat) = english_seat {
+        let room = first_page_rows.saturating_sub(seat + 1);
+        let extra = usize::min(first_page_count.saturating_sub(1), room);
+        let extra: Vec<WordItem> = english.by_ref().take(extra).collect();
+        candidates.splice(seat + 1..seat + 1, extra);
+        candidates.extend(english);
     }
     anchor_expressive_rows(&mut candidates, emoji, kaomoji);
     place_symbol_rows(&mut candidates, symbols);
@@ -533,7 +631,17 @@ pub(crate) fn insert_expressive_rows(
     kaomoji: Vec<ExpressiveRow>,
     symbols: Vec<SymbolRow>,
 ) -> Vec<WordItem> {
-    insert_mixed_rows_with_japanese(candidates, Vec::new(), emoji, kaomoji, symbols, None, None)
+    insert_mixed_rows_with_japanese(
+        candidates,
+        Vec::new(),
+        emoji,
+        kaomoji,
+        symbols,
+        None,
+        None,
+        0,
+        0,
+    )
 }
 
 /// 两段文字去掉 U+FE0F（emoji 样式的变体选择符）后相同。
@@ -763,6 +871,7 @@ mod tests {
         let english = EnglishInputOptions {
             mixed_candidates: true,
             minimum_prefix: usize::MAX,
+            first_page_count: 1,
         };
         for (prefix, english, expressive, with_japanese) in [
             ("ni", english, MixedExpressiveOptions::default(), false),
@@ -804,6 +913,8 @@ mod tests {
                     true,
                     true,
                     japanese,
+                    6,
+                    true,
                 )
             });
 
@@ -1228,6 +1339,8 @@ mod tests {
         let on = EnglishInputOptions {
             mixed_candidates: true,
             minimum_prefix: 2,
+
+            first_page_count: 1,
         };
         let expressive_on = MixedExpressiveOptions {
             emoji_candidates: true,
@@ -1304,6 +1417,8 @@ mod tests {
                 true,
                 true,
                 None,
+                6,
+                true,
             );
             assert_eq!(
                 list,
@@ -1379,6 +1494,8 @@ mod tests {
             Vec::new(),
             None,
             japanese("開始", true),
+            1,
+            0,
         );
         assert_eq!(words(&led), vec!["開始", "开始", "开"]);
 
@@ -1390,6 +1507,8 @@ mod tests {
             Vec::new(),
             None,
             japanese("開始", false),
+            1,
+            0,
         );
         assert_eq!(words(&slotted), vec!["开始", "🎬", "開始", "kaishi", "开"]);
 
@@ -1408,6 +1527,8 @@ mod tests {
             Vec::new(),
             None,
             japanese("開始", false),
+            1,
+            0,
         );
         assert_eq!(words(&short), vec!["开始", "開始", "kaishi"]);
     }
@@ -1423,6 +1544,8 @@ mod tests {
             Vec::new(),
             Some("hello"),
             japanese("へっぉ", true),
+            1,
+            0,
         );
         assert_eq!(words(&list), vec!["hello", "へっぉ", "何咯", "和"]);
         // 英文没有领先（只是补全）时日文占首位。
@@ -1434,6 +1557,8 @@ mod tests {
             Vec::new(),
             Some("hello"),
             japanese("へっぉ", true),
+            1,
+            0,
         );
         assert_eq!(words(&list), vec!["へっぉ", "何咯", "hellos", "和"]);
     }
@@ -1459,6 +1584,8 @@ mod tests {
                 Vec::new(),
                 None,
                 japanese("開始", false),
+                1,
+                0,
             );
             assert_eq!(slotted[slot].word, "開始", "{ai:?} {:?}", words(&slotted));
             assert_eq!(slotted[slot + 1].word, "kaishi", "{ai:?}");
@@ -1470,6 +1597,8 @@ mod tests {
                 Vec::new(),
                 None,
                 japanese("開始", true),
+                1,
+                0,
             );
             assert_eq!(led[0].word, "開始", "{ai:?}");
         }
@@ -1494,6 +1623,8 @@ mod tests {
             Vec::new(),
             None,
             japanese("開始", true),
+            1,
+            0,
         );
         assert_eq!(words(&merged), vec!["开始", "开", "開始"]);
         assert!(merged
@@ -1508,6 +1639,8 @@ mod tests {
             Vec::new(),
             None,
             japanese("OK", false),
+            1,
+            0,
         );
         assert_eq!(words(&merged), vec!["开始", "OK", "开"]);
         assert_eq!(merged[1].source, CandidateSource::EnglishDictionary);
@@ -1531,8 +1664,44 @@ mod tests {
             true,
             true,
             japanese("開始", false),
+            6,
+            true,
         );
         assert_eq!(words(&list), vec!["开始", "開始", "开"]);
+    }
+
+    /// 候选混输总开关（`SessionOptions::mixed_candidates`，Windows `utility.mixed_candidates`）关掉时，
+    /// 英文、emoji、颜文字、符号和日文行各分成员照常传进来也不查，列表原样返回。
+    #[test]
+    fn the_mixed_candidates_master_switch_gates_every_member() {
+        let mut queries = CandidateQueries::new(
+            &RuntimePaths::default(),
+            crate::shuangpin::profile::default_profile(),
+        );
+        let candidates = kaishi_chinese();
+        let expected = words(&candidates);
+        let list = queries.mixed(
+            candidates.clone(),
+            "kaishi",
+            SchemeType::Quanpin,
+            EnglishInputOptions {
+                mixed_candidates: true,
+                ..EnglishInputOptions::default()
+            },
+            MixedExpressiveOptions {
+                emoji_candidates: true,
+                kaomoji_candidates: true,
+                symbol_candidates: true,
+            },
+            false,
+            LocalInputMode::None,
+            true,
+            true,
+            japanese("開始", false),
+            6,
+            false,
+        );
+        assert_eq!(words(&list), expected);
     }
 
     /// 英文库里的一行：`key` 是小写词，`display` 是显示的写法。
@@ -1546,6 +1715,50 @@ mod tests {
             WordItem::new("hello", "何咯", 1, CandidateSource::Generated, "he'lo"),
             WordItem::new("he", "和", 1, CandidateSource::Database, "he"),
         ]
+    }
+
+    /// 首页英文候选数（`mixed_input.first_page_count`，Windows `cn_en_mixed_input_first_page_count`）：
+    /// 第一行英文进优先位置之后，其余英文紧跟它继续占首页的空位（最多到 `first_page_count` 个），
+    /// 首页放不下或数量为 1 时照旧接在列表末尾——列表比页短时末尾仍在首页，与 Windows 去 `items.end()` 一致。
+    #[test]
+    fn first_page_count_limits_english_rows_on_the_first_page() {
+        let rows = || {
+            vec![
+                english("hello", "hello"),
+                english("hellos", "hellos"),
+                english("helmet", "helmet"),
+            ]
+        };
+        let merge = |count: usize, page: usize| {
+            insert_mixed_rows_with_japanese(
+                hello_chinese(),
+                rows(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                count,
+                page,
+            )
+        };
+        assert_eq!(
+            words(&merge(1, 6)),
+            ["何咯", "hello", "和", "hellos", "helmet"]
+        );
+        assert_eq!(
+            words(&merge(2, 6)),
+            ["何咯", "hello", "hellos", "和", "helmet"]
+        );
+        assert_eq!(
+            words(&merge(3, 6)),
+            ["何咯", "hello", "hellos", "helmet", "和"]
+        );
+        // 首页只放得下第一行英文时，数量再大也不展开，其余接在列表末尾。
+        assert_eq!(
+            words(&merge(3, 2)),
+            ["何咯", "hello", "和", "hellos", "helmet"]
+        );
     }
 
     #[test]
@@ -1671,6 +1884,8 @@ mod tests {
             EnglishInputOptions {
                 mixed_candidates: true,
                 minimum_prefix,
+
+                first_page_count: 1,
             },
             MixedExpressiveOptions::default(),
             false,
@@ -1678,6 +1893,8 @@ mod tests {
             english_may_lead,
             true,
             None,
+            6,
+            true,
         )
     }
 
@@ -1823,18 +2040,60 @@ mod tests {
     }
 
     #[test]
-    fn contact_candidates_precede_dictionary_rows_and_commit_phone() {
+    fn contact_candidates_replace_dictionary_duplicates_with_name_and_phone() {
         let mut queries = CandidateQueries::new(&RuntimePaths::default(), default_profile());
         queries.set_mentions(&[MentionEntry {
-            text: "张三".into(),
-            key: "zhang'san".into(),
-            phone: "13800138000".into(),
+            text: "拟好".into(),
+            key: "ni'hao".into(),
+            phone: "202-555-0101".into(),
         }]);
-        let mut rows = database(&["张三"]);
-        queries.append_contact_candidates("zhang", &mut rows);
-        assert_eq!(rows[0].word, "13800138000");
-        assert_eq!(rows[0].source, CandidateSource::Contact);
-        assert_eq!(rows[1].word, "张三");
+        for input in ["nihao", "ni'hao", "nh"] {
+            let mut rows = database(&["你好", "拟好"]);
+            queries.append_contact_candidates(input, &mut rows);
+            assert_eq!(words(&rows), ["拟好", "拟好 202-555-0101", "你好"]);
+            assert!(rows[..2]
+                .iter()
+                .all(|row| row.source == CandidateSource::Contact));
+        }
+    }
+
+    #[test]
+    fn contacts_prioritize_exact_names_and_ignore_plain_mentions() {
+        let mut queries = CandidateQueries::new(&RuntimePaths::default(), default_profile());
+        queries.set_mentions(&[
+            MentionEntry {
+                text: "合成甲乙".into(),
+                key: "he'cheng'jia'yi".into(),
+                phone: "202-555-0101".into(),
+            },
+            MentionEntry {
+                text: "合成甲".into(),
+                key: "he'cheng'jia".into(),
+                phone: "202-555-0102".into(),
+            },
+            MentionEntry {
+                text: "普通名单".into(),
+                key: "he'cheng'jia".into(),
+                phone: String::new(),
+            },
+        ]);
+        let mut rows = database(&["合成甲", "其他词"]);
+        queries.append_contact_candidates("hechengjia", &mut rows);
+        assert_eq!(
+            words(&rows),
+            [
+                "合成甲",
+                "合成甲 202-555-0102",
+                "合成甲乙",
+                "合成甲乙 202-555-0101",
+                "其他词"
+            ]
+        );
+        for invalid in ["", "'", "he1", "HE", "其他"] {
+            let mut rows = database(&["其他词"]);
+            queries.append_contact_candidates(invalid, &mut rows);
+            assert_eq!(words(&rows), ["其他词"]);
+        }
     }
 
     fn with_symbols(list: Vec<WordItem>, symbols: Vec<SymbolRow>) -> Vec<WordItem> {
@@ -1846,6 +2105,8 @@ mod tests {
             symbols,
             None,
             None,
+            1,
+            0,
         )
     }
 
@@ -1859,6 +2120,8 @@ mod tests {
             vec![symbol("±", "正负", false, true)],
             None,
             None,
+            1,
+            0,
         );
         assert_eq!(
             words(&merged),
@@ -1906,6 +2169,24 @@ mod tests {
             vec![symbol("π", "派", true, false)],
         );
         assert_eq!(words(&merged), vec!["排", "牌"]);
+    }
+
+    #[test]
+    fn number_symbols_preserve_the_first_three_words_and_require_the_number_anchor() {
+        let numbers = || {
+            query_mixed_symbols(
+                "yi",
+                SchemeType::Quanpin,
+                crate::shuangpin::profile::default_profile(),
+            )
+        };
+        let merged = with_symbols(database(&["一", "已", "以", "易", "衣"]), numbers());
+        assert_eq!(
+            words(&merged),
+            vec!["一", "已", "以", "①", "⑴", "⒈", "易", "衣"]
+        );
+        let merged = with_symbols(database(&["已", "以", "易"]), numbers());
+        assert_eq!(words(&merged), vec!["已", "以", "易"]);
     }
 
     #[test]
@@ -2052,6 +2333,8 @@ mod tests {
             ],
             None,
             None,
+            1,
+            0,
         );
         assert_eq!(words(&merged), vec!["对号", "√", "✔", "👍", "对好"]);
     }
@@ -2069,6 +2352,8 @@ mod tests {
             ],
             Some("gamma"),
             None,
+            1,
+            0,
         );
         assert_eq!(words(&merged), vec!["gamma", "γ", "Γ", "嘎嘛", "噶"]);
         // 英文不领先时进优先位置，符号照样跟着它。
@@ -2080,6 +2365,8 @@ mod tests {
             vec![symbol("γ", "gamma", false, true)],
             None,
             None,
+            1,
+            0,
         );
         assert_eq!(words(&merged), vec!["嘎嘛", "gamma", "γ", "噶"]);
     }
@@ -2104,6 +2391,8 @@ mod tests {
                 true,
                 allowed,
                 None,
+                6,
+                true,
             )
         };
         assert_eq!(

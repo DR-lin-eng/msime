@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.msime.android.assistance.test">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
+    <application android:label="水杉合成输入辅助测试" />
+    <instrumentation android:name="app.msime.android.test.InputAssistancePreparation" android:targetPackage="app.msime.android" />
+</manifest>

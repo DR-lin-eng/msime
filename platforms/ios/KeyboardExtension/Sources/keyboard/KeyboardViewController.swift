@@ -70,6 +70,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private weak var compositionContainer: CandidateCanvasHostView?
   private let replyModel = ReplyKeyboardModel()
   private var personalDictionaryTimer: Timer?
+  private let idleMaintenance = IdleMaintenancePoll()
   private var lastKeyTouchTime: TimeInterval = -.infinity
   private var synchronizingPersonalDictionary = false
   private let preeditButton = UIButton()
@@ -162,6 +163,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var oneHandGutterWidth: NSLayoutConstraint?
   /// 长按空格键时在键区打开的语音面板。
   private var voicePanel: KeyboardVoicePanelView?
+  /// 正在进行的按住说话，录音和识别在后台的主 App 里（`KeyboardVoiceDictation`）。
+  private var voiceDictation: KeyboardVoiceDictation?
+  /// 听写开始时的输入位置；结果回来时位置变了就不直接上屏。
+  private var voiceDictationContext: KeyboardDocumentContext?
+  /// 按住空格开始听写时手指的纵坐标，用来判断上滑取消；松手后或读屏开始的听写为 nil。
+  private var voiceHoldOriginY: CGFloat?
   private let handwriting = HandwritingInputView()
   /// 手写区：标点列、书写卡片和 ⌫ / 重写列，与 Android 的 rebuildHandwritingRows 布局一致。
   private let handwritingPad = UIStackView()
@@ -425,6 +432,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var visibleCandidateAnnotations: [String] = []
   private var visibleCandidateSources: [Int] = []
   private var visibleCandidateFixedPositions: [Int] = []
+  private var visibleCandidateHighlighted: [Bool] = []
   /// 候选条隐藏云占位行后，显示序号对应的 Engine 当前页索引。
   private var visibleCandidateEngineIndices: [Int] = []
   private var visibleCandidatePageCount = 0
@@ -444,6 +452,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 最近一次快照报告的引号与方头括号样式（View 的 `punctuation_marks`）。
   private var currentCornerQuotes = false
   private var currentHollowBrackets = false
+  /// View 的 `punctuation_marks` 顿号开关：`\` 缺省开、`/` 缺省关，快照里读到什么用什么。
+  private var currentEnumerationCommaBackslash = true
+  private var currentEnumerationCommaSlash = false
   private var currentNineKeySpellings: [String] = []
   private var currentNineKeySingleCharacter = false
   private var currentNineKeyStrokes = ""
@@ -601,19 +612,32 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// The key input remains ASCII so the Engine chooses the punctuation mark (including quote alternation and book-title nesting) and smart punctuation; only the visible face changes. English and local-input modes keep the literal ASCII face.
   static let chineseSymbolFaces: [String: String] = [
     ",": "，", ".": "。", "?": "？", "!": "！", ";": "；", ":": "：",
-    "(": "（", ")": "）", "[": "【", "]": "】", "\\": "、",
+    "(": "（", ")": "）", "[": "【", "]": "】", "\\": "、", "/": "、",
     "<": "《", ">": "》", "'": "‘", "\"": "“", "_": "——",
   ]
 
-  /// 按引号与方头括号样式（View 的 `punctuation_marks`）取中文键面：直角引号下 `'` 画「、`"` 画『，空心括号下 `[` `]` 画〖〗，其余与 `chineseSymbolFaces` 相同。这些键经 Engine 上屏，键面与写出的字一致。不是 private：键面测试会固定它。
-  static func chineseSymbolFace(_ ascii: String, cornerQuotes: Bool, hollowBrackets: Bool) -> String? {
+  /// 按引号与方头括号样式（View 的 `punctuation_marks`）取中文键面：直角引号下 `'` 画「、`"` 画『，空心括号下 `[` `]` 画〖〗，其余与 `chineseSymbolFaces` 相同。这些键经 Engine 上屏，键面与写出的字一致。顿号键随 View 的顿号开关：`\` 关着时画 `\`，`/` 开着时画 `、`。不是 private：键面测试会固定它。
+  static func chineseSymbolFace(_ ascii: String, cornerQuotes: Bool, hollowBrackets: Bool,
+                                enumerationCommaBackslash: Bool = true,
+                                enumerationCommaSlash: Bool = false) -> String? {
     switch ascii {
     case "'" where cornerQuotes: return "「"
     case "\"" where cornerQuotes: return "『"
     case "[" where hollowBrackets: return "〖"
     case "]" where hollowBrackets: return "〗"
+    case "\\": return enumerationCommaBackslash ? "、" : ascii
+    case "/": return enumerationCommaSlash ? "、" : ascii
     default: return chineseSymbolFaces[ascii]
     }
+  }
+
+  /// 英文模式下标点锁定为中文时，按当前 View 的顿号开关选择发给 Engine 的键。nonisolated：纯函数，SmartPunctuationTests 这类非隔离测试可直接钉住。
+  nonisolated static func lockedEnglishPunctuationInput(
+    for symbol: String, enumerationCommaBackslash: Bool, enumerationCommaSlash: Bool) -> String? {
+    KeyboardPunctuationContext.engineInput(
+      for: symbol, japanese: false,
+      enumerationCommaBackslash: enumerationCommaBackslash,
+      enumerationCommaSlash: enumerationCommaSlash)
   }
 
   /// Whether Chinese punctuation is on for marks the keyboard writes itself rather than through the Engine (the Zhuyin symbol panel): a 中文 lock, or the 中文标点 switch under 跟随中英文; an 英文 lock turns it off. Not private: the scheme tests pin it.
@@ -635,9 +659,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// What a Zhuyin symbol-panel key writes: the Chinese mark for an ASCII mark that has one while Chinese punctuation is on, else the key itself. Not private: the scheme tests pin it.
   static func zhuyinSymbolText(_ symbol: String, chinesePunctuation: Bool, cornerQuotes: Bool = false,
-                               hollowBrackets: Bool = false) -> String {
+                               hollowBrackets: Bool = false,
+                               enumerationCommaBackslash: Bool = true,
+                               enumerationCommaSlash: Bool = false) -> String {
     chinesePunctuation
-      ? chineseSymbolFace(symbol, cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets) ?? symbol : symbol
+      ? chineseSymbolFace(symbol, cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets,
+                          enumerationCommaBackslash: enumerationCommaBackslash,
+                          enumerationCommaSlash: enumerationCommaSlash) ?? symbol : symbol
   }
 
   /// Whether the Zhuyin symbol panel writes Chinese marks now.
@@ -740,15 +768,34 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     snapshotWorker.tick(idle: !hasComposition && !isInLocalMode, fullAccess: hasFullAccess, force: true)
     personalDictionaryTimer?.invalidate()
     personalDictionaryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-      MainActor.assumeIsolated {
-        guard let self else { return }
-        // 异步首键尚未渲染时也在输入；词间的短暂停顿不触发同步权限和词库维护。
-        guard !self.hasComposition, !self.isInLocalMode, !self.session.hasPendingCharacters,
-              ProcessInfo.processInfo.systemUptime - self.lastKeyTouchTime >= 0.3 else { return }
-        let fullAccess = self.hasFullAccess
-        self.synchronizePersonalDictionary(force: false, fullAccess: fullAccess)
-        self.snapshotWorker.tick(idle: true, fullAccess: fullAccess)
+      MainActor.assumeIsolated { self?.startIdleMaintenance() }
+    }
+  }
+
+  /// 异步首键尚未渲染时也在输入；词间的短暂停顿不触发同步权限和词库维护。
+  private var idleForMaintenance: Bool {
+    !hasComposition && !isInLocalMode && !session.hasPendingCharacters
+      && ProcessInfo.processInfo.systemUptime - lastKeyTouchTime >= 0.3
+  }
+
+  /// 两秒一轮的词库维护。读两份共享文件放到后台，主线程只在读完、并且仍然空闲时做真正要做的同步；通常两边都无事可做，主线程这一轮只读一次完全访问权限。
+  private func startIdleMaintenance() {
+    guard idleForMaintenance, !idleMaintenance.isRunning else { return }
+    let fullAccess = hasFullAccess
+    guard fullAccess else {
+      // 没有完全访问时个人词库不同步，快照工作者停下并归还租约，两边都不读共享目录。
+      snapshotWorker.tick(idle: true, fullAccess: false)
+      return
+    }
+    idleMaintenance.start(readSnapshotState: snapshotWorker.stateReader()) { [weak self] outcome in
+      // 后台读文件期间用户可能已经开始输入：这一轮让给按键，下一次定时器再来。
+      guard let self, self.idleForMaintenance else { return }
+      switch outcome.personalDictionary {
+      case .success(true): self.synchronizePersonalDictionary(force: false, fullAccess: fullAccess)
+      case .success(false): break
+      case .failure(let error): self.showDiagnostic(error.localizedDescription)
       }
+      self.snapshotWorker.tick(idle: true, fullAccess: fullAccess, prefetched: outcome.snapshotState)
     }
   }
 
@@ -888,7 +935,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 空格键的 VoiceOver 提示：语音关闭时，长按空格改为移动光标。
   private static func spaceAccessibilityHint(voice: Bool) -> String {
-    voice ? "轻点输入空格或选词，左右滑动移动光标，长按打开语音输入" : "轻点输入空格或选词，左右滑动或长按移动光标"
+    voice ? "轻点输入空格或选词，左右滑动移动光标，按住说话，松开上屏" : "轻点输入空格或选词，左右滑动或长按移动光标"
   }
 
   override func selectionWillChange(_ textInput: UITextInput?) {
@@ -985,6 +1032,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidateGlossTimer = nil
     personalDictionaryTimer?.invalidate()
     personalDictionaryTimer = nil
+    idleMaintenance.cancel()
     closeKeyboardPicker()
     // 键盘收起时还在调整高度就当作取消：没点「完成」的预览不保存，与 Android onFinishInputView 一致。
     closeInlineHeight(commit: false)
@@ -3309,7 +3357,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     if spaceVoiceEnabled {
       actions.append(UIAccessibilityCustomAction(name: "语音输入") { [weak self] _ in
         guard let self, voiceInsertionReady else { return false }
-        showVoicePanel()
+        // 会话开着时直接开始听写，点圆球结束；没开时先打开语音面板，由它去开启会话或插入待取的结果。
+        if hasFullAccess && KeyboardVoiceDictation().sessionAvailable { startVoiceFromSpace(held: false) } else { showVoicePanel() }
         return true
       })
     }
@@ -3582,7 +3631,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
          commitEnglishBoundary(symbol) { return }
       // 标点锁定为中文 keeps Chinese marks in English mode too; the shared route decides, as it does in Chinese mode.
       if session.sharedPreferences?["punctuation_lock"] as? String == "chinese",
-         let punctuation = KeyboardPunctuationContext.engineInput(for: symbol, japanese: false) {
+         let punctuation = Self.lockedEnglishPunctuationInput(
+           for: symbol, enumerationCommaBackslash: currentEnumerationCommaBackslash,
+           enumerationCommaSlash: currentEnumerationCommaSlash) {
         let preceding = KeyboardPunctuationContext.precedingScalar(textDocumentProxy.documentContextBeforeInput)
         let snapshot = session.handlePunctuationWithContext(punctuation, preceding: preceding)
         if snapshot.isHandled {
@@ -3599,8 +3650,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // Zhuyin spells with the digit row and with , . / ; -, so the symbol panel cannot hand its keys to the Engine: they would type ㄅ or ㄝ or pick a list row. The panel commits the conversion and types the mark itself, as the key draws it: the Chinese face for an ASCII mark that has one while Chinese punctuation is on, the ASCII mark otherwise.
     if typesZhuyin {
       render(session.finishComposition())
-      insertDirectText(Self.zhuyinSymbolText(symbol, chinesePunctuation: zhuyinWritesChinesePunctuation,
-                                             cornerQuotes: currentCornerQuotes, hollowBrackets: currentHollowBrackets))
+      insertDirectText(Self.zhuyinSymbolText(
+        symbol, chinesePunctuation: zhuyinWritesChinesePunctuation,
+        cornerQuotes: currentCornerQuotes, hollowBrackets: currentHollowBrackets,
+        enumerationCommaBackslash: currentEnumerationCommaBackslash,
+        enumerationCommaSlash: currentEnumerationCommaSlash))
       return
     }
 
@@ -3657,7 +3711,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
 
     guard let punctuation = KeyboardPunctuationContext.engineInput(
-      for: symbol, japanese: inputScheme.isJapanese, asciiMarks: typesKorean || typesCasedLetters) else {
+      for: symbol, japanese: inputScheme.isJapanese, asciiMarks: typesKorean || typesCasedLetters,
+      enumerationCommaBackslash: currentEnumerationCommaBackslash,
+      enumerationCommaSlash: currentEnumerationCommaSlash) else {
       render(session.finishComposition())
       insertDirectText(symbol)
       return
@@ -4569,18 +4625,40 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       if !spaceHoldMovesCursor {
         countKeyPress(TypingKeyID.space)
         playInputClick()
-        startVoiceFromSpace()
+        startVoiceFromSpace(held: true, originY: hold.location(in: view).y)
       }
     }
     if spaceHoldMovesCursor {
       handleSpaceCursorMovement(hold.state, at: hold.location(in: view).x,
                                 velocity: 0, space: hold.view as? UIButton)
+    } else if let dictation = voiceDictation, let originY = voiceHoldOriginY {
+      // 按住说话：松开结束，上滑超过键盘高度的四分之一后松开取消（Android 的 `VoiceHoldPolicy`）。
+      switch hold.state {
+      case .changed:
+        voicePanel?.setCancelling(Self.voiceHoldCancels(originY: originY, y: hold.location(in: view).y,
+                                                        height: view.bounds.height))
+      case .ended:
+        voiceHoldOriginY = nil
+        if voicePanel?.isCancelling == true { closeKeyboardPicker() } else { dictation.finish() }
+      case .cancelled, .failed:
+        closeKeyboardPicker()
+      default:
+        break
+      }
     }
     if [.ended, .cancelled, .failed].contains(hold.state) { spaceHoldMovesCursor = false }
   }
 
-  /// 键盘扩展不能录音；长按空格直接把用户带到主 App 的录音页，由深链进入逻辑自动开始录音。
-  private func startVoiceFromSpace() {
+  /// 对应 Android 的 `VoiceHoldPolicy.CANCEL_ZONE_FRACTION`。
+  static let voiceCancelFraction: CGFloat = 0.25
+
+  /// 按住说话时手指从按下处上滑超过键盘高度的四分之一就进入取消区。
+  static func voiceHoldCancels(originY: CGFloat, y: CGFloat, height: CGFloat) -> Bool {
+    originY - y > height * voiceCancelFraction
+  }
+
+  /// 长按空格说话。键盘扩展不能录音，录音识别由后台的主 App 做（`VoiceSessionService`）：会话开着时在键区显示聆听界面并开始听写，结果回来直接上屏；会话还没开或已经过期时打开 App 开启它，用户回来再按住空格。`held` 为假时是读屏操作开始的听写，点圆球结束。
+  private func startVoiceFromSpace(held: Bool, originY: CGFloat? = nil) {
     guard hasFullAccess else {
       showDiagnostic("语音输入需要开启键盘的“允许完全访问”。")
       renderCandidateStrip()
@@ -4589,10 +4667,88 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     guard voiceInsertionReady else { return }
     closeKeyboardService()
     closeKeyboardPicker()
-    KeyboardAppLauncher.open(KeyboardAppLauncher.voiceURL, from: self)
+    let dictation = KeyboardVoiceDictation()
+    guard dictation.sessionAvailable else {
+      openVoiceSession()
+      return
+    }
+    voiceDictationContext = KeyboardHostContext.documentIdentifier(for: textDocumentProxy).map {
+      KeyboardDocumentContext(document: $0, before: textDocumentProxy.documentContextBeforeInput,
+                              selected: textDocumentProxy.selectedText, after: textDocumentProxy.documentContextAfterInput)
+    }
+    voiceHoldOriginY = held ? originY : nil
+    let panel = KeyboardVoicePanelView(dictationHeld: held, skin: KeyboardTheme.current)
+    panel.onCancel = { [weak self] in self?.closeKeyboardPicker() }
+    panel.onOrb = { [weak self] in self?.voiceDictation?.finish() }
+    dictation.onEvent = { [weak self] event in self?.handleVoiceDictation(event) }
+    voiceDictation = dictation
+    voicePanel = panel
+    // 按着的手指属于空格键，面板盖住键区时不能让这一行停止接收触摸，否则松开和上滑都收不到。
+    installPanel(panel, keepsKeyTouches: held)
+    dictation.start()
   }
 
-  /// 键区里的语音结果面板。键盘扩展不能录音，面板只负责读取待插入的交接结果；长按空格改走 `startVoiceFromSpace()` 直接打开主 App 的录音页。点圆球时会核对结果与当前编辑器是否对得上，与 `showKeyboardVoice` 插入前的检查一样。
+  /// 打开 App 的语音会话页。打不开时说明原因，不让长按空格看起来毫无反应。
+  private func openVoiceSession() {
+    KeyboardAppLauncher.open(KeyboardAppLauncher.voiceSessionURL, from: self) { [weak self] opened in
+      guard !opened else { return }
+      DispatchQueue.main.async {
+        self?.showDiagnostic("未能打开水杉，请手动打开水杉 App 开启语音。")
+        self?.renderCandidateStrip()
+      }
+    }
+  }
+
+  private func handleVoiceDictation(_ event: KeyboardVoiceDictation.Event) {
+    switch event {
+    case .listening(let text):
+      voicePanel?.showListening(text)
+    case .recognizing(let text, let message):
+      voicePanel?.showRecognizing(text: text, message: message)
+    case .finished(let text):
+      let context = voiceDictationContext
+      endVoiceDictation()
+      insertVoiceResult(text, context: context)
+    case .failed(let message, let reopensSession):
+      endVoiceDictation()
+      showDiagnostic(message)
+      renderCandidateStrip()
+      if reopensSession { openVoiceSession() }
+    }
+  }
+
+  /// 听写已经结束：收起面板，不再向 App 发取消。
+  private func endVoiceDictation() {
+    voiceDictation = nil
+    voiceDictationContext = nil
+    voiceHoldOriginY = nil
+    closeKeyboardPicker()
+  }
+
+  /// 输入位置还和听写开始时一样就直接上屏；变了就把结果留在语音交接里，可以在功能菜单的「语音结果」里插入（Android 留在语音结果面板里）。
+  private func insertVoiceResult(_ text: String, context: KeyboardDocumentContext?) {
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      showDiagnostic("没有听到内容，请靠近麦克风再试。")
+      renderCandidateStrip()
+      return
+    }
+    if hasFullAccess, voiceInsertionReady, let context,
+       context.matches(document: KeyboardHostContext.documentIdentifier(for: textDocumentProxy),
+                       before: textDocumentProxy.documentContextBeforeInput, selected: textDocumentProxy.selectedText,
+                       after: textDocumentProxy.documentContextAfterInput) {
+      insertOwnText(text, source: .voice)
+      return
+    }
+    do {
+      try VoiceTextHandoffStore().save(text)
+      showDiagnostic("输入位置已变化，结果已保留，可在功能菜单的“语音结果”里插入。")
+    } catch {
+      showDiagnostic(error.localizedDescription)
+    }
+    renderCandidateStrip()
+  }
+
+  /// 键区里的语音结果面板，读屏的「语音输入」操作在语音会话还没开时打开它：有待插入的交接结果时点圆球插入，没有时点圆球去 App 开启语音会话；长按空格走 `startVoiceFromSpace(held:originY:)`。插入前会核对结果与当前编辑器是否对得上，与 `showKeyboardVoice` 插入前的检查一样。
   private func showVoicePanel() {
     guard hasFullAccess else {
       showDiagnostic("语音输入需要开启键盘的“允许完全访问”。")
@@ -4619,7 +4775,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       guard let self else { return }
       closeKeyboardPicker()
       guard let entry else {
-        KeyboardAppLauncher.open(KeyboardAppLauncher.voiceURL, from: self)
+        openVoiceSession()
         return
       }
       insertVoiceHandoff(entry, store: store, context: context)
@@ -4660,8 +4816,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
           fullAccess ?? hasFullAccess else { return }
     let store = PersonalDictionaryStore()
     do {
+      try session.synchronizeSogouDictionaries()
       let state = try store.read()
-      guard force || state.pendingCount > 0 || state.refreshID != state.completedRefreshID else { return }
+      guard force || state.needsKeyboardSynchronization else { return }
       synchronizingPersonalDictionary = true
       defer { synchronizingPersonalDictionary = false }
       try store.synchronize(apply: { request in
@@ -4912,6 +5069,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         onClose: { [weak self] in self?.closeKeyboardPicker() },
         columns: columns.map { ($0.leading, $0.trailing) })
       candidatePanel = panel
+      refreshDecorationWords()
       candidatePanelSnapshot = snapshot
       nineKeyPanelColumns = columns
       // 九键三栏面板和普通候选网格一样装在键区：上面的候选栏和读音留着，用户看得到选拼音、筛选之后读音和首选怎么变。
@@ -5353,8 +5511,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 日语的逗号写作 、，手机底行的逗号键就画 、，按下也发 、。
     let japaneseComma = writesJapaneseComma
     for face in symbolKeyFaces where face.key !== quickPunctuationButton || (phoneBottomRowShown && !usesCustomQuickPunctuation) {
-      let styled = Self.chineseSymbolFace(face.ascii, cornerQuotes: currentCornerQuotes,
-                                          hollowBrackets: currentHollowBrackets) ?? face.chinese
+      let styled = Self.chineseSymbolFace(
+        face.ascii, cornerQuotes: currentCornerQuotes, hollowBrackets: currentHollowBrackets,
+        enumerationCommaBackslash: currentEnumerationCommaBackslash,
+        enumerationCommaSlash: currentEnumerationCommaSlash) ?? face.chinese
       let chinese = japaneseComma && face.key === quickPunctuationButton ? "、" : styled
       let title = sendsChinesePunctuation ? chinese : face.ascii
       guard face.key.configuration?.title != title || face.key.accessibilityLabel != "符号 \(title)" else { continue }
@@ -6168,9 +6328,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
     currentLocalMode = snapshot.localMode
     // 样式在偏好改动后空闲重建时才变；变了就重画受影响的键面。
-    if currentCornerQuotes != snapshot.cornerQuotes || currentHollowBrackets != snapshot.hollowBrackets {
+    if currentCornerQuotes != snapshot.cornerQuotes || currentHollowBrackets != snapshot.hollowBrackets
+      || currentEnumerationCommaBackslash != snapshot.enumerationCommaBackslash
+      || currentEnumerationCommaSlash != snapshot.enumerationCommaSlash {
       currentCornerQuotes = snapshot.cornerQuotes
       currentHollowBrackets = snapshot.hollowBrackets
+      currentEnumerationCommaBackslash = snapshot.enumerationCommaBackslash
+      currentEnumerationCommaSlash = snapshot.enumerationCommaSlash
       updateSymbolKeyFaces()
       if !symbolLayerKeys.isEmpty { updateSymbolLayerFaces() }
     }
@@ -6236,6 +6400,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
                          candidateAnnotations: visibleValues(snapshot.candidateAnnotations),
                          candidateSources: visibleValues(snapshot.candidateSources),
                          candidateFixedPositions: visibleValues(snapshot.candidateFixedPositions),
+                         candidateHighlighted: visibleValues(snapshot.candidateHighlighted),
                          candidatePageCount: snapshot.candidatePageCount,
                          candidateEngineIndices: visibleIndices,
                          answeredByPinyinFallback: snapshot.answeredByPinyinFallback)
@@ -6282,7 +6447,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func updateCandidateStrip(preedit: String, candidates: [String],
                                     candidateCodes: [String] = [], candidateGlosses: [String] = [],
                                     candidateAnnotations: [String] = [], candidateSources: [Int] = [],
-                                    candidateFixedPositions: [Int] = [], candidatePageCount: Int = 0,
+                                    candidateFixedPositions: [Int] = [], candidateHighlighted: [Bool] = [], candidatePageCount: Int = 0,
                                     candidateEngineIndices: [Int]? = nil,
                                     answeredByPinyinFallback: Bool = false) {
     // 光标前打到 `xxx@` 时邮箱后缀占候选条，排在英文建议之前，与 Android 一样；它们不是 Engine 的候选，不带编码、释义和来源。
@@ -6300,6 +6465,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     visibleCandidateAnnotations = showsEmailSuffixes ? [] : candidateAnnotations
     visibleCandidateSources = showsEmailSuffixes ? [] : candidateSources
     visibleCandidateFixedPositions = showsEmailSuffixes ? [] : candidateFixedPositions
+    visibleCandidateHighlighted = showsEmailSuffixes ? [] : candidateHighlighted
     if showsEmailSuffixes || candidates.isEmpty {
       visibleCandidateEngineIndices = []
     } else if let candidateEngineIndices, candidateEngineIndices.count == candidates.count {
@@ -6322,6 +6488,24 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     renderCandidateStrip()
   }
 
+  /// 展开网格仍使用普通当前页；独立来源标注不包含固定位置图钉或原文后缀。
+  private func refreshDecorationWords() {
+    let page = visibleEmailSuffixes.isEmpty ? Array(visibleCandidates.prefix(candidatePageSize)) : visibleEmailSuffixes
+    let hasOverlay = candidateCanvasSkin?.banner?.candidate != nil
+    let words: [ExternalCandidateSkin.Canvas.Word] = hasOverlay && visibleDiagnostic == nil ? page.enumerated().map { index, text in
+      let source = visibleCandidateSources.indices.contains(index) ? visibleCandidateSources[index] : -1
+      let badge = source == CandidateMarker.cloudSource ? "☁️" : source == CandidateMarker.aiSource ? "🤖" : ""
+      let highlighted = japaneseConversionIndex.map { $0 == index }
+        ?? (visibleCandidateHighlighted.indices.contains(index) && visibleCandidateHighlighted[index])
+      return ExternalCandidateSkin.Canvas.Word(text: chineseOutput(text), badge: badge, highlighted: highlighted)
+    } : []
+    let hosts: [CandidateCanvasHostView?] = [compositionContainer, candidatePanel]
+    for host in hosts {
+      host?.decorationWords = words
+      host?.decorationFontFamilies = candidateFontFamilies
+    }
+  }
+
   private func renderCandidateStrip() {
     exitLocalModeButton.isHidden = !isInLocalMode
     updateHanjaButton()
@@ -6335,6 +6519,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidateContent?.isHidden = !showsCandidates
     updatePreeditButton()
     // 邮箱后缀不分页：二十个全排在候选条上横向滚动，与 Android 一样。
+    refreshDecorationWords()
     let page = visibleEmailSuffixes.isEmpty ? Array(visibleCandidates.prefix(candidatePageSize)) : visibleEmailSuffixes
     while candidateStack.arrangedSubviews.count < page.count {
       let index = candidateStack.arrangedSubviews.count
@@ -6880,8 +7065,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         ? CandidateSelectionBarView(color: palette.selectedBar ?? palette.accent, layout: palette.layout,
                                     fontSize: Self.candidateChipFontSize * candidateFontScale) : nil
       configuration.background.backgroundColor = converting ? palette.selected.withAlphaComponent(0.35)
-        : number == 1 ? (candidateCanvasSkin == nil ? palette.hover : palette.selected)
-        : candidateCanvasSkin == nil ? palette.surface : .clear
+        : number == 1 ? (candidateCanvasSkin?.panelLoaded != true ? palette.hover : palette.selected)
+        : candidateCanvasSkin?.panelLoaded != true ? palette.surface : .clear
       configuration.background.cornerRadius = candidatePalette?.layout?.itemRadius ?? candidateCanvasSkin?.itemCornerRadius ?? 9
       configuration.background.strokeWidth = palette.layout?.borderWidth ?? 1
       configuration.background.strokeColor = palette.border
@@ -6903,7 +7088,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let selected = candidatePalette == nil && number == 1
     let weight: UIFont.Weight = selected ? .semibold : .regular
     // A pinned word takes the accent colour, as it does in the Windows candidate window; chips are reused, so every other word is set back.
-    let pinned = markers.contains { $0.symbol == "pin.fill" }
+    let pinned = markers.contains(where: \.pinned)
     configuration.baseForegroundColor = pinned || selected
       ? candidatePalette?.accent ?? skin.accent
       : (number == 1 ? candidatePalette?.selectedText : nil) ?? candidatePalette?.text ?? skin.keyForeground
@@ -6984,7 +7169,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   static func markerRun(_ markers: [CandidateMarker], color: UIColor, scale: CGFloat) -> AttributedString {
     let font = CandidateFontPreference.font(.caption1, scale: scale)
     var run = AttributedString()
-    for marker in markers {
+    for marker in markers where !marker.symbol.isEmpty {
       guard let image = UIImage(systemName: marker.symbol, withConfiguration: UIImage.SymbolConfiguration(font: font))?
         .withTintColor(color, renderingMode: .alwaysOriginal) else { continue }
       run += AttributedString(" ")
@@ -7312,9 +7497,21 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 密码、验证码这类输入框和隐私模式下根本没有「云端」页，也就什么都不去取（`KeyboardPrivacyGate` 的 `cloudClipboard`，与 Android 的 `cloudClipboardAllowed` 一致）；本机历史照常可插入，只是不保存新的剪贴板。
     let cloud = privacyGate.allows(.cloudClipboard) ? KeyboardCloudClipboard(hasFullAccess: hasFullAccess) : nil
     cloud?.fieldAllowsCloud = { [weak self] in self?.privacyGate.allows(.cloudClipboard) ?? false }
+    let documentIdentifier = textDocumentProxy.documentIdentifier
     let panel = KeyboardClipboardView(
       hasFullAccess: hasFullAccess, cloud: cloud,
       capturesHistory: { [weak self] in self?.privacyGate.allows(.clipboardHistory) ?? false },
+      allowsCode: { [weak self] in
+        guard let self else { return false }
+        return textDocumentProxy.documentIdentifier == documentIdentifier && !KeyboardPrivacyPreference.incognito
+          && textDocumentProxy.textContentType != .password && textDocumentProxy.textContentType != .newPassword
+          && (MetasequoiaInputSessionBridge.loadSharedPreferences()?["verification_code_suggestions"] as? Bool ?? true)
+      }, onCode: { [weak self] code in
+        guard let self, textDocumentProxy.documentIdentifier == documentIdentifier else { return }
+        // 验证码直接交给输入连接，不进入学习、上下文缓存或统计。
+        textDocumentProxy.insertText(code)
+        closeKeyboardPicker()
+      }, onSystemCode: { [weak self] in self?.advanceToNextInputMode() },
       showsHeader: false, onInsert: { [weak self] text in
       guard let self else { return }
       render(session.finishComposition())
@@ -7361,7 +7558,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   /// 在键区显示 `panel`：位于顶栏之下、按键之上，面板打开期间按键隐藏，透明面板就不会透出它们。工具栏留在上方且可操作，因为关面板靠的就是它的按钮。
-  private func installPanel(_ panel: UIView) {
+  /// `keepsKeyTouches` 为真时键区只是看不见，按着的手指（按住空格说话）照常收到松开和移动；新的触摸落在面板上。
+  private func installPanel(_ panel: UIView, keepsKeyTouches: Bool = false) {
     guard let root = keyboardRoot, let topRow = compositionContainer else { return }
     // 面板替换回复面板的方式与替换按键相同。
     if replyKeyboardShown { closeReplyKeyboard() }
@@ -7375,7 +7573,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       panel.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       panel.trailingAnchor.constraint(equalTo: root.trailingAnchor),
     ])
-    setKeyRowsCovered(true)
+    setKeyRowsCovered(true, keepsTouches: keepsKeyTouches)
     updateToolbarActiveState()
     UIAccessibility.post(notification: .layoutChanged, argument: panel)
   }
@@ -7386,10 +7584,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   /// 隐藏或恢复顶栏下面的所有行，以及它们旁边的单手模式侧栏。这些行保留布局，键盘高度不变；它们只是不再绘制、不再接收触摸。
-  private func setKeyRowsCovered(_ covered: Bool) {
+  private func setKeyRowsCovered(_ covered: Bool, keepsTouches: Bool = false) {
     for row in keyColumn.arrangedSubviews + [oneHandGutter] {
       row.alpha = covered ? 0 : 1
-      row.isUserInteractionEnabled = !covered
+      row.isUserInteractionEnabled = !covered || keepsTouches
       row.accessibilityElementsHidden = covered
     }
   }
@@ -7748,6 +7946,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       panel.removeFromSuperview()
       voicePanel = nil
       UIAccessibility.post(notification: .layoutChanged, argument: spaceButton)
+    }
+    // 听写还没结束时面板被关掉（点面板、上滑取消、键盘收起、换出别的面板）就取消它。
+    if let dictation = voiceDictation {
+      voiceDictation = nil
+      voiceDictationContext = nil
+      voiceHoldOriginY = nil
+      dictation.cancel()
     }
     if keyAreaPanel != nil {
       keyAreaPanel = nil

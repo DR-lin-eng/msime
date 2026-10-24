@@ -401,13 +401,13 @@ pub struct PreferencesView {
     pub candidate_page_size: u8,
     /// Candidate font size in points, 12 to 32.
     pub candidate_font_size: u8,
-    /// Overall size of the floating candidate window in percent, 50 to 200; the font size and the window's geometry are both multiplied by it (Windows and macOS).
+    /// Overall size of the floating candidate window in percent, 50 to 200; the font size and the window's geometry are both multiplied by it (Windows, macOS and the Linux Fcitx5 candidate window; the Linux IBus panel scales only the font).
     pub candidate_scale_percent: u16,
-    /// Opacity of the candidate window's background, border and skin image in percent, 50 to 100; the text stays opaque.
+    /// Opacity of the candidate window's background, border and skin image in percent, 50 to 100; the text stays opaque. The Linux Fcitx5 candidate window honours it, the Linux IBus panel does not.
     pub candidate_opacity_percent: u8,
     /// Corner radius of the candidate window in points, 0 to 32. Null means the skin's or the platform's own radius.
     pub candidate_corner_radius: Option<u8>,
-    /// Space between the candidate window's edge and its candidates in points, 0 to 16, before the overall size scales it (macOS only). Null means the skin's or the platform's own padding.
+    /// Space between the candidate window's edge and its candidates in points, 0 to 16, before the overall size scales it (macOS and the Linux Fcitx5 candidate window; the Linux IBus panel ignores it). Null means the skin's or the platform's own padding.
     pub candidate_padding: Option<u8>,
     pub candidate_layout: Layout,
     pub candidate_follow_cursor: bool,
@@ -415,15 +415,23 @@ pub struct PreferencesView {
     pub number_row_selection: bool,
     /// 切换中英文时显示「中」或「英」的提示（macOS、Windows、Linux 和 HarmonyOS）。
     pub input_mode_hud: bool,
-    /// 在候选窗和悬浮工具栏左端显示水杉 logo（macOS 和 Windows；其他宿主始终显示，没有这个开关）。
+    /// 在候选窗和悬浮工具栏左端显示水杉 logo（macOS、Windows 和 Linux 的 Fcitx5 候选窗；Linux 的 IBus 面板不画 logo，其他宿主始终显示，没有这个开关）。
     pub show_app_logo: bool,
-    /// 候选窗显示页码（Linux 是辅助文本里的当前页/总页数，macOS 是首行的「1 / 3」和 ‹ › 翻页按钮）。这个开关不改变键盘和滚轮翻页；滚轮翻页由 `navigation.mouse_wheel` 另外控制，默认关闭，所以 macOS 上关掉它又没开滚轮时，鼠标就不能翻页了。
+    /// 候选窗显示页码（Linux 是辅助文本里的当前页/总页数，Fcitx5 候选窗连同 ‹ › 翻页按钮一起隐藏，IBus 面板自带的翻页箭头不受影响；macOS 是首行的「1 / 3」和 ‹ › 翻页按钮）。这个开关不改变键盘和滚轮翻页；滚轮翻页由 `navigation.mouse_wheel` 另外控制，默认关闭，所以 macOS 上关掉它又没开滚轮时，鼠标就不能翻页了。
     pub show_candidate_page_number: bool,
     pub fuzzy_pinyin: bool,
     /// The mode a newly focused text field starts in.
     pub default_ime_mode: StartMode,
     /// 应用例外（macOS 和 Windows）：切到这些应用时固定从这里给的模式开始，优先于按应用记忆和 `default_ime_mode`；用户在应用里手动切换后，本次停留期间让位。键在 macOS 上是 bundle id，在 Windows 上是程序文件名（如 `code.exe`，不分大小写）。
     pub app_input_mode_rules: BTreeMap<String, StartMode>,
+    /// 中英切换（英文候选模式）热键，写法同设置页录入（如 `Ctrl+Shift+KeyE`）；空串表示不绑定。
+    pub toggle_english_candidates: String,
+    /// 全角 / 半角切换热键（如 `Ctrl+Shift+Space`）；空串表示不绑定。
+    pub toggle_full_width: String,
+    /// 中英文标点切换热键（如 `Ctrl+Period`）；空串表示不绑定。
+    pub toggle_punctuation: String,
+    /// Vim 模式应用名单（macOS）：名单里的前台应用收到无修饰 Esc 时，输入法同时切到英文。标识口径同 `app_input_mode_rules`。
+    pub vim_mode_apps: Vec<String>,
     /// The width of the ASCII letters, digits and punctuation the input method outputs.
     pub character_width: Width,
     /// Type Chinese punctuation in Chinese mode.
@@ -442,6 +450,10 @@ pub struct PreferencesView {
     pub shuangpin_keymap_hint: Option<bool>,
     /// 五笔里，完整四码且只有一个候选时在第四键提交。
     pub wubi_auto_commit_unique: bool,
+    /// 五笔里 `z` 匹配码表该位置的任意一个字母（含首位）。
+    pub wubi_z_wildcard: bool,
+    /// 五笔里完整四码后再敲字母时上屏首选，并把该字母留作下一组开头。
+    pub wubi_fifth_code_top_commit: bool,
     /// Whether the input method writes its diagnostic log: focus changes, slow requests, candidate window and dictionary events and failures, never what is typed.
     pub diagnostic_log_server: bool,
     /// Windows only: whether the TIP adds its composition and key-latency records to the diagnostic log.
@@ -493,6 +505,10 @@ impl From<&PreferencesSnapshot> for PreferencesView {
                 .iter()
                 .map(|(id, rule)| (id.clone(), (*rule).into()))
                 .collect(),
+            toggle_english_candidates: preferences.keybindings.toggle_english_candidates.clone(),
+            toggle_full_width: preferences.keybindings.toggle_full_width.clone(),
+            toggle_punctuation: preferences.keybindings.toggle_punctuation.clone(),
+            vim_mode_apps: preferences.vim_mode_apps.clone(),
             character_width: preferences.character_width.into(),
             chinese_punctuation: preferences.chinese_punctuation,
             smart_punctuation: preferences.smart_punctuation,
@@ -502,6 +518,8 @@ impl From<&PreferencesSnapshot> for PreferencesView {
             wubi_code_hint: preferences.wubi_code_hint,
             shuangpin_keymap_hint: preferences.shuangpin_keymap_hint,
             wubi_auto_commit_unique: preferences.wubi_auto_commit_unique,
+            wubi_z_wildcard: preferences.wubi_z_wildcard,
+            wubi_fifth_code_top_commit: preferences.wubi_fifth_code_top_commit,
             diagnostic_log_server: preferences.diagnostic_log.server,
             diagnostic_log_tsf: preferences.diagnostic_log.tsf,
             game_candidate_overlay: preferences.game_compatibility.candidate_overlay,
@@ -555,6 +573,14 @@ pub struct PreferencesChange {
     pub default_ime_mode: Option<StartMode>,
     /// 整张替换应用例外表，`{}` 清空。最多 32 条；标识非空、不超过 64 字节、两端没有空白、不含控制字符和 `/` `\`，按 ASCII 不分大小写不能重复。
     pub app_input_mode_rules: Option<BTreeMap<String, StartMode>>,
+    /// 中英切换（英文候选模式）热键；写法同设置页录入（`Ctrl`/`Alt`/`Shift`/`Meta` 加主键），`""` 解绑。非法写法或与已有绑定冲突时整次更新被拒绝。
+    pub toggle_english_candidates: Option<String>,
+    /// 全角 / 半角切换热键，规则同上。
+    pub toggle_full_width: Option<String>,
+    /// 中英文标点切换热键，规则同上。
+    pub toggle_punctuation: Option<String>,
+    /// 整张替换 Vim 模式应用名单，`[]` 清空。条数与标识口径同 `app_input_mode_rules`。
+    pub vim_mode_apps: Option<Vec<String>>,
     pub character_width: Option<Width>,
     pub chinese_punctuation: Option<bool>,
     pub smart_punctuation: Option<bool>,
@@ -566,6 +592,8 @@ pub struct PreferencesChange {
     #[serde(default, deserialize_with = "present")]
     pub shuangpin_keymap_hint: Option<Option<bool>>,
     pub wubi_auto_commit_unique: Option<bool>,
+    pub wubi_z_wildcard: Option<bool>,
+    pub wubi_fifth_code_top_commit: Option<bool>,
     /// Turn on to look into a problem the user reports, and off again once it is understood.
     pub diagnostic_log_server: Option<bool>,
     /// Windows only; the other platforms keep it for the Windows settings to find.
@@ -606,6 +634,10 @@ impl PreferencesChange {
             && self.fuzzy_pinyin.is_none()
             && self.default_ime_mode.is_none()
             && self.app_input_mode_rules.is_none()
+            && self.toggle_english_candidates.is_none()
+            && self.toggle_full_width.is_none()
+            && self.toggle_punctuation.is_none()
+            && self.vim_mode_apps.is_none()
             && self.character_width.is_none()
             && self.chinese_punctuation.is_none()
             && self.smart_punctuation.is_none()
@@ -615,6 +647,8 @@ impl PreferencesChange {
             && self.wubi_code_hint.is_none()
             && self.shuangpin_keymap_hint.is_none()
             && self.wubi_auto_commit_unique.is_none()
+            && self.wubi_z_wildcard.is_none()
+            && self.wubi_fifth_code_top_commit.is_none()
             && self.diagnostic_log_server.is_none()
             && self.diagnostic_log_tsf.is_none()
             && self.game_candidate_overlay.is_none()
@@ -705,6 +739,18 @@ impl PreferencesChange {
                 .map(|(id, mode)| (id.clone(), (*mode).into()))
                 .collect();
         }
+        if let Some(chord) = &self.toggle_english_candidates {
+            preferences.keybindings.toggle_english_candidates = chord.clone();
+        }
+        if let Some(chord) = &self.toggle_full_width {
+            preferences.keybindings.toggle_full_width = chord.clone();
+        }
+        if let Some(chord) = &self.toggle_punctuation {
+            preferences.keybindings.toggle_punctuation = chord.clone();
+        }
+        if let Some(apps) = &self.vim_mode_apps {
+            preferences.vim_mode_apps = apps.clone();
+        }
         if let Some(width) = self.character_width {
             preferences.character_width = width.into();
         }
@@ -734,6 +780,12 @@ impl PreferencesChange {
         }
         if let Some(value) = self.wubi_auto_commit_unique {
             preferences.wubi_auto_commit_unique = value;
+        }
+        if let Some(value) = self.wubi_z_wildcard {
+            preferences.wubi_z_wildcard = value;
+        }
+        if let Some(value) = self.wubi_fifth_code_top_commit {
+            preferences.wubi_fifth_code_top_commit = value;
         }
         if let Some(value) = self.diagnostic_log_server {
             preferences.diagnostic_log.server = value;
@@ -1226,6 +1278,50 @@ mod tests {
     }
 
     #[test]
+    fn toggle_hotkeys_are_read_and_written_as_canonical_chords() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert_eq!(before.toggle_english_candidates, "Ctrl+Shift+KeyE");
+        assert_eq!(before.toggle_full_width, "Ctrl+Shift+Space");
+        assert_eq!(before.toggle_punctuation, "Ctrl+Period");
+        let run = |change: &PreferencesChange| {
+            update(directory.path(), &options, Edition::full(), change)
+        };
+        // 别名写法归一成规范形落盘；空串解绑。
+        let updated = run(&PreferencesChange {
+            toggle_english_candidates: Some("control+alt+keyr".into()),
+            toggle_punctuation: Some(String::new()),
+            ..change(before.revision)
+        })
+        .unwrap();
+        assert_eq!(updated.toggle_english_candidates, "Ctrl+Alt+KeyR");
+        assert_eq!(updated.toggle_punctuation, "");
+        // 非法写法和撞已有绑定的写法都被拒绝，文档不动。
+        for (change, expected) in [
+            (
+                PreferencesChange {
+                    toggle_punctuation: Some("Ctrl+".into()),
+                    ..change(updated.revision)
+                },
+                "切换热键必须是合法的快捷键组合",
+            ),
+            (
+                PreferencesChange {
+                    toggle_punctuation: Some("Ctrl+Shift+Space".into()),
+                    ..change(updated.revision)
+                },
+                "切换热键不能互相相同",
+            ),
+        ] {
+            let error = run(&change).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert_eq!(load(directory.path(), Edition::full()).unwrap(), updated);
+    }
+
+    #[test]
     fn smart_punctuation_writes_both_halves_with_the_master_switch() {
         let directory = tempfile::tempdir().unwrap();
         let options = directory.path().join("runtime-options.json");
@@ -1282,6 +1378,8 @@ mod tests {
                 traditional_chinese_output: Some(true),
                 wubi_code_hint: Some(false),
                 wubi_auto_commit_unique: Some(false),
+                wubi_z_wildcard: Some(true),
+                wubi_fifth_code_top_commit: Some(false),
                 diagnostic_log_server: Some(true),
                 ..change(before.revision)
             },
@@ -1295,6 +1393,8 @@ mod tests {
         assert!(updated.traditional_chinese_output);
         assert!(!updated.wubi_code_hint);
         assert!(!updated.wubi_auto_commit_unique);
+        assert!(updated.wubi_z_wildcard);
+        assert!(!updated.wubi_fifth_code_top_commit);
         assert!(updated.diagnostic_log_server && !updated.diagnostic_log_tsf);
         assert_eq!(updated.revision, before.revision + 1);
 
@@ -1315,6 +1415,8 @@ mod tests {
         expected.traditional_chinese_output = true;
         expected.wubi_code_hint = false;
         expected.wubi_auto_commit_unique = false;
+        expected.wubi_z_wildcard = true;
+        expected.wubi_fifth_code_top_commit = false;
         expected.diagnostic_log.server = true;
         expected.fuzzy_pinyin = stored.preferences.fuzzy_pinyin.clone();
         assert_eq!(json!(stored.preferences), json!(expected));
@@ -1557,6 +1659,47 @@ mod tests {
         let cleared = update(directory.path(), &options, Edition::full(), &cleared).unwrap();
         assert!(cleared.app_input_mode_rules.is_empty());
         assert_eq!(cleared.shuangpin_keymap_hint, None);
+    }
+
+    /// Vim 模式名单与应用例外同一份读写通路：整张替换、`[]` 清空、非法标识拒存。
+    #[test]
+    fn vim_mode_apps_are_set_cleared_and_invalid_entries_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let store = PreferencesStore::new(directory.path());
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert!(before.vim_mode_apps.is_empty());
+
+        let set: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": before.revision,
+            "vim_mode_apps": ["com.apple.Terminal", "nvim.exe"],
+        }))
+        .unwrap();
+        assert!(!set.is_empty());
+        let updated = update(directory.path(), &options, Edition::full(), &set).unwrap();
+        assert_eq!(updated.vim_mode_apps, ["com.apple.Terminal", "nvim.exe"]);
+        assert_eq!(
+            store.load().unwrap().preferences.vim_mode_apps,
+            ["com.apple.Terminal", "nvim.exe"]
+        );
+
+        // 与 valid_vim_mode_apps 同一口径：只差大小写的两条命中同一个应用，存储层拒绝，原名单不变。
+        let duplicate: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": updated.revision,
+            "vim_mode_apps": ["Code.exe", "code.exe"],
+        }))
+        .unwrap();
+        assert!(update(directory.path(), &options, Edition::full(), &duplicate).is_err());
+        assert_eq!(store.load().unwrap().preferences.vim_mode_apps.len(), 2);
+
+        let cleared: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": updated.revision,
+            "vim_mode_apps": [],
+        }))
+        .unwrap();
+        let cleared = update(directory.path(), &options, Edition::full(), &cleared).unwrap();
+        assert!(cleared.vim_mode_apps.is_empty());
     }
 
     /// AI 助手只能关不能开，关掉时接口地址、模型和密钥原样留着，用户在设置里重新打开就能接着用。

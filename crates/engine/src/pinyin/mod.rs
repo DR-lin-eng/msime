@@ -9,4 +9,5 @@ pub mod jianpin;
 pub mod normalize;
 pub mod segment;
 pub mod syllables;
+pub mod touch;
 pub mod typos;

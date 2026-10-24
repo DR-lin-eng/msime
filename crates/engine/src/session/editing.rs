@@ -109,6 +109,9 @@ impl InputSession {
 
     /// 从编辑文字里删掉 `removed` 后剩下 `text`。网址模式删空就退出；删掉的是末尾那个、正是进入网址模式的键（`url_reverts`）时退回组字，否则与其他模式一样替换编辑文字。
     fn delete_editing_character(&mut self, text: String, caret: usize, removed: char) -> KeyResult {
+        if !self.dedicated_english && self.local_mode == LocalInputMode::None {
+            self.engine.edit_touch_points(caret, 1, None);
+        }
         if self.local_mode == LocalInputMode::Url {
             // 网址删空后没有前缀字母可留，退出模式，否则会停在空的网址模式里吞掉后续按键。
             if text.is_empty() {
@@ -130,6 +133,8 @@ impl InputSession {
         let lower = value.is_ascii_lowercase();
         let upper = value.is_ascii_uppercase();
         let mut accepted = lower || upper;
+        // 真正落进输入串的字符：句中标记键在串里一律记成 `` ` ``，其余键就是自己。
+        let mut inserted = value;
         if !self.dedicated_english {
             match self.local_mode {
                 LocalInputMode::Unicode => {
@@ -160,17 +165,46 @@ impl InputSession {
                         && scheme == SchemeType::Shuangpin
                         && self.profile.uses_semicolon_key()
                     {
-                        // `;`（微软的 ing，或自定义方案放在 `;` 上的韵母、零声母编码的第二个键）只能补完一个奇数长度的片段。
-                        let start = text[..caret].rfind('\'').map_or(0, |at| at + 1);
-                        accepted = (caret - start) % 2 == 1;
+                        // `;`（微软的 ing，或自定义方案放在 `;` 上的韵母、零声母编码的第二个键）只能补完一个奇数长度的片段；辅助码段不算这一节的键。
+                        accepted = crate::shuangpin::mid_sentence::accepts_semicolon_final_at(
+                            text.as_bytes(),
+                            caret,
+                            self.shuangpin_helpcode_uppercase_triggers(),
+                        );
+                    }
+                    // 句中标记：`;`/反引号在光标处能开一段时一律记成 `` ` ``；分号先让给 ing
+                    // （`IsMidSentenceHelpcodeMarkerKey`/`AcceptsMarkerAt`，光标可以不在末尾）。
+                    if !accepted && scheme == SchemeType::Shuangpin {
+                        let modes = self.engine.request().shuangpin_helpcode_modes;
+                        let mid_trigger = match value {
+                            b'`' => modes.mid_sentence_backtick,
+                            b';' => modes.mid_sentence_semicolon,
+                            _ => false,
+                        };
+                        if modes.mid_sentence
+                            && mid_trigger
+                            && crate::shuangpin::mid_sentence::accepts_marker_at(
+                                text.as_bytes(),
+                                caret,
+                                self.shuangpin_helpcode_uppercase_triggers(),
+                            )
+                        {
+                            accepted = true;
+                            inserted = crate::shuangpin::mid_sentence::MID_SENTENCE_MARKER;
+                        }
                     }
                     if value == b'\'' && scheme.accepts_apostrophe() {
                         accepted = caret > 0;
                     }
                 }
-                LocalInputMode::Emoji
-                | LocalInputMode::Kaomoji
-                | LocalInputMode::TemporaryJapanese => accepted = accepted || value == b'\'',
+                LocalInputMode::Emoji | LocalInputMode::Kaomoji => {
+                    accepted = accepted || value == b'\'';
+                }
+                LocalInputMode::TemporaryJapanese => {
+                    accepted = accepted || matches!(value, b'\'' | b'-');
+                }
+                // 与 `handle_local_character` 同一组规则：符号模式只收字母。
+                LocalInputMode::Symbol => accepted = value.is_ascii_alphabetic(),
                 LocalInputMode::SuperJianpin | LocalInputMode::TemporaryEnglish => {}
                 LocalInputMode::Expression => {
                     accepted = text.len() < GENERATED_MODE_INPUT_LIMIT
@@ -233,7 +267,10 @@ impl InputSession {
         {
             return KeyResult::handled();
         }
-        text.insert(caret, value as char);
+        text.insert(caret, inserted as char);
+        if !self.dedicated_english && self.local_mode == LocalInputMode::None {
+            self.engine.edit_touch_points(caret, 0, Some(inserted));
+        }
         self.replace_editing_text(&text, caret + 1)
     }
 
@@ -264,7 +301,7 @@ impl InputSession {
         self.caret = Some(caret);
         // The edit may have moved the caret into or out of a complete prefix.
         self.update_mixed_candidates();
-        self.online_requests.invalidate();
+        self.invalidate_online_requests();
         self.discard_abandoned_phrase_progress();
         KeyResult::handled().with_diagnostic(diagnostic)
     }
@@ -279,25 +316,41 @@ impl InputSession {
         if raw_with_cases.is_empty() {
             return Vec::new();
         }
-        if self.has_literal_capitals() {
+        if self.has_literal_input() {
             return self.literal_raw_boundaries();
         }
         match self.engine.current_scheme_type() {
             SchemeType::Shuangpin => {
                 let profile = self.shuangpin_profile();
-                let raw = &self.engine.request().raw_input;
-                let helpcode_length =
-                    detect_active_double_helpcode_length(raw, raw_with_cases, profile);
-                let base = if helpcode_length > 0 {
-                    trim_trailing_letters_preserve_delimiters(raw_with_cases, helpcode_length)
+                let request = self.engine.request();
+                // 带辅助码段时音节边界在去段串上算，再按 source_index 映回原串（编辑文本含段标记）。
+                let (clean, index_map) = if request.raw_input_with_helpcode_marks.is_empty() {
+                    (raw_with_cases, None)
                 } else {
-                    raw_with_cases.to_owned()
+                    (
+                        request.raw_input_with_cases.as_str(),
+                        Some(&request.helpcode_source_index),
+                    )
+                };
+                let helpcode_length =
+                    detect_active_double_helpcode_length(&request.raw_input, clean, profile);
+                let base = if helpcode_length > 0 {
+                    trim_trailing_letters_preserve_delimiters(clean, helpcode_length)
+                } else {
+                    clean.to_owned()
                 };
                 let mut boundaries = segment_raw_boundaries(&base, profile);
                 if helpcode_length > 0 && !boundaries.is_empty() {
                     // The active double helpcode is one editable unit of its own, the same boundary raw_segmentation draws before it.
                     boundaries.push(base.len());
-                    boundaries.push(raw_with_cases.len());
+                    boundaries.push(clean.len());
+                    boundaries.sort_unstable();
+                    boundaries.dedup();
+                }
+                if let Some(index_map) = index_map {
+                    for boundary in &mut boundaries {
+                        *boundary = index_map[*boundary];
+                    }
                     boundaries.sort_unstable();
                     boundaries.dedup();
                 }
@@ -321,6 +374,8 @@ impl InputSession {
 
     /// 将光标限制在可编辑范围内并重算前缀候选；禁止内部光标的方案仍留在末尾。
     pub(super) fn set_caret(&mut self, caret: Option<usize>) {
+        self.exit_date_time_menu();
+        self.helpcode_entry = None;
         // 宿主直接放字母光标，就是回到拼音编辑。
         self.leave_conversion();
         if self.engine.current_scheme_type().locks_caret()
@@ -400,10 +455,13 @@ impl InputSession {
         self.prefix_active = true;
     }
 
-    /// The typed raw input with its case, as the scheme holds it.
+    /// The typed raw input with its case, as the scheme holds it. 带辅助码段时是用户敲的原串
+    /// （含段标记），与 `get_pinyin_sequence_with_cases` 一致。
     pub(super) fn raw_with_cases(&self) -> &str {
         let request = self.engine.request();
-        if request.raw_input_with_cases.is_empty() {
+        if !request.raw_input_with_helpcode_marks.is_empty() {
+            &request.raw_input_with_helpcode_marks
+        } else if request.raw_input_with_cases.is_empty() {
             &request.raw_input
         } else {
             &request.raw_input_with_cases

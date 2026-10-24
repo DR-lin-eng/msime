@@ -213,6 +213,356 @@ fn japanese_toggle_defaults_off_and_persists_an_explicit_enable() {
 }
 
 #[test]
+fn trilingual_cycle_defaults_off_and_persists_an_explicit_enable() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let snapshot = store.load().unwrap();
+    // 默认对齐旧版 Windows 正式版的出厂值。
+    assert!(!snapshot.preferences.keybindings.trilingual_cycle);
+    // 早于这个开关的文档没有这个键，读出来是关。
+    let mut value = serde_json::to_value(&snapshot.preferences).unwrap();
+    assert_eq!(
+        value["keybindings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("trilingual_cycle"),
+        Some(false.into())
+    );
+    let legacy: Preferences = serde_json::from_value(value.clone()).unwrap();
+    assert!(!legacy.keybindings.trilingual_cycle);
+    // 打开它，「切换中英文」那一组快捷键本身不变：循环与否是另一项。
+    value["keybindings"]["trilingual_cycle"] = true.into();
+    let enabled: Preferences = serde_json::from_value(value).unwrap();
+    store.save(snapshot.revision, enabled).unwrap();
+    let keybindings = store.load().unwrap().preferences.keybindings;
+    assert_eq!(
+        keybindings,
+        KeybindingPreferences {
+            trilingual_cycle: true,
+            ..KeybindingPreferences::default()
+        }
+    );
+}
+
+#[test]
+fn toggle_hotkeys_use_the_legacy_factory_defaults() {
+    let keybindings = Preferences::default().keybindings;
+    assert_eq!(keybindings.toggle_english_candidates, "Ctrl+Shift+KeyE");
+    assert_eq!(keybindings.toggle_full_width, "Ctrl+Shift+Space");
+    assert_eq!(keybindings.toggle_punctuation, "Ctrl+Period");
+    // 出厂值不落盘：写出的文档不带这三个键；没有这三个键的旧文档读回来还是出厂值。
+    let value = serde_json::to_value(Preferences::default()).unwrap();
+    let object = value["keybindings"].as_object().unwrap();
+    for key in [
+        "toggle_english_candidates",
+        "toggle_full_width",
+        "toggle_punctuation",
+    ] {
+        assert!(
+            !object.contains_key(key),
+            "{key} must stay out of the default document"
+        );
+    }
+    let restored: Preferences = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.keybindings, Preferences::default().keybindings);
+}
+
+#[test]
+fn toggle_hotkeys_persist_custom_chords_and_disabled_bindings() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let snapshot = store.load().unwrap();
+    let mut preferences = snapshot.preferences.clone();
+    preferences.keybindings.toggle_punctuation = "Ctrl+Alt+Slash".into();
+    preferences.keybindings.toggle_full_width = String::new();
+    store.save(snapshot.revision, preferences).unwrap();
+    let loaded = store.load().unwrap().preferences.keybindings;
+    assert_eq!(
+        loaded.punctuation_chord().unwrap().to_string(),
+        "Ctrl+Alt+Slash"
+    );
+    // 空串是「不绑定」，不是回到出厂值。
+    assert!(loaded.full_width_chord().is_none());
+    assert_eq!(loaded.toggle_full_width, "");
+}
+
+#[test]
+fn toggle_hotkeys_reject_unparseable_values() {
+    for bad in ["Ctrl+", "Ctrl+Alt+Shift", "Ctrl+Banana", "Period+Ctrl"] {
+        let mut preferences = Preferences::default();
+        preferences.keybindings.toggle_punctuation = bad.into();
+        assert!(matches!(
+            preferences.validate(),
+            Err(PreferencesError::InvalidToggleHotkey)
+        ));
+    }
+}
+
+#[test]
+fn toggle_hotkeys_reject_two_bindings_for_the_same_chord() {
+    let mut preferences = Preferences::default();
+    preferences.keybindings.toggle_punctuation = "control+shift+keye".into();
+    assert!(matches!(
+        preferences.validate(),
+        Err(PreferencesError::ConflictingToggleHotkeys)
+    ));
+    preferences.keybindings.toggle_punctuation = "Shift+Ctrl+Space".into();
+    assert!(matches!(
+        preferences.validate(),
+        Err(PreferencesError::ConflictingToggleHotkeys)
+    ));
+}
+
+#[test]
+fn toggle_hotkeys_reject_chords_owned_by_enabled_switches() {
+    // 保留表随开关开合：简繁开着时 Ctrl+Shift+F 被占用，关掉后才绑得出去。
+    for (text, reason) in [
+        ("Ctrl+Shift+KeyF", "简繁切换"),
+        ("Ctrl+Space", "Linux 语言切换"),
+        ("Ctrl+Alt+Space", "语言切换"),
+        ("Ctrl+F9", "语音切换"),
+        ("Ctrl+Shift+F9", "Windows 语音只看 Ctrl 按住"),
+        ("Ctrl+Alt+Shift+KeyC", "macOS 维护键"),
+    ] {
+        let mut preferences = Preferences::default();
+        preferences.keybindings.toggle_punctuation = text.into();
+        assert!(
+            matches!(
+                preferences.validate(),
+                Err(PreferencesError::ConflictingToggleHotkeys)
+            ),
+            "{text} must conflict ({reason})"
+        );
+    }
+    let mut preferences = Preferences::default();
+    preferences.keybindings.toggle_punctuation = "Ctrl+Shift+KeyF".into();
+    preferences.keybindings.toggle_character_set_ctrl_shift_f = false;
+    preferences.validate().unwrap();
+}
+
+#[test]
+fn toggle_hotkeys_all_empty_disables_every_toggle() {
+    let mut preferences = Preferences::default();
+    preferences.keybindings.toggle_english_candidates = String::new();
+    preferences.keybindings.toggle_full_width = String::new();
+    preferences.keybindings.toggle_punctuation = String::new();
+    preferences.validate().unwrap();
+    assert!(preferences.keybindings.english_candidates_chord().is_none());
+}
+
+#[test]
+fn toggle_hotkey_check_returns_the_canonical_spelling() {
+    let keybindings = KeybindingPreferences::default();
+    for (slot, text, expected) in [
+        (
+            ToggleHotkeySlot::EnglishCandidates,
+            "Ctrl+Alt+KeyR",
+            "Ctrl+Alt+KeyR",
+        ),
+        // 解析比文档宽：别名、大小写和修饰键顺序都归一成规范形。
+        (
+            ToggleHotkeySlot::Punctuation,
+            "control+alt+slash",
+            "Ctrl+Alt+Slash",
+        ),
+        (
+            ToggleHotkeySlot::FullWidth,
+            "shift+ctrl+period",
+            "Ctrl+Shift+Period",
+        ),
+    ] {
+        assert_eq!(
+            keybindings.check_toggle_hotkey(slot, text, true),
+            Ok(expected.to_string()),
+            "{text}"
+        );
+    }
+    // 空串是合法的「不绑定」，通过且回空。
+    assert_eq!(
+        keybindings.check_toggle_hotkey(ToggleHotkeySlot::Punctuation, "  ", true),
+        Ok(String::new())
+    );
+    // 写回自己当前的绑定不算冲突（写法不同、指向同一按键也归一成同一个值）。
+    assert_eq!(
+        keybindings.check_toggle_hotkey(ToggleHotkeySlot::Punctuation, "control+period", true),
+        Ok("Ctrl+Period".to_string())
+    );
+}
+
+#[test]
+fn toggle_hotkey_check_rejects_unparseable_text() {
+    let keybindings = KeybindingPreferences::default();
+    for bad in ["Ctrl+", "Ctrl+Alt+Shift", "Ctrl+Banana", "Period+Ctrl"] {
+        assert!(
+            matches!(
+                keybindings.check_toggle_hotkey(ToggleHotkeySlot::Punctuation, bad, true),
+                Err(ToggleHotkeyRejection::Invalid(_))
+            ),
+            "{bad} must fail"
+        );
+    }
+}
+
+#[test]
+fn toggle_hotkey_shift_space_follows_language_switch() {
+    let mut keybindings = KeybindingPreferences::default();
+    for slot in [
+        ToggleHotkeySlot::EnglishCandidates,
+        ToggleHotkeySlot::FullWidth,
+        ToggleHotkeySlot::Punctuation,
+    ] {
+        assert!(matches!(
+            keybindings.check_toggle_hotkey(slot, "Shift+Space", false),
+            Err(ToggleHotkeyRejection::Conflict { .. })
+        ));
+    }
+    let mut preferences = Preferences::default();
+    preferences.keybindings.toggle_punctuation = "Shift+Space".into();
+    assert!(preferences.validate().is_err());
+    keybindings.switch_language_shift = false;
+    assert_eq!(
+        keybindings.check_toggle_hotkey(ToggleHotkeySlot::Punctuation, "Shift+Space", false),
+        Ok("Shift+Space".into())
+    );
+    preferences.keybindings.switch_language_shift = false;
+    assert!(preferences.validate().is_ok());
+}
+
+#[test]
+fn toggle_hotkey_reserves_macos_width_and_screen_keyboard() {
+    let mut keys = KeybindingPreferences::default();
+    for text in ["Alt+Shift+KeyH", "Ctrl+Shift+Meta+KeyK"] {
+        assert!(matches!(
+            keys.check_toggle_hotkey(ToggleHotkeySlot::Punctuation, text, false),
+            Err(ToggleHotkeyRejection::Conflict { .. })
+        ));
+        let mut preferences = Preferences::default();
+        preferences.keybindings.toggle_punctuation = text.into();
+        assert!(preferences.validate().is_err());
+    }
+    keys.toggle_fullwidth_option_shift_h = false;
+    assert_eq!(
+        keys.check_toggle_hotkey(ToggleHotkeySlot::Punctuation, "Alt+Shift+KeyH", false),
+        Ok("Alt+Shift+KeyH".into())
+    );
+}
+
+#[test]
+fn toggle_hotkey_check_names_the_conflicting_owner() {
+    let keybindings = KeybindingPreferences {
+        toggle_japanese_ctrl_shift_j: true,
+        ..KeybindingPreferences::default()
+    };
+    // 撞另一个切换热键：owner 是那个槽位，设置页按它指出「与哪一项冲突」。
+    for (slot, text, owner) in [
+        (
+            ToggleHotkeySlot::Punctuation,
+            "ctrl+shift+keye",
+            ToggleChordOwner::EnglishCandidates,
+        ),
+        (
+            ToggleHotkeySlot::EnglishCandidates,
+            "Ctrl+Period",
+            ToggleChordOwner::Punctuation,
+        ),
+        // 撞已启用开关占用的组合键：owner 指到占用它的开关。
+        (
+            ToggleHotkeySlot::Punctuation,
+            "Ctrl+Shift+KeyF",
+            ToggleChordOwner::ToggleCharacterSetCtrlShiftF,
+        ),
+        (
+            ToggleHotkeySlot::FullWidth,
+            "Ctrl+Space",
+            ToggleChordOwner::SwitchLanguageCtrlSpace,
+        ),
+        (
+            ToggleHotkeySlot::FullWidth,
+            "Ctrl+Shift+KeyJ",
+            ToggleChordOwner::ToggleJapaneseCtrlShiftJ,
+        ),
+        (
+            ToggleHotkeySlot::FullWidth,
+            "Ctrl+F9",
+            ToggleChordOwner::VoiceHotkey,
+        ),
+        (
+            ToggleHotkeySlot::FullWidth,
+            "Ctrl+Shift+F9",
+            ToggleChordOwner::VoiceHotkey,
+        ),
+        // macOS 维护键没有开关，照样指名。
+        (
+            ToggleHotkeySlot::FullWidth,
+            "Ctrl+Alt+Shift+KeyT",
+            ToggleChordOwner::MacosMaintenance,
+        ),
+    ] {
+        let Err(ToggleHotkeyRejection::Conflict {
+            owner: actual,
+            chord,
+        }) = keybindings.check_toggle_hotkey(slot, text, true)
+        else {
+            panic!("{text} must conflict");
+        };
+        assert_eq!(actual, owner, "{text}");
+        assert_eq!(chord, text.parse().unwrap(), "{text}");
+    }
+    // owner 有跨进程用的稳定标识：撞切换热键时用文档字段名，撞占用键时用开关字段名或 `voice_hotkey` / `macos_maintenance`。
+    assert_eq!(
+        ToggleChordOwner::EnglishCandidates.id(),
+        "toggle_english_candidates"
+    );
+    assert_eq!(ToggleChordOwner::VoiceHotkey.id(), "voice_hotkey");
+    assert_eq!(ToggleChordOwner::MacosMaintenance.id(), "macos_maintenance");
+
+    // 占用随开关开合：关掉简繁、中日切换和语音热键后，这些组合键可以绑出去。
+    let mut keybindings = KeybindingPreferences {
+        toggle_character_set_ctrl_shift_f: false,
+        toggle_japanese_ctrl_shift_j: false,
+        ..KeybindingPreferences::default()
+    };
+    assert_eq!(
+        keybindings.check_toggle_hotkey(ToggleHotkeySlot::FullWidth, "Ctrl+Shift+KeyF", false),
+        Ok("Ctrl+Shift+KeyF".to_string())
+    );
+    assert_eq!(
+        keybindings.check_toggle_hotkey(ToggleHotkeySlot::FullWidth, "Ctrl+F9", false),
+        Ok("Ctrl+F9".to_string())
+    );
+    // 另一个切换热键解绑（空串）后，这个组合键也可以绑出去。
+    keybindings.toggle_punctuation = String::new();
+    assert_eq!(
+        keybindings.check_toggle_hotkey(ToggleHotkeySlot::FullWidth, "Ctrl+Period", false),
+        Ok("Ctrl+Period".to_string())
+    );
+}
+
+#[test]
+fn saving_canonicalizes_toggle_hotkey_spellings() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let snapshot = store.load().unwrap();
+    let mut preferences = snapshot.preferences.clone();
+    preferences.keybindings.toggle_punctuation = "control+alt+slash".into();
+    // 与出厂值等价的别名写法归一后与出厂写法相同，一样不落盘。
+    preferences.keybindings.toggle_english_candidates = "control+shift+keye".into();
+    let saved = store.save(snapshot.revision, preferences).unwrap();
+    assert_eq!(
+        saved.preferences.keybindings.toggle_punctuation,
+        "Ctrl+Alt+Slash"
+    );
+    assert_eq!(
+        saved.preferences.keybindings.toggle_english_candidates,
+        "Ctrl+Shift+KeyE"
+    );
+    let document = serde_json::to_value(&saved).unwrap();
+    let keybindings = document["preferences"]["keybindings"].as_object().unwrap();
+    assert_eq!(keybindings["toggle_punctuation"], "Ctrl+Alt+Slash");
+    assert!(!keybindings.contains_key("toggle_english_candidates"));
+}
+
+#[test]
 fn voice_commit_mode_defaults_for_legacy_documents() {
     let mut value = serde_json::to_value(Preferences::default()).unwrap();
     value["voice_input"]
@@ -512,6 +862,65 @@ fn candidate_pronunciation_is_opt_in_and_round_trips() {
 }
 
 #[test]
+fn candidate_translation_display_defaults_follow_windows_factory_config() {
+    let defaults = Preferences::default();
+    assert!(defaults.candidate_translation_show_pos);
+    assert!(!defaults.candidate_translation_single_sense);
+
+    // 旧文档缺这两个键时按 Windows v0.11.1 的出厂配置补上。
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    let fields = legacy.as_object_mut().unwrap();
+    fields.remove("candidate_translation_show_pos");
+    fields.remove("candidate_translation_single_sense");
+    let parsed = serde_json::from_value::<Preferences>(legacy).unwrap();
+    assert!(parsed.candidate_translation_show_pos);
+    assert!(!parsed.candidate_translation_single_sense);
+
+    // 用户显式保存的选择原样往返。
+    let saved = Preferences {
+        candidate_translation_show_pos: false,
+        candidate_translation_single_sense: true,
+        ..defaults
+    };
+    let round_tripped =
+        serde_json::from_str::<Preferences>(&serde_json::to_string(&saved).unwrap()).unwrap();
+    assert!(!round_tripped.candidate_translation_show_pos);
+    assert!(round_tripped.candidate_translation_single_sense);
+}
+
+#[test]
+fn candidate_badge_defaults_follow_windows_factory_config() {
+    let defaults = Preferences::default();
+    assert!(defaults.candidate_fixed_badge);
+    assert_eq!(defaults.candidate_fixed_badge_style, "paperclip");
+    assert_eq!(defaults.candidate_ai_badge_style, "robot");
+
+    // 旧文档缺这几个键时按 Windows v0.11.1 的出厂配置补上。
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    let fields = legacy.as_object_mut().unwrap();
+    fields.remove("candidate_fixed_badge");
+    fields.remove("candidate_fixed_badge_style");
+    fields.remove("candidate_ai_badge_style");
+    let parsed = serde_json::from_value::<Preferences>(legacy).unwrap();
+    assert!(parsed.candidate_fixed_badge);
+    assert_eq!(parsed.candidate_fixed_badge_style, "paperclip");
+    assert_eq!(parsed.candidate_ai_badge_style, "robot");
+
+    // 用户显式保存的选择原样往返。
+    let saved = Preferences {
+        candidate_fixed_badge: false,
+        candidate_fixed_badge_style: "dot".to_string(),
+        candidate_ai_badge_style: "whale".to_string(),
+        ..defaults
+    };
+    let round_tripped =
+        serde_json::from_str::<Preferences>(&serde_json::to_string(&saved).unwrap()).unwrap();
+    assert!(!round_tripped.candidate_fixed_badge);
+    assert_eq!(round_tripped.candidate_fixed_badge_style, "dot");
+    assert_eq!(round_tripped.candidate_ai_badge_style, "whale");
+}
+
+#[test]
 fn english_suggestions_default_on_and_legacy_documents_preserve_it() {
     let defaults = Preferences::default();
     assert!(defaults.english_suggestions);
@@ -707,6 +1116,34 @@ fn candidate_translations_keep_legacy_and_explicit_choices() {
 }
 
 #[test]
+fn voice_language_default_uses_the_bcp47_region_form() {
+    // 共享设置页（React 的 `defaultVoiceInput`）和 macOS 原生回退窗口都写 `zh-CN`。共享默认以前是
+    // 小写的 `zh-cn`，同一份文档因此可能带着两种写法，界面和读盘比较只能靠不区分大小写兜住。
+    // 统一成区域形式后，宿主和页面显示的是同一个码。
+    let defaults = Preferences::default();
+    assert_eq!(defaults.voice_input.language, "zh-CN");
+    let serialized = serde_json::to_value(&defaults).unwrap();
+    assert_eq!(serialized["voice_input"]["language"], "zh-CN");
+    assert_eq!(
+        serde_json::from_value::<Preferences>(serialized)
+            .unwrap()
+            .voice_input
+            .language,
+        "zh-CN"
+    );
+    // 只改出厂值：用户或旧版本写下的短形式原样保留，不在这里做迁移改写。
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy["voice_input"]["language"] = "zh-cn".into();
+    assert_eq!(
+        serde_json::from_value::<Preferences>(legacy)
+            .unwrap()
+            .voice_input
+            .language,
+        "zh-cn"
+    );
+}
+
+#[test]
 fn translation_account_is_an_explicit_choice_on_every_platform() {
     let defaults = Preferences::default();
     assert!(!defaults.translation_account);
@@ -818,6 +1255,59 @@ fn wubi_auto_commit_unique_defaults_on_and_roundtrips() {
         !serde_json::from_str::<Preferences>(&serde_json::to_string(&disabled).unwrap())
             .unwrap()
             .wubi_auto_commit_unique
+    );
+}
+
+#[test]
+fn wubi_z_wildcard_defaults_off_and_roundtrips() {
+    let defaults = Preferences::default();
+    // 来源出厂 `wubi_z_mode = "off"`：新键的缺省必须跟它一致。
+    assert!(!defaults.wubi_z_wildcard);
+
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy.as_object_mut().unwrap().remove("wubi_z_wildcard");
+    assert!(
+        !serde_json::from_value::<Preferences>(legacy)
+            .unwrap()
+            .wubi_z_wildcard
+    );
+
+    let enabled = Preferences {
+        wubi_z_wildcard: true,
+        ..defaults
+    };
+    assert!(
+        serde_json::from_str::<Preferences>(&serde_json::to_string(&enabled).unwrap())
+            .unwrap()
+            .wubi_z_wildcard
+    );
+}
+
+#[test]
+fn wubi_fifth_code_top_commit_defaults_on_and_roundtrips() {
+    let defaults = Preferences::default();
+    // 来源出厂 `wubi_fifth_code_top_commit = true`，也是接入开关之前唯一可能的行为。
+    assert!(defaults.wubi_fifth_code_top_commit);
+
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("wubi_fifth_code_top_commit");
+    assert!(
+        serde_json::from_value::<Preferences>(legacy)
+            .unwrap()
+            .wubi_fifth_code_top_commit
+    );
+
+    let disabled = Preferences {
+        wubi_fifth_code_top_commit: false,
+        ..defaults
+    };
+    assert!(
+        !serde_json::from_str::<Preferences>(&serde_json::to_string(&disabled).unwrap())
+            .unwrap()
+            .wubi_fifth_code_top_commit
     );
 }
 
@@ -1078,14 +1568,15 @@ fn generated_local_modes_are_off_by_default_and_when_absent() {
         !defaults.expression && !defaults.command && !defaults.mention && !defaults.mention_places
     );
 
-    // A document without the switches loads with them off and the rest as written.
+    // A document without the switches loads with the factory values and the rest as written.
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
     let mut sparse = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
     let local_modes = sparse["preferences"]["local_modes"]
         .as_object_mut()
         .unwrap();
-    for key in ["expression", "command", "mention", "mention_places"] {
+    assert_eq!(local_modes.remove("expression"), Some(false.into()));
+    for key in ["command", "mention", "mention_places"] {
         assert_eq!(local_modes.remove(key), Some(false.into()), "{key}");
     }
     local_modes.insert("unicode".into(), false.into());
@@ -1129,7 +1620,9 @@ fn generated_local_modes_are_off_by_default_and_when_absent() {
         );
         let written: serde_json::Value =
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(written["preferences"]["local_modes"][*key], true);
+        assert!(written["preferences"]["local_modes"][*key]
+            .as_bool()
+            .unwrap());
     }
 
     // 别的键是更新版本的模式：读得进来，记为未知键，保存时原样写回。
@@ -1175,8 +1668,40 @@ fn shift_letter_entry_defaults_on_and_survives_a_save() {
 }
 
 #[test]
+fn symbol_mode_defaults_on_and_is_written_only_when_off() {
+    // 与 Windows 正式版的出厂配置一致：缺键读作开，文档里也不写这个键。
+    assert!(LocalModePreferences::default().symbol);
+    let written = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(written["local_modes"].get("symbol").is_none());
+
+    // 早于符号模式的文档没有这个键，读出来仍是开，其余模式开关照原样。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut sparse = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    let local_modes = sparse["preferences"]["local_modes"]
+        .as_object_mut()
+        .unwrap();
+    assert_eq!(local_modes.remove("symbol"), None);
+    local_modes.insert("emoji".into(), false.into());
+    fs::write(store.path(), serde_json::to_vec(&sparse).unwrap()).unwrap();
+    let loaded = store.load().unwrap().preferences.local_modes;
+    assert!(loaded.symbol && !loaded.emoji && loaded.unicode);
+
+    // 关掉后文档里写 false，读回来还是关。
+    let mut value = serde_json::to_value(Preferences::default()).unwrap();
+    value["local_modes"]["symbol"] = false.into();
+    store
+        .save(0, serde_json::from_value(value).unwrap())
+        .unwrap();
+    assert!(!store.load().unwrap().preferences.local_modes.symbol);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(on_disk["preferences"]["local_modes"]["symbol"], false);
+}
+
+#[test]
 fn chaizi_is_unset_until_the_user_flips_it() {
-    // 缺省是 `None`：由宿主形态决定开关，文档里也不写这个键，旧版本照常读得懂。
+    // 缺省是 `None`：host-api 按宿主形态读缺键（触屏开、桌面关），文档里也不写这个键，旧版本照常读得懂。
     assert_eq!(LocalModePreferences::default().chaizi, None);
     let written = serde_json::to_value(Preferences::default()).unwrap();
     assert!(written["local_modes"].get("chaizi").is_none());
@@ -1201,6 +1726,117 @@ fn chaizi_is_unset_until_the_user_flips_it() {
             serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(on_disk["preferences"]["local_modes"]["chaizi"], flag);
     }
+}
+
+/// 序列化默认值后删掉一个键，等价于「早于这个键的文档」。
+fn modes_without(key: &str) -> LocalModePreferences {
+    let mut value = serde_json::to_value(LocalModePreferences::default()).unwrap();
+    value.as_object_mut().unwrap().remove(key);
+    serde_json::from_value(value).unwrap()
+}
+
+/// emoji / 颜文字快捷模式是必填成员，缺键的 `local_modes` 整份读不进、退回全默认（与旧版本一致）；文档里写明的值原样生效。Windows v0.11.1 出厂关，本仓出厂值为开，差异已记录、是否对齐留待产品决策。
+#[test]
+fn emoji_and_kaomoji_modes_default_on_and_keep_written_values() {
+    let defaults = LocalModePreferences::default();
+    assert!(defaults.emoji && defaults.kaomoji);
+    for flag in [true, false] {
+        let modes: LocalModePreferences = serde_json::from_value(serde_json::json!({
+            "unicode": true, "date_time": true, "quick_phrase": true,
+            "emoji": flag, "kaomoji": flag, "super_jianpin": true,
+            "temporary_english": true, "temporary_japanese": true
+        }))
+        .unwrap();
+        assert_eq!([modes.emoji, modes.kaomoji], [flag, flag], "{flag}");
+    }
+}
+
+/// V 模式（Windows `utility.v_mode` 出厂开）本仓出厂值为关，缺键读作关；差异已记录。文档里写明的开不被覆盖。
+#[test]
+fn expression_mode_defaults_off() {
+    assert!(!LocalModePreferences::default().expression);
+    assert!(!modes_without("expression").expression);
+    let mut value = serde_json::to_value(LocalModePreferences::default()).unwrap();
+    value["expression"] = true.into();
+    let modes: LocalModePreferences = serde_json::from_value(value).unwrap();
+    assert!(modes.expression);
+}
+
+/// 行内日期时间混入（对应 Windows `utility.date_time_candidates`，出厂关）与 T 模式（date_time）是两个独立开关；缺键读作开——此前由 `date_time` 一并控制且默认开，保持同样的有效行为，开着时不写进文档。
+#[test]
+fn date_time_inline_defaults_on_and_is_written_only_when_off() {
+    assert!(LocalModePreferences::default().date_time_inline);
+    let written = serde_json::to_value(LocalModePreferences::default()).unwrap();
+    assert!(written.get("date_time_inline").is_none());
+    assert!(modes_without("date_time_inline").date_time_inline);
+    assert!(modes_without("date_time_inline").date_time_menu);
+    let mut value = serde_json::to_value(LocalModePreferences::default()).unwrap();
+    value["date_time_inline"] = false.into();
+    let modes: LocalModePreferences = serde_json::from_value(value).unwrap();
+    assert!(!modes.date_time_inline);
+}
+
+/// 左右键候选导航（Windows `general.candidate_horizontal_arrow_navigation` 出厂关）本仓出厂值为开，缺键读作开；差异已记录。文档里写明的关不被覆盖。
+#[test]
+fn left_right_navigation_defaults_on() {
+    assert!(NavigationPreferences::default().left_right);
+    let mut value = serde_json::to_value(NavigationPreferences::default()).unwrap();
+    value.as_object_mut().unwrap().remove("left_right");
+    let navigation: NavigationPreferences = serde_json::from_value(value).unwrap();
+    assert!(navigation.left_right && navigation.arrows);
+    let mut value = serde_json::to_value(NavigationPreferences::default()).unwrap();
+    value["left_right"] = false.into();
+    let navigation: NavigationPreferences = serde_json::from_value(value).unwrap();
+    assert!(!navigation.left_right);
+}
+
+/// 符号混输（Windows `general.symbol_mixed_input` 出厂关）本仓出厂值为开，缺键读作开、开着不写进文档；差异已记录。文档里写明的关不被覆盖。
+#[test]
+fn mixed_symbols_defaults_on() {
+    assert!(MixedInputPreferences::default().symbols);
+    let mut value = serde_json::to_value(MixedInputPreferences::default()).unwrap();
+    value.as_object_mut().unwrap().remove("symbols");
+    let mixed: MixedInputPreferences = serde_json::from_value(value).unwrap();
+    assert!(mixed.symbols);
+    let mut value = serde_json::to_value(MixedInputPreferences::default()).unwrap();
+    value["symbols"] = false.into();
+    let mixed: MixedInputPreferences = serde_json::from_value(value).unwrap();
+    assert!(!mixed.symbols);
+}
+
+/// 辅助码开关（Windows v0.11.1 出厂关、门禁 pin 出厂开）本仓出厂值为开，缺键读作开；差异已记录。文档里写明的值原样生效。
+#[test]
+fn helpcode_enabled_defaults_on() {
+    assert!(HelpcodePreferences::default().enabled);
+    assert!(default_quanpin_helpcode().enabled && default_shuangpin_helpcode().enabled);
+    let mut value = serde_json::to_value(default_shuangpin_helpcode()).unwrap();
+    value.as_object_mut().unwrap().remove("enabled");
+    let helpcode: HelpcodePreferences = serde_json::from_value(value).unwrap();
+    assert!(helpcode.enabled);
+    let mut value = serde_json::to_value(default_quanpin_helpcode()).unwrap();
+    value.as_object_mut().unwrap().remove("enabled");
+    let helpcode: HelpcodePreferences = serde_json::from_value(value).unwrap();
+    assert!(helpcode.enabled);
+    for flag in [true, false] {
+        let helpcode: HelpcodePreferences = serde_json::from_value(serde_json::json!({
+            "enabled": flag, "schema": "lantian"
+        }))
+        .unwrap();
+        assert_eq!(helpcode.enabled, flag, "{flag}");
+    }
+}
+
+/// Windows `appearance.candidate_window_fit_content` 出厂关（post-pin 键）：缺键读作关，开着时才写进文档；文档里写明的开不被覆盖。
+#[test]
+fn candidate_window_fit_content_defaults_off() {
+    let preferences = Preferences::default();
+    assert!(!preferences.candidate_window_fit_content);
+    let written = serde_json::to_value(&preferences).unwrap();
+    assert!(written.get("candidate_window_fit_content").is_none());
+    let mut value = written.clone();
+    value["candidate_window_fit_content"] = true.into();
+    let loaded: Preferences = serde_json::from_value(value).unwrap();
+    assert!(loaded.candidate_window_fit_content);
 }
 
 #[test]
@@ -1671,6 +2307,99 @@ fn app_input_mode_rule_identifiers_are_validated() {
 }
 
 #[test]
+fn vim_mode_apps_stay_out_of_the_document_until_written() {
+    // 没有名单时不写这个键，没有它的旧版本照样能读；缺这个键的文档读成空表。
+    let serialized = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(serialized.get("vim_mode_apps").is_none());
+    assert!(Preferences::default().vim_mode_apps.is_empty());
+
+    // macOS 的 bundle id 和 Windows 的进程基名放在同一份名单里，保存再读回原样不变。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let chosen = Preferences {
+        vim_mode_apps: vec![
+            "com.apple.Terminal".into(),
+            "code.exe".into(),
+            "nvim.exe".into(),
+        ],
+        ..Preferences::default()
+    };
+    let written = serde_json::to_value(&chosen).unwrap();
+    assert_eq!(
+        written["vim_mode_apps"],
+        serde_json::json!(["com.apple.Terminal", "code.exe", "nvim.exe"])
+    );
+    store.save(0, chosen.clone()).unwrap();
+    assert_eq!(
+        store.load().unwrap().preferences.vim_mode_apps,
+        chosen.vim_mode_apps
+    );
+    assert!(chosen.restored_to_defaults().vim_mode_apps.is_empty());
+
+    // 类型非法（不是字符串数组）时整个文档读不出。
+    let mut value = serde_json::to_value(Preferences::default()).unwrap();
+    value["vim_mode_apps"] = serde_json::json!({ "code.exe": true });
+    assert!(serde_json::from_value::<Preferences>(value).is_err());
+}
+
+#[test]
+fn vim_mode_app_identifiers_are_validated() {
+    let invalid: [fn(&mut Vec<String>); 8] = [
+        |apps| apps.push(String::new()),
+        |apps| apps.push(" code.exe".into()),
+        |apps| apps.push(r"C:\Program Files\code.exe".into()),
+        |apps| apps.push("apps/code".into()),
+        |apps| apps.push("code\n.exe".into()),
+        |apps| apps.push("a".repeat(MAX_APP_INPUT_MODE_RULE_ID_BYTES + 1)),
+        // 与应用例外同一口径：只差大小写的两条命中同一个应用。
+        |apps| {
+            apps.push("Code.exe".into());
+            apps.push("code.exe".into());
+        },
+        |apps| {
+            for index in 0..=MAX_APP_INPUT_MODE_RULES {
+                apps.push(format!("app{index}.exe"));
+            }
+        },
+    ];
+    for (index, change) in invalid.into_iter().enumerate() {
+        let mut preferences = Preferences::default();
+        change(&mut preferences.vim_mode_apps);
+        assert!(
+            matches!(
+                preferences.validate(),
+                Err(PreferencesError::InvalidVimModeApps)
+            ),
+            "{index}"
+        );
+    }
+
+    // 恰好上限的条数和字节数、带空格和非 ASCII 字符的名字都合法。
+    let mut preferences = Preferences::default();
+    for index in 0..MAX_APP_INPUT_MODE_RULES - 2 {
+        preferences.vim_mode_apps.push(format!("app{index}.exe"));
+    }
+    preferences
+        .vim_mode_apps
+        .push("a".repeat(MAX_APP_INPUT_MODE_RULE_ID_BYTES));
+    preferences.vim_mode_apps.push("终端 beta.app".into());
+    assert!(preferences.validate().is_ok());
+
+    // 拒绝的文档不会被保存。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let rejected = Preferences {
+        vim_mode_apps: vec!["apps/code".into()],
+        ..Preferences::default()
+    };
+    assert!(matches!(
+        store.save(0, rejected),
+        Err(PreferencesError::InvalidVimModeApps)
+    ));
+    assert!(!store.path().exists());
+}
+
+#[test]
 fn appearance_preferences_absent_defaults_and_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
@@ -1684,6 +2413,7 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
         "custom_theme",
         "candidate_follow_cursor",
         "input_mode_hud",
+        "input_mode_focus_hud",
         "input_mode_status_item",
         "expand_candidates",
         "show_candidate_expand_button",
@@ -1693,7 +2423,9 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
     let bytes = serde_json::to_vec(&sparse).unwrap();
     fs::write(store.path(), &bytes).unwrap();
     let loaded = store.load().unwrap();
-    // 菜单栏状态项是新加的开关，缺字段的旧文档和新装一样读成关闭。
+    // 聚焦提示与菜单栏状态项都缺省关闭，旧文档和新装相同。
+    assert!(!Preferences::default().input_mode_focus_hud);
+    assert!(!loaded.preferences.input_mode_focus_hud);
     assert!(!Preferences::default().input_mode_status_item);
     assert!(!loaded.preferences.input_mode_status_item);
     // 「展开候选」同样是新加的开关，缺字段的旧文档和新装都读成关闭。
@@ -1720,6 +2452,7 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
         toolbar_theme: SettingsTheme::Light,
         candidate_follow_cursor: false,
         input_mode_hud: false,
+        input_mode_focus_hud: true,
         input_mode_status_item: true,
         expand_candidates: true,
         show_candidate_expand_button: false,
@@ -1727,6 +2460,15 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
     };
     let saved = store.save(0, preferences).unwrap();
     assert_eq!(store.load().unwrap(), saved);
+    assert!(store.load().unwrap().preferences.input_mode_focus_hud);
+    assert!(
+        !store
+            .load()
+            .unwrap()
+            .preferences
+            .restored_to_defaults()
+            .input_mode_focus_hud
+    );
     assert!(store.load().unwrap().preferences.input_mode_status_item);
     assert!(store.load().unwrap().preferences.expand_candidates);
     assert!(
@@ -2057,7 +2799,7 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
         cfg!(any(windows, target_os = "macos"))
     );
     assert_eq!(fs::read(store.path()).unwrap(), bytes);
-    // 只写前四项的旧对象（`japanese` 之前的文档、各宿主自己拼的对象）照样能读，日文混输按关、符号混输按开处理。
+    // 只写前四项的旧对象（`japanese` 之前的文档、各宿主自己拼的对象）照样能读，日文混输按关处理、符号混输按出厂读作开。
     let mut four_fields = legacy.clone();
     four_fields["preferences"]["mixed_input"] = serde_json::json!({
         "english": false,
@@ -2069,23 +2811,31 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
     assert_eq!(
         store.load().unwrap().preferences.mixed_input,
         MixedInputPreferences {
+            enabled: true,
+            first_page_count: 1,
             english: false,
             minimum_prefix: 3,
             emoji: true,
             kaomoji: true,
             japanese: false,
             symbols: true,
+            quick_phrase: true,
+            quick_phrase_frequency: true,
         }
     );
     fs::write(store.path(), &bytes).unwrap();
     for mask in 0..32 {
         let preferences = Preferences {
             mixed_input: MixedInputPreferences {
+                enabled: true,
+                first_page_count: 1,
                 english: mask & 1 != 0,
                 emoji: mask & 2 != 0,
                 kaomoji: mask & 4 != 0,
                 japanese: mask & 8 != 0,
                 symbols: mask & 16 == 0,
+                quick_phrase: true,
+                quick_phrase_frequency: true,
                 minimum_prefix: mask % 8 + 1,
             },
             ..Preferences::default()
@@ -2099,7 +2849,7 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
             written["preferences"]["mixed_input"].get("japanese"),
             (mask & 8 != 0).then_some(&serde_json::Value::Bool(true))
         );
-        // 符号混输反过来：开着（默认）时不写，关掉才写 `false`。
+        // 符号混输开着时不写这个键，关掉才写出；旧版本把缺键读作开。
         assert_eq!(
             written["preferences"]["mixed_input"].get("symbols"),
             (mask & 16 != 0).then_some(&serde_json::Value::Bool(false))
@@ -2117,15 +2867,15 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
     }
 }
 
-/// 符号混输是后加的可选成员，默认开：缺键读作开且不写回，关掉才写出 `false`，写成 `true` 的文档再保存时去掉这个键；四个必填成员缺一个照旧整份读不进来。
+/// 符号混输出厂为开（`symbol_mixed_input` 出厂关，差异已记录）：缺键读作开、开着不写键位，写明的 `false` 原样生效并原样写回；四个必填成员缺一个照旧整份读不进来。
 #[test]
 fn mixed_input_symbols_default_on_and_are_written_only_when_off() {
     assert!(MixedInputPreferences::default().symbols);
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
     let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
-    assert_eq!(document["preferences"]["mixed_input"].get("symbols"), None);
     let mixed = |document: &serde_json::Value| document["preferences"]["mixed_input"].clone();
+    assert!(mixed(&document).get("symbols").is_none());
 
     document["preferences"]["mixed_input"] = serde_json::json!({
         "english": true,
@@ -2139,7 +2889,7 @@ fn mixed_input_symbols_default_on_and_are_written_only_when_off() {
     let saved = store.save(loaded.revision, loaded.preferences).unwrap();
     let written: serde_json::Value =
         serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-    assert_eq!(mixed(&written).get("symbols"), None);
+    assert!(mixed(&written).get("symbols").is_none());
 
     let mut off = saved.preferences.clone();
     off.mixed_input.symbols = false;
@@ -2154,10 +2904,6 @@ fn mixed_input_symbols_default_on_and_are_written_only_when_off() {
     fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
     let loaded = store.load().unwrap();
     assert!(loaded.preferences.mixed_input.symbols);
-    store.save(loaded.revision, loaded.preferences).unwrap();
-    let written: serde_json::Value =
-        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-    assert_eq!(mixed(&written).get("symbols"), None);
 
     let mut missing = document.clone();
     missing["preferences"]["mixed_input"]
@@ -2366,7 +3112,7 @@ fn navigation_accepts_windows_candidate_arrow_alias() {
     let parsed: NavigationPreferences = serde_json::from_value(value).unwrap();
     assert!(!parsed.arrows);
     assert!(parsed.mouse_wheel);
-    // 旧文档没有这个键时按新的默认行为开启左右候选导航。
+    // 旧文档没有这个键时按出厂值读作开（Windows `candidate_horizontal_arrow_navigation` 出厂关，差异已记录）。
     assert!(parsed.left_right);
 }
 
@@ -3144,6 +3890,58 @@ fn first_document_tells_a_fresh_install_from_an_upgrade() {
 }
 
 #[test]
+fn touch_spelling_position_defaults_to_the_editor_independently_of_the_candidate_window() {
+    // 桌面候选窗默认画拼音行；触屏的拼写位置不能跟着它挪出输入框。
+    assert_eq!(
+        Preferences::default().candidate_preedit_style,
+        CandidatePreeditStyle::Pinyin
+    );
+    assert_eq!(
+        Preferences::default().touch_spelling_position,
+        TouchSpellingPosition::Editor
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    legacy["preferences"]
+        .as_object_mut()
+        .unwrap()
+        .remove("touch_spelling_position");
+    fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(
+        store.load().unwrap().preferences.touch_spelling_position,
+        TouchSpellingPosition::Editor
+    );
+
+    let saved = store
+        .save(
+            0,
+            Preferences {
+                touch_spelling_position: TouchSpellingPosition::CandidateBar,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.load().unwrap().preferences.touch_spelling_position,
+        TouchSpellingPosition::CandidateBar
+    );
+    assert_eq!(
+        saved.preferences.candidate_preedit_style,
+        CandidatePreeditStyle::Pinyin
+    );
+    assert_eq!(
+        serde_json::to_value(TouchSpellingPosition::CandidateBar).unwrap(),
+        "candidate_bar"
+    );
+    assert_eq!(
+        serde_json::to_value(TouchSpellingPosition::Editor).unwrap(),
+        "editor"
+    );
+}
+
+#[test]
 fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
@@ -3269,9 +4067,11 @@ fn helpcode_legacy_defaults_and_independent_schemes_roundtrip() {
     {
         let preferences = Preferences {
             quanpin_helpcode: HelpcodePreferences {
+                trigger_key: String::new(),
                 enabled: false,
                 schema,
                 show_in_candidate_window: true,
+                modes: ShuangpinHelpcodeModes::default(),
             },
             ..Preferences::default()
         };
@@ -3313,6 +4113,126 @@ fn custom_helpcode_schema_roundtrips_and_rejects_unsafe_ids() {
         fs::write(store.path(), invalid).unwrap();
         assert!(store.load().is_err(), "accepted unsafe schema {unsafe_id}");
     }
+}
+
+#[test]
+fn shuangpin_helpcode_modes_follow_windows_v0_11_1_defaults() {
+    let modes = ShuangpinHelpcodeModes::default();
+    assert!(modes.direct);
+    assert!(!modes.trigger_backtick && modes.trigger_semicolon && !modes.trigger_uppercase);
+    assert!(!modes.mid_sentence);
+    assert!(
+        modes.mid_sentence_backtick
+            && !modes.mid_sentence_semicolon
+            && !modes.mid_sentence_uppercase
+    );
+    assert!(
+        !modes.direct_helpcode && modes.direct_helpcode_slash && !modes.direct_helpcode_uppercase
+    );
+    // 默认值不写进文档：旧文档缺这一段时按默认读，默认的文档也不带这一段。
+    let serialized = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(serialized["shuangpin_helpcode"].get("modes").is_none());
+    assert!(serialized["quanpin_helpcode"].get("modes").is_none());
+    let mut legacy = serialized;
+    legacy["shuangpin_helpcode"]
+        .as_object_mut()
+        .unwrap()
+        .remove("modes");
+    assert_eq!(
+        serde_json::from_value::<Preferences>(legacy)
+            .unwrap()
+            .shuangpin_helpcode
+            .modes,
+        ShuangpinHelpcodeModes::default()
+    );
+}
+
+#[test]
+fn shuangpin_helpcode_modes_roundtrip_and_stay_off_quanpin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let modes = ShuangpinHelpcodeModes {
+        direct: false,
+        trigger_backtick: true,
+        ..ShuangpinHelpcodeModes::default()
+    };
+    let saved = store
+        .save(
+            0,
+            Preferences {
+                shuangpin_helpcode: HelpcodePreferences {
+                    modes,
+                    ..default_shuangpin_helpcode()
+                },
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(saved.preferences.shuangpin_helpcode.modes, modes);
+    assert_eq!(
+        store.load().unwrap().preferences.shuangpin_helpcode.modes,
+        modes
+    );
+    // 全拼不写也不读这一段：保存后文档里 `quanpin_helpcode` 仍没有 `modes`。
+    let document: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert!(document["preferences"]["quanpin_helpcode"]
+        .get("modes")
+        .is_none());
+    assert_eq!(
+        document["preferences"]["shuangpin_helpcode"]["modes"]["trigger_backtick"],
+        true
+    );
+}
+
+#[test]
+fn save_normalizes_conflicting_shuangpin_helpcode_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let modes = ShuangpinHelpcodeModes {
+        mid_sentence: true,
+        mid_sentence_semicolon: true,
+        // 与句中同一枚触发键同时开着：归一后只归句中。
+        trigger_semicolon: true,
+        // 句中没认领的键仍归末尾（`mid_sentence_backtick` 出厂即真，反引号此时只能归句中）。
+        trigger_uppercase: true,
+        ..ShuangpinHelpcodeModes::default()
+    };
+    let saved = store
+        .save(
+            0,
+            Preferences {
+                shuangpin_helpcode: HelpcodePreferences {
+                    modes,
+                    ..default_shuangpin_helpcode()
+                },
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    let normalized = saved.preferences.shuangpin_helpcode.modes;
+    assert!(!normalized.trigger_semicolon && normalized.mid_sentence_semicolon);
+    // 句中没认领的键仍归末尾；`mid_sentence_backtick` 出厂即真，反引号此时只能归句中。
+    assert!(normalized.trigger_uppercase);
+    assert_eq!(store.load().unwrap(), saved);
+
+    // `mid_sentence` 与 `direct_helpcode` 同真时按万象式直接：归一后句中让位。
+    let mut conflict = normalized;
+    conflict.direct_helpcode = true;
+    let saved = store
+        .save(
+            saved.revision,
+            Preferences {
+                shuangpin_helpcode: HelpcodePreferences {
+                    modes: conflict,
+                    ..default_shuangpin_helpcode()
+                },
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    let normalized = saved.preferences.shuangpin_helpcode.modes;
+    assert!(normalized.direct_helpcode && !normalized.mid_sentence);
 }
 
 #[test]
@@ -3973,6 +4893,11 @@ fn floating_toolbar_component_defaults_and_roundtrip() {
     assert!(
         !defaults.emoji && !defaults.handwriting && !defaults.voice && !defaults.screen_keyboard
     );
+    // 自动隐藏按 Windows 旧正式版 v0.11.1 的出厂配置：关、延时 5 秒。macOS 旧行为是常开 10 秒。
+    assert!(!defaults.auto_hide);
+    assert_eq!(defaults.auto_hide_delay, 5);
+    // 阴影出厂为开，与 Windows v0.11.1 一致，也是 macOS 一直写死的行为。
+    assert!(defaults.shadow);
     let json = serde_json::to_string(&Preferences::default()).unwrap();
     let restored: Preferences = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.floating_toolbar, defaults);
@@ -3991,6 +4916,9 @@ fn legacy_preferences_without_toolbar_use_component_defaults() {
     assert!(restored.preferences.floating_toolbar.fullwidth);
     assert!(restored.preferences.floating_toolbar.input_scheme);
     assert!(!restored.preferences.floating_toolbar.screen_keyboard);
+    assert!(!restored.preferences.floating_toolbar.auto_hide);
+    assert_eq!(restored.preferences.floating_toolbar.auto_hide_delay, 5);
+    assert!(restored.preferences.floating_toolbar.shadow);
 }
 
 #[test]
@@ -4998,12 +5926,14 @@ fn touch_toolbar_keeps_the_original_buttons_by_default_and_round_trips_partial_d
     );
     let defaults = loaded.preferences.touch_toolbar;
     assert!(defaults.layout && defaults.emoji && defaults.skin);
+    assert!(!defaults.undo && !defaults.redo);
     assert!(!defaults.clipboard && !defaults.ai && !defaults.character_set);
 
-    // A document written before a switch existed leaves that switch at its default.
+    // 缺少新开关的旧文档按共享默认值补全，不能让升级后的工具栏自动增加按钮。
     let partial: TouchToolbarPreferences =
         serde_json::from_value(serde_json::json!({"emoji": false, "clipboard": true})).unwrap();
     assert!(!partial.emoji && partial.clipboard && partial.layout && !partial.ai);
+    assert!(!partial.undo && !partial.redo);
 
     let saved = store
         .save(
@@ -5012,6 +5942,8 @@ fn touch_toolbar_keeps_the_original_buttons_by_default_and_round_trips_partial_d
                 touch_toolbar: TouchToolbarPreferences {
                     skin: false,
                     punctuation: true,
+                    undo: true,
+                    redo: true,
                     ..TouchToolbarPreferences::default()
                 },
                 ..Preferences::default()
@@ -5020,7 +5952,13 @@ fn touch_toolbar_keeps_the_original_buttons_by_default_and_round_trips_partial_d
         .unwrap();
     assert!(!saved.preferences.touch_toolbar.skin);
     assert!(saved.preferences.touch_toolbar.punctuation);
-    assert!(!store.load().unwrap().preferences.touch_toolbar.skin);
+    let reloaded = store.load().unwrap().preferences.touch_toolbar;
+    assert!(!reloaded.skin);
+    assert!(reloaded.undo && reloaded.redo);
+    assert!(serde_json::from_value::<TouchToolbarPreferences>(
+        serde_json::json!({"undo": "true", "redo": false})
+    )
+    .is_err());
 }
 
 #[test]
@@ -5245,6 +6183,55 @@ fn candidate_padding_is_absent_by_default_and_bounded() {
         ),
         Err(PreferencesError::InvalidCandidateWindowStyle)
     ));
+}
+
+#[test]
+fn candidate_item_geometry_preserves_absence_zero_bounds_and_store_roundtrip() {
+    let base = serde_json::to_value(Preferences::default()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut generation = 0;
+    for (key, maximum) in [
+        ("candidate_padding_horizontal", 16),
+        ("candidate_padding_vertical", 16),
+        ("candidate_item_padding_horizontal", 16),
+        ("candidate_item_padding_vertical", 16),
+        ("candidate_item_corner_radius", 32),
+        ("candidate_item_spacing", 16),
+    ] {
+        assert!(base.get(key).is_none());
+        for number in [0, maximum] {
+            let mut value = base.clone();
+            value[key] = number.into();
+            value["candidate_padding"] = 7.into();
+            let preferences: Preferences = serde_json::from_value(value).unwrap();
+            assert!(preferences.validate().is_ok());
+            assert_eq!(serde_json::to_value(&preferences).unwrap()[key], number);
+            store.save(generation, preferences.clone()).unwrap();
+            generation += 1;
+            assert_eq!(store.load().unwrap().preferences, preferences);
+        }
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+        ] {
+            let mut value = base.clone();
+            value[key] = invalid;
+            assert!(serde_json::from_value::<Preferences>(value).is_err());
+        }
+        let mut value = base.clone();
+        value[key] = (maximum + 1).into();
+        let invalid: Preferences = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            invalid.validate(),
+            Err(PreferencesError::InvalidCandidateWindowStyle)
+        ));
+        let mut value = base.clone();
+        value[key] = serde_json::Value::Null;
+        let cleared: Preferences = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(cleared).unwrap().get(key).is_none());
+    }
 }
 
 fn wubi_edition() -> &'static crate::edition::Edition {
@@ -5536,6 +6523,37 @@ fn restoring_defaults_in_the_store_is_one_compare_and_swap() {
     assert_eq!(store.load().unwrap(), restored);
 }
 
+#[test]
+fn android_portrait_split_defaults_and_validates_without_changing_legacy_documents() {
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("touch_keyboard_split_portrait");
+    let legacy = document.to_string();
+    let loaded: Preferences = serde_json::from_str(&legacy).unwrap();
+    assert_eq!(
+        serde_json::to_value(loaded).unwrap()["touch_keyboard_split_portrait"],
+        false
+    );
+    for enabled in [false, true] {
+        document["touch_keyboard_split_portrait"] = enabled.into();
+        let loaded: Preferences = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap()["touch_keyboard_split_portrait"],
+            enabled
+        );
+    }
+    for invalid in [
+        serde_json::json!("true"),
+        serde_json::json!(1),
+        serde_json::Value::Null,
+    ] {
+        document["touch_keyboard_split_portrait"] = invalid;
+        assert!(serde_json::from_value::<Preferences>(document.clone()).is_err());
+    }
+}
+
 /// 偏好里键名像凭据、但确实不是凭据的字段。新字段名含 token|key|secret|password 时，要么进 `Preferences::credential_slots`，要么在这里说明它不是凭据。
 const NOT_CREDENTIALS: &[&str] = &[
     "custom_theme.keyboard",
@@ -5546,6 +6564,9 @@ const NOT_CREDENTIALS: &[&str] = &[
     "custom_theme.keyboard.keyShape",
     "floating_toolbar.screen_keyboard",
     "keybindings",
+    // 辅助码按键是普通键位偏好，不是服务凭据。
+    "quanpin_helpcode.trigger_key",
+    "shuangpin_helpcode.trigger_key",
     "screen_keyboard_theme",
     "second_third_candidate.keys",
     "sentence_association.neural_keyboard",
@@ -5553,6 +6574,7 @@ const NOT_CREDENTIALS: &[&str] = &[
     "touch_keyboard_height_adjustment",
     "touch_keyboard_layout",
     "touch_keyboard_schemes",
+    "touch_keyboard_split_portrait",
     "touch_number_keypad_order",
     "touch_shuangpin_key_hints",
     "touch_twenty_six_key_number_layout",
@@ -5835,6 +6857,46 @@ fn punctuation_styles_default_omitted_roundtrip_and_reject_unknown_values() {
     }
 }
 
+// 顿号自定义（Windows v0.11.1 `input.enumeration_comma_*`）：`\` 默认开、`/` 默认关，等于缺省时不写进文档，没有这个键的旧文档按缺省读；两个键各自的取值都能保存读回。
+#[test]
+fn enumeration_comma_keys_default_omitted_and_roundtrip() {
+    let defaults = Preferences::default();
+    assert!(defaults.enumeration_comma_backslash);
+    assert!(!defaults.enumeration_comma_slash);
+    let written = serde_json::to_value(&defaults).unwrap();
+    assert!(written.get("enumeration_comma_backslash").is_none());
+    assert!(written.get("enumeration_comma_slash").is_none());
+    let read = serde_json::from_value::<Preferences>(written).unwrap();
+    assert!(read.enumeration_comma_backslash);
+    assert!(!read.enumeration_comma_slash);
+
+    // 「两个都关」的文档照样读得进来（deny_unknown_fields 不拦），归一在 `punctuation_marks`。
+    let mut document = serde_json::to_value(&defaults).unwrap();
+    document["enumeration_comma_backslash"] = serde_json::Value::Bool(false);
+    document["enumeration_comma_slash"] = serde_json::Value::Bool(false);
+    let parsed: Preferences = serde_json::from_value(document).unwrap();
+    assert!(!parsed.enumeration_comma_backslash);
+    assert!(!parsed.enumeration_comma_slash);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let saved = store
+        .save(
+            0,
+            Preferences {
+                enumeration_comma_backslash: false,
+                enumeration_comma_slash: true,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(on_disk["preferences"]["enumeration_comma_backslash"], false);
+    assert_eq!(on_disk["preferences"]["enumeration_comma_slash"], true);
+    assert_eq!(store.load().unwrap(), saved);
+}
+
 /// `value` 里每一个对象（数组元素里的除外）的键路径。
 fn object_paths(value: &serde_json::Value, path: &mut Vec<String>, found: &mut Vec<Vec<String>>) {
     let serde_json::Value::Object(object) = value else {
@@ -5950,4 +7012,244 @@ fn finished_scope_releases_inherited_lock() {
         inherited,
         &root.path().join("preferences.lock"),
     );
+}
+
+#[test]
+fn english_online_is_an_explicit_local_opt_in() {
+    let defaults = Preferences::default();
+    assert!(!defaults.english_online_candidates);
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("english_online_candidates");
+    assert!(
+        !serde_json::from_value::<Preferences>(legacy)
+            .unwrap()
+            .english_online_candidates
+    );
+    let enabled = Preferences {
+        english_online_candidates: true,
+        ..defaults
+    };
+    assert!(
+        serde_json::from_value::<Preferences>(serde_json::to_value(&enabled).unwrap())
+            .unwrap()
+            .english_online_candidates
+    );
+    let exported = crate::settings_document::export_document(&enabled).unwrap();
+    assert!(!exported.contains("english_online_candidates"));
+}
+
+/// 网络代理设置：出厂值与 Windows 正式版相同，等于默认值时不写进文档，旧文档缺这一节时也能读。
+#[test]
+fn network_proxy_defaults_match_the_windows_release_and_stay_out_of_the_document() {
+    let defaults = Preferences::default();
+    assert_eq!(
+        defaults.network.proxy_mode,
+        crate::network::ProxyMode::System
+    );
+    assert!(defaults.network.proxy_server.is_empty());
+    let document = serde_json::to_value(&defaults).unwrap();
+    assert!(document.get("network").is_none());
+
+    // 没有这个键的旧文档按 system 读出来。
+    let restored: Preferences = serde_json::from_value(document).unwrap();
+    assert_eq!(
+        restored.network,
+        crate::network::NetworkPreferences::default()
+    );
+
+    // custom 模式里留空服务器时文档里写 `custom`，生效模式回退 system。
+    let mut empty_custom = Preferences::default();
+    empty_custom.network.proxy_mode = crate::network::ProxyMode::Custom;
+    let document = serde_json::to_value(&empty_custom).unwrap();
+    assert_eq!(document["network"]["proxy_mode"], "custom");
+    assert_eq!(
+        empty_custom.network.effective_mode(),
+        crate::network::ProxyMode::System
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let saved = store.save(0, empty_custom.clone()).unwrap();
+    assert_eq!(store.load().unwrap(), saved);
+    assert_eq!(saved.preferences.network, empty_custom.network);
+}
+
+#[test]
+fn network_proxy_server_is_validated_and_restored_with_the_services() {
+    let valid = |server: &str| {
+        let mut preferences = Preferences::default();
+        preferences.network.proxy_mode = crate::network::ProxyMode::Custom;
+        preferences.network.proxy_server = server.into();
+        preferences.validate()
+    };
+    assert!(valid("127.0.0.1:7890").is_ok());
+    assert!(valid("http://127.0.0.1:7890").is_ok());
+    assert!(valid("").is_ok());
+    assert!(matches!(
+        valid("127.0.0.1"),
+        Err(PreferencesError::InvalidNetwork)
+    ));
+    assert!(matches!(
+        valid("http://user:secret@127.0.0.1:7890"),
+        Err(PreferencesError::InvalidNetwork)
+    ));
+
+    // 恢复默认设置留下代理地址：服务凭据还在，出口跟着一起留下，否则全部断掉。
+    let mut configured = Preferences::default();
+    configured.network.proxy_mode = crate::network::ProxyMode::Custom;
+    configured.network.proxy_server = "127.0.0.1:7890".into();
+    assert_eq!(
+        configured.restored_to_defaults().network,
+        configured.network
+    );
+}
+
+#[test]
+fn helpcode_trigger_keys_roundtrip_independently_and_validate() {
+    let old = serde_json::json!({"enabled": true, "schema": "ziranma"});
+    let old: HelpcodePreferences = serde_json::from_value(old).unwrap();
+    assert!(old.trigger_key.is_empty());
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    for (revision, key) in ["", ";", "/", "\\", "`", "="].into_iter().enumerate() {
+        let mut preferences = Preferences::default();
+        preferences.quanpin_helpcode.trigger_key = key.into();
+        preferences.shuangpin_helpcode.trigger_key = "/".into();
+        preferences.validate().unwrap();
+        store.save(revision as u64, preferences).unwrap();
+        let loaded = PreferencesStore::new(directory.path())
+            .load()
+            .unwrap()
+            .preferences;
+        assert_eq!(loaded.quanpin_helpcode.trigger_key, key);
+        assert_eq!(loaded.shuangpin_helpcode.trigger_key, "/");
+    }
+    for key in ["a", "1", " ", "'", "Shift", "Ctrl+;", ";;", "；"] {
+        for shuangpin in [false, true] {
+            let mut preferences = Preferences::default();
+            let family = if shuangpin {
+                &mut preferences.shuangpin_helpcode
+            } else {
+                &mut preferences.quanpin_helpcode
+            };
+            family.trigger_key = key.into();
+            assert!(matches!(
+                preferences.validate(),
+                Err(PreferencesError::InvalidHelpcodeTriggerKey)
+            ));
+        }
+    }
+}
+
+#[test]
+fn sentence_collocation_tuning_defaults_match_windows_factory() {
+    let association = Preferences::default().sentence_association;
+    assert_eq!(association.sentence_collocation_weight, 1.0);
+    assert_eq!(association.sentence_collocation_max_length, 6);
+    assert_eq!(association.sentence_collocation_min_length, 2);
+    assert_eq!(association.sentence_collocation_penalty, -14.0);
+    assert_eq!(association.sentence_collocation_non_penalty, -6.0);
+    assert_eq!(association.sentence_collocation_weak_penalty, -100.0);
+    assert_eq!(association.sentence_collocation_rear_penalty, -18.0);
+}
+
+#[test]
+fn sentence_collocation_tuning_serializes_only_when_not_factory() {
+    // 全出厂值：七个键一个都不写进文档（与 quote_style 的约定一致）。
+    let defaults = serde_json::to_value(Preferences::default()).unwrap();
+    let association = defaults["sentence_association"].as_object().unwrap();
+    for key in [
+        "sentence_collocation_weight",
+        "sentence_collocation_max_length",
+        "sentence_collocation_min_length",
+        "sentence_collocation_penalty",
+        "sentence_collocation_non_penalty",
+        "sentence_collocation_weak_penalty",
+        "sentence_collocation_rear_penalty",
+    ] {
+        assert!(
+            !association.contains_key(key),
+            "{key} 等于出厂值不该写进文档"
+        );
+    }
+
+    // 改过才写，且写出的值能原样读回。
+    let mut tuned = Preferences::default();
+    tuned.sentence_association.sentence_collocation_weight = 0.0;
+    tuned.sentence_association.sentence_collocation_penalty = -30.0;
+    tuned.sentence_association.sentence_collocation_max_length = 4;
+    let value = serde_json::to_value(&tuned).unwrap();
+    let association = &value["sentence_association"];
+    assert_eq!(
+        association["sentence_collocation_weight"],
+        serde_json::json!(0.0)
+    );
+    assert_eq!(
+        association["sentence_collocation_penalty"],
+        serde_json::json!(-30.0)
+    );
+    assert_eq!(
+        association["sentence_collocation_max_length"],
+        serde_json::json!(4)
+    );
+    assert!(!association
+        .as_object()
+        .unwrap()
+        .contains_key("sentence_collocation_min_length"));
+    let restored: Preferences = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.sentence_association, tuned.sentence_association);
+}
+
+/// 与 Windows `value_or` 同口径的逐键回退：类型不符、i32 放不下的整数、非有限值
+/// 各自回出厂值，相邻键和文档其余部分照常生效——单个手误不让整份文档不可读。
+#[test]
+fn sentence_collocation_tuning_falls_back_per_key_on_bad_values() {
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["sentence_association"] = serde_json::json!({
+        "word_lattice": false,
+        "sentence_collocation_weight": "high",
+        "sentence_collocation_max_length": 5_000_000_000i64,
+        "sentence_collocation_min_length": true,
+        "sentence_collocation_penalty": -20.0,
+        "sentence_collocation_non_penalty": {"bad": "object"},
+        "sentence_collocation_weak_penalty": [1, 2],
+        "sentence_collocation_rear_penalty": null
+    });
+    let parsed: Preferences = serde_json::from_value(document).unwrap();
+    let association = parsed.sentence_association;
+    assert!(!association.word_lattice, "相邻的合法键照常生效");
+    assert_eq!(association.sentence_collocation_weight, 1.0);
+    assert_eq!(association.sentence_collocation_max_length, 6);
+    assert_eq!(association.sentence_collocation_min_length, 2);
+    assert_eq!(association.sentence_collocation_penalty, -20.0);
+    assert_eq!(association.sentence_collocation_non_penalty, -6.0);
+    assert_eq!(association.sentence_collocation_weak_penalty, -100.0);
+    assert_eq!(association.sentence_collocation_rear_penalty, -18.0);
+    parsed.validate().unwrap();
+}
+
+/// `1e400` 这种合法 JSON 数能进到 f64 的非有限区；读成偏好必须回出厂值，
+/// 不能把 inf/NaN 带进词格打分。
+#[test]
+fn sentence_collocation_tuning_rejects_non_finite_values() {
+    for (key, raw) in [
+        ("sentence_collocation_weight", "1e400"),
+        ("sentence_collocation_penalty", "-1e400"),
+    ] {
+        let mut document = serde_json::to_value(Preferences::default()).unwrap();
+        document["sentence_association"][key] =
+            serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+        let parsed: Preferences = serde_json::from_value(document).unwrap();
+        assert_eq!(
+            parsed.sentence_association.sentence_collocation_weight, 1.0,
+            "{key}"
+        );
+        assert_eq!(
+            parsed.sentence_association.sentence_collocation_penalty, -14.0,
+            "{key}"
+        );
+    }
 }

@@ -121,7 +121,7 @@ jobs:
     name: Unsigned universal package
     needs: [changes, layout]
     if: ${{ needs.changes.outputs.package == 'true' }}
-    runs-on: depot-macos-26
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-macos-26' || 'macos-26' }}
     timeout-minutes: 120
     env:
       # 与 release-macos.yml 同一个 Xcode，打出来的才是发布那个包。

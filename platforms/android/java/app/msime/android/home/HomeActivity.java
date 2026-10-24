@@ -1,5 +1,7 @@
 package app.msime.android.home;
 
+import app.msime.android.NightLearningJobService;
+
 import app.msime.android.DimensionPolicy;
 
 import android.animation.ValueAnimator;
@@ -93,6 +95,7 @@ public final class HomeActivity extends AppCompatActivity {
         if (cached != null) drawnSeason = cached;
         super.onCreate(state);
         Telemetry.start(this);
+        NightLearningJobService.schedule(this);
         AccountIdentity.register(this);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         setContentView(R.layout.activity_home);

@@ -2,6 +2,7 @@
 #import <AppKit/AppKit.h>
 #import "../../../../shared/apple/TextClient.h"
 #include "../candidate/CandidateSkin.h"
+#include "../input/ToggleHotkeys.h"
 
 @class MSIMECandidateCanvasAssets;
 
@@ -82,6 +83,8 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic) NSInteger candidateOpacityPercent;
 @property(nonatomic, copy) NSNumber *candidateCornerRadius;
 @property(nonatomic, copy) NSNumber *candidatePadding;
+/// 共享偏好 `candidate_window_fit_content`：候选窗严格按文字宽度收紧，与皮肤 `fit_content` 是或关系；缺省为关。
+@property(nonatomic, readonly) BOOL candidateWindowFitContent;
 - (msime::mac::CandidateWindowStyle)candidateWindowStyle;
 /// -resolvedSkinForDark: with -candidateWindowStyle laid over it, which is what the candidate window draws. The floating toolbar and the colour wells read the skin as resolved.
 - (msime::mac::ResolvedSkin)candidateWindowSkinForDark:(BOOL)dark;
@@ -118,9 +121,13 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic, copy) NSString *defaultImeMode;
 @property(nonatomic, copy) NSString *imeModeScope;
 - (void)activateInputModeForApplication:(NSString *)identifier;
+/// Vim 模式（共享偏好 `vim_mode_apps`）：这个 bundle id 的前台应用是否把无修饰 Esc 搭车切英文。
+- (BOOL)vimModeEnabledForApplication:(NSString *)identifier;
 - (void)lockActiveInputMode;
 - (void)resetRememberedInputModes;
 @property(nonatomic) BOOL inputModeShortcut;
+/// 中日英循环切换（共享偏好 `keybindings.trilingual_cycle`，默认关）：打开后「切换中英文」那一组快捷键按 中 → 日 → 英 → 中 转圈。顺序和「有组字时先上屏原始字母」在共享层，见 `crates/client-core/src/language_cycle.rs`。
+@property(nonatomic) BOOL trilingualCycle;
 @property(nonatomic) BOOL shiftTapShortcut;
 @property(nonatomic) BOOL controlTapShortcut;
 /// 单按 Caps Lock 切换中英文（共享偏好 `keybindings.switch_language_caps_lock`），缺省为关。
@@ -128,6 +135,10 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic) BOOL controlOptionSpaceShortcut;
 @property(nonatomic) BOOL characterSetShortcut;
 @property(nonatomic) BOOL fullWidthShortcut;
+/// 三个可重绑切换热键（共享偏好 `keybindings.toggle_english_candidates`、`toggle_full_width`、`toggle_punctuation`）解码出的认键组合；写法为空或不合法时 bound=NO 不绑定。共享文档还没载入或没有 keybindings 时按出厂值（client-core 的 `TOGGLE_*_DEFAULT`）。
+@property(nonatomic, readonly) msime::mac::ToggleChord englishCandidatesToggleChord;
+@property(nonatomic, readonly) msime::mac::ToggleChord fullWidthToggleChord;
+@property(nonatomic, readonly) msime::mac::ToggleChord punctuationToggleChord;
 @property(nonatomic) BOOL traditionalOutput;
 @property(nonatomic) BOOL fullWidthInput;
 @property(nonatomic) BOOL chinesePunctuation;

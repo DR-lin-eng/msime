@@ -36,7 +36,7 @@ pub struct SkinView {
     pub layouts: Vec<String>,
     /// The colour modes the skin supports: dark, light.
     pub themes: Vec<String>,
-    /// 清单基底是否为 `canvas`：仅此时读取九宫格、自由挂件和边距。Web engine 与 macOS、Windows、iOS、Android、HarmonyOS 原生候选窗通过各自图片解码器绘制贴图，尚无对应绘制能力的宿主（目前是 Linux）使用不透明的可读回退。
+    /// 清单基底是否为 `canvas`：仅此时读取九宫格、自由挂件和边距。Web engine 与 macOS、Windows、iOS、Android、HarmonyOS 2in1 和 Linux X11 的对应原生入口通过各自图片解码器绘制贴图；Linux 原生窗口还要求焦点与 classicui 所有权，其他入口沿用各自静态或不透明的可读回退。声明可读不代表目标设备已完成绘制验收。
     pub canvas: bool,
     /// 不阻止加载的提示，例如非 canvas 基底上忽略的专用字段，或需要宿主绘制能力的 canvas 贴图；没有提示时是空列表。始终输出：输出 schema 把它列为必填，省略会让按 schema 校验结构化结果的客户端（如 Claude Code）拒绝整个列表。
     pub notices: Vec<String>,
@@ -58,8 +58,56 @@ pub struct SkinDecorationView {
     pub motion_period_ms: u16,
     /// 装饰图的帧数：静态 PNG、JPEG 为 1，APNG（以及手动装进皮肤目录的 GIF、WebP）为它的动画帧数。
     pub frames: u32,
-    /// 装饰图是不是多帧的 APNG（frames 大于 1）。能播帧动画的宿主（目前是 macOS）播放它，其他宿主只画第一帧。
+    /// 装饰图是否多帧（frames 大于 1）；这是资源元数据，实际帧播放与待机变换分别取决于宿主入口的能力，不能据此认定所有宿主都已播放动画。
     pub animated: bool,
+    /// 装饰框内叠加候选词的声明；绘制覆盖面由各宿主决定，不能把列表中的声明当成设备验收结果。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_overlay: Option<SkinDecorationCandidateView>,
+}
+
+#[derive(Debug, Serialize, JsonSchema, PartialEq)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SkinDecorationCandidateView {
+    /// 0 跟随高亮，1 起为当前页候选序号；越出当前页时不显示。
+    pub index: u8,
+    pub font_size_dip: f64,
+    pub min_font_size_dip: f64,
+    /// 0 使用装饰框宽；缩到最小字号仍放不下时不换行、允许超出。
+    pub max_width_dip: f64,
+    /// 原始安全颜色声明；不能识别的颜色由绘制器回退为白色。
+    pub color: String,
+    pub align_h: String,
+    pub align_v: String,
+    pub offset_x_dip: f64,
+    pub offset_y_dip: f64,
+    pub strip_badge: bool,
+}
+
+impl From<&catalog::SkinDecorationCandidate> for SkinDecorationCandidateView {
+    fn from(value: &catalog::SkinDecorationCandidate) -> Self {
+        Self {
+            index: value.index,
+            font_size_dip: value.font_size_dip,
+            min_font_size_dip: value.min_font_size_dip,
+            max_width_dip: value.max_width_dip,
+            color: value.color.clone(),
+            align_h: match value.align_h {
+                catalog::DecorationAlign::Left => "left",
+                catalog::DecorationAlign::Center => "center",
+                catalog::DecorationAlign::Right => "right",
+            }
+            .into(),
+            align_v: match value.align_v {
+                catalog::DecorationVerticalAlign::Top => "top",
+                catalog::DecorationVerticalAlign::Center => "center",
+                catalog::DecorationVerticalAlign::Bottom => "bottom",
+            }
+            .into(),
+            offset_x_dip: value.offset_x_dip,
+            offset_y_dip: value.offset_y_dip,
+            strip_badge: value.strip_badge,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, JsonSchema, PartialEq)]
@@ -97,7 +145,7 @@ pub struct CreateSkinRequest {
     pub package_id: String,
     /// The whole `skin.toml`, at most 64 KiB.
     pub manifest: String,
-    /// 以标准 base64 给出的资源，以包内相对路径为键。支持 PNG/JPEG/APNG/GIF/WebP，预览限 PNG/JPEG；与 image_files 合计最多 37 张，每张 1 MiB、每边 2048 像素，合计 2 MiB 和 8,000,000 像素，预览最多 256 KiB。动画最多 120 帧，每帧按整张画布计入像素预算。
+    /// 以标准 base64 给出的资源，以包内相对路径为键。支持 PNG/JPEG/APNG/GIF/WebP，预览限 PNG/JPEG；与 image_files 合计最多 64 张（含工具栏图片），每张 1 MiB、每边 2048 像素，合计 2 MiB 和 8,000,000 像素，预览最多 256 KiB。动画最多 120 帧，每帧按整张画布计入像素预算。社区上传沿用服务端的 37 张上限，图片工具栏另需明确能力声明。
     #[serde(default)]
     pub images: BTreeMap<String, String>,
     /// 以本机文件给出的资源，以包内相对路径为键、文件的绝对路径为值。服务器只读这些文件：路径上不能有符号链接，必须是普通文件，超过 1 MiB 的在读之前就拒绝；读进来的字节和 images 里的 base64 走同一套检查和上限。同一个包内路径不能两边都给。
@@ -210,6 +258,7 @@ pub fn list(state_dir: &Path) -> SkinList {
                         motion_period_ms: package.decoration_motion_period_ms,
                         frames: package.decoration_frames,
                         animated: package.decoration_frames > 1,
+                        candidate_overlay: package.decoration_candidate.as_ref().map(Into::into),
                     }),
             })
             .collect(),
@@ -383,7 +432,7 @@ fn local_file_problem(image_files: &BTreeMap<String, String>) -> String {
 fn explain(code: &str) -> &'static str {
     match code {
         "candidate_skin_exists" => "a skin with this package_id is already installed; list_candidate_skins shows it. Pass replace: true to replace it whole, or choose another id",
-        "candidate_skin_file_path" => "images and image_files together must hold 1 to 37 entries, the preview and any decoration, background, border_image and decorations images counted together, each a relative path inside the skin folder other than skin.toml, unique ignoring case and given in only one of the two",
+        "candidate_skin_file_path" => "images and image_files together must hold 1 to 64 entries, including preview, candidate and toolbar images, each a relative path inside the skin folder other than skin.toml, unique ignoring case and given in only one of the two",
         "candidate_skin_file_type" => "resources must be .png, .jpg, .jpeg, .apng, .gif or .webp; the preview must be .png, .jpg or .jpeg, and stylesheets are not accepted",
         "candidate_skin_too_large" => "too large: the manifest may be 64 KiB, each image 1 MiB (a larger file in image_files is refused before it is read) and 2048 pixels on each side, all images 2 MiB and 8,000,000 pixels together (each animated frame counts as a whole image), an animation at most 120 frames, and the preview 256 KiB",
         "candidate_skin_image_invalid" => "an image is not valid standard base64, or its bytes (every animation frame) cannot be decoded using the format its extension names: it may be truncated or corrupted, so generate it again with code, write it to a file and pass its path in image_files",
@@ -578,7 +627,7 @@ mod tests {
     fn the_listing_reports_decoration_motion_and_frames() {
         let state = tempfile::tempdir().unwrap();
         for (id, image, motion) in [
-            ("whale", APNG, "motion = 'sway'\nmotion_period_ms = 2400\n"),
+            ("whale", APNG, "motion = 'sway'\nmotion_period_ms = 2400\ncandidate_overlay = true\ncandidate_overlay_index = 0\n"),
             ("still", PNG, ""),
         ] {
             let manifest = format!(
@@ -618,6 +667,18 @@ mod tests {
                 motion_period_ms: 2400,
                 frames: 3,
                 animated: true,
+                candidate_overlay: Some(SkinDecorationCandidateView {
+                    index: 0,
+                    font_size_dip: 16.0,
+                    min_font_size_dip: 8.0,
+                    max_width_dip: 0.0,
+                    color: String::new(),
+                    align_h: "center".into(),
+                    align_v: "center".into(),
+                    offset_x_dip: 0.0,
+                    offset_y_dip: 0.0,
+                    strip_badge: true,
+                }),
             }
         );
         assert_eq!(
@@ -627,8 +688,17 @@ mod tests {
                 motion_period_ms: 3000,
                 frames: 1,
                 animated: false,
+                candidate_overlay: None,
             }
         );
+        let json = serde_json::to_value(&listed).unwrap();
+        let still = json["skins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skin| skin["id"] == "still")
+            .unwrap();
+        assert!(still["decoration"].get("candidate_overlay").is_none());
     }
 
     /// A version 2 manifest on `base`, with `extra` tables after `[candidate_window]`.

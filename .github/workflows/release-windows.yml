@@ -83,9 +83,9 @@ jobs:
   # The Rust half of the client (host DLLs, MCP server, Tauri panel shell) does not depend on the edition, so it is built once per architecture here, in parallel, rather than six times over in every edition's job, where it was most of the build time.
   rust:
     needs: source
-    # SignPath 的开源项目只接受签名请求之前的每个 job 都跑在 GitHub 托管 runner 上，所以签名时 rust、release、package 都换到 windows-2025（4 核，超时放宽）；不签名时留在 Depot 上。
-    runs-on: ${{ needs.source.outputs.signpath == 'true' && 'windows-2025' || 'depot-windows-2025-8' }}
-    timeout-minutes: ${{ needs.source.outputs.signpath == 'true' && 120 || 60 }}
+    # SignPath 的开源项目只接受签名请求之前的每个 job 都跑在 GitHub 托管 runner 上，所以签名时 rust、release、package 都换到 windows-2025（4 核，超时放宽）；上游不签名时使用 Depot，fork 使用 GitHub 托管 runner。
+    runs-on: ${{ (github.repository_owner != 'metasequoiaime' || needs.source.outputs.signpath == 'true') && 'windows-2025' || 'depot-windows-2025-8' }}
+    timeout-minutes: ${{ (github.repository_owner != 'metasequoiaime' || needs.source.outputs.signpath == 'true') && 120 || 60 }}
     strategy:
       fail-fast: true
       matrix:
@@ -94,7 +94,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: '0'
       # GitHub 托管 runner 没有 Depot Cache，sccache 改用 GitHub Actions 缓存。
-      SCCACHE_GHA_ENABLED: ${{ needs.source.outputs.signpath == 'true' && 'true' || 'false' }}
+      SCCACHE_GHA_ENABLED: ${{ (github.repository_owner != 'metasequoiaime' || needs.source.outputs.signpath == 'true') && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {ref: "${{ needs.source.outputs.sha }}", persist-credentials: false}
@@ -153,7 +153,7 @@ jobs:
   # 每个版本（shared/contracts/editions.json 里有 Windows 段的 id）各打一个安装包，可以同时安装，也可以和 msime-windows 同时安装。full 的安装包名、AppId、目录和注册表键也是自己的，不再是 msime-windows 的那一组。
   release:
     needs: [source, rust, official-plugins]
-    runs-on: ${{ needs.source.outputs.signpath == 'true' && 'windows-2025' || 'depot-windows-2025-8' }}
+    runs-on: ${{ (github.repository_owner != 'metasequoiaime' || needs.source.outputs.signpath == 'true') && 'windows-2025' || 'depot-windows-2025-8' }}
     timeout-minutes: 150
     strategy:
       fail-fast: true
@@ -165,7 +165,7 @@ jobs:
       PYTHONUTF8: '1'
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: '0'
-      SCCACHE_GHA_ENABLED: ${{ needs.source.outputs.signpath == 'true' && 'true' || 'false' }}
+      SCCACHE_GHA_ENABLED: ${{ (github.repository_owner != 'metasequoiaime' || needs.source.outputs.signpath == 'true') && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {ref: "${{ needs.source.outputs.sha }}", fetch-depth: 0, persist-credentials: false}
@@ -239,7 +239,7 @@ jobs:
           "MSIME_DESKTOP_RESOURCES=$(@($resources)[-1].Trim())" >> $env:GITHUB_ENV
       - name: Build Windows client
         shell: pwsh
-        env: {VERSION: "${{ steps.version.outputs.value }}", EDITION: "${{ matrix.edition }}"}
+        env: {VERSION: "${{ steps.version.outputs.value }}", EDITION: "${{ matrix.edition }}", SERVER_UIACCESS: "${{ needs.source.outputs.signpath == 'true' && needs.source.outputs.policy != 'test-signing' }}"}
         run: |
           $deps = Join-Path $env:RUNNER_TEMP 'msime-deps'
           # Build-Client.ps1 defaults to the Visual Studio 2022 generator; the runner image moves between Visual Studio releases, so name the one it has.
@@ -265,7 +265,8 @@ jobs:
             if (-not (& $vswhere -latest -products * -requires $component -property installationPath)) { throw "Visual Studio lacks $component" }
           }
           # The Rust half comes from the rust job; nothing is compiled by cargo or pnpm here.
-          ./platforms/windows/Build-Client.ps1 -X64Dependencies (Join-Path $deps 'x64-windows/x64-windows') -X86Dependencies (Join-Path $deps 'x86-windows/x86-windows') -TargetVersion $env:VERSION -Generator $generator -Edition $env:EDITION -RustOutputs (Join-Path $env:RUNNER_TEMP 'msime-rust')
+          # UIAccess 需要受信任签名；nightly、未签名包和 test-signing 包保留普通权限输入能力。
+          ./platforms/windows/Build-Client.ps1 -X64Dependencies (Join-Path $deps 'x64-windows/x64-windows') -X86Dependencies (Join-Path $deps 'x86-windows/x86-windows') -TargetVersion $env:VERSION -Generator $generator -Edition $env:EDITION -RustOutputs (Join-Path $env:RUNNER_TEMP 'msime-rust') -ServerUiAccess:($env:SERVER_UIACCESS -eq 'true')
       - name: Collect third-party notices
         shell: pwsh
         env: {EDITION: "${{ matrix.edition }}"}
@@ -387,7 +388,7 @@ jobs:
   package:
     needs: [source, release, sign-payload]
     if: ${{ !cancelled() && !failure() }}
-    runs-on: ${{ needs.source.outputs.signpath == 'true' && 'windows-2025' || 'depot-windows-2025-8' }}
+    runs-on: ${{ (github.repository_owner != 'metasequoiaime' || needs.source.outputs.signpath == 'true') && 'windows-2025' || 'depot-windows-2025-8' }}
     timeout-minutes: 60
     strategy:
       fail-fast: true

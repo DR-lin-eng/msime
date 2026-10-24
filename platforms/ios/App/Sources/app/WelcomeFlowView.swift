@@ -90,7 +90,7 @@ struct WelcomeFlowView: View {
         case 0: keyboardStep
         case 1: schemeStep
         case 2: translationStep
-        default: syncStep
+        default: VStack(spacing: 16) { syncStep; SogouDictionarySection(compact: true) }
         }
       }.padding(.top, 6)
     }

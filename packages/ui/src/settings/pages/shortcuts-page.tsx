@@ -10,7 +10,8 @@ import { createSettingsDraftActions } from "../settings-draft-actions";
 import { useSettingsForm } from "../settings-form-context";
 import { ShortcutsSettingsSection } from "../shortcuts-settings-section";
 import { createShortcutsSettingsActions } from "../shortcuts-settings-actions";
-import { offersJapaneseToggle } from "../input-scheme-options";
+import { offersJapaneseToggle, offersTrilingualCycle } from "../input-scheme-options";
+import { ToggleHotkeysSection } from "../toggle-hotkeys-section";
 
 /** The 快捷键 page of the settings form. */
 export function ShortcutSettingsPage() {
@@ -34,6 +35,7 @@ export function ShortcutSettingsPage() {
     page,
     keybindings,
     wordCharacter,
+    client,
   } = useSettingsForm();
   const navigation = navigationWithDefaults(draft.navigation);
   const { onKeybindingsChange, onNumberRowSelectionChange } = createShortcutsSettingsActions({
@@ -58,6 +60,7 @@ export function ShortcutSettingsPage() {
       windows={windowsPlatform}
       capsLockLanguageSwitch={host?.caps_lock_language_switch ?? false}
       japaneseToggle={offersJapaneseToggle(host)}
+      trilingualCycle={offersTrilingualCycle(host)}
       // 速查列出实际生效的翻页键：宿主把 Tab 和 PageUp/PageDown 固定为开时，不管文档里存的值。
       navigation={effectiveNavigation(navigation, showTabPagePagingSwitches)}
       // iOS 键盘扩展收不到实体键，以词定字靠长按候选，没有可列的键。
@@ -67,6 +70,18 @@ export function ShortcutSettingsPage() {
       onNumberRowSelectionChange={onNumberRowSelectionChange}
       showPanelShortcuts={showPanelShortcuts}
       harmony={harmonyPlatform}
+      toggleHotkeys={
+        (host?.toggle_hotkey_chords ?? false) &&
+        !harmonyPhone && (
+          <ToggleHotkeysSection
+            keybindings={keybindings}
+            check={client.checkToggleHotkey}
+            voiceCtrlF9={draft.voice_input?.hotkey_ctrl_f9 ?? true}
+            onChange={onKeybindingsChange}
+            disabled={busy}
+          />
+        )
+      }
       paging={
         harmonyPhone && (
           <NavigationSection

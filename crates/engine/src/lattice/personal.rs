@@ -125,6 +125,7 @@ pub struct PersonalNgram {
     triple_totals: CountTable,
     triple_followers: CountTable,
     total: u64,
+    pub(crate) adaptive: crate::adaptive::PersonalRanker,
 }
 
 impl PersonalNgram {
@@ -161,6 +162,16 @@ impl PersonalNgram {
         if count == 0 {
             return;
         }
+        self.adaptive.observe(previous, word, count);
+        self.restore_pair(previous, word, count);
+    }
+
+    /// 日志恢复先重建计数，神经头另按固定预算抽取高频词对训练。
+    pub(crate) fn restore_pair(&mut self, previous: &str, word: &str, count: u32) {
+        if count == 0 {
+            return;
+        }
+        self.adaptive.observe("", word, count);
         self.pairs.add(key_of_pair(previous, word), count);
         self.context_totals.add(key_of(previous), count);
         self.word_counts.add(key_of(word), count);
@@ -203,6 +214,8 @@ impl PersonalNgram {
 
     /// PN:220-228. The context and word totals shrink by what the pair actually lost.
     pub fn remove_pair(&mut self, previous: &str, word: &str, count: u32) {
+        // 神经头不能逆向减去梯度；删除后清空，由日志 store 重放未删除的词对。
+        self.adaptive = crate::adaptive::PersonalRanker::default();
         let removed = self.pairs.subtract(key_of_pair(previous, word), count);
         if removed == 0 {
             return;

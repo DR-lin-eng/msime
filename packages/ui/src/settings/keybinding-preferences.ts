@@ -9,4 +9,12 @@ export type KeybindingPreferences = {
   switch_language_caps_lock?: boolean;
   /** Ctrl+Shift+J 在中文和日语之间切换。缺省为关。 */
   toggle_japanese_ctrl_shift_j?: boolean;
+  /** 中日英循环切换：打开后「切换中英文」这一组快捷键按 中 → 日 → 英 → 中 转圈。缺省为关。 */
+  trilingual_cycle?: boolean;
+  /** 中英切换（英文候选模式）热键，写法见 client-core 的 KeyChord（如 `Ctrl+Shift+KeyE`）；空串表示不绑定，缺省为出厂值。 */
+  toggle_english_candidates?: string;
+  /** 全角 / 半角切换热键（如 `Ctrl+Shift+Space`）；空串表示不绑定，缺省为出厂值。 */
+  toggle_full_width?: string;
+  /** 中英文标点切换热键（如 `Ctrl+Period`）；空串表示不绑定，缺省为出厂值。 */
+  toggle_punctuation?: string;
 };

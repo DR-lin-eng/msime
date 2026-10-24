@@ -69,7 +69,10 @@ pub(super) fn resolve_shuangpin_composition_base<'a>(
         raw_input_with_cases,
         helpcode_length: 0,
     };
-    if !request.enable_shuangpin_helpcode || base.effective_raw_input.is_empty() {
+    if !request.enable_shuangpin_helpcode
+        || !request.shuangpin_helpcode_modes.direct
+        || base.effective_raw_input.is_empty()
+    {
         return base;
     }
     if detect_active_double_helpcode_length(&base.raw_input, &base.raw_input_with_cases, profile)
@@ -122,7 +125,7 @@ fn remove_consumed_leading_separators(raw: &str) -> &str {
 /// Detect an active shuangpin helpcode without constructing the owned composition base. The
 /// candidate refresh path only needs this length to decide whether dynamic rows can move.
 fn active_shuangpin_helpcode_length(request: &QueryRequest, profile: &ShuangpinProfile) -> usize {
-    if !request.enable_shuangpin_helpcode {
+    if !request.enable_shuangpin_helpcode || !request.shuangpin_helpcode_modes.direct {
         return 0;
     }
     let raw = &request.raw_input;
@@ -431,11 +434,29 @@ impl InputSession {
                             base.raw_input.len(),
                         )
                     };
-                    Some((
-                        remove_consumed_leading_separators(&base.raw_input[start..end]).to_owned(),
-                        remove_consumed_leading_separators(&base.raw_input_with_cases[start..end])
+                    Some(if request.raw_input_with_helpcode_marks.is_empty() {
+                        (
+                            remove_consumed_leading_separators(&base.raw_input[start..end])
+                                .to_owned(),
+                            remove_consumed_leading_separators(
+                                &base.raw_input_with_cases[start..end],
+                            )
                             .to_owned(),
-                    ))
+                        )
+                    } else {
+                        // 带辅助码段时按 source_index 把去段串的剩余范围映回原串
+                        // （`RemapMidSentenceRest`）：段随已消耗的音节一起走。
+                        let marks = request.raw_input_with_helpcode_marks.as_str();
+                        let map = &request.helpcode_source_index;
+                        let skip = base.raw_input_with_cases[start..end]
+                            .bytes()
+                            .take_while(|&byte| byte == b'\'')
+                            .count();
+                        let full_begin = map.get(start + skip).copied().unwrap_or(marks.len());
+                        let full_end = map.get(end).copied().unwrap_or(marks.len());
+                        let rest = &marks[full_begin..full_end];
+                        (rest.to_lowercase(), rest.to_owned())
+                    })
                 } else {
                     None
                 };
@@ -569,7 +590,7 @@ impl InputSession {
 
     /// input_session_composition.cpp:417-449.
     pub(super) fn pinyin_segmentation_with_cases(&self) -> Cow<'_, str> {
-        if self.has_literal_capitals() {
+        if self.has_literal_input() {
             return Cow::Borrowed(self.raw_with_cases());
         }
         let request = self.engine.request();
@@ -586,12 +607,22 @@ impl InputSession {
                 if request.raw_segmentation.is_empty() {
                     Cow::Borrowed(&request.raw_input)
                 } else {
-                    Cow::Borrowed(&request.raw_segmentation)
+                    // 辅助码段按原样接回对应音节的后面（`decorate_mid_sentence_segmentation`）。
+                    Cow::Owned(crate::shuangpin::mid_sentence::decorate_segmentation(
+                        &request.raw_segmentation,
+                        &request.helpcode_decorations,
+                    ))
                 },
                 request,
             ),
             SchemeType::Quanpin => build_quanpin_autocorrect_display(request),
-            SchemeType::Shuangpin => with_trailing_separator(self.pinyin_segmentation(), request),
+            SchemeType::Shuangpin => with_trailing_separator(
+                Cow::Owned(crate::shuangpin::mid_sentence::decorate_segmentation(
+                    &self.pinyin_segmentation(),
+                    &request.helpcode_decorations,
+                )),
+                request,
+            ),
         }
     }
 
@@ -632,10 +663,25 @@ impl InputSession {
         if self.dedicated_english || self.local_mode != LocalInputMode::None {
             return false;
         }
+        // 带 `z` 的码是通配猜码，不是用户确定下来的编码：它后面那个「唯一」候选只跟若干个码差一个字母，
+        // 直接上屏就把「看见命中了什么」这件事拿走了——那正是这个键存在的理由。来源的
+        // `wubi_unique_four_code` 用同一条 `raw_input.find('z')` 守卫。
+        if self.engine.request().raw_input.contains('z') {
+            return false;
+        }
         // The whole list counts, not only the wubi rows. In mixed Wubi four letters are often pinyin as well — `jixu` is the wubi code of 曳光弹 and the pinyin of 继续 — and committing the one wubi row on the fourth key takes the pinyin away from someone typing it. The wubi_mixed_routing overlay counted wubi rows only; it never applied to the shipped engine, and that rule is what auto-committed 曳光弹 for jixu.
+        // 追加在末尾的快捷短语不算：它们只是编码恰好相同，而这条规则问的是五笔码本身唯一；算上它们，`addr`（莽原）这类码就因为词库里有同编码的短语而不再自动上屏。宿主提交的是第一格，所以第一格也得是那一行。
+        let candidates = self.candidates();
         self.wubi_candidates_are_native()
             && self.engine.wubi_has_complete_code()
-            && self.candidates().len() == 1
+            && candidates
+                .first()
+                .is_some_and(|item| item.source != CandidateSource::QuickPhrase)
+            && candidates
+                .iter()
+                .filter(|item| item.source != CandidateSource::QuickPhrase)
+                .count()
+                == 1
     }
 
     pub(super) fn has_active_helpcode(&self) -> bool {
@@ -650,7 +696,8 @@ impl InputSession {
             | SchemeType::Tibetan
             | SchemeType::Stroke => false,
             SchemeType::Shuangpin => {
-                active_shuangpin_helpcode_length(request, self.shuangpin_profile()) > 0
+                !request.end_helpcodes.is_empty()
+                    || active_shuangpin_helpcode_length(request, self.shuangpin_profile()) > 0
             }
             SchemeType::Quanpin => {
                 request.enable_quanpin_helpcode
@@ -935,22 +982,39 @@ mod tests {
     fn helpcode_length_matches_the_composition_base() {
         let profile =
             crate::shuangpin::profile::profile(crate::types::ShuangpinProfileKind::Xiaohe).unwrap();
-        for (raw, raw_with_cases, enabled) in [
-            ("nihcAB", "nihcAB", true),
-            ("uiu", "uiu", true),
-            ("ui'u", "ui'u", true),
-            ("uiu", "uiu", false),
+        for (raw, raw_with_cases, enabled, direct) in [
+            ("nihcAB", "nihcAB", true, true),
+            ("uiu", "uiu", true, true),
+            ("ui'u", "ui'u", true, true),
+            ("uiu", "uiu", false, true),
+            // 末尾直接关闭后末尾裸字母不再算辅助码。
+            ("uiu", "uiu", true, false),
+            ("nihcAB", "nihcAB", true, false),
         ] {
             let request = QueryRequest {
                 raw_input: raw.to_owned(),
                 raw_input_with_cases: raw_with_cases.to_owned(),
                 enable_shuangpin_helpcode: enabled,
+                shuangpin_helpcode_modes: crate::types::ShuangpinHelpcodeModes {
+                    direct,
+                    ..crate::types::ShuangpinHelpcodeModes::default()
+                },
                 ..QueryRequest::default()
+            };
+            let expected = match (enabled, direct, raw) {
+                (true, true, "nihcAB") => 2,
+                (true, true, "uiu") => 1,
+                _ => 0,
             };
             assert_eq!(
                 active_shuangpin_helpcode_length(&request, profile),
+                expected,
+                "length {raw}/{raw_with_cases}/{enabled}/{direct}"
+            );
+            assert_eq!(
                 resolve_shuangpin_composition_base(&request, profile).helpcode_length,
-                "{raw}/{raw_with_cases}/{enabled}"
+                expected,
+                "base {raw}/{raw_with_cases}/{enabled}/{direct}"
             );
         }
     }

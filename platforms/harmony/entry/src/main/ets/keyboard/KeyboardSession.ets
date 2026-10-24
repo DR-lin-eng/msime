@@ -1,3 +1,4 @@
+import { DecorationCandidateStyle } from './candidate/DecorationCandidatePolicy';
 import { CandidateLayoutPolicy, CandidateResolvedLayout } from './candidate/CandidateSkinPolicy';
 import { CandidateCanvasScene, CandidateCanvasResource, CandidateCanvasPolicy } from './candidate/CandidateCanvasPolicy';
 import { NativeCleanup } from './NativeCleanup';
@@ -72,6 +73,7 @@ import { ModeBindings, DEFAULT_MODE_BINDINGS } from './InputModeRouting';
 import { FloatingToolbarLayout, ToolbarButton, ToolbarComponents, ToolbarState }
   from './FloatingToolbarLayout';
 import { ToolbarSkin, ToolbarSkinPolicy } from './ToolbarSkinPolicy';
+import { ToolbarImagePolicy, ToolbarImageResources, ToolbarImageScene, ToolbarImageLayoutReply } from './ToolbarImagePolicy';
 import { DesktopSurface } from './DesktopSurface';
 import { CandidateAnnotationPreferencePolicy } from './candidate/CandidateAnnotationPreferencePolicy';
 import { CandidateManagementAction } from './candidate/CandidateManagementAction';
@@ -598,6 +600,9 @@ export interface KeyboardState {
   /** View 报告的引号与方头括号样式，键盘画符号键和 123 层键面时用。 */
   readonly cornerQuotes: boolean;
   readonly hollowBrackets: boolean;
+  /** View 报告的顿号键开关：顿号键面随它画。 */
+  readonly enumerationCommaBackslash: boolean;
+  readonly enumerationCommaSlash: boolean;
 }
 
 interface EngineValue {
@@ -972,6 +977,8 @@ export interface KeyboardPreferences {
   readonly candidateMinWidthVp: number;
   /** Image-only data URL for a compatible external candidate decoration. */
   readonly candidateDecorationImage: string | null;
+  /** 只在桌面装饰图成功读取时提供文字声明。 */
+  readonly candidateDecorationCandidate: DecorationCandidateStyle | null;
   readonly candidateDecorationTopVp: number;
   readonly candidateDecorationWidthVp: number;
   readonly candidateDecorationAspectRatio: number;
@@ -1270,6 +1277,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     globalThemeId: 'system',
     candidateMinWidthVp: CandidateWidthPolicy.MIN_WIDTH_VP,
     candidateDecorationImage: null,
+    candidateDecorationCandidate: null,
     candidateDecorationTopVp: 0,
     candidateDecorationWidthVp: 0,
     candidateDecorationAspectRatio: 1,
@@ -1374,7 +1382,9 @@ export class KeyboardSession implements HardwareKeyTarget {
     | undefined = undefined;
   /** The toolbar's face, set by whichever window is currently drawing it. */
   onToolbar: ((state: ToolbarState, buttons: ToolbarButton[], fontSize: number, scale: number,
-               toolbarSkin: ToolbarSkin) => void) | undefined = undefined;
+               toolbarSkin: ToolbarSkin, image: ToolbarImageScene | null) => void) | undefined = undefined;
+  /** 原生面板负责先调整物理尺寸，绘制层随后设置窗口形状。 */
+  onToolbarResize: (() => Promise<void>) | undefined = undefined;
   /** The status-bar panel owns the window; the ArkUI handle only reports its pan gesture. */
   onToolbarDragStart: (() => void) | undefined = undefined;
   onToolbarDrag: ((offsetX: number, offsetY: number) => void) | undefined = undefined;
@@ -1547,6 +1557,31 @@ export class KeyboardSession implements HardwareKeyTarget {
     };
   }
 
+  /** 外观重载时一次读取全部状态图，切换模式只消费缓存。 */
+  private readToolbarImage(packages: CandidateSkinPackage[], id: string | null): ToolbarImageResources | null {
+    const entry: CandidateSkinPackage | null = id === null ? null : CandidateSkinCatalogPolicy.package(packages, id);
+    if (!KeyboardFormFactor.isDesktop() || entry === null || entry.toolbarImage === undefined
+      || entry.toolbarImage === null || id === null) return null;
+    const resources: CandidateCanvasResource[] = [];
+    let remaining: number = 16 * 1024 * 1024;
+    for (const relative of ToolbarImagePolicy.paths(entry.toolbarImage)) {
+      try {
+        const request: SkinResourceRequest = {
+          directory: `${this.stateDirectory}/skins`, id: id, relative: relative, kind: 'image'
+        };
+        const reply: SkinResourceResponse = JSON.parse(client.skinResource(JSON.stringify(request))) as SkinResourceResponse;
+        if (reply.ok && reply.value !== undefined && reply.value !== null && reply.value.bytes.length <= remaining) {
+          remaining -= reply.value.bytes.length;
+          resources.push({ relative: relative, contentType: reply.value.contentType,
+            base64: new util.Base64Helper().encodeToStringSync(new Uint8Array(reply.value.bytes)) });
+        }
+      } catch (_) {
+        // 坏图留给原生文字与背景矩形回退，不影响输入会话。
+      }
+    }
+    return { key: `toolbar:${++this.canvasGeneration}:${id}`, spec: entry.toolbarImage, resources: resources };
+  }
+
   /** 仅在视图确实绘制当前快照的面板后使用贴图配色，取色器仍由共享 Rust 叠加。 */
   canvasCandidateColors(key: string): CandidateColors | null {
     if (this.appearance.candidateCanvas?.key !== key || this.canvasPreferences === null) return null;
@@ -1627,6 +1662,8 @@ export class KeyboardSession implements HardwareKeyTarget {
         : Math.max(CandidateWidthPolicy.MIN_WIDTH_VP,
           Math.min(CandidateWidthPolicy.MAX_WIDTH_VP, skinMinWidth)),
       candidateDecorationImage: skinImage.image,
+      candidateDecorationCandidate: skinImage.image === null || packageId === null ? null
+        : CandidateSkinCatalogPolicy.decorationCandidate(skinPackages, packageId),
       candidateDecorationTopVp: skinImage.image === null ? 0 : (skinDecoration?.topVp ?? 0),
       candidateDecorationWidthVp: skinImage.image === null ? 0 : (skinDecoration?.widthVp ?? 0),
       candidateDecorationAspectRatio: skinImage.aspectRatio,
@@ -1699,6 +1736,13 @@ export class KeyboardSession implements HardwareKeyTarget {
     // The theme's bar, then the package's `[toolbar]` colours for that mode, then its stylesheet.
     const toolbarColors: CandidateColors = GlobalTheme.candidateColors(
       toolbarTheme === null ? null : toolbarTheme.candidate, toolbarDark);
+    this.toolbarImage = this.readToolbarImage(skinPackages, toolbarPackageId);
+    this.toolbarImageRejected = false;
+    if (this.toolbarImage !== null) {
+      this.skinImagePaths.push(...CandidateSkinPackageIdentity.imagePaths(`${this.stateDirectory}/skins`,
+        toolbarPackageId, ToolbarImagePolicy.paths(this.toolbarImage.spec)));
+      this.skinImageIdentity = CandidateSkinPackageIdentity.identity(this.skinImagePaths, KeyboardSession.statSkinFile);
+    }
     this.toolbarSkin = ToolbarSkinPolicy.fromCss(toolbarColors, skinToolbar,
       ToolbarSkinPolicy.withPackage(toolbarColors,
         CandidateSkinCatalogPolicy.toolbar(skinPackages, toolbarPackageId), toolbarDark));
@@ -2755,12 +2799,8 @@ export class KeyboardSession implements HardwareKeyTarget {
     };
   }
 
-  /** Push the toolbar's face to whichever window is drawing it. */
-  refreshToolbar(): void {
-    if (this.onToolbar === undefined) {
-      return;
-    }
-    const state: ToolbarState = {
+  private toolbarState(): ToolbarState {
+    return {
       english: this.englishMode,
       temporaryEnglish: this.localMode === 'temporary_english' || this.isEnglishCandidates(),
       japanese: !this.englishMode && this.schemeName === 'japanese',
@@ -2773,8 +2813,47 @@ export class KeyboardSession implements HardwareKeyTarget {
       chinesePunctuation: this.usesChinesePunctuation() && !this.writesAsciiPunctuation(),
       fullWidth: this.fullWidth, traditional: this.traditional
     };
-    this.onToolbar(state, FloatingToolbarLayout.buttons(this.toolbarComponents()),
-      this.toolbarFontSize(), this.toolbarScale(), this.toolbarSkin);
+  }
+
+  toolbarImageScene(): ToolbarImageScene | null {
+    const image: ToolbarImageResources | null = this.toolbarImage;
+    if (image === null || this.toolbarImageRejected) return null;
+    try {
+      const request: string = JSON.stringify({ toolbar: image.spec,
+        shown: ToolbarImagePolicy.shown(FloatingToolbarLayout.buttons(this.toolbarComponents()), this.toolbarState()) });
+      const reply: ToolbarImageLayoutReply = JSON.parse(client.skinToolbarImageLayout(request)) as ToolbarImageLayoutReply;
+      if (!reply.ok || reply.value === undefined || reply.value === null) return null;
+      return { key: image.key, spec: image.spec, resources: image.resources, layout: reply.value };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  toolbarSize(): number[] {
+    const scene: ToolbarImageScene | null = this.toolbarImageScene();
+    return scene === null
+      ? [FloatingToolbarLayout.widthVp(FloatingToolbarLayout.buttons(this.toolbarComponents()).length),
+        FloatingToolbarLayout.heightVp()]
+      : [scene.layout.widthDip, scene.layout.heightDip];
+  }
+
+  async resizeToolbarWindow(): Promise<void> {
+    if (this.onToolbarResize !== undefined) await this.onToolbarResize();
+  }
+
+  /** 系统拒绝非矩形状态窗或形状预算超限时，整条回退为普通工具栏。 */
+  rejectToolbarImage(key: string): void {
+    if (this.toolbarImage?.key !== key || this.toolbarImageRejected) return;
+    this.toolbarImageRejected = true;
+    KeyboardLog.info('toolbar window shape unavailable; using native bar');
+    this.refreshToolbar();
+  }
+
+  /** 将同一个状态与共享布局交给窗口。 */
+  refreshToolbar(): void {
+    if (this.onToolbar === undefined) return;
+    this.onToolbar(this.toolbarState(), FloatingToolbarLayout.buttons(this.toolbarComponents()),
+      this.toolbarFontSize(), this.toolbarScale(), this.toolbarSkin, this.toolbarImageScene());
   }
 
   beginToolbarDrag(): void {
@@ -3571,7 +3650,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     } catch (error) {
       return JSON.stringify({ ok: false, error: 'invalid dictionary action' });
     }
-    if (action.operation === 'updates') {
+    if (action.operation === 'updates' || action.operation === 'sogou') {
       // 更新状态与后台下载不准备工作词库，也不触碰正在组字的会话。
       try {
         const loaded: SnapshotResponse = JSON.parse(client.loadPreferences(stateRoot)) as SnapshotResponse;
@@ -3850,9 +3929,14 @@ export class KeyboardSession implements HardwareKeyTarget {
     // Armed off the Engine's own commit rather than off the key that was pressed: what reaches the
     // editor is what the space would be correcting, and the two differ whenever the punctuation
     // policy rewrote the mark.
+    // 顿号的反查按按下的键和 View 的顿号开关定（契约 enumerationComma 段）。
+    const punctuationMarks: PunctuationMarksView | undefined =
+      this.lastView?.punctuation_marks;
     this.smartPunctuationSpaceSnapshot = SmartPunctuationSpacePolicy.arm(
       committed, completion !== null, this.smartPunctuation, this.smartPunctuationSpaceConvert,
-      this.editorGeneration);
+      this.editorGeneration, ascii,
+      ChineseSymbolFaces.enumerationCommaBackslash(punctuationMarks),
+      ChineseSymbolFaces.enumerationCommaSlash(punctuationMarks));
     if (completion === null || this.inputClient === undefined) return;
     try {
       this.insertEditorTextSync(completion.closing);
@@ -4309,6 +4393,8 @@ export class KeyboardSession implements HardwareKeyTarget {
     enabled: true, english_mode: true, punctuation: true, fullwidth: true, character_set: true,
     emoji: true, screen_keyboard: false, scale_percent: 100, font_size: 20
   };
+  private toolbarImage: ToolbarImageResources | null = null;
+  private toolbarImageRejected: boolean = false;
   private toolbarSkin: ToolbarSkin = ToolbarSkinPolicy.base(GlobalTheme.candidateColors(null, false));
   private onlineTimer: number = -1;
   private onlineEpoch: number = 0;
@@ -4431,7 +4517,10 @@ export class KeyboardSession implements HardwareKeyTarget {
         nineKeySingleCharacter: view.nine_key_single_character === true,
         nineKeyStrokes: view.nine_key_strokes ?? '',
         cornerQuotes: ChineseSymbolFaces.cornerQuotes(view.punctuation_marks),
-        hollowBrackets: ChineseSymbolFaces.hollowBrackets(view.punctuation_marks)
+        hollowBrackets: ChineseSymbolFaces.hollowBrackets(view.punctuation_marks),
+        enumerationCommaBackslash:
+          ChineseSymbolFaces.enumerationCommaBackslash(view.punctuation_marks),
+        enumerationCommaSlash: ChineseSymbolFaces.enumerationCommaSlash(view.punctuation_marks)
       });
     }
     if (this.onCandidateWidth !== undefined) {
@@ -4495,7 +4584,10 @@ export class KeyboardSession implements HardwareKeyTarget {
       nineKeySingleCharacter: view.nine_key_single_character === true,
       nineKeyStrokes: view.nine_key_strokes ?? '',
       cornerQuotes: ChineseSymbolFaces.cornerQuotes(view.punctuation_marks),
-      hollowBrackets: ChineseSymbolFaces.hollowBrackets(view.punctuation_marks)
+      hollowBrackets: ChineseSymbolFaces.hollowBrackets(view.punctuation_marks),
+      enumerationCommaBackslash:
+        ChineseSymbolFaces.enumerationCommaBackslash(view.punctuation_marks),
+      enumerationCommaSlash: ChineseSymbolFaces.enumerationCommaSlash(view.punctuation_marks)
     });
     if (this.onCandidateWidth !== undefined) {
       this.onCandidateWidth(this.candidateWidthVp(entries, reading, view.page, view.page_count));
@@ -4579,7 +4671,10 @@ export class KeyboardSession implements HardwareKeyTarget {
       nineKeySingleCharacter: view?.nine_key_single_character === true,
       nineKeyStrokes: view?.nine_key_strokes ?? '',
       cornerQuotes: ChineseSymbolFaces.cornerQuotes(view?.punctuation_marks),
-      hollowBrackets: ChineseSymbolFaces.hollowBrackets(view?.punctuation_marks)
+      hollowBrackets: ChineseSymbolFaces.hollowBrackets(view?.punctuation_marks),
+      enumerationCommaBackslash:
+        ChineseSymbolFaces.enumerationCommaBackslash(view?.punctuation_marks),
+      enumerationCommaSlash: ChineseSymbolFaces.enumerationCommaSlash(view?.punctuation_marks)
     });
     if (this.onCandidateWidth !== undefined) {
       this.onCandidateWidth(this.candidateWidthVp(entries, view?.editing_text ?? this.editing, 0, 1));

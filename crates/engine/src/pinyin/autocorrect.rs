@@ -409,11 +409,22 @@ pub fn autocorrect_cut_kbest(
     autocorrect_types: u32,
     k: usize,
 ) -> Vec<AutocorrectCut> {
+    autocorrect_cut_kbest_with_touch(pinyin, autocorrect_types, k, &[])
+}
+
+/// 阶段 2 使用逐字母触点替换固定纠错代价；无触点保持原有搜索与顺序。
+pub fn autocorrect_cut_kbest_with_touch(
+    pinyin: &str,
+    autocorrect_types: u32,
+    k: usize,
+    touch_points: &[Option<crate::pinyin::touch::TouchPoint>],
+) -> Vec<AutocorrectCut> {
     if k == 0
         || autocorrect_types == 0
         || pinyin.is_empty()
         || pinyin.len() > MAX_AUTOCORRECT_INPUT_LENGTH
         || pinyin.contains('\'')
+        || crate::pinyin::touch::centered_segment(touch_points, 0, pinyin.len())
     {
         return Vec::new();
     }
@@ -447,6 +458,9 @@ pub fn autocorrect_cut_kbest(
             let Some(piece_text) = std::str::from_utf8(piece).ok() else {
                 continue;
             };
+            if crate::pinyin::touch::centered_segment(touch_points, start, raw_length) {
+                continue;
+            }
             let Some(targets) = index.get(piece_text) else {
                 continue;
             };
@@ -455,13 +469,23 @@ pub fn autocorrect_cut_kbest(
                 if enabled_bits == 0 {
                     continue;
                 }
+                let fallback = correction_weight(piece_text, target.syllable, enabled_bits);
+                let Some(weight) = crate::pinyin::touch::replacement_cost(
+                    touch_points,
+                    start,
+                    piece_text,
+                    target.syllable,
+                    f64::from(fallback),
+                ) else {
+                    continue;
+                };
                 search.extend(
                     length,
                     start,
                     raw_length,
                     target.syllable,
                     true,
-                    correction_weight(piece_text, target.syllable, enabled_bits),
+                    weight.round().clamp(1.0, f64::from(i32::MAX)) as i32,
                 );
             }
         }

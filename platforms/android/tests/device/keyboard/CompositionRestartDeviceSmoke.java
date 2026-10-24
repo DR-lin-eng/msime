@@ -9,12 +9,25 @@ import org.json.JSONObject;
 
 /** 组字写入后立即 restartInput 的合成编辑器，必须继续使用同一串候选。 */
 public final class CompositionRestartDeviceSmoke extends DeviceSmoke {
+    private boolean magnifierOnly;
+    private boolean appCompositionOnly;
+
+    @Override public void onCreate(android.os.Bundle arguments) {
+        appCompositionOnly = arguments != null && "true".equals(arguments.getString("app-composition"));
+        magnifierOnly = arguments != null && "true".equals(arguments.getString("magnifier"));
+        super.onCreate(arguments);
+    }
     private File eventLog;
     private long eventWindowStart;
 
-    @Override protected String successDescription() { return "composition survives same-editor restarts"; }
+    @Override protected String successDescription() {
+        return appCompositionOnly ? "app-specific keyboard composition and ordinary editor isolation" : magnifierOnly ? "composition magnifier: editor taps, middle edits, offset dragging and long spelling"
+            : "composition survives same-editor restarts; magnifier middle edits and offset dragging";
+    }
 
     @Override protected void runChecks() throws Exception {
+        if (appCompositionOnly) { AppCompositionDeviceChecks.run(this); return; }
+        if (magnifierOnly) { CompositionMagnifierChecks.run(this); return; }
         File root = getTargetContext().getFilesDir().getCanonicalFile();
         JSONObject options = new JSONObject(new String(Files.readAllBytes(
             new File(root, "runtime-options.json").toPath()), StandardCharsets.UTF_8));
@@ -145,6 +158,7 @@ public final class CompositionRestartDeviceSmoke extends DeviceSmoke {
             if (originalLocal == null) Files.deleteIfExists(localFile.toPath());
             else publish(localFile, originalLocal);
         }
+        CompositionMagnifierChecks.run(this);
     }
 
     private int count() {

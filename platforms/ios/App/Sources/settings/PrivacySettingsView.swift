@@ -4,6 +4,8 @@ import SwiftUI
 struct PrivacySettingsView: View {
   @State private var usageReporting = UsageReporting.isEnabled
   @State private var usageReportingFailed = false
+  @State private var nightLearning = true
+  @State private var codeSuggestions = true
 
   var body: some View {
     ScrollView {
@@ -25,6 +27,17 @@ struct PrivacySettingsView: View {
         }
 
         DesignGroup(title: "本机数据", radius: MetasequoiaTheme.tabCardRadius) {
+          DesignToggleRow(title: "充电夜间自学习", subtitle: "充电、空闲且本地 0–6 点时优化个人排序，运行时机由系统决定", isOn: Binding(get: { nightLearning }, set: { enabled in
+            if MetasequoiaInputSessionBridge.updateSharedPreferences({ $0["charging_night_learning"] = enabled }) {
+              nightLearning = enabled; IOSNightLearning.schedule()
+            } else { usageReportingFailed = true }
+          })).accessibilityIdentifier("nightLearningToggle")
+          DesignDivider()
+          DesignToggleRow(title: "验证码粘贴提示", subtitle: "在键盘剪贴板面板点按读取；短信自动填充由系统键盘提供，不读取短信收件箱", isOn: Binding(get: { codeSuggestions }, set: { enabled in
+            if MetasequoiaInputSessionBridge.updateSharedPreferences({ $0["verification_code_suggestions"] = enabled }) { codeSuggestions = enabled }
+            else { usageReportingFailed = true }
+          })).accessibilityIdentifier("verificationCodeToggle")
+          DesignDivider()
           NavigationLink { ClipboardHistorySettingsView() } label: {
             DesignNavRowLabel(title: "剪贴板历史", subtitle: "只保存在本机，可选择保留条数")
           }
@@ -62,7 +75,12 @@ struct PrivacySettingsView: View {
     .designCanvasBackground()
     .navigationTitle("隐私").navigationBarTitleDisplayMode(.inline)
     // 本页被盖住时键盘可能改了同一个偏好，所以每次返回都重新读取。
-    .onAppear { usageReporting = UsageReporting.isEnabled }
+    .onAppear {
+      usageReporting = UsageReporting.isEnabled
+      let preferences = MetasequoiaInputSessionBridge.loadSharedPreferences()
+      nightLearning = preferences?["charging_night_learning"] as? Bool ?? true
+      codeSuggestions = preferences?["verification_code_suggestions"] as? Bool ?? true
+    }
     .alert("无法保存设置", isPresented: $usageReportingFailed) { Button("好", role: .cancel) {} } message: {
       Text("设置被键盘同时修改了，请稍后再试。")
     }

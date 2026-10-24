@@ -80,6 +80,9 @@ struct Decoded {
 }
 
 pub struct ImeSession {
+    touch_points: Vec<Option<crate::pinyin::touch::TouchPoint>>,
+    next_touch: Option<(u8, crate::pinyin::touch::TouchPoint)>,
+    touch_edit_prepared: bool,
     scheme: Scheme,
     registry: ProviderRegistry,
     state: CompositionState,
@@ -96,6 +99,7 @@ pub struct ImeSession {
     autocorrect_types: u32,
     quanpin_helpcode: bool,
     shuangpin_helpcode: bool,
+    shuangpin_helpcode_modes: crate::types::ShuangpinHelpcodeModes,
     fuzzy: FuzzyPinyinOptions,
     sentence_alternatives: bool,
     /// 首页行数随每个请求交给各方案引擎；只影响词库要不要并入补全词。
@@ -149,6 +153,9 @@ impl ImeSession {
         registry.activate(scheme)?;
         let zhuyin = registry.take_dictionary(scheme);
         let mut session = Self {
+            touch_points: Vec::new(),
+            next_touch: None,
+            touch_edit_prepared: false,
             scheme: Scheme::new(
                 scheme,
                 profile,
@@ -169,6 +176,7 @@ impl ImeSession {
             autocorrect_types: 0,
             quanpin_helpcode: false,
             shuangpin_helpcode: false,
+            shuangpin_helpcode_modes: crate::types::ShuangpinHelpcodeModes::default(),
             fuzzy: FuzzyPinyinOptions::default(),
             sentence_alternatives: false,
             first_page_rows: FirstPageRows::default(),
@@ -281,6 +289,11 @@ impl ImeSession {
 
     /// `scheme.handle_key` then `refresh_candidates`; `SchemeKey::Requery` only refreshes.
     pub fn handle_key(&mut self, key: SchemeKey) -> bool {
+        let old_length = self.state.request.raw_input.len();
+        let touch = self.next_touch.take().and_then(|(value, point)| {
+            matches!(key, SchemeKey::Letter(letter) if letter.eq_ignore_ascii_case(&value))
+                .then_some(point)
+        });
         if let SchemeKey::Letter(letter) = key {
             if self.wubi_pinyin_continues(letter) {
                 if let Some(wubi) = self.scheme.as_wubi_mut() {
@@ -296,8 +309,56 @@ impl ImeSession {
         } else {
             false
         };
+        if changed
+            && matches!(
+                self.current_scheme_type(),
+                SchemeType::Quanpin | SchemeType::Shuangpin
+            )
+        {
+            match key {
+                SchemeKey::Letter(_) | SchemeKey::Apostrophe | SchemeKey::Semicolon => {
+                    if touch.is_some() || !self.touch_points.is_empty() {
+                        self.touch_points.resize(old_length, None);
+                        self.touch_points.push(touch);
+                    }
+                }
+                SchemeKey::Backspace => {
+                    self.touch_points.truncate(old_length.saturating_sub(1));
+                }
+                _ => {}
+            }
+        }
         self.refresh_candidates();
         changed
+    }
+
+    /// 一次字符调用范围内的旁路；键值绑定防止被模式切换或拒绝的键污染下一键。
+    pub fn set_touch_point(&mut self, point: Option<(u8, crate::pinyin::touch::TouchPoint)>) {
+        self.next_touch = point;
+    }
+
+    /// 光标编辑使用明确字节位置，重复字母也不会把邻居的触点错移过来。
+    pub fn edit_touch_points(&mut self, at: usize, remove: usize, insert: Option<u8>) {
+        if !matches!(
+            self.current_scheme_type(),
+            SchemeType::Quanpin | SchemeType::Shuangpin
+        ) {
+            return;
+        }
+        let point = self.next_touch.take().and_then(|(key, point)| {
+            insert
+                .is_some_and(|value| value.eq_ignore_ascii_case(&key))
+                .then_some(point)
+        });
+        if !self.touch_points.is_empty() || point.is_some() {
+            self.touch_points
+                .resize(self.state.request.raw_input.len(), None);
+            if at <= self.touch_points.len() && remove <= self.touch_points.len() - at {
+                self.touch_points
+                    .splice(at..at + remove, insert.map(|_| point));
+                self.touch_edit_prepared = true;
+            }
+        }
     }
 
     /// Opens what `scheme` reads (`msime-cantonese.db` for Cantonese, `msime-zhuyin.db` for Zhuyin, `msime-stroke.db` for Stroke) without switching to it, so a caller can learn that the scheme is unavailable before it discards anything; `switch_scheme` to an activated scheme cannot fail. A live Zhuyin scheme already holds `msime-zhuyin.db`, so activating Zhuyin again opens nothing.
@@ -339,12 +400,19 @@ impl ImeSession {
             }
         }
         self.bind_wubi_scheme();
+        self.bind_shuangpin_scheme();
+        self.touch_points.clear();
+        self.next_touch = None;
+        self.touch_edit_prepared = false;
         self.state = CompositionState::default();
         self.pinyin_tail = false;
         Ok(())
     }
 
     pub fn reset(&mut self) {
+        self.touch_points.clear();
+        self.next_touch = None;
+        self.touch_edit_prepared = false;
         self.scheme.reset();
         self.state = CompositionState::default();
         self.pinyin_tail = false;
@@ -358,6 +426,21 @@ impl ImeSession {
 
     /// Host editing for whichever scheme is active; wubi also re-derives its length allowance from the mixed-pinyin option (ime_session.cpp:103-157, 199-238).
     pub fn replace_active_raw_input(&mut self, raw: &str, raw_with_cases: &str) {
+        if !std::mem::take(&mut self.touch_edit_prepared) && !self.touch_points.is_empty() {
+            let previous = &self.state.request.raw_input;
+            let next = raw.to_ascii_lowercase();
+            if previous.ends_with(&next) {
+                self.touch_points
+                    .drain(..previous.len().saturating_sub(next.len()));
+            } else if previous.starts_with(&next) {
+                self.touch_points.truncate(next.len());
+            } else if next.starts_with(previous) {
+                self.touch_points.resize(next.len(), None);
+            } else {
+                // 任意外部替换没有触点来源，宁可丢弃证据，也不猜重复字母的对应关系。
+                self.touch_points.clear();
+            }
+        }
         // Host editing rewrites text the composition already holds, so its clip length comes from the setting, not from what the last query answered; otherwise moving the caret through a mixed composition drops everything past the fourth letter. `refresh_candidates` restores the query-derived value.
         let mixed_pinyin = self.wubi_options.mixed_pinyin;
         if let Some(wubi) = self.scheme.as_wubi_mut() {
@@ -671,6 +754,12 @@ impl ImeSession {
 
     /// The request a scratch scheme of the current type builds for `raw`, with the session's switches applied. The current scheme was activated before it became current, so building its scratch twin cannot fail, except for Zhuyin, whose `msime-zhuyin.db` connection belongs to the live editor: an invalid request stands for both, and Zhuyin keeps its caret at the end, so it never decodes a caret prefix.
     fn build_raw_request(&self, raw: &str, raw_with_cases: &str, request: &mut QueryRequest) {
+        request.touch_points.clear();
+        if self.state.request.raw_input.starts_with(raw) && self.touch_points.len() >= raw.len() {
+            request
+                .touch_points
+                .extend_from_slice(&self.touch_points[..raw.len()]);
+        }
         match self.current_scheme_type() {
             SchemeType::Quanpin => {
                 QuanpinScheme::build_request_from_raw_into(raw, raw_with_cases, request)
@@ -679,6 +768,7 @@ impl ImeSession {
                 self.profile,
                 raw,
                 raw_with_cases,
+                self.helpcode_uppercase_triggers(),
                 request,
             ),
             _ => return self.raw_request_through_scheme(raw, raw_with_cases, request),
@@ -708,7 +798,8 @@ impl ImeSession {
         if let Some(wubi) = scratch.as_wubi_mut() {
             wubi.set_mixed_pinyin_allowed(self.wubi_options.mixed_pinyin);
             wubi.set_extended_length_allowed(self.wubi_options.mixed_pinyin);
-            wubi.set_pinyin_lookup_allowed(!self.wubi_options.mixed_pinyin);
+            wubi.set_z_wildcard(self.wubi_options.z_wildcard);
+            wubi.set_pinyin_lookup_allowed(self.pinyin_lookup_allowed());
         }
         scratch.set_raw_input(raw, raw_with_cases);
         let built = self.prepare_request(&scratch);
@@ -753,6 +844,32 @@ impl ImeSession {
 
     pub fn set_shuangpin_helpcode_enabled(&mut self, enabled: bool) {
         self.shuangpin_helpcode = enabled;
+        // 末尾大写触发归谁同时看总开关，方案层要重算。
+        self.bind_shuangpin_scheme();
+    }
+
+    /// 双拼辅助码的触发方式；请求每次构建都带上，改动即时生效。
+    pub fn set_shuangpin_helpcode_modes(&mut self, modes: crate::types::ShuangpinHelpcodeModes) {
+        self.shuangpin_helpcode_modes = modes;
+        self.bind_shuangpin_scheme();
+    }
+
+    /// 大写字母开哪种辅助码段（`ime_session.h` 的 `helpcode_uppercase_triggers`）。
+    pub(super) fn helpcode_uppercase_triggers(
+        &self,
+    ) -> crate::shuangpin::mid_sentence::UppercaseTriggers {
+        crate::shuangpin::mid_sentence::uppercase_triggers(
+            &self.shuangpin_helpcode_modes,
+            self.shuangpin_helpcode,
+        )
+    }
+
+    /// 大写段按当时的触发方式解析，方案层要拿到和敲键时一致的设置（`configure_shuangpin_scheme`）。
+    fn bind_shuangpin_scheme(&mut self) {
+        let triggers = self.helpcode_uppercase_triggers();
+        if let Some(shuangpin) = self.scheme.as_shuangpin_mut() {
+            shuangpin.set_helpcode_uppercase_triggers(triggers);
+        }
     }
 
     pub fn set_fuzzy_pinyin_options(&mut self, options: FuzzyPinyinOptions) {
@@ -828,6 +945,17 @@ impl ImeSession {
     fn refresh_candidates(&mut self) {
         let mut request = std::mem::take(&mut self.state.request);
         self.scheme.build_request_into(&mut request);
+        if matches!(request.scheme, SchemeType::Quanpin | SchemeType::Shuangpin) {
+            if request.raw_input_with_helpcode_marks.is_empty() {
+                self.touch_points.truncate(request.raw_input.len());
+            } else {
+                // 辅助码段会改写查询字节位置，没有逐字映射的触点不能继续参与纠错。
+                self.touch_points.clear();
+            }
+            request.touch_points.clone_from(&self.touch_points);
+        } else {
+            request.touch_points.clear();
+        }
         self.apply_request_options(&mut request);
         self.apply_autocorrect_suppression(&mut request);
         apply_shuangpin_helpcode_segmentation(&mut request, self.profile);
@@ -942,6 +1070,15 @@ impl ImeSession {
 
     fn apply_request_options(&self, request: &mut QueryRequest) {
         request.enable_shuangpin_helpcode = self.shuangpin_helpcode;
+        request.shuangpin_helpcode_modes = self.shuangpin_helpcode_modes;
+        // 末尾段只在「辅助码开、末尾直接关、万象式直接没接管」时筛候选（ime_session.cpp:386-404）；
+        // 串里残留的旧段降级成分隔符。
+        if !(self.shuangpin_helpcode
+            && !request.shuangpin_helpcode_modes.direct
+            && !request.shuangpin_helpcode_modes.direct_helpcode)
+        {
+            request.end_helpcodes.clear();
+        }
         request.enable_quanpin_helpcode = self.quanpin_helpcode;
         request.sentence_alternatives = self.sentence_alternatives;
         request.enable_quanpin_autocorrect_transposition =
@@ -949,7 +1086,7 @@ impl ImeSession {
         request.enable_quanpin_autocorrect_neighbor =
             self.autocorrect_types & autocorrect_type::NEIGHBOR != 0;
         request.fuzzy_pinyin = self.fuzzy;
-        request.sentence_association = self.sentence_association;
+        request.sentence_association = self.sentence_association.clone();
         request.first_page_rows = self.first_page_rows;
         request
             .rescoring_context
@@ -1032,7 +1169,7 @@ impl ImeSession {
 
     /// 五笔请求是临时拼音反查时，去掉引导键 `z` 之后的拼音原文（不带大小写的和带大小写的）。混输关闭时五笔码里不会出现 `z`，所以以 `z` 开头的五笔请求只能来自反查；混输打开时 `z` 是拼音字母，没有反查。
     fn pinyin_lookup_spelling<'a>(&self, request: &'a QueryRequest) -> Option<(&'a str, &'a str)> {
-        if request.scheme != SchemeType::Wubi || self.wubi_options.mixed_pinyin {
+        if request.scheme != SchemeType::Wubi || !self.pinyin_lookup_allowed() {
             return None;
         }
         let raw = request
@@ -1068,11 +1205,21 @@ impl ImeSession {
 
     fn bind_wubi_scheme(&mut self) {
         let mixed_pinyin = self.wubi_options.mixed_pinyin;
+        let z_wildcard = self.wubi_options.z_wildcard;
+        let lookup_allowed = self.pinyin_lookup_allowed();
         if let Some(wubi) = self.scheme.as_wubi_mut() {
             wubi.set_mixed_pinyin_allowed(mixed_pinyin);
-            // 混输打开时 `z` 已经是拼音字母，引导反查只在混输关闭时有意义。
-            wubi.set_pinyin_lookup_allowed(!mixed_pinyin);
+            wubi.set_z_wildcard(z_wildcard);
+            // 混输打开时 `z` 已经是拼音字母；通配打开时它是未知码位。两条路都占着这个键，引导反查只在两者都关时才有意义。
+            wubi.set_pinyin_lookup_allowed(lookup_allowed);
         }
+    }
+
+    /// `z` 引导的临时拼音反查能否打开：混输关闭、通配也关闭。
+    ///
+    /// 五笔码不用 `z`，所以三条路不重叠地各占一种语义：拼音字母、未知码位、拼音反查。
+    fn pinyin_lookup_allowed(&self) -> bool {
+        !self.wubi_options.mixed_pinyin && !self.wubi_options.z_wildcard
     }
 }
 
@@ -1112,17 +1259,22 @@ fn pinyin_prefix_with_next(tail: &str, next: u8) -> bool {
 
 /// 从已构造的请求复用方案显示文本，避免刷新时再次调用 `Scheme::preedit()` 分配同一份字符串。
 fn reuse_request_preedit(request: &QueryRequest, destination: &mut String) {
-    let source = match request.scheme {
-        SchemeType::Quanpin
-        | SchemeType::Shuangpin
-        | SchemeType::Wubi
-        | SchemeType::JapaneseRomaji
-        | SchemeType::Cantonese => &request.raw_input_with_cases,
-        SchemeType::Korean
-        | SchemeType::Zhuyin
-        | SchemeType::Vietnamese
-        | SchemeType::Tibetan
-        | SchemeType::Stroke => &request.normalized_segmentation,
+    // 带辅助码段时预编辑必须是用户敲的原串（含段标记），去段串只用于查询。
+    let source = if !request.raw_input_with_helpcode_marks.is_empty() {
+        &request.raw_input_with_helpcode_marks
+    } else {
+        match request.scheme {
+            SchemeType::Quanpin
+            | SchemeType::Shuangpin
+            | SchemeType::Wubi
+            | SchemeType::JapaneseRomaji
+            | SchemeType::Cantonese => &request.raw_input_with_cases,
+            SchemeType::Korean
+            | SchemeType::Zhuyin
+            | SchemeType::Vietnamese
+            | SchemeType::Tibetan
+            | SchemeType::Stroke => &request.normalized_segmentation,
+        }
     };
     source.clone_into(destination);
 }
@@ -1267,6 +1419,7 @@ fn apply_shuangpin_helpcode_segmentation(request: &mut QueryRequest, profile: &S
     const HELPCODE_LENGTH: usize = 2;
     if request.scheme != SchemeType::Shuangpin
         || !request.enable_shuangpin_helpcode
+        || !request.shuangpin_helpcode_modes.direct
         || detect_active_double_helpcode_length(
             &request.raw_input,
             &request.raw_input_with_cases,

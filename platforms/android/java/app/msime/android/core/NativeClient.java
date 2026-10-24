@@ -391,8 +391,21 @@ public final class NativeClient {
         return TextPolicy.utf8(mobileVoiceConfigurationRaw(utf8(directory)));
     }
 
+    /** 识别服务设置行的共享状态文案；纯计算，不读写偏好。 */
+    public static String mobileVoiceStatus(String provider, boolean resolved,
+            boolean platformAvailable, boolean modelReady, boolean runtimeReady) {
+        if (provider == null || !TextPolicy.validUnicode(provider) || provider.length() > 256
+                || TextPolicy.utf8Length(provider) > 256)
+            throw new IllegalArgumentException("Invalid voice status provider");
+        return TextPolicy.utf8(mobileVoiceStatusRaw(utf8(provider), resolved, platformAvailable,
+            modelReady, runtimeReady));
+    }
+
     /** 共享语音服务与豆包流式接口目录；纯计算，不读写偏好、不联网。 */
     public static String voiceProviderCatalog() { return TextPolicy.utf8(voiceProviderCatalogRaw()); }
+    public static String aiProviderCatalog() { return TextPolicy.utf8(aiProviderCatalogRaw()); }
+    public static String aiProviderUpdate(String request) { return TextPolicy.utf8(aiProviderUpdateRaw(utf8(request))); }
+    public static String aiModels(String request) { return TextPolicy.utf8(aiModelsRaw(utf8(request))); }
 
     /** 设置页的语音接口预检；纯计算，与 C ABI 共用 64 KiB 的 UTF-8 传输上限。 */
     public static String voiceEndpointIssue(String endpoint, boolean websocket) {
@@ -401,6 +414,25 @@ public final class NativeClient {
         byte[] payload = utf8(endpoint);
         if (payload.length > 65_536) throw new IllegalArgumentException("Invalid voice endpoint");
         return TextPolicy.utf8(voiceEndpointIssueRaw(payload, websocket));
+    }
+
+    /** 设置页的共享语音凭据预检；空值表示删除，响应不含凭据。 */
+    public static String voiceCredentialIssue(String provider, String value) {
+        if (provider == null || value == null || !TextPolicy.validUnicode(provider)
+                || !TextPolicy.validUnicode(value) || provider.length() > 256
+                || TextPolicy.utf8Length(provider) > 256 || value.length() > 16 * 1024
+                || TextPolicy.utf8Length(value) > 16 * 1024)
+            throw new IllegalArgumentException("Invalid voice credential");
+        return TextPolicy.utf8(voiceCredentialIssueRaw(utf8(provider), utf8(value)));
+    }
+
+    /** 生成流式 WebSocket 的共享传输描述；失败时返回标准错误信封，不回退本地 URI 解析。 */
+    public static String voiceWebSocketEndpoint(String endpoint) {
+        if (endpoint == null || endpoint.length() > 65_536 || !TextPolicy.validUnicode(endpoint))
+            throw new IllegalArgumentException("Invalid voice websocket endpoint");
+        byte[] payload = utf8(endpoint);
+        if (payload.length > 65_536) throw new IllegalArgumentException("Invalid voice websocket endpoint");
+        return TextPolicy.utf8(voiceWebSocketEndpointRaw(payload));
     }
 
     /** 纯计算的换服务补丁，含凭据；不得记录请求或响应，与 C ABI 共用 1 MiB 的 UTF-8 上限。 */
@@ -730,6 +762,13 @@ public final class NativeClient {
         if (ascii < 0 || ascii > 127) throw new IllegalArgumentException("Engine character must be ASCII");
         return TextPolicy.utf8(characterRaw(session, ascii, shift));
     }
+    public static String characterWithTouch(long session, int ascii, boolean shift,
+            float x, float y, float[] centers) {
+        if (ascii < 0 || ascii > 127 || !TextPolicy.isAsciiLetter((char) ascii)
+                || centers == null || centers.length != 52)
+            throw new IllegalArgumentException("Touch input requires a letter and 52 center coordinates");
+        return TextPolicy.utf8(characterWithTouchRaw(session, ascii, shift, x, y, centers));
+    }
     public static String punctuationWithContext(long session, int ascii, int precedingCodePoint) {
         if (ascii < 0 || ascii > 127 || !SmartPunctuationContext.isAsciiPunctuation((char) ascii))
             throw new IllegalArgumentException("Engine punctuation must be ASCII punctuation");
@@ -959,8 +998,15 @@ public final class NativeClient {
     private static native byte[] setPrivateSessionRaw(long session, boolean enabled);
     private static native byte[] setEnglishModeRaw(long session, boolean enabled);
     private static native byte[] mobileVoiceConfigurationRaw(byte[] directory);
+    private static native byte[] mobileVoiceStatusRaw(byte[] provider, boolean resolved,
+        boolean platformAvailable, boolean modelReady, boolean runtimeReady);
     private static native byte[] voiceProviderCatalogRaw();
+    private static native byte[] aiProviderCatalogRaw();
+    private static native byte[] aiProviderUpdateRaw(byte[] request);
+    private static native byte[] aiModelsRaw(byte[] request);
     private static native byte[] voiceEndpointIssueRaw(byte[] endpoint, boolean websocket);
+    private static native byte[] voiceCredentialIssueRaw(byte[] provider, byte[] value);
+    private static native byte[] voiceWebSocketEndpointRaw(byte[] endpoint);
     private static native byte[] voiceProviderUpdateRaw(byte[] request);
     private static native byte[] simplifiedToTraditionalRaw(byte[] text);
     private static native byte[] resetCacheRaw(long session);
@@ -968,6 +1014,8 @@ public final class NativeClient {
     private static native byte[] setChinesePunctuationRaw(long session, boolean enabled);
     private static native byte[] setCharacterWidthRaw(long session, boolean fullwidth);
     private static native byte[] characterRaw(long session, int ascii, boolean shift);
+    private static native byte[] characterWithTouchRaw(long session, int ascii, boolean shift,
+        float x, float y, float[] centers);
     private static native byte[] balancePairedPunctuationAfterAutoCloseRaw(long session, int opening);
     private static native byte[] punctuationWithContextRaw(long session, int ascii,
         int precedingCodePoint);

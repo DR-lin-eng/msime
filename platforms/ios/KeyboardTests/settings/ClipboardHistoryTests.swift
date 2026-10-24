@@ -103,7 +103,7 @@ final class ClipboardHistoryTests: XCTestCase {
   /// Windows' 搜索剪贴板 on a keyboard: a letter and digit pad filters the rows, a tap inserts the match, and 返回 leaves the search before the panel.
   @MainActor func testPanelSearchFiltersWithItsOwnPad() throws {
     let store = try temporaryStore()
-    for text in ["会议链接 https://example.com/a1", "验证码 804512", "晚饭吃什么", "Example Draft"] { try store.add(text) }
+    for text in ["会议链接 https://example.com/a1", "合成订单 804512", "晚饭吃什么", "Example Draft"] { try store.add(text) }
     var inserted = ""
     var closed = false
     let panel = KeyboardClipboardView(hasFullAccess: true, store: store, onInsert: { inserted = $0 }, onClose: { closed = true })
@@ -130,7 +130,7 @@ final class ClipboardHistoryTests: XCTestCase {
     for key in ["8", "0", "4"] { try view("clipboardSearchKey-" + key, in: panel).sendActions(for: .primaryActionTriggered) }
     XCTAssertEqual(table.numberOfRows(inSection: 0), 1)
     panel.tableView(table, didSelectRowAt: IndexPath(row: 0, section: 0))
-    XCTAssertEqual(inserted, "验证码 804512")
+    XCTAssertEqual(inserted, "合成订单 804512")
 
     try view("clipboardSearchKey-q", in: panel).sendActions(for: .primaryActionTriggered)
     XCTAssertEqual(table.numberOfRows(inSection: 0), 0)
@@ -149,7 +149,7 @@ final class ClipboardHistoryTests: XCTestCase {
   /// 按键区里的紧凑面板在手机横屏只有约 168pt 高：搜索时字母键盘让出高度，结果表仍放得下一张单行卡片。
   @MainActor func testCompactSearchKeepsARowOfResultsInALandscapeKeyArea() throws {
     let store = try temporaryStore()
-    try store.add("验证码 804512")
+    try store.add("合成订单 804512")
     let panel = KeyboardClipboardView(hasFullAccess: true, store: store, showsHeader: false, onInsert: { _ in }, onClose: {})
     panel.frame = CGRect(x: 0, y: 0, width: 844, height: 168)
     panel.layoutIfNeeded()
@@ -172,5 +172,15 @@ final class ClipboardHistoryTests: XCTestCase {
 
   private func view(_ identifier: String, in root: UIView) throws -> UIControl {
     try XCTUnwrap(descendants(root).first { $0.accessibilityIdentifier == identifier } as? UIControl, identifier)
+  }
+}
+
+// 验证码历史拒收由独立用例覆盖，搜索夹具使用普通订单编号。
+extension ClipboardHistoryTests {
+  func testVerificationMessageIsNotPersistedAsHistory() throws {
+    let store = try temporaryStore()
+    do { try store.add("合成验证码 482615"); XCTFail("验证码不应保存") }
+    catch ClipboardHistoryStore.Failure.verificationCode { }
+    XCTAssertTrue(try store.load().isEmpty)
   }
 }

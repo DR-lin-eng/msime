@@ -3031,8 +3031,7 @@ struct KeyboardView {
 
   /** The adjustment is spread across the key rows so none of them keeps a stray pixel. */
   private rowHeight(index: number): number {
-    return KeyboardGeometry.adjustedRowHeight(KeyboardMetrics.ROW_HEIGHT_VP,
-      this.geometryHeight, KeyboardMetrics.KEY_ROWS, index);
+    return KeyboardGeometry.keyHeight(this.settings.keyHeight);
   }
 
   /**
@@ -3418,7 +3417,7 @@ struct KeyboardView {
     this.stripWasShown = this.stripShown();
     KeyboardSession.shared.resizeTouchKeyboard(KeyboardMetrics.totalHeightVp(
       this.geometryRowSpacing, this.geometryHeight, KeyboardSession.shared.glossRows(),
-      this.settings.candidateFontSize, this.settings.candidatePreeditFontSize, false, this.stripWasShown));
+      this.settings.candidateFontSize, this.settings.candidatePreeditFontSize, false, this.stripWasShown, this.settings.keyHeight));
   }
 
   /** Nothing to spell, choose or report on a touch keyboard: the strip is the logo bar. */
@@ -9524,7 +9523,7 @@ struct KeyboardView {
         left: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP,
         right: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP,
         top: KeyboardMetrics.TOUCH_ROOT_TOP_PADDING_VP,
-        bottom: KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP
+        bottom: KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP + KeyboardGeometry.bottomSpace(this.geometryHeight)
       })
     } else {
       Column({ space: this.rowSpacing() }) {
@@ -9547,7 +9546,7 @@ struct KeyboardView {
         left: KeyboardMetrics.ROOT_HORIZONTAL_PADDING_VP,
         right: KeyboardMetrics.ROOT_HORIZONTAL_PADDING_VP,
         top: KeyboardMetrics.ROOT_VERTICAL_PADDING_VP,
-        bottom: KeyboardMetrics.ROOT_VERTICAL_PADDING_VP
+        bottom: KeyboardMetrics.ROOT_VERTICAL_PADDING_VP + KeyboardGeometry.bottomSpace(this.geometryHeight)
       })
     }
   }

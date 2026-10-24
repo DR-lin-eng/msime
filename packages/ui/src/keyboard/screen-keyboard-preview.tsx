@@ -139,6 +139,7 @@ export function ScreenKeyboardPreview({
   keySpacingTenths,
   rowSpacingTenths,
   heightAdjustment = 0,
+  keyHeight,
   widthPercent = 100,
   layout,
   touchRows,
@@ -152,6 +153,7 @@ export function ScreenKeyboardPreview({
   keySpacingTenths?: number;
   rowSpacingTenths?: number;
   heightAdjustment?: number;
+  keyHeight?: number;
   widthPercent?: number;
   /** 省略时取 `ScreenKeyboardLayoutContext`，即宿主自己的键盘。 */
   layout?: "desktop" | "touch";
@@ -200,17 +202,22 @@ export function ScreenKeyboardPreview({
   const rowGap = thumbnail ? 11 : phone ? rowSpacing : Math.max(0, 4 + rowSpacing - 7);
   // 手机预览：每排键 44 高，「键盘高度」的增减摊到各排，底下留 8。
   const phoneHeight =
-    rowsTop + layoutRows.length * phoneKeyHeight + rowGap * (layoutRows.length - 1) + 8;
+    rowsTop +
+    layoutRows.length * (keyHeight ?? phoneKeyHeight) +
+    rowGap * (layoutRows.length - 1) +
+    8;
   const canvasHeight = thumbnail
     ? thumbnailHeight
     : phone
-      ? phoneHeight + clamp(heightAdjustment, -12, 48)
+      ? phoneHeight + clamp(heightAdjustment, keyHeight === undefined ? -12 : 0, 48)
       : 400 + clamp(heightAdjustment, -12, 48);
   const height = thumbnail
     ? 43
-    : phone
-      ? (canvasHeight - rowsTop - 8 - rowGap * (layoutRows.length - 1)) / layoutRows.length
-      : (canvasHeight - 28 - 7 - rowGap * (layoutRows.length - 1)) / layoutRows.length;
+    : keyHeight !== undefined
+      ? clamp(keyHeight, 28, 64)
+      : phone
+        ? (canvasHeight - rowsTop - 8 - rowGap * (layoutRows.length - 1)) / layoutRows.length
+        : (canvasHeight - 28 - 7 - rowGap * (layoutRows.length - 1)) / layoutRows.length;
   const backgroundRadius = thumbnail ? 0 : phone ? 14 : 8;
   return (
     <svg

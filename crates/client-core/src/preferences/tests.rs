@@ -3948,6 +3948,7 @@ fn touch_keyboard_geometry_preserves_defaults_bounds_and_legacy_roundtrip() {
     let mut legacy = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
     for key in [
         "touch_keyboard_width_percent",
+        "touch_key_height",
         "touch_key_spacing_tenths",
         "touch_row_spacing_tenths",
         "touch_keyboard_height_adjustment",
@@ -3962,6 +3963,7 @@ fn touch_keyboard_geometry_preserves_defaults_bounds_and_legacy_roundtrip() {
     fs::write(store.path(), &bytes).unwrap();
     let loaded = store.load().unwrap();
     assert_eq!(loaded.preferences.touch_keyboard_width_percent, 100);
+    assert_eq!(loaded.preferences.touch_key_height, 40);
     assert_eq!(loaded.preferences.touch_key_spacing_tenths, 60);
     assert_eq!(loaded.preferences.touch_row_spacing_tenths, 70);
     assert_eq!(loaded.preferences.touch_keyboard_height_adjustment, 0);
@@ -6600,6 +6602,7 @@ const NOT_CREDENTIALS: &[&str] = &[
     "screen_keyboard_theme",
     "second_third_candidate.keys",
     "sentence_association.neural_keyboard",
+    "touch_key_height",
     "touch_key_spacing_tenths",
     "touch_keyboard_width_percent",
     "touch_keyboard_height_adjustment",

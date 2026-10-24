@@ -1181,13 +1181,16 @@ pub struct Preferences {
     /// 普通移动键盘按键区的宽度百分比；候选栏和工具栏不缩放。
     #[serde(default = "default_touch_keyboard_width_percent")]
     pub touch_keyboard_width_percent: u8,
+    /// 单个触屏按键的键帽高度，单位为 dp；额外键盘空间不改变它。
+    #[serde(default = "default_touch_key_height")]
+    pub touch_key_height: u8,
     /// 横向按键间距，单位为十分之一 dp。
     #[serde(default = "default_touch_key_spacing_tenths")]
     pub touch_key_spacing_tenths: u8,
     /// 纵向行间距，单位为十分之一 dp。
     #[serde(default = "default_touch_row_spacing_tenths")]
     pub touch_row_spacing_tenths: u8,
-    /// Touch-keyboard height adjustment in density-independent pixels.
+    /// 触屏键盘额外的底部空间，单位为 dp；旧负值保留兼容，显示时按零处理。
     #[serde(default)]
     pub touch_keyboard_height_adjustment: i8,
     /// Show a direct voice-result entry in touch-keyboard toolbars.
@@ -3059,6 +3062,10 @@ pub fn normalize_touch_quick_symbols(symbols: &[String]) -> Vec<String> {
     }
 }
 
+fn default_touch_key_height() -> u8 {
+    40
+}
+
 fn default_touch_keyboard_width_percent() -> u8 {
     100
 }
@@ -3137,6 +3144,7 @@ impl Default for Preferences {
             touch_keyboard_split_portrait: false,
             touch_keyboard_schemes: TouchKeyboardSchemePreferences::default(),
             touch_keyboard_width_percent: default_touch_keyboard_width_percent(),
+            touch_key_height: default_touch_key_height(),
             touch_key_spacing_tenths: default_touch_key_spacing_tenths(),
             touch_row_spacing_tenths: default_touch_row_spacing_tenths(),
             touch_keyboard_height_adjustment: 0,
@@ -3989,7 +3997,8 @@ impl Preferences {
         if !(1..=MAX_CANDIDATE_PAGE_SIZE).contains(&self.candidate_page_size) {
             return Err(PreferencesError::InvalidPageSize);
         }
-        if !(75..=100).contains(&self.touch_keyboard_width_percent)
+        if !(28..=64).contains(&self.touch_key_height)
+            || !(75..=100).contains(&self.touch_keyboard_width_percent)
             || self.touch_key_spacing_tenths > 120
             || self.touch_row_spacing_tenths > 160
             || !(-12..=48).contains(&self.touch_keyboard_height_adjustment)

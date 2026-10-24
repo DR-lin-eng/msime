@@ -143,6 +143,7 @@ export function ScreenKeyboardSettingsPage() {
       rowSpacingTenths={previewRowSpacingTenths}
       heightAdjustment={previewHeightAdjustment}
       phone={harmonyPhone}
+      keyHeight={mobilePlatform ? (draft.touch_key_height ?? 40) : undefined}
       widthPercent={mobilePlatform ? (draft.touch_keyboard_width_percent ?? 100) : 100}
       touchRows={
         harmonyPhone
@@ -219,6 +220,8 @@ export function ScreenKeyboardSettingsPage() {
             }
             preview={harmonyPhone && phonePreview}
             widthPercent={mobilePlatform ? (draft.touch_keyboard_width_percent ?? 100) : undefined}
+            keyHeight={mobilePlatform ? (draft.touch_key_height ?? 40) : undefined}
+            onKeyHeightChange={(touch_key_height) => onPreferencesChange({ touch_key_height })}
             onWidthPercentChange={(touch_keyboard_width_percent) =>
               onPreferencesChange({ touch_keyboard_width_percent })
             }

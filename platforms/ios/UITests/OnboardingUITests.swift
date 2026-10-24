@@ -231,6 +231,7 @@ final class OnboardingUITests: XCTestCase {
     settingsEntry("keyboardLayoutLink", in: app).tap()
     let keys = app.sliders["appKeySpacingSlider"]
     let rows = app.sliders["appRowSpacingSlider"]
+    let height = app.sliders["appKeyHeightSlider"]
     XCTAssertTrue(keys.waitForExistence(timeout: 5))
     XCTAssertFalse(app.buttons["layoutPreset_msime"].exists)
     // 语音入口已移到 语音输入 → 启动方式，所以这一页上无论标识符是什么，都没有与它相关的开关。
@@ -243,13 +244,15 @@ final class OnboardingUITests: XCTestCase {
     func position(_ slider: XCUIElement) throws -> CGFloat {
       revealBelowKeyboardPreview(slider, in: app)
       let raw = try XCTUnwrap(slider.value as? String)
-      let value = try XCTUnwrap(Double(raw.replacingOccurrences(of: "%", with: "")))
+      let value = try XCTUnwrap(Double(raw.filter { "0123456789.-".contains($0) }))
       if raw.contains("%") { return CGFloat(value / 100) }
-      let minimum = 0.0
-      let maximum = slider.identifier == "appKeySpacingSlider" ? 12.0 : 16.0
+      let minimum = slider.identifier == "appKeyHeightSlider" ? 28.0 : 0.0
+      let maximum = slider.identifier == "appKeyHeightSlider" ? 64.0
+        : slider.identifier == "appKeySpacingSlider" ? 12.0 : 16.0
       return CGFloat((value - minimum) / (maximum - minimum))
     }
     let originalKeys = try position(keys), originalRows = try position(rows)
+    let originalHeight = try position(height)
     // 间距存在 app group 里，比 app 本身活得久，测试中途失败就会把本测试的值留给之后的每个测试（以及共用这个 group 的键盘单元测试）。即使 `continueAfterFailure = false` 终止了测试，teardown block 也会执行，`defer` 不保证这一点，所以还原放在那里；下面的正常路径仍会检查这些值确实恢复了。
     let restore = SpacingRestore()
     addTeardownBlock { @MainActor in
@@ -261,7 +264,10 @@ final class OnboardingUITests: XCTestCase {
       guard keys.waitForExistence(timeout: 5) else { return }
       adjust(keys, to: originalKeys)
       adjust(rows, to: originalRows)
+      adjust(height, to: originalHeight)
     }
+    adjust(height, to: 0.5)
+    let changedHeight = try position(height)
     adjust(keys, to: originalKeys > 0.5 ? 0 : 1)
     adjust(rows, to: originalRows > 0.5 ? 0 : 1)
     let changedKeys = try position(keys), changedRows = try position(rows)
@@ -271,8 +277,14 @@ final class OnboardingUITests: XCTestCase {
     XCTAssertTrue(keys.waitForExistence(timeout: 5))
     XCTAssertEqual(try position(keys), changedKeys, accuracy: 0.01)
     XCTAssertEqual(try position(rows), changedRows, accuracy: 0.01)
+    XCTAssertEqual(try position(height), changedHeight, accuracy: 0.01)
+    let screenshot = XCTAttachment(screenshot: app.screenshot())
+    screenshot.name = "单键高度与独立间距设置"
+    screenshot.lifetime = .keepAlways
+    add(screenshot)
     adjust(keys, to: originalKeys)
     adjust(rows, to: originalRows)
+    adjust(height, to: originalHeight)
     restore.done = true
   }
 

@@ -221,6 +221,10 @@ final class ImeBottomBar {
             }
             bottom = margin + s.pixels(KeyboardBottomBarPolicy.BAR_HEIGHT_DP);
         }
+        // 键盘加高只增加底部空白；字母键、底行及其触摸区域都保持用户设定的单键高度。
+        if (!s.hardwareKeysCollapsed()) bottom += s.pixels(Math.max(0,
+            KeyboardHeightPolicy.windowHeightAdjustment(s.touchKeyboardHeightAdjustment,
+                s.getResources().getConfiguration().screenHeightDp)));
         // 底栏计入目标高度，额外空白只抬高键区，覆盖面板同样让出这段内边距。
         bottom += s.pixels(KeyboardBottomBarPolicy.extraPaddingDp(
             s.localSettings.bool(AndroidLocalSettings.BOTTOM_PADDING),

@@ -292,6 +292,7 @@ public final class MSIMEInputService extends InputMethodService {
     int touchKeyboardWidthPercent = KeyboardSpacingPolicy.DEFAULT_WIDTH_PERCENT;
     int touchKeySpacingTenths = KeyboardSpacingPolicy.DEFAULT_KEY_SPACING_TENTHS;
     int touchRowSpacingTenths = KeyboardSpacingPolicy.DEFAULT_ROW_SPACING_TENTHS;
+    int touchKeyHeight = KeyboardSpacingPolicy.DEFAULT_KEY_HEIGHT_DP;
     int touchKeyboardHeightAdjustment = KeyboardHeightPolicy.DEFAULT_HEIGHT_ADJUSTMENT_DP;
     private boolean touchVoiceShortcutEnabled;
     /** 26 键双拼的字母键画不画声母/韵母提示，来自共享偏好 `touch_shuangpin_key_hints`，缺省为关。 */
@@ -2403,6 +2404,8 @@ public final class MSIMEInputService extends InputMethodService {
             NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100));
         touchKeySpacingTenths = KeyboardSpacingPolicy.keySpacing(preferences == null ? -1
             : NumberPolicy.strictInt(preferences, "touch_key_spacing_tenths", -1));
+        touchKeyHeight = KeyboardSpacingPolicy.keyHeight(preferences == null ? 40
+            : NumberPolicy.strictInt(preferences, "touch_key_height", 40));
         touchRowSpacingTenths = KeyboardSpacingPolicy.rowSpacing(preferences == null ? -1
             : NumberPolicy.strictInt(preferences, "touch_row_spacing_tenths", -1));
         adoptSavedHeightAdjustment(heightAdjustmentFrom(preferences));
@@ -2763,7 +2766,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     private String touchGeometryKey() {
-        return touchKeyboardWidthPercent + ":" + touchKeySpacingTenths + ":" + touchRowSpacingTenths + ":"
+        return touchKeyHeight + ":" + touchKeyboardWidthPercent + ":" + touchKeySpacingTenths + ":" + touchRowSpacingTenths + ":"
             + touchKeyboardHeightAdjustment + ":"
             + touchVoiceShortcutEnabled + ":" + voiceInputEnabled + ":" + voiceLanguage + ":"
             + shuangpinKeyHintsEnabled + ":" + splitKeyboardPortrait;
@@ -2858,6 +2861,8 @@ public final class MSIMEInputService extends InputMethodService {
             NumberPolicy.strictInt(preferences, "candidate_font_size", 16));
         int nextPreeditFontSize = CandidateAppearance.fontSize(
             NumberPolicy.strictInt(preferences, "candidate_preedit_font_size", nextFontSize));
+        int nextKeyHeight = KeyboardSpacingPolicy.keyHeight(
+            NumberPolicy.strictInt(preferences, "touch_key_height", 40));
         int nextWidthPercent = KeyboardSpacingPolicy.widthPercent(
             NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100));
         int nextKeySpacing = KeyboardSpacingPolicy.keySpacing(
@@ -2926,7 +2931,8 @@ public final class MSIMEInputService extends InputMethodService {
         if (learningSuppressed()) sessionSnapshot.getJSONObject("preferences").put("learning", false);
         JSONObject result = value(NativeClient.updatePreferences(session, sessionSnapshot.toString()));
         markPrivateSession();
-        boolean geometryChanged = touchKeyboardWidthPercent != nextWidthPercent
+        boolean geometryChanged = touchKeyHeight != nextKeyHeight
+            || touchKeyboardWidthPercent != nextWidthPercent
             || touchKeySpacingTenths != nextKeySpacing
             || touchRowSpacingTenths != nextRowSpacing
             || touchKeyboardHeightAdjustment != nextHeightAdjustment
@@ -2942,6 +2948,7 @@ public final class MSIMEInputService extends InputMethodService {
         candidateFontSize = nextFontSize;
         candidatePreeditFontSize = nextPreeditFontSize;
         spellingPosition = nextSpellingPosition;
+        touchKeyHeight = nextKeyHeight;
         touchKeyboardWidthPercent = nextWidthPercent;
         touchKeySpacingTenths = nextKeySpacing;
         touchRowSpacingTenths = nextRowSpacing;
@@ -4571,7 +4578,7 @@ public final class MSIMEInputService extends InputMethodService {
         boolean phoneLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
             && !KeyboardFormFactorPolicy.expanded(configuration.smallestScreenWidthDp);
         return PagedTileGrid.pickerGrid(phoneLandscape, KeyboardHeightPolicy.keyAreaHeightDp(
-            touchKeyboardHeightAdjustment, configuration.screenHeightDp, touchRowSpacingTenths), rowHeightDp, chromeDp);
+            touchKeyboardHeightAdjustment, configuration.screenHeightDp, touchRowSpacingTenths, touchKeyHeight), rowHeightDp, chromeDp);
     }
 
     int displayedTouchLayout(JSONObject value) {

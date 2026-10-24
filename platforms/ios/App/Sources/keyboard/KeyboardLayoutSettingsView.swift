@@ -8,6 +8,7 @@ struct KeyboardLayoutSettingsView: View {
   @State private var widthPercent = KeyboardLayoutPreference.widthPercent
   @State private var keySpacing = KeyboardLayoutPreference.keySpacing
   @State private var rowSpacing = KeyboardLayoutPreference.rowSpacing
+  @State private var keyHeight = KeyboardLayoutPreference.keyHeight
   @State private var height = KeyboardLayoutPreference.heightAdjustment
   @State private var skin = KeyboardTheme.current
   @State private var scheme = InputSchemePreference.scheme
@@ -33,7 +34,7 @@ struct KeyboardLayoutSettingsView: View {
 
   private enum Axis { case vertical, horizontal }
   /// 一次保存只写用户刚动的那一项，见 `save(_:)`。
-  private enum Field { case height, width, keySpacing, rowSpacing }
+  private enum Field { case height, width, keyHeight, keySpacing, rowSpacing }
   private static let spacingDragScale: Double = 18
 
   var body: some View {
@@ -73,7 +74,7 @@ struct KeyboardLayoutSettingsView: View {
       KeyboardSkinPreview(
         skin: skin, nineKey: nineKey, fourteenKey: scheme == .fourteenKey,
         layout: KeyboardGeometry(keySpacing: keySpacing, rowSpacing: rowSpacing, showsBottomLanguage: !hideLanguageKey),
-        heightAdjustment: height, widthPercent: widthPercent
+        heightAdjustment: height, widthPercent: widthPercent, keyHeight: keyHeight
       )
       .gesture(spacingDrag)
       .accessibilityIdentifier("keyboardLayoutPreview")
@@ -94,7 +95,7 @@ struct KeyboardLayoutSettingsView: View {
       .accessibilityLabel("键盘高度")
       .accessibilityValue(heightPercent(height))
       .accessibilityAdjustableAction { direction in
-        height = KeyboardGeometry.clamped(height + (direction == .increment ? 2 : -2), -12, 48)
+        height = KeyboardGeometry.clamped(height + (direction == .increment ? 2 : -2), 0, 48)
         save(.height)
       }
   }
@@ -103,7 +104,7 @@ struct KeyboardLayoutSettingsView: View {
     switch dragAxis {
     case .vertical: return "行间距 \(String(format: "%.1f", rowSpacing))"
     case .horizontal: return "按键间距 \(String(format: "%.1f", keySpacing))"
-    case nil: return "拖上面的把手改高度，在键盘上左右拖改键距、上下拖改行间距"
+    case nil: return "拖上面的把手改底部留白，在键盘上左右拖改键距、上下拖改行间距"
     }
   }
 
@@ -112,7 +113,7 @@ struct KeyboardLayoutSettingsView: View {
       .onChanged { value in
         let base = dragBase ?? snapshot()
         if dragBase == nil { dragBase = base }
-        height = KeyboardGeometry.clamped(base.height - Double(value.translation.height), -12, 48)
+        height = KeyboardGeometry.clamped(base.height - Double(value.translation.height), 0, 48)
       }
       .onEnded { _ in
         dragBase = nil
@@ -173,8 +174,13 @@ struct KeyboardLayoutSettingsView: View {
                       }))
         .accessibilityIdentifier("appHideLanguageKeySwitch")
       DesignDivider()
-      sliderRow("键盘高度", value: $height, range: -12...48, identifier: "appKeyboardHeightSlider",
+      sliderRow("底部留白", value: $height, range: 0...48, identifier: "appKeyboardHeightSlider",
                 field: .height, format: heightPercent)
+      DesignDivider()
+      sliderRow("单个按键高度", value: $keyHeight, range: 28...64, identifier: "appKeyHeightSlider",
+                field: .keyHeight, format: { "\(Int($0.rounded())) pt" })
+      Text("增加键盘空间只增加下方留白，按键保持设定高度；行间距可单独调整。")
+        .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 16)
       DesignDivider()
       sliderRow("按键区域宽度", value: $widthPercent, range: 75...100, identifier: "appKeyboardWidthSlider",
                 field: .width, format: { "\(Int($0.rounded()))%" })
@@ -360,7 +366,9 @@ struct KeyboardLayoutSettingsView: View {
     field: Field,
     format: @escaping (Double) -> String = { String(format: "%.1f", $0) }
   ) -> some View {
-    InlineSliderRow(title: title, value: value, range: range, identifier: identifier, format: format) { save(field) }
+    InlineSliderRow(title: title, value: value, range: range, identifier: identifier, format: format) { current in
+      save(field, value: current)
+    }
   }
 
   // MARK: - 存储
@@ -407,12 +415,13 @@ struct KeyboardLayoutSettingsView: View {
   /// The drags and sliders only move the preview while they run; the settled value is saved here, into the shared document the keyboard reloads. A save the document refuses puts the page back to what is stored.
   ///
   /// 只写动过的那一项：页面上其余的值可能已经过时（键盘里刚调过高度，这一页还停在后台），一起写回去就会把键盘里的调整盖掉。
-  private func save(_ field: Field) {
+  private func save(_ field: Field, value: Double? = nil) {
     let saved = switch field {
-    case .height: KeyboardLayoutPreference.saveGeometry(heightAdjustment: height)
-    case .width: KeyboardLayoutPreference.saveGeometry(widthPercent: widthPercent)
-    case .keySpacing: KeyboardLayoutPreference.saveGeometry(keySpacing: keySpacing)
-    case .rowSpacing: KeyboardLayoutPreference.saveGeometry(rowSpacing: rowSpacing)
+    case .height: KeyboardLayoutPreference.saveGeometry(heightAdjustment: value ?? height)
+    case .keyHeight: KeyboardLayoutPreference.saveGeometry(keyHeight: value ?? keyHeight)
+    case .width: KeyboardLayoutPreference.saveGeometry(widthPercent: value ?? widthPercent)
+    case .keySpacing: KeyboardLayoutPreference.saveGeometry(keySpacing: value ?? keySpacing)
+    case .rowSpacing: KeyboardLayoutPreference.saveGeometry(rowSpacing: value ?? rowSpacing)
     }
     saveFailed = !saved
     if saveFailed { readPreferences() }
@@ -444,6 +453,7 @@ struct KeyboardLayoutSettingsView: View {
     widthPercent = KeyboardLayoutPreference.widthPercent
     keySpacing = KeyboardLayoutPreference.keySpacing
     rowSpacing = KeyboardLayoutPreference.rowSpacing
+    keyHeight = KeyboardLayoutPreference.keyHeight
     height = KeyboardLayoutPreference.heightAdjustment
     skin = KeyboardTheme.reload(preferences)
     hideLanguageKey = KeyboardLayoutPreference.hideLanguageKey
@@ -462,6 +472,7 @@ struct KeyboardLayoutSettingsView: View {
     widthPercent = KeyboardLayoutPreference.widthPercent
     keySpacing = KeyboardLayoutPreference.keySpacing
     rowSpacing = KeyboardLayoutPreference.rowSpacing
+    keyHeight = KeyboardLayoutPreference.keyHeight
     height = KeyboardLayoutPreference.heightAdjustment
     shuangpinKeyHints = KeyboardLayoutPreference.sharedShuangpinKeyHints(in: preferences)
     KeyboardLayoutPreference.shuangpinKeyHints = shuangpinKeyHints
@@ -475,11 +486,12 @@ private struct InlineSliderRow: View {
   let range: ClosedRange<Double>
   let identifier: String
   let format: (Double) -> String
-  let commit: () -> Void
+  let commit: (Double) -> Void
+  @State private var editing = false
   @Environment(\.horizontalSizeClass) private var widthClass
 
   init(title: String, value: Binding<Double>, range: ClosedRange<Double>, identifier: String,
-       format: @escaping (Double) -> String, commit: @escaping () -> Void) {
+       format: @escaping (Double) -> String, commit: @escaping (Double) -> Void) {
     self.title = title
     _value = value
     self.range = range
@@ -493,8 +505,13 @@ private struct InlineSliderRow: View {
       Text(title).font(.system(size: 17)).foregroundStyle(.primary)
       Spacer(minLength: 8)
       HStack(spacing: 8) {
-        Slider(value: $value, in: range) { Text(title) } onEditingChanged: { editing in
-          if !editing { commit() }
+        Slider(value: $value, in: range) { Text(title) } onEditingChanged: { active in
+          editing = active
+          if !active { commit(value) }
+        }
+        // 辅助功能调整可能不回报拖动结束；最终值在编辑结束后到达时同样保存。
+        .onChange(of: value) { _, current in
+          if !editing { commit(current) }
         }
         .tint(MetasequoiaTheme.accent)
         .frame(width: widthClass == .regular ? 160 : 110)

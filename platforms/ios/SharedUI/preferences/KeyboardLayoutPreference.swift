@@ -23,6 +23,11 @@ enum KeyboardLayoutPreference {
     set { defaults.set(newValue, forKey: hideLanguageKeyKey) }
   }
   static let oneHandedKey = "keyboard.oneHanded"
+  static let keyHeightKey = "keyboard.key.height"
+  static var keyHeight: Double {
+    get { spacing(key: keyHeightKey, fallback: 40, range: 28...64) }
+    set { defaults.set(SharedNumber.clamped(newValue.rounded(), to: 28...64), forKey: keyHeightKey) }
+  }
   static let widthPercentKey = "keyboard.width.percent"
   static var widthPercent: Double {
     get { spacing(key: widthPercentKey, fallback: 100, range: 75...100) }
@@ -59,7 +64,7 @@ enum KeyboardLayoutPreference {
   }
 
   static func resetToDefaults() {
-    for stored in [widthPercentKey, keySpacingKey, rowSpacingKey, heightAdjustmentKey, voiceShortcutKey] {
+    for stored in [keyHeightKey, widthPercentKey, keySpacingKey, rowSpacingKey, heightAdjustmentKey, voiceShortcutKey] {
       defaults.removeObject(forKey: stored)
     }
   }
@@ -68,10 +73,11 @@ enum KeyboardLayoutPreference {
   /// 只写传了值的那几项，其余保持文档里的样子。设置页原先每次都把四项一起写：键盘里调过高度之后，设置页上停留的还是旧高度，这时动一下任何别的控件，旧高度就被写回文档，键盘下次出现又变回设置页的值。
   @discardableResult
   static func saveGeometry(keySpacing: Double? = nil, rowSpacing: Double? = nil, heightAdjustment: Double? = nil,
-                           widthPercent: Double? = nil, voiceShortcut: Bool? = nil, stateRoot: URL? = nil) -> Bool {
+                           widthPercent: Double? = nil, keyHeight: Double? = nil, voiceShortcut: Bool? = nil, stateRoot: URL? = nil) -> Bool {
     guard let mapping = MetasequoiaInputSessionBridge.geometryMapping(
-      keySpacing: keySpacing, rowSpacing: rowSpacing, heightAdjustment: heightAdjustment, widthPercent: widthPercent, voiceEnabled: voiceShortcut),
+      keySpacing: keySpacing, rowSpacing: rowSpacing, heightAdjustment: heightAdjustment, widthPercent: widthPercent, keyHeight: keyHeight, voiceEnabled: voiceShortcut),
       MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot, mapping) else { return false }
+    if let keyHeight { self.keyHeight = keyHeight }
     if let widthPercent { self.widthPercent = widthPercent }
     if let keySpacing { self.keySpacing = keySpacing }
     if let rowSpacing { self.rowSpacing = rowSpacing }
@@ -82,6 +88,7 @@ enum KeyboardLayoutPreference {
 
   /// 把共享文档里的几何、语音与快捷符号镜像到 App Group。缺少几何项时保持原值，快捷符号缺省时采用共享默认；键盘和设置页每次出现都按文档对齐。
   static func mirrorGeometry(_ preferences: [String: Any]) {
+    keyHeight = SharedNumber.strictInt(preferences["touch_key_height"]).map { Double($0) } ?? 40
     // 旧文档或恢复默认时缺失字段，必须清掉上一次的宽度镜像。
     widthPercent = SharedNumber.strictInt(preferences["touch_keyboard_width_percent"]).map { Double($0) } ?? 100
     defaults.set(normalizeQuickPunctuationSymbols(preferences["touch_quick_punctuation_symbols"] as? [String] ?? []),
@@ -122,7 +129,7 @@ enum KeyboardLayoutPreference {
   @discardableResult
   static func resetGeometry(stateRoot: URL? = nil) -> Bool {
     let written = MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot) { preferences in
-      for key in ["touch_keyboard_width_percent", "touch_key_spacing_tenths", "touch_row_spacing_tenths", "touch_keyboard_height_adjustment",
+      for key in ["touch_key_height", "touch_keyboard_width_percent", "touch_key_spacing_tenths", "touch_row_spacing_tenths", "touch_keyboard_height_adjustment",
                   "touch_voice_shortcut", "touch_quick_punctuation_symbols"] {
         preferences.removeValue(forKey: key)
       }

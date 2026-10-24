@@ -43,29 +43,21 @@ function check(condition: boolean, message: string): void {
 }
 
 /**
- * 视图在触控时堆叠的内容，按 `keyboard()` 的布局方式累加：顶部内边距、候选条、其下的固定间距、四行按键（`KeyboardGeometry.adjustedRowHeight`，与 `rowHeight()` 的取法相同）及行间距，以及底部内边距。
+ * 视图在触控时堆叠的内容，按 `keyboard()` 的布局方式累加：顶部内边距、候选条、其下的固定间距、四行固定高度按键（`KeyboardGeometry.keyHeight`，与 `rowHeight()` 的取法相同）及行间距，以及底部内边距。
  */
 function drawnTouchHeight(
   rowSpacingTenths: number,
   adjustment: number,
   strip: boolean = true,
 ): number {
-  let keys: number = 0;
-  for (let row: number = 0; row < KeyboardMetrics.KEY_ROWS; row++) {
-    keys += KeyboardGeometry.adjustedRowHeight(
-      KeyboardMetrics.ROW_HEIGHT_VP,
-      adjustment,
-      KeyboardMetrics.KEY_ROWS,
-      row,
-    );
-  }
+  const keys: number = KeyboardGeometry.keyHeight(undefined) * KeyboardMetrics.KEY_ROWS;
   const gaps: number = (rowSpacingTenths / 10) * (KeyboardMetrics.KEY_ROWS - 1);
   return (
     KeyboardMetrics.TOUCH_ROOT_TOP_PADDING_VP +
     (strip ? KeyboardMetrics.STRIP_HEIGHT_VP + KeyboardMetrics.STRIP_GAP_VP : 0) +
     keys +
     gaps +
-    KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP
+    KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP + KeyboardGeometry.bottomSpace(adjustment)
   );
 }
 
@@ -155,7 +147,7 @@ group("the strip keeps one height whatever the candidate fonts and glosses", () 
     KeyboardMetrics.totalHeightVp(70, 0, 0, 32, 24, false) === base,
     "and so do larger candidate and pre-edit fonts",
   );
-  check(base === 8 + 50 + 10 + 4 * 44 + 3 * 7 + 6, "the design's frame at the default spacing");
+  check(base === 8 + 50 + 10 + 4 * 40 + 3 * 7 + 6, "the design's frame at the default spacing");
 });
 
 group("the height bar's caption spans the range the shared validation allows", () => {
@@ -188,7 +180,7 @@ group("the emoji panel's bottom row has a glyph for every tab", () => {
 
 group("the emoji grid shows three rows, none under the design's 40", () => {
   // 默认按键区 4 x 44 + 3 x 7，减去 40vp 的底行和其上方 6vp 的间距。
-  const grid: number = 4 * 44 + 3 * 7 - 40 - 6;
+  const grid: number = 4 * 40 + 3 * 7 - 40 - 6;
   check(
     EmojiCatalogModel.cellHeightVp(grid, 2) === Math.floor((grid - 4) / 3),
     "three rows fill the grid",
@@ -303,7 +295,7 @@ group("the 2in1 candidate window is sized for the card's 8vp padding", () => {
       KeyboardMetrics.compositionRowHeightVp(15) +
         KeyboardMetrics.candidateRowHeightVp(18, true) +
         2 * KeyboardMetrics.CANDIDATE_CARD_PADDING_VP +
-        KeyboardMetrics.ROW_HEIGHT_VP * KeyboardMetrics.KEY_ROWS +
+        40 * KeyboardMetrics.KEY_ROWS +
         7 * KeyboardMetrics.KEY_ROWS +
         2 * KeyboardMetrics.ROOT_VERTICAL_PADDING_VP,
     "the tall 2in1 surfaces count the card padding too, or their last row is clipped",

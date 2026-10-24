@@ -23,6 +23,8 @@ export interface TouchKeyboardGeometrySectionProps extends TouchKeyboardToolbarS
   heightAdjustment: number;
   /** 仅移动宿主提供，普通键区居中缩放。 */
   widthPercent?: number;
+  keyHeight?: number;
+  onKeyHeightChange?: (value: number) => void;
   onWidthPercentChange?: (value: number) => void;
   keySpacingTenths: number;
   rowSpacingTenths: number;
@@ -68,6 +70,8 @@ const heightText = (value: number) => (value === 0 ? "标准" : `${value > 0 ? "
 export function TouchKeyboardGeometrySection({
   heightAdjustment,
   widthPercent,
+  keyHeight,
+  onKeyHeightChange,
   onWidthPercentChange,
   keySpacingTenths,
   rowSpacingTenths,
@@ -125,6 +129,19 @@ export function TouchKeyboardGeometrySection({
     toolbar: toolbarComponents || harmonyToolbar !== undefined,
   });
   const resetDescription = `${resetSubjects}回到默认`;
+  const keyHeightRow = keyHeight !== undefined && (
+    <SliderRow
+      title="单个按键高度"
+      wide={phone}
+      description="增加键盘空间只改变底部留白，按键保持设定高度。"
+      displayValue={`${keyHeight} dp`}
+      valueText={`${keyHeight} dp`}
+      min={28}
+      max={64}
+      value={keyHeight}
+      onChange={(value) => onKeyHeightChange?.(value)}
+    />
+  );
   const widthRow = widthPercent !== undefined && (
     <SliderRow
       title="按键区域宽度"
@@ -152,15 +169,16 @@ export function TouchKeyboardGeometrySection({
           <GroupList title="尺寸">
             {preview}
             <SliderRow
-              title="键盘高度"
+              title={keyHeight !== undefined ? "底部留白" : "键盘高度"}
               wide
               displayValue={heightText(heightAdjustment)}
               valueText={`${heightAdjustment} dp`}
-              min={-12}
+              min={keyHeight !== undefined ? 0 : -12}
               max={48}
               value={heightAdjustment}
               onChange={onHeightAdjustmentChange}
             />
+            {keyHeightRow}
             {widthRow}
             <SliderRow
               title="按键间距"
@@ -202,14 +220,15 @@ export function TouchKeyboardGeometrySection({
             </SettingsGroupNote>
             {showHeight && (
               <SliderRow
-                title="键盘高度"
+                title={keyHeight !== undefined ? "底部留白" : "键盘高度"}
                 description={`${heightAdjustment > 0 ? "+" : ""}${heightAdjustment} dp`}
-                min={-12}
+                min={keyHeight !== undefined ? 0 : -12}
                 max={48}
                 value={heightAdjustment}
                 onChange={onHeightAdjustmentChange}
               />
             )}
+            {keyHeightRow}
             {widthRow}
             {showSpacing && (
               <>

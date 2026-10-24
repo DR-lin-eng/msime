@@ -72,6 +72,7 @@ struct Host {
     Json all{{"generation", 21}, {"candidates", Json::array({row("本地首项", 0, 21), row("后页第四项", 21, 21)})}};
     int selects = 0, any_selects = 0;
     bool all_ok = true, partial = false;
+    std::string commit_override;
     bool valid() const { return true; }
     bool view(std::string *out, std::string *) { *out = Json{{"ok", true}, {"value", current}}.dump(); return true; }
     bool all_candidates(std::string *out, std::string *) { if (!all_ok) return false; *out = Json{{"ok", true}, {"value", all}}.dump(); return true; }
@@ -79,7 +80,7 @@ struct Host {
         for (const auto &item : rows) if (item.at("id").at("index") == index && item.at("id").at("generation") == generation) {
             Json after{{"session", 7}, {"generation", generation + 1}, {"preedit", partial ? "合成tail" : ""},
                        {"editing_text", partial ? "tail" : ""}, {"phrase_prefix", partial ? "合成" : ""}, {"candidates", Json::array()}};
-            *out = Json{{"ok", true}, {"value", {{"handled", true}, {"commit", partial ? Json(nullptr) : item.at("text")}, {"view", after}}}}.dump();
+            *out = Json{{"ok", true}, {"value", {{"handled", true}, {"commit", partial ? Json(nullptr) : (commit_override.empty() ? item.at("text") : Json(commit_override))}, {"view", after}}}}.dump();
             return true;
         }
         return false;
@@ -95,13 +96,15 @@ struct CMetasequoiaIME {
     Engine *_pCompositionProcessorEngine;
     Presenter *_pCandidateListUIPresenter;
     std::wstring committed;
-    int completed = 0, refreshed = 0;
+    int completed = 0, refreshed = 0, cancelled = 0;
+    std::wstring document = L"既有文本｜";
     wchar_t _smartPunctuationShadowChar = 0;
     bool _smartPunctuationShadowValid = false;
     HRESULT _SelectHighlightedHostCandidate(TfEditCookie, ITfContext *, const std::wstring *);
     wchar_t _CandidateCommitPairedClosing(const std::wstring &) { return 0; }
-    HRESULT _AddCharAndFinalize(TfEditCookie, ITfContext *, const CStringRange *text) { committed = text->text; return S_OK; }
+    HRESULT _AddCharAndFinalize(TfEditCookie, ITfContext *, const CStringRange *text) { committed = text->text; document = L"既有文本｜" + text->text; return S_OK; }
     void _DeleteCandidateList(bool, ITfContext *) {}
+    bool _CancelHostComposition() { ++cancelled; return true; }
     void _HandleCompleteCommitFirst(TfEditCookie, ITfContext *) { ++completed; }
     void _OpenCandidateCommitPair(wchar_t, wchar_t) {}
     HRESULT _HandleCompositionInputWorker(Engine *, TfEditCookie, ITfContext *, uint64_t) { ++refreshed; return S_OK; }
@@ -111,11 +114,13 @@ tests = r'''
 int main() {
     int failed = 0;
     const auto check = [&](const char *name, Host host, const std::wstring &choice, HRESULT expected,
-                           const std::wstring &commit, int any_calls, int refresh = 0) {
-        Engine engine{&host}; Presenter presenter; CMetasequoiaIME ime{&engine, &presenter, {}}; ITfContext context;
+                           const std::wstring &commit, int any_calls, int refresh = 0, int cancel = 0) {
+        Engine engine{&host}; Presenter presenter; CMetasequoiaIME ime{}; ime._pCompositionProcessorEngine = &engine; ime._pCandidateListUIPresenter = &presenter; ITfContext context;
         const auto status = ime._SelectHighlightedHostCandidate(0, &context, &choice);
-        const bool ok = status == expected && ime.committed == commit && host.any_selects == any_calls && ime.refreshed == refresh;
+        const bool ok = status == expected && ime.committed == commit && host.any_selects == any_calls && ime.refreshed == refresh && ime.cancelled == cancel && ime.document == L"既有文本｜" + commit;
         std::printf("%s status=%d expected=%d commit_matches=%d any_calls=%d match=%d\n", name, status, expected, ime.committed == commit, host.any_selects, ok);
+        if (std::string(name) == "last_single_character_keeps_sentence")
+            std::printf("SENTENCE_DOCUMENT actual=%s expected=%s\n", narrow(ime.document).c_str(), narrow(L"既有文本｜" + commit).c_str());
         failed += !ok;
     };
     check("same_text_different_index", Host{}, L"本地匹配", S_OK, L"本地匹配", 0);
@@ -128,11 +133,33 @@ int main() {
     Host unavailable; unavailable.all_ok = false;
     check("full_list_failure_rejected", unavailable, L"后页第四项", S_FALSE, L"", 0);
     Host partial; partial.partial = true;
-    check("page_three_partial_continues", partial, L"后页第四项", S_OK, L"", 1, 1);
+    check("page_three_partial_continues", partial, L"tail\t后页第四项\t后页第四项tail", S_OK, L"", 1, 1);
+    check("server_final_overrides_local_partial", partial, L"后页第四项", S_OK, L"后页第四项", 1, 0, 1);
     Host wire; wire.partial = true; wire.current["phrase_prefix"] = "合成";
     check("partial_wire_extracts_new_word", wire, L"tail\t合成后页第四项\t合成后页第四项tail", S_OK, L"", 1, 1);
     Host held; held.current["phrase_prefix"] = "合成";
-    check("full_commit_removes_held_prefix", held, L"合成后页第四项", S_OK, L"后页第四项", 1);
+    check("full_commit_keeps_held_prefix", held, L"合成后页第四项", S_OK, L"合成后页第四项", 1);
+    Host repeated; repeated.current["phrase_prefix"] = "本地";
+    check("repeated_prefix_is_not_doubled", repeated, L"本地本地匹配", S_OK, L"本地本地匹配", 0);
+    Host disagreement; disagreement.current["phrase_prefix"] = "合成"; disagreement.commit_override = "其他前缀后页第四项";
+    check("server_final_is_authoritative", disagreement, L"合成后页第四项", S_OK, L"合成后页第四项", 1);
+    Host finalChar; finalChar.current["phrase_prefix"] = "甲乙丙丁戊";
+    finalChar.current["candidates"] = Json::array({row("了", 3)});
+    check("last_single_character_keeps_sentence", finalChar, L"甲乙丙丁戊了", S_OK, L"甲乙丙丁戊了", 0);
+    Host complete; complete.current["phrase_prefix"] = "合成"; complete.commit_override = "合成后页第四项";
+    check("complete_local_result_not_prefixed_twice", complete, L"合成后页第四项", S_OK, L"合成后页第四项", 1);
+    for (const bool held : {false, true}) {
+        Host local;
+        if (held) { local.current["phrase_prefix"] = "合成"; local.commit_override = "合成本地首项"; }
+        Engine engine{&local}; Presenter presenter; CMetasequoiaIME ime{};
+        ime._pCompositionProcessorEngine = &engine; ime._pCandidateListUIPresenter = &presenter; ITfContext context;
+        const auto status = ime._SelectHighlightedHostCandidate(0, &context, nullptr);
+        const auto expected = held ? L"合成本地首项" : L"本地首项";
+        const bool ok = status == S_OK && ime.committed == expected && ime.completed == 1 && !ime.cancelled &&
+                        ime.document == L"既有文本｜" + std::wstring(expected);
+        std::printf("local_without_server held=%d match=%d\n", held, ok);
+        failed += !ok;
+    }
     std::printf("host page selection: %d failures\n", failed);
     return failed ? 1 : 0;
 }

@@ -12,6 +12,8 @@ Status: implemented
 
 ## Decision
 
+完整回复的文本归属由[最终提交保留 Server 的完整词段](2026-10-24-windows-final-commit-keeps-server-phrase.md)补充：宿主会话仍按文字推进，最终写入使用 Server 已确认的整段文本。下面关于不能放弃宿主同步的理由继续成立。
+
 `_SelectHighlightedHostCandidate` 按 **Server 确认的文字**在宿主会话当前页唯一匹配，用匹配到的本地候选下标调 `host->select`，当前页没有时再查本地完整列表；不使用候选窗带来的 `_EngineIndex`。完整列表也只接受唯一匹配，使用列表自己的 generation 与全局下标。任何一级的同形歧义、状态不符、查找失败都返回 `S_FALSE`，交给同一回复类型的既有处理。`MatchesEngineView` 的 session/generation 前置校验保留。
 
 数字键与空格共用 `_HandleCandidateFinalize` 的带类型回复处理，优先消费已缓存的 Server 回复，不能在重复读管道失败后退回本地高亮项。部分选择回复先提取新增前缀文字。当前页找不到该词时到宿主完整列表唯一匹配，再用完整列表自己的 generation 与全局下标选择；同形歧义、读失败与不存在的词仍拒绝，不能沿用候选窗的页内号。

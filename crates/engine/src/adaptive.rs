@@ -17,10 +17,12 @@ const MIN_OBSERVATIONS: u64 = 32;
 /// 最近的本地预测上下文；按字符截断，不拆 UTF-8，也不扩大云服务输入。
 pub fn remember_context(context: &mut String, text: &str) {
     let tail = crate::text::last_characters(text, CONTEXT_CHARACTERS);
-    context.push_str(tail);
-    let keep = crate::text::last_characters(context, CONTEXT_CHARACTERS);
+    let remaining = CONTEXT_CHARACTERS - tail.chars().count();
+    let keep = crate::text::last_characters(context, remaining);
     let cut = context.len() - keep.len();
+    // 先移除过期前缀再追加，满窗口持续输入时不为马上丢弃的文字扩容。
     context.drain(..cut);
+    context.push_str(tail);
 }
 
 const fn mix(mut value: u32) -> u32 {
@@ -60,15 +62,37 @@ fn signature(text: &str) -> [f32; SIGNATURE] {
     values
 }
 
+// 交叉特征的槽位和符号只由下标决定，编译时固定，训练和推理共用同一张表。
+const fn feature_projections() -> [(u8, f32); SIGNATURE * SIGNATURE] {
+    let mut result = [(0, 0.0); SIGNATURE * SIGNATURE];
+    let mut index = 0;
+    while index < result.len() {
+        let hash = mix(index as u32 + 0x1024);
+        result[index] = (
+            (SIGNATURE * 2 + hash as usize % (INPUTS - SIGNATURE * 2)) as u8,
+            if hash & 0x100 != 0 { 1.0 } else { -1.0 },
+        );
+        index += 1;
+    }
+    result
+}
+
+static FEATURE_PROJECTIONS: [(u8, f32); SIGNATURE * SIGNATURE] = feature_projections();
+
 fn features(context: &[f32; SIGNATURE], word: &[f32; SIGNATURE]) -> [f32; INPUTS] {
     let mut input = [0.0; INPUTS];
     input[..SIGNATURE].copy_from_slice(context);
     input[SIGNATURE..SIGNATURE * 2].copy_from_slice(word);
     for (left, &a) in context.iter().enumerate() {
-        for (right, &b) in word.iter().enumerate() {
-            let hash = mix((left * SIGNATURE + right) as u32 + 0x1024);
-            let index = SIGNATURE * 2 + hash as usize % (INPUTS - SIGNATURE * 2);
-            input[index] += a * b * if hash & 0x100 != 0 { 1.0 } else { -1.0 };
+        if a == 0.0 {
+            continue;
+        }
+        let projections = &FEATURE_PROJECTIONS[left * SIGNATURE..(left + 1) * SIGNATURE];
+        for (&b, &(index, sign)) in word.iter().zip(projections) {
+            // 签名始终有限；跳过零乘积，同时保持非零项的原始累加次序。
+            if b != 0.0 {
+                input[usize::from(index)] += a * b * sign;
+            }
         }
     }
     input

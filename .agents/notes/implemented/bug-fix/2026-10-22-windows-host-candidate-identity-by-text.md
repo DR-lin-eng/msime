@@ -12,7 +12,9 @@ Status: implemented
 
 ## Decision
 
-`_SelectHighlightedHostCandidate` 按**文字**在宿主会话当前列表里唯一匹配，用匹配到的候选自己的下标调 `host->select`，不再使用候选窗带来的 `_EngineIndex`。同形候选在同一页上不止一个时 **never** 猜，和找不到一样返回 `S_FALSE`，由调用方既有的兜底接手（写 Server 的文字，再 `_CancelHostComposition`）。`MatchesEngineView` 的 session/generation 前置校验保留。
+`_SelectHighlightedHostCandidate` 按 **Server 确认的文字**在宿主会话当前页唯一匹配，用匹配到的本地候选下标调 `host->select`，当前页没有时再查本地完整列表；不使用候选窗带来的 `_EngineIndex`。完整列表也只接受唯一匹配，使用列表自己的 generation 与全局下标。任何一级的同形歧义、状态不符、查找失败都返回 `S_FALSE`，交给同一回复类型的既有处理。`MatchesEngineView` 的 session/generation 前置校验保留。
+
+数字键与空格共用 `_HandleCandidateFinalize` 的带类型回复处理，优先消费已缓存的 Server 回复，不能在重复读管道失败后退回本地高亮项。部分选择回复先提取新增前缀文字。当前页找不到该词时到宿主完整列表唯一匹配，再用完整列表自己的 generation 与全局下标选择；同形歧义、读失败与不存在的词仍拒绝，不能沿用候选窗的页内号。
 
 这不是新规则，是这份代码库已有的规则。`common/HostCandidateContinuation.h` 开头就写着「候选必须在本地当前列表中唯一匹配，不能套用 Server 的身份」，续接候选一直这么做；`_SelectHighlightedHostCandidate` 是漏网的那一处。
 
@@ -28,7 +30,7 @@ Status: implemented
 ## Consequences
 
 - **收益**：用户看见哪个候选，上屏就是哪个，空格、数字键、点选三条路同时修好；宿主会话仍随之前进，2026-10-16 那次改动的收益不受影响。
-- **代价**：同一页上出现两个同形候选时这条路会拒绝，落回兜底，那种情形下分段选词剩余的拼音不保留——与候选窗和宿主会话对不上时的既有行为相同。每次选择多一次列表线性扫描，页内候选个位数，可忽略。
+- **代价**：同一页或完整列表出现多个同形候选时拒绝猜测；完整上屏沿既有 Server 回复兜底，部分选择仍需两个会话在同一输入状态。每次选择多一次页内扫描；只有页内不匹配时才取得完整列表，可能触发延迟尾部展开并推进本地 generation。
 - **重访信号**：如果以后候选需要按身份（而不是文字）区分同形项——例如同一个词来自不同来源要分别计数——这条唯一匹配会开始拒绝合法选择，那时需要的是让两个会话共享候选身份，而不是放宽匹配。
 - **未处理**：`runtime-options.json` 里 `preferences.cloud_candidates = false` 与 `config.toml` 的 `true` 相反。文档里的 preferences 是准备那一刻的副本（`lib.rs` 的 `HostOptions::from_document`），`refresh_host_options` 只刷新词库代次。本次不动它。
 
@@ -36,3 +38,5 @@ Status: implemented
 
 - `msime-tsf-space-host-selection-wiring` 与 `msime-tsf-gloss-column-wiring` 在改动后的源码上通过（Visual Studio 2022 生成工具 17.14，RelWithDebInfo）。这两项是源码接线检查，证明的是接线而不是运行时行为。
 - 真机：装上本次构建后，在记事本里打 `bushang` 按空格，以及按数字键 1，都要上屏候选窗高亮的那一项。修复前这两条路都上屏「不伤」。
+
+后页回归在 Docker 编译执行真实 TIP 选词方法，只替换窗口和编辑器：第三页第 4 项及其部分选择在基线失败，修改后通过；同页不同下标、完整列表同形歧义、未知词与读取失败保留原约束。容器不等同于真实 Windows 编辑器验收。

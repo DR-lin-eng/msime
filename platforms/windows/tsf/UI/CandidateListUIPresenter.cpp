@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include "../../common/CandidateSources.h"
 #include "../../common/GameCompatProfile.h"
 #include "FanyDefines.h"
@@ -419,23 +420,8 @@ HRESULT CMetasequoiaIME::_HandleCandidateWorker(TfEditCookie ec, _In_ ITfContext
 
     if (auto *host = _pCompositionProcessorEngine->GetHostEngineAdapter(); host && host->valid())
     {
-        // 数字在预选的释义列（Tab）或 Ctrl+Enter 的释义页上是上屏释义：Server 已经取消了自己的组字，回 CommitExactText。宿主会话不知道这两种状态，所以先读这个键的回复；读不到（不中断管道，和 _HandleConversionKey 一样）或是别的回复时，照旧向宿主会话选词。以前这里不读回复，上屏的是宿主会话的候选而不是释义，Server 记下的上屏文字也和文档不一致。
-        std::wstring serverChoice;
-        if (requestId != FANY_IME_NO_REQUEST_ID)
-        {
-            const FanyImeNamedpipeDataToTsf *reply =
-                TryReadDataFromServerPipeWithTimeout(requestId, /*abortTransportOnTimeout=*/false);
-            if (reply->msg_type == Global::DataFromServerMsgType::CommitExactText)
-            {
-                const std::wstring exactText(reply->candidate_string);
-                return _CommitServerExactText(ec, pContext, exactText);
-            }
-            // 数字选中的是哪个词以 Server 的回复为准：候选窗是它画的，用户数的编号也是数在它那一份上。
-            if (reply->msg_type == Global::DataFromServerMsgType::Normal)
-                serverChoice.assign(reply->candidate_string);
-        }
-        // Never turn a stale/failed host selection into a legacy text commit.
-        return _SelectHighlightedHostCandidate(ec, pContext, serverChoice.empty() ? nullptr : &serverChoice);
+        // 数字和空格共用带类型的 Server 回复处理，不能在读不到回复时改选本地高亮项。
+        return _HandleCandidateFinalize(ec, pContext, requestId, prefetchedText);
     }
 
     hrReturn = _HandleCandidateFinalize(ec, pContext, requestId, prefetchedText);
@@ -475,6 +461,21 @@ HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ I
     if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, shown.data(), static_cast<int>(shown.size()),
                             target.data(), targetSize, nullptr, nullptr) != targetSize)
         return S_FALSE;
+    if (serverChoice && !serverChoice->empty())
+    {
+        // 部分选词回复为「剩余原文\t已选前缀\t预编辑」；定位本次新增的候选文字。
+        const auto first = target.find('\t');
+        if (first != std::string::npos)
+        {
+            const auto second = target.find('\t', first + 1);
+            if (second == std::string::npos) return S_FALSE;
+            target = target.substr(first + 1, second - first - 1);
+        }
+        const auto &prefix = view.view.phrase_prefix;
+        if (!prefix.empty() && target.compare(0, prefix.size(), prefix) == 0)
+            target.erase(0, prefix.size());
+        if (target.empty()) return S_FALSE;
+    }
     const msime::tsf::EngineCandidate *found = nullptr;
     for (const auto &candidate : view.view.candidates)
     {
@@ -483,14 +484,38 @@ HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ I
         if (found) return S_FALSE;
         found = &candidate;
     }
-    if (!found) return S_FALSE;
-    // 占位席位（云的「☁」、旧数据里的 AI 行）占着一格和一个编号，却不是候选。引擎对它们「什么都不做但算处理过」（`crates/engine/src/session/commit.rs`，#6888），这里必须给出同样的结果：返回 S_OK 把按键吃掉，组字原样留着。退回 S_FALSE 会被调用方当成选择失败，于是去写 Server 的文字并丢掉宿主会话的组字——按一下云席位的数字键，整串拼音就被原样吐进文档了。
-    if (msime::windows::candidate_source_is_pending_seat(found->source)) return S_OK;
     std::string raw;
+    if (found)
+    {
+        // 占位席位只吃掉按键，不上屏也不前进组字。
+        if (msime::windows::candidate_source_is_pending_seat(found->source)) return S_OK;
+        if (!host->select(view.view.generation, found->index, &raw, &error)) return S_FALSE;
+    }
+    else
+    {
+        // 两个会话可能停在不同页；只按 Server 确认的文字查完整列表，不套用它的序号或代次。
+        if (!serverChoice || serverChoice->empty() || !host->all_candidates(&raw, &error)) return S_FALSE;
+        try
+        {
+            const auto response = nlohmann::json::parse(raw);
+            if (!response.value("ok", false)) return S_FALSE;
+            const auto &all = response.at("value");
+            bool matched = false;
+            std::size_t index = 0;
+            for (const auto &candidate : all.at("candidates"))
+            {
+                if (candidate.at("text").get<std::string>() != target) continue;
+                if (matched) return S_FALSE;
+                matched = true;
+                index = candidate.at("id").at("index").get<std::size_t>();
+            }
+            if (!matched || !host->select_any(all.at("generation").get<uint64_t>(), index, &raw, &error))
+                return S_FALSE;
+        }
+        catch (...) { return S_FALSE; }
+    }
     msime::tsf::EngineResult selected;
-    if (!host->select(view.view.generation, found->index, &raw, &error) ||
-        !msime::tsf::EngineSessionAdapter::parse_result(raw, &selected, &error))
-        return S_FALSE;
+    if (!msime::tsf::EngineSessionAdapter::parse_result(raw, &selected, &error)) return S_FALSE;
     if (selected.has_commit && !selected.commit.empty())
     {
         const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),

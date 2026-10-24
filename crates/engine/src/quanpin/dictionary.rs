@@ -838,7 +838,26 @@ impl QuanpinDictionary {
             } else {
                 self.query_series(raw, segmentation, &segments)
             };
-            append_unique_words(&mut result, literal);
+            let raw_letters = raw.bytes().filter(|byte| *byte != b'\'').count();
+            let has_literal_sentence_prefix = segments.len()
+                > MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS
+                && literal.iter().any(|row| {
+                    let letters = row.pinyin.bytes().filter(|byte| *byte != b'\'');
+                    let consumed = letters.clone().count();
+                    row.source == CandidateSource::Generated
+                        && consumed < raw_letters
+                        && raw
+                            .bytes()
+                            .filter(|byte| *byte != b'\'')
+                            .take(consumed)
+                            .eq(letters)
+                });
+            if has_literal_sentence_prefix {
+                // 完整字面前缀的整句不能被纠错路径的短前缀挤出首页；同覆盖范围仍保持原优先级。
+                merge_series_by_coverage(&mut result, literal);
+            } else {
+                append_unique_words(&mut result, literal);
+            }
             // Same-cost readings of the typo compete with the primary cut on dictionary frequency, and the best keeps a protected slot near the top.
             if !alternatives.is_empty() {
                 result = self.merge_alternatives(
@@ -1080,6 +1099,40 @@ impl QuanpinDictionary {
                 self.merge_sentences(&mut result, raw, segmentation, segments);
             } else {
                 self.merge_sentences_with_typos(&mut result, raw, segmentation, segments, false);
+            }
+        }
+
+        // 长串末尾的音节尚未打完时，仍给出完整前缀的整句候选。
+        // 该候选只消耗完整音节，末尾拼写继续留在组字里；不把未完成音节当纠错。
+        if segments.len() > MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS
+            && !has_only_complete_pinyin_segments(segments)
+        {
+            if let Some(incomplete) = segments
+                .iter()
+                .position(|segment| !crate::pinyin::syllables::is_intact(segment))
+            {
+                let prefix = &segments[..incomplete];
+                let tail = segments[incomplete..].concat();
+                let literal = raw
+                    .bytes()
+                    .filter(|byte| *byte != b'\'')
+                    .eq(segments.iter().flat_map(|segment| segment.bytes()));
+                if literal
+                    && has_only_complete_pinyin_segments(prefix)
+                    && crate::pinyin::syllables::is_prefix(&tail)
+                    && !crate::pinyin::syllables::is_intact(&tail)
+                {
+                    if let Some(raw_prefix) = raw.strip_suffix(tail.as_str()) {
+                        let prefix_key = join_segments(prefix);
+                        self.merge_sentences_with_typos(
+                            &mut result,
+                            raw_prefix.trim_end_matches('\''),
+                            &prefix_key,
+                            prefix,
+                            false,
+                        );
+                    }
+                }
             }
         }
 
@@ -2124,3 +2177,7 @@ mod empty_projection_tests;
 
 #[cfg(test)]
 mod online_cache_update_tests;
+
+#[cfg(test)]
+#[path = "dictionary/partial_sentence_tests.rs"]
+mod partial_sentence_tests;

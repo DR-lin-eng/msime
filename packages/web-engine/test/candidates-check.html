@@ -555,7 +555,8 @@
         const root = parts(bar.element).root;
         const image = root.querySelector(".skin-decoration-image");
         const word = root.querySelector(".skin-decoration-word");
-        const next = { ...composingFrame("n", ["示例(原文)", "合成很长很长很长很长的候选词"]), highlight: 0 };
+        // 样本须在缺少中文字库的 runner 上也足够宽，确保测试触及最小字号。
+        const next = { ...composingFrame("n", ["示例(原文)", "合成很长很长很长很长的候选词".repeat(10)]), highlight: 0 };
         next.page[0].badge = "[合成标注]";
         const anchor = { left: 20, top: 20, bottom: 40 };
         bar.render(next, anchor);

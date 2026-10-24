@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
 
     // 数字键和空格用同一个宿主选词函数。
     const std::string worker = between(presenter, "HRESULT CMetasequoiaIME::_HandleCandidateWorker(", "\n}\n");
-    expect(worker, "return _SelectHighlightedHostCandidate(ec, pContext, serverChoice.empty() ? nullptr : &serverChoice);", true, "digits select through the shared host selection");
+    expect(worker, "return _HandleCandidateFinalize(ec, pContext, requestId, prefetchedText);", true, "digits share the typed Server reply handler");
     const std::string helper = between(presenter, "HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(", "\n}\n");
     expect_before(helper, "displayed.MatchesEngineView(view.view.session, view.view.generation)", "host->select(view.view.generation",
                   "the host selection refuses a candidate window that no longer matches the host session");
@@ -94,10 +94,13 @@ int main(int argc, char **argv) {
                   "the host selection locates that text in the host session before selecting");
     expect(presenter, "_SelectHighlightedHostCandidate(ec, pContext, &serverCandidateString)", true,
            "Space passes the Server's candidate text to the host selection");
-    expect(presenter, "serverChoice.assign(reply->candidate_string)", true,
-           "digits take the Server's reply as the chosen text");
-    expect_before(helper, "if (found) return S_FALSE;", "if (!found) return S_FALSE;",
-                  "an ambiguous match refuses instead of guessing");
+    const std::string finalizePath = between(presenter, "HRESULT CMetasequoiaIME::_HandleCandidateFinalize(", "\n}\n");
+    expect_before(finalizePath, "_TakePendingServerCandidate", "TryReadDataFromServerPipeWithTimeout",
+                  "buffered replies are consumed before reading the pipe again");
+    expect_before(helper, "if (found) return S_FALSE;", "host->all_candidates",
+                  "an ambiguous page match refuses instead of guessing");
+    expect(helper, "host->select_any(all.at(\"generation\").get<uint64_t>()", true,
+           "a later-page match uses the full local list generation");
     // 占位席位要把按键吃掉（S_OK），不能退回 S_FALSE——那会被当成选择失败，丢掉组字并把拼音原文写进文档。
     expect_before(helper, "candidate_source_is_pending_seat(found->source)) return S_OK;",
                   "host->select(view.view.generation",

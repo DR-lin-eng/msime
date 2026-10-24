@@ -368,12 +368,24 @@ export {
   useVoiceInputSettings,
   type UseVoiceInputSettingsOptions,
 } from "./settings/use-voice-input-settings";
+export {
+  useTouchKeyboardSkinEditorState,
+  type UseTouchKeyboardSkinEditorStateOptions,
+  type TouchKeyboardSkinEditorState,
+} from "./keyboard/use-touch-keyboard-skin-editor-state";
 export { AiSkinGeneration, type AiSkinGenerationProps } from "./keyboard/ai-skin-generation";
 export {
   useAiSkinGeneration,
   type UseAiSkinGenerationOptions,
   type AiSkinGenerationState,
 } from "./keyboard/use-ai-skin-generation";
+export {
+  useTouchKeyboardSkinLibrary,
+  type TouchKeyboardSkinLibraryState,
+  type TouchSkinLibraryNameEditor,
+  type TouchSkinLibraryConfirmation,
+  type TouchSkinLibrarySaveResult,
+} from "./keyboard/use-touch-keyboard-skin-library";
 export type {
   AiSkinClient,
   AiSkinProposal,
@@ -459,6 +471,7 @@ export { AccountPage } from "./account/account-page";
 export type {
   AccountChallenge,
   AccountClient,
+  AccountNamePresentation,
   AccountCommunityDestination,
   AccountDeletion,
   AccountPreferenceSchema,
@@ -526,6 +539,7 @@ export type { HomePageActions } from "./keyboard/home-model";
 export { openKeyboardSwitchGuide } from "./keyboard/keyboard-switch-guide";
 export {
   WelcomeFlowPage,
+  HarmonyLaunchSplash,
   type OnboardingActions,
   type OnboardingChoices,
   type OnboardingInputScheme,
@@ -539,6 +553,7 @@ export {
   LinuxSetupPage,
   nextSetupProgress,
   type LinuxSetupClient,
+  type LinuxDictionaryDownloads,
   type LinuxSetupLine,
   type LinuxSetupRegistration,
   type LinuxSetupStage,
@@ -884,6 +899,10 @@ export {
   ChineseEnglishSpacingSection,
   type ChineseEnglishSpacingSectionProps,
 } from "./settings/chinese-english-spacing-section";
+export {
+  CrossCommitSpacingSection,
+  type CrossCommitSpacingSectionProps,
+} from "./settings/cross-commit-spacing-section";
 export {
   CloudCandidatesSection,
   type CloudCandidatesSectionProps,
@@ -1235,6 +1254,8 @@ export {
 } from "./settings/tencent-translation-section";
 export { SecretSettingRow, type SecretSettingRowProps } from "./settings/secret-setting-row";
 export { TextInputRow, type TextInputRowProps } from "./settings/text-input-row";
+export { HexColorRow, type HexColorRowProps } from "./settings/hex-color-row";
+export { RgbColorRow, type RgbColorRowProps } from "./settings/rgb-color-row";
 export { SelectRow, type SelectRowProps } from "./settings/select-row";
 export { SwitchRow, type SwitchRowProps } from "./settings/switch-row";
 export {
@@ -1544,6 +1565,13 @@ export {
   type SettingsShortcutKeyProps,
 } from "./settings/settings-shortcut-key";
 export { SkinCardHeader, type SkinCardHeaderProps } from "./skin/skin-card-header";
+export { BuiltinThemeCard, type BuiltinThemeCardProps } from "./skin/builtin-theme-card";
+export {
+  candidateSkinSelection,
+  type CandidateSkinSelection,
+  type CandidateSkinSelectionOptions,
+  type CandidateSkinSelectionPackage,
+} from "./skin/candidate-skin-selection";
 export { SkinPreviewStage, type SkinPreviewStageProps } from "./skin/skin-preview-stage";
 export { SkinPreviewSurface, type SkinPreviewSurfaceProps } from "./skin/skin-preview-surface";
 export {
@@ -1552,6 +1580,15 @@ export {
 } from "./settings/settings-input-description";
 export { SettingsWarning, type SettingsWarningProps } from "./settings/settings-warning";
 export { ErrorAlert, type ErrorAlertProps } from "./core/error-alert";
+export { CheckGlyph, type CheckGlyphProps } from "./core/check-glyph";
+export {
+  ChevronGlyph,
+  type ChevronGlyphProps,
+  type ChevronGlyphVariant,
+} from "./core/chevron-glyph";
+export { SearchGlyph, type SearchGlyphProps } from "./core/search-glyph";
+export { CloseGlyph, type CloseGlyphProps } from "./core/close-glyph";
+export { PlusGlyph, type PlusGlyphProps, type PlusGlyphVariant } from "./core/plus-glyph";
 export { formatDateTime, formatZhDate, formatZhMonthDay } from "./core/format-date";
 export { formatZhNumber, formatZhPercent } from "./core/format-number";
 export { StatusMessage, type StatusMessageProps } from "./core/status-message";

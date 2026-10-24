@@ -56,6 +56,7 @@
 #include "../src/candidates/PairedPunctuation.h"
 #include "../src/core/CandidateSkinCatalog.h"
 #include "../src/core/GlobalTheme.h"
+#include "../src/core/ToggleHotkeyChord.h"
 #include "../src/core/DictionaryQuiesceLease.h"
 #include "../src/core/EmojiPluginGroups.h"
 #include "../src/core/RuntimeOptionsRefresh.h"
@@ -666,6 +667,7 @@ public:
     voice_hotkey_hold_space_lock_ = true;
     voice_ralt_held_ = false;
     voice_f9_held_ = false;
+    voice_toggle_held_ = 0;
     voice_ctrl_win_held_ = false;
     voice_rctrl_ralt_held_ = false;
     voice_space_consumed_ = false;
@@ -3229,6 +3231,7 @@ public:
   }
   // An oversized prompt must not take the rest of the configuration down with it; like the IBus host, the refusal surfaces when voice input starts.
   void loadVoiceOptions() {
+    voice_toggle_chord_ = msime::host_api::decode_toggle_hotkey(preferences_, "voice_input");
     try {
       voice_options_ = msime::linux_host::voice_provider_options(preferences_);
       voice_options_valid_ = true;
@@ -4199,6 +4202,8 @@ public:
   Json voice_host_options_;
   bool voice_enabled_ = true;
   bool voice_hotkey_ctrl_f9_ = true;
+  msime::host_api::ToggleHotkeyChord voice_toggle_chord_;
+  unsigned voice_toggle_held_ = 0;
   bool voice_hotkey_ralt_ = true;
   bool voice_hotkey_ctrl_win_ = false;
   bool voice_hotkey_rctrl_ralt_ = false;
@@ -8552,9 +8557,12 @@ void FcitxState::showInputModeHud([[maybe_unused]] ModeHudTrigger trigger) {
 #ifdef MSIME_FCITX5_MODE_BADGE
   // 标志跟随「显示水杉图标」（show_app_logo，默认关），与 macOS 一致。只有 X11 客户端报的光标矩形是根窗口坐标；Wayland 客户端的是它自己表面里的局部坐标，拿来放徽章会放错地方。
   const bool show_logo = preferences_.value("show_app_logo", false);
+  const bool allow_corner = preferences_.value("input_mode_corner_hud", true);
   const bool x11_client = ic_.display().rfind("x11:", 0) == 0;
-  auto *badge = msime::linux_host::mode_badge_surface_wanted(x11_client, show_logo) ? engine_->modeBadge() : nullptr;
-  hint = msime::linux_host::mode_badge_hint(badge != nullptr, badge && badge->follows_caret(), x11_client, show_logo);
+  auto *badge =
+      msime::linux_host::mode_badge_surface_wanted(x11_client, show_logo, allow_corner) ? engine_->modeBadge() : nullptr;
+  hint = msime::linux_host::mode_badge_hint(badge != nullptr, badge && badge->follows_caret(), x11_client,
+                                          show_logo, allow_corner);
   if (hint == msime::linux_host::ModeBadgeHint::CaretBadge && trigger == ModeHudTrigger::FocusEntered && loop_) {
     mode_hud_after_focus_ = true;
     mode_hud_focus_timer_ = loop_->addTimeEvent(
@@ -8720,6 +8728,13 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
   }
   // An accepted stroke owns its repeats and release, even if modifiers or
   // preferences change while held. Unmatched releases must not stop voice.
+  const auto voiceStroke = event.rawKey().code() != 0
+      ? static_cast<unsigned>(event.rawKey().code())
+      : msime::linux_host::toggle_key_symbol(event.rawKey().sym()) | 0x80000000u;
+  if (voice_toggle_held_ != 0 && voice_toggle_held_ == voiceStroke) {
+    if (event.isRelease()) voice_toggle_held_ = 0;
+    return true;
+  }
   if (sym == FcitxKey_F9 && voice_f9_held_) {
     if (event.isRelease()) voice_f9_held_ = false;
     return true;
@@ -8948,6 +8963,21 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
       // 锁定后的样子（圆形操作按钮，或文本回退里的锁定提示）立即显示，不等下一次 250 ms 的轮询。
       updateVoiceOverlay();
     }
+    return true;
+  }
+  const auto voiceModifiers = event.rawKey().states();
+  const bool customVoiceToggle = !voiceModifiers.testAny(fcitx::KeyStates{
+      fcitx::KeyState::Hyper, fcitx::KeyState::Meta, fcitx::KeyState::Mod5}) &&
+      voice_toggle_chord_.matches(msime::linux_host::toggle_key_name(event.rawKey().sym(),
+          event.rawKey().code() >= 8 ? event.rawKey().code() - 8 : 0),
+          voiceModifiers.test(fcitx::KeyState::Ctrl), voiceModifiers.test(fcitx::KeyState::Alt),
+          voiceModifiers.test(fcitx::KeyState::Shift), voiceModifiers.test(fcitx::KeyState::Super));
+  if (customVoiceToggle && voice_enabled_ && !voice_socket_.empty() && !restricted() &&
+      !privateInput() && ic_.hasFocus()) {
+    if (voice_loading_) {
+      if (!stopVoice()) return false;
+    } else if (!requestVoice()) return false;
+    voice_toggle_held_ = voiceStroke;
     return true;
   }
   if (sym == FcitxKey_F9 && ctrl && !alt && !shift &&

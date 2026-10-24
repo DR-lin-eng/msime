@@ -1392,7 +1392,7 @@ export class KeyboardSession implements HardwareKeyTarget {
   onToolbarDragStart: (() => void) | undefined = undefined;
   onToolbarDrag: ((offsetX: number, offsetY: number) => void) | undefined = undefined;
   /** 设置应用，只有宿主能打开它：启动它所需的 context 归宿主所有。2in1 工具栏的齿轮和手机上的「更多设置」卡片都从这里进入。`page` 是 `SettingsPageLink.PAGES` 之一，用于直接打开对应页面；为 `undefined` 时打开设置首页。 */
-  onOpenSettings: ((page: string | undefined) => void) | undefined = undefined;
+  onOpenSettings: ((page: string | undefined, requestMicrophone?: boolean) => void) | undefined = undefined;
   /**
    * A surface the toolbar asked for, which two readers need and for different reasons: the host
    * sizes and shows the window, the view draws what goes in it. Two slots rather than one, the way
@@ -4895,21 +4895,48 @@ export class KeyboardSession implements HardwareKeyTarget {
     const epoch: number = ++this.translationEpoch;
     const handle: number = this.handle;
     const requestSignature: string = signature;
+    // 本地词典先显示，不等待网络防抖或服务返回；在线阶段复用本次查词结果。
+    const english: TranslationEntry[] = [];
+    if (query.english_gloss && typeof query.resources === 'string' && query.resources.length > 0) {
+      this.appendOfflineGloss(query, english);
+    }
+    const offline: Map<string, TranslationEntry[]> = this.offlineTargetGlosses(query);
+    const local: TranslationEntry[] = english.slice();
+    for (const target of TranslationPolicy.targets(query)) {
+      for (const entry of offline.get(target) ?? []) {
+        TranslationPolicy.append(local, entry.text, entry.translation);
+      }
+    }
+    this.applyTranslationEntries(handle, query.generation, local);
+    if (!this.translationCurrent(handle, epoch) || TranslationPolicy.provider(query).length === 0) return;
     this.translationTimer = setTimeout((): void => {
       this.translationTimer = -1;
-      void this.fetchTranslations(handle, JSON.stringify(query), query, epoch, requestSignature);
+      void this.fetchTranslations(handle, query, epoch, requestSignature, english, offline);
     }, TranslationPolicy.QUIET_INTERVAL_MS);
   }
 
-  private async fetchTranslations(handle: number, queryDocument: string,
-    query: TranslationQuery, epoch: number, requestSignature: string): Promise<void> {
-    if (!this.translationCurrent(handle, epoch)) return;
-    const entries: TranslationEntry[] = [];
-    let providerComplete: boolean = true;
-    if (query.english_gloss && typeof query.resources === 'string' && query.resources.length > 0) {
-      this.appendOfflineGloss(query, entries);
+  /** 本地和在线结果共用代次校验与重绘入口，空结果不清空已经显示的释义。 */
+  private applyTranslationEntries(handle: number, generation: number, entries: TranslationEntry[]): boolean {
+    if (entries.length === 0) return false;
+    try {
+      const applied: NativeReply<OnlineApplyValue> = JSON.parse(client.applyTranslations(
+        handle, generation, JSON.stringify(entries))) as NativeReply<OnlineApplyValue>;
+      const value: OnlineApplyValue | null = NativeReplyPolicy.successfulValue(applied);
+      if (value === null || value.view === undefined || value.applied !== true) return false;
+      this.render(value.view);
+      return true;
+    } catch (error) {
+      KeyboardLog.error(`candidate translations unavailable: ${describeError(error)}`);
+      return false;
     }
-    const offline: Map<string, TranslationEntry[]> = this.offlineTargetGlosses(query);
+  }
+
+  private async fetchTranslations(handle: number, query: TranslationQuery, epoch: number,
+    requestSignature: string, english: TranslationEntry[],
+    offline: Map<string, TranslationEntry[]>): Promise<void> {
+    if (!this.translationCurrent(handle, epoch)) return;
+    const entries: TranslationEntry[] = english.slice();
+    let providerComplete: boolean = true;
     const deadline: number = Date.now() + 6000;
     const provider: string = TranslationPolicy.provider(query);
     for (const target of TranslationPolicy.targets(query)) {
@@ -4937,14 +4964,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
     let appliedCurrent: boolean = false;
     try {
-      const applied: NativeReply<OnlineApplyValue> = JSON.parse(client.applyTranslations(
-        handle, query.generation, JSON.stringify(entries))) as NativeReply<OnlineApplyValue>;
-      const appliedValue: OnlineApplyValue | null = NativeReplyPolicy.successfulValue(applied);
-      if (appliedValue !== null && appliedValue.view !== undefined
-        && appliedValue.applied !== false) {
-        appliedCurrent = appliedValue.applied;
-        this.render(appliedValue.view);
-      }
+      appliedCurrent = this.applyTranslationEntries(handle, query.generation, entries);
       if (appliedCurrent && typeof query.user_data === 'string' && query.user_data.length > 0
         && TranslationPolicy.targets(query).includes('en')) {
         const saveRequest: TranslationGlossSaveRequest = {
@@ -6704,11 +6724,11 @@ export class KeyboardSession implements HardwareKeyTarget {
     };
   }
 
-  /**
-   * Offer a hardware key to the voice shortcuts.
-   *
-   * Returns whether the key was claimed, so the caller knows not to hand it on.
-   */
+  /** 麦克风未授权时只打开本应用的授权窗口，不在输入法扩展里采集或申请权限。 */
+  requestVoicePermission(): void {
+    this.onOpenSettings?.(undefined, true);
+  }
+
   /**
    * 打开设置应用：词库、快捷短语、云端和语音服务都在那里，而不在键盘上。
    *

@@ -79,6 +79,7 @@ struct SettingsView: View {
   private func refresh() {
     let preferences = MetasequoiaInputSessionBridge.loadSharedPreferences()
     InputSchemePreference.mirror(preferences)
+    TouchShuangpinLayoutPreference.mirror(preferences)
     scheme = InputSchemePreference.scheme
     skin = KeyboardTheme.reload(preferences)
     values = Self.rowValues(scheme: scheme, preferences: preferences)
@@ -94,7 +95,10 @@ struct SettingsView: View {
     default: chinesePunctuation = preferences?["chinese_punctuation"] as? Bool ?? true
     }
     let learning = InputHabitPreference.settings(in: preferences).learning
-    let keys = scheme.isMandarinNineKey || scheme == .japaneseNineKey ? "9 键" : scheme == .fourteenKey ? "14 键" : "26 键"
+    let doubleShuangpinFourteen = scheme.shuangpinProfile != nil
+      && TouchShuangpinLayoutPreference.layout(in: preferences) == .fourteenKey
+    let keys = scheme.isMandarinNineKey || scheme == .japaneseNineKey
+      ? "9 键" : (scheme == .fourteenKey || doubleShuangpinFourteen) ? "14 键" : "26 键"
     let height = KeyboardLayoutPreference.sharedHeightAdjustment(preferences?["touch_keyboard_height_adjustment"])
       ?? KeyboardLayoutPreference.heightAdjustment
     let language = VoicePolishSettings(preferences).language

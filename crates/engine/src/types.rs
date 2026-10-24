@@ -771,14 +771,16 @@ impl WubiProfileKind {
     }
 }
 
+pub use crate::shared_string::SharedString;
+
 /// One candidate row. Every field the goldens record is here from the start, including the ones the overlays added.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WordItem {
     /// The code the row matched, as typed. Composition advance consumes exactly this.
-    pub pinyin: String,
+    pub pinyin: SharedString,
     /// The complete quanpin key from the dictionary, used when a phrase is persisted.
-    pub canonical_pinyin: String,
-    pub word: String,
+    pub canonical_pinyin: SharedString,
+    pub word: SharedString,
     /// Dictionary weight; for lattice rows `trunc(log_prob * 1000)`, which is not a sort key.
     pub weight: i64,
     pub source: CandidateSource,
@@ -788,7 +790,7 @@ pub struct WordItem {
     pub fixed_position: i32,
     pub fuzzy: bool,
     /// Non-empty for a row read from an autocorrected spelling; holds the folded letters the user typed.
-    pub corrected_from: String,
+    pub corrected_from: SharedString,
     /// Only whole-sentence association rows (lattice and neural sentences).
     pub sentence_association: bool,
     /// Word boundaries of a decoded sentence, for personal context learning.
@@ -827,9 +829,9 @@ impl WordItem {
         canonical_pinyin: impl Into<String>,
     ) -> Self {
         Self {
-            pinyin: pinyin.into(),
-            canonical_pinyin: canonical_pinyin.into(),
-            word: word.into(),
+            pinyin: SharedString::from(Into::<String>::into(pinyin)),
+            canonical_pinyin: SharedString::from(Into::<String>::into(canonical_pinyin)),
+            word: SharedString::from(Into::<String>::into(word)),
             weight,
             source,
             ..Self::default()
@@ -949,6 +951,8 @@ impl Default for FirstPageRows {
 /// 双拼辅助码的触发方式开关（Windows v0.11.1 `[helpcode]` 组的双拼专属键），随 `QueryRequest` 交给双拼引擎。默认值与 Windows 出厂配置一致；`direct` 控制末尾直接，`trigger_*` 控制末尾间接，`mid_sentence*` 控制句中间接，`direct_helpcode*` 控制逐音节直接。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShuangpinHelpcodeModes {
+    /// 只在 Tab 后输入辅助码；保留其它触发方式的设置，关闭后恢复。
+    pub manual_tab: bool,
     /// 末尾直接：完整音节基座后的裸字母按辅助码读。关闭后只认触发键开启的段。
     pub direct: bool,
     /// 末尾间接触发键：反引号段。
@@ -972,6 +976,7 @@ impl Default for ShuangpinHelpcodeModes {
     /// Windows v0.11.1 出厂值：末尾直接开、末尾间接的分号开，句中间接与万象式直接关。
     fn default() -> Self {
         Self {
+            manual_tab: false,
             direct: true,
             trigger_backtick: false,
             trigger_semicolon: true,

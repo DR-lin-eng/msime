@@ -53,6 +53,13 @@ constexpr wchar_t SERVER_PATH_REGISTRY_VALUE[] = L"ServerPath";
 std::atomic<UINT> nextWindowMessageToken{0};
 std::atomic<bool> serverLaunchInFlight{false};
 
+// 诊断日志里拼「1」或「0」时，`L"x=" + (cond ? L"1" : L"0")` 两边都是指针，会变成指针加。
+// 统一走这个函数，返回 std::wstring，和左右两侧的 wstring 串接。
+inline std::wstring BoolFlag(bool value)
+{
+    return value ? L"1" : L"0";
+}
+
 bool IsServerAlreadyRunning()
 {
     HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, SERVER_MUTEX_NAME);
@@ -288,9 +295,10 @@ class CCommitCandidateAndContinueEditSession : public CEditSessionBase
 {
   public:
     CCommitCandidateAndContinueEditSession(CMetasequoiaIME *pTextService, ITfContext *pContext, std::wstring payload,
-                                           uint64_t focusToken, uint64_t compositionEpoch)
+                                           uint64_t focusToken, uint64_t compositionEpoch,
+                                           uint64_t replayToken, uint64_t generation)
         : CEditSessionBase(pTextService, pContext), _payload(std::move(payload)), _focusToken(focusToken),
-          _compositionEpoch(compositionEpoch)
+          _compositionEpoch(compositionEpoch), _replayToken(replayToken), _generation(generation)
     {
     }
 
@@ -301,13 +309,17 @@ class CCommitCandidateAndContinueEditSession : public CEditSessionBase
         {
             return S_FALSE;
         }
-        return _pTextService->_HandleCommitCandidateAndContinue(ec, _pContext, _payload);
+        if (!_pTextService->_IsWubiWorkerEditCurrent(_replayToken, _generation, _pContext)) return S_FALSE;
+        const HRESULT result = _pTextService->_HandleCommitCandidateAndContinue(ec, _pContext, _payload);
+        if (_replayToken) _pTextService->_FinishWubiWorkerEdit(_replayToken, result == S_OK);
+        return result;
     }
 
   private:
     std::wstring _payload;
     uint64_t _focusToken;
     uint64_t _compositionEpoch;
+    uint64_t _replayToken, _generation;
 };
 
 class CDeferredApplicationTextEditSession : public CEditSessionBase
@@ -926,6 +938,15 @@ bool CMetasequoiaIME::_PostServerTextDelivery(UINT windowMessage, _In_z_ const W
     return true;
 }
 
+bool CMetasequoiaIME::_PeekServerCandidateCommit(UINT token, _Out_ WorkerCandidateCommit &request)
+{
+    std::lock_guard<std::mutex> lock(_pendingCommitCandidateMutex);
+    const auto entry = _pendingServerCommitMessages.find(token);
+    if (entry == _pendingServerCommitMessages.end()) return false;
+    request = entry->second;
+    return true;
+}
+
 bool CMetasequoiaIME::_TakeServerCandidateCommit(UINT token, _Out_ WorkerCandidateCommit &request)
 {
     std::lock_guard<std::mutex> lock(_pendingCommitCandidateMutex);
@@ -1036,8 +1057,61 @@ void CMetasequoiaIME::_ClearAsyncKeyRequests()
     }
 }
 
+bool CMetasequoiaIME::_IsWubiWorkerEditCurrent(uint64_t token, uint64_t generation, ITfContext *context) const
+{
+    if (!token)
+    {
+        auto *host = _pCompositionProcessorEngine ? _pCompositionProcessorEngine->GetHostEngineAdapter() : nullptr;
+        return !host || !host->valid();
+    }
+    return _wubiCommitOwner.editing(token) && _IsDeferredKeyReplayCurrent(token, generation, context);
+}
+
+bool CMetasequoiaIME::_FinishWubiLocalEdit(uint64_t token, bool applied)
+{
+    if (!_wubiCommitOwner.current(token)) return false;
+    if (!applied)
+    {
+        if (_wubiCommitOwner.applied()) { _FinishWubiWorkerEdit(token, false); return true; }
+        _wubiCommitOwner.clear();
+        return false;
+    }
+    if (!_wubiCommitOwner.finish_local())
+    {
+        if (_wubiCommitOwner.has_early_worker()) { _FinishWubiWorkerEdit(token, false); return true; }
+        _wubiCommitOwner.clear();
+        return false;
+    }
+    const UINT message = _wubiCommitOwner.take_early_worker();
+    // 仅投递，不在原编辑会话的析构阶段嵌套请求写锁。
+    if (message && !PostMessage(_msgWndHandle, WM_CommitCandidateAndContinue, message, 0))
+        _FinishWubiWorkerEdit(token, false);
+    return true;
+}
+
+void CMetasequoiaIME::_FinishWubiWorkerEdit(uint64_t token, bool applied)
+{
+    if (!_wubiCommitOwner.current(token)) return;
+    _wubiCommitOwner.clear();
+    if (applied) _CompleteDeferredKeyReplay(token);
+    else
+    {
+        _ClearDeferredKeyDowns();
+        MarkNamedpipeSessionDirtyForOwner(this);
+    }
+}
+
+void CMetasequoiaIME::_PollWubiCommit()
+{
+    if (_wubiCommitOwner.expired(GetTickCount64()))
+        _FinishWubiWorkerEdit(_wubiCommitOwner.token(), false);
+}
+
 void CMetasequoiaIME::_ClearPendingIpcRequests()
 {
+    // 已推进的字符不能重放；尚未推进的槽仍由原有发送/编辑失败回调恢复。
+    if (_wubiCommitOwner.applied()) _ClearDeferredKeyDowns();
+    else _wubiCommitOwner.clear();
     _ClearAsyncKeyRequests();
     ResetNamedpipeReplyState();
 
@@ -1121,16 +1195,33 @@ void CMetasequoiaIME::_CompleteLocalSessionReset(UINT resetToken)
     _queuedLocalResetToken = 0;
 
     const UINT currentToken = _localSessionResetToken.load(std::memory_order_acquire);
+    if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+    {
+        QueueTsfDiagnosticLog(L"[msime][local-reset] complete stage=enter token=" + std::to_wstring(resetToken) +
+                              L" current=" + std::to_wstring(currentToken) + L" composing=" +
+                              BoolFlag(_IsComposing()) + L" presenter=" +
+                              BoolFlag(_pCandidateListUIPresenter != nullptr));
+    }
     if (_localSessionResetPending.load(std::memory_order_acquire) && currentToken != resetToken)
     {
         // A focus loss superseded an already-granted dirty reset.  The old
         // cancel has finished; process the exact newer token before reopening
         // the key path.
+        if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+        {
+            QueueTsfDiagnosticLog(L"[msime][local-reset] complete stage=superseded token=" +
+                                  std::to_wstring(resetToken) + L" current=" + std::to_wstring(currentToken));
+        }
         _RequestLocalSessionReset(nullptr, currentToken);
         return;
     }
     if (currentToken == resetToken && !_IsComposing() && _pCandidateListUIPresenter == nullptr)
     {
+        if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+        {
+            QueueTsfDiagnosticLog(L"[msime][local-reset] complete stage=cleared token=" +
+                                  std::to_wstring(resetToken));
+        }
         _localSessionResetPending.store(false, std::memory_order_release);
     }
     else if (currentToken == resetToken && _localSessionResetPending.load(std::memory_order_acquire))
@@ -1138,12 +1229,28 @@ void CMetasequoiaIME::_CompleteLocalSessionReset(UINT resetToken)
         // A granted edit session can still fail inside the key-state handler.
         // Do not reopen the transport while the old local composition or
         // presenter survives; retire this queue slot and retry the exact token.
+        // 组字或候选窗还活着就不清标志，这里重排重连定时器等下一次机会。日志把两边的阻留原因都记下来：
+        // 如果这一行反复出现而 stage=cleared 一直不出现，就是这条链路自锁了（#9519）。
+        if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+        {
+            QueueTsfDiagnosticLog(L"[msime][local-reset] complete stage=blocked token=" +
+                                  std::to_wstring(resetToken) + L" composing=" +
+                                  BoolFlag(_IsComposing()) + L" presenter=" +
+                                  BoolFlag(_pCandidateListUIPresenter != nullptr) + L" connected=" +
+                                  BoolFlag(Global::g_connected));
+        }
         if (Global::g_connected && _msgWndHandle && IsWindow(_msgWndHandle))
         {
             _ipcReconnectDelayMs = CONNECT_NAMEDPIPE_RETRY_INTERVAL_MS;
             SetTimer(_msgWndHandle, TIMER_CONNECT_ALL_NAMEDPIPE, _ipcReconnectDelayMs, nullptr);
         }
         return;
+    }
+    if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+    {
+        QueueTsfDiagnosticLog(L"[msime][local-reset] complete stage=drained token=" +
+                              std::to_wstring(resetToken) + L" connected=" +
+                              BoolFlag(Global::g_connected));
     }
     if (Global::g_connected && _msgWndHandle && IsWindow(_msgWndHandle))
     {
@@ -1165,10 +1272,25 @@ void CMetasequoiaIME::_RequestLocalSessionReset(_In_opt_ ITfContext *preferredCo
 
     if (_localResetEditSessionQueued)
     {
+        // 重置的取消编辑会话已经排过一次，等它回来之前不再排。日志留着这条，好看出是不是卡在这里。
+        if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+        {
+            QueueTsfDiagnosticLog(L"[msime][local-reset] request-skipped stage=edit-session-queued token=" +
+                                  std::to_wstring(resetToken) + L" composing=" +
+                                  BoolFlag(_IsComposing()) + L" presenter=" +
+                                  BoolFlag(_pCandidateListUIPresenter != nullptr));
+        }
         return;
     }
 
     const bool needsCancel = _IsComposing() || _pCandidateListUIPresenter != nullptr;
+    if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+    {
+        QueueTsfDiagnosticLog(L"[msime][local-reset] request stage=begin token=" + std::to_wstring(resetToken) +
+                              L" composing=" + BoolFlag(_IsComposing()) + L" presenter=" +
+                              BoolFlag(_pCandidateListUIPresenter != nullptr) + L" needs_cancel=" +
+                              BoolFlag(needsCancel));
+    }
     if (!needsCancel)
     {
         if (_localSessionResetToken.load(std::memory_order_acquire) == resetToken)
@@ -2208,6 +2330,7 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
         }
         else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::InputModeChanged)
         {
+            msime::tsf::invalidate_host_configuration();
             Global::InputModeScheme.store(
                 msime::windows::scheme::mode_scheme(msime::windows::scheme::input_mode_from_code(buf.data[0])),
                 std::memory_order_relaxed);
@@ -2455,6 +2578,16 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
 
     switch (message)
     {
+    case WM_COPYDATA: {
+        const auto *data = reinterpret_cast<const COPYDATASTRUCT *>(lParam);
+        if (!data || data->dwData != msime::panel_key::CopyDataId ||
+            data->cbData != sizeof(msime::panel_key::Request) || !data->lpData)
+            return FALSE;
+        // 系统封送内存只在消息处理期间有效，先复制且不回写。
+        msime::panel_key::Request request;
+        memcpy(&request, data->lpData, sizeof(request));
+        return pIME->_HandleGroupedPanelKey(request) ? TRUE : FALSE;
+    }
     case WM_CancelKeyboardComposition: {
         CMetasequoiaIME::WorkerCompartmentSwitch request;
         if (pIME->_TakeWorkerCompartmentSwitch(static_cast<UINT>(wParam), request) &&
@@ -2639,6 +2772,9 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
         {
             pIME->_PollApplicationKeyReplay();
             pIME->_ConsumeCandidateContinuationFailure();
+            pIME->_PollWubiCommit();
+            // 已推进的视图在 worker 恢复余码前不可被偏好刷新换掉。
+            if (pIME->_wubiCommitOwner.active()) break;
             msime::tsf::refresh_host_configuration();
             const auto configuration = msime::tsf::cached_host_configuration();
             auto *engine = pIME->GetCompositionProcessorEngine();
@@ -2751,6 +2887,22 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
         break;
     }
     case WM_ThreadFocus: {
+        // Win7 的旧编辑器可能只在激活后通知线程焦点，而不重发已存在的文档焦点。
+        // 延后到这里重新读取当前线程与文档，仅补上尚未建立的连接；活动会话不换代。
+        if (!Global::g_connected && IsNamedpipeFocusStateOwner(pIME))
+        {
+            BOOL focused = FALSE;
+            auto *thread = pIME->_GetThreadMgr();
+            ITfDocumentMgr *document = nullptr;
+            if (thread && SUCCEEDED(thread->IsThreadFocus(&focused)) && focused &&
+                SUCCEEDED(thread->GetFocus(&document)) && document)
+            {
+                if (SUCCEEDED(thread->IsThreadFocus(&focused)) && focused &&
+                    IsNamedpipeFocusStateOwner(pIME) && !Global::g_connected)
+                    pIME->OnSetFocus(document, nullptr);
+                document->Release();
+            }
+        }
         // Some Chromium/Electron window switches surface only as thread-focus
         // changes. Refresh this thread's cached TSF language-bar item even when
         // there was no document-focus transition.
@@ -2805,34 +2957,62 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
     }
     case WM_CommitCandidateAndContinue: {
         CMetasequoiaIME::WorkerCandidateCommit request;
-        if (!pIME->_TakeServerCandidateCommit(static_cast<UINT>(wParam), request))
-        {
-            break;
-        }
+        // 旧窗口消息不拥有当前槽，先核验载荷与代次，再接触本地阶段状态。
+        if (!pIME->_PeekServerCandidateCommit(static_cast<UINT>(wParam), request)) break;
         if (!pIME->_IsFocusSessionCurrent(request.focusToken) ||
             !pIME->_IsCompositionEpochCurrent(request.compositionEpoch))
         {
+            pIME->_TakeServerCandidateCommit(static_cast<UINT>(wParam), request);
             break;
         }
-        ITfDocumentMgr *pDocMgrFocus = nullptr;
-        ITfContext *pContext = nullptr;
-        if (SUCCEEDED(pIME->_GetThreadMgr()->GetFocus(&pDocMgrFocus)) && pDocMgrFocus)
+        const uint64_t replayToken = pIME->_wubiCommitOwner.token();
+        const uint64_t generation = pIME->_deferredKeyFocusGeneration;
+        if (!replayToken && !pIME->_IsWubiWorkerEditCurrent(0, generation, nullptr))
         {
-            if (SUCCEEDED(pDocMgrFocus->GetTop(&pContext)) && pContext)
-            {
-                auto *editSession = new (std::nothrow) CCommitCandidateAndContinueEditSession(
-                    pIME, pContext, std::move(request.text), request.focusToken, request.compositionEpoch);
-                if (editSession)
-                {
-                    HRESULT editSessionHr = E_FAIL;
-                    pContext->RequestEditSession(pIME->_tfClientId, editSession,
-                                                 TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &editSessionHr);
-                    editSession->Release();
-                }
-                pContext->Release();
-            }
-            pDocMgrFocus->Release();
+            pIME->_TakeServerCandidateCommit(static_cast<UINT>(wParam), request);
+            break;
         }
+        if (replayToken)
+        {
+            const auto action = pIME->_wubiCommitOwner.worker(static_cast<UINT>(wParam));
+            if (action == msime::tsf::WubiCommitOwner::Worker::Early) break;
+            if (action != msime::tsf::WubiCommitOwner::Worker::Ready)
+            {
+                pIME->_FinishWubiWorkerEdit(replayToken, false);
+                break;
+            }
+        }
+        if (!pIME->_TakeServerCandidateCommit(static_cast<UINT>(wParam), request))
+        {
+            pIME->_FinishWubiWorkerEdit(replayToken, false);
+            break;
+        }
+        ITfDocumentMgr *document = nullptr;
+        ITfContext *context = nullptr;
+        HRESULT dispatch = E_FAIL, editResult = E_FAIL;
+        if (replayToken && pIME->_IsDeferredKeyReplayCurrent(replayToken, generation, nullptr))
+        {
+            context = pIME->_deferredKeyInFlight.context;
+            context->AddRef();
+        }
+        else if (!replayToken && SUCCEEDED(pIME->_GetThreadMgr()->GetFocus(&document)) && document)
+            document->GetTop(&context);
+        if (document) document->Release();
+        if (context)
+        {
+            auto *edit = new (std::nothrow) CCommitCandidateAndContinueEditSession(
+                pIME, context, std::move(request.text), request.focusToken, request.compositionEpoch,
+                replayToken, generation);
+            if (edit)
+            {
+                dispatch = context->RequestEditSession(pIME->_tfClientId, edit,
+                    TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &editResult);
+                edit->Release();
+            }
+            context->Release();
+        }
+        if (FAILED(dispatch) || (editResult != S_OK && editResult != TF_S_ASYNC))
+            pIME->_FinishWubiWorkerEdit(replayToken, false);
         break;
     }
     case WM_InsertText: {

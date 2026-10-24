@@ -194,6 +194,7 @@ ReplyComposer::stage(const KeyResult &result, ReplyPath path, bool uiless,
       next.encoded = uiless_composition(result.request_id, display_prefix + display, view);
     }
     break;
+  case ReplyPath::HostCharacter:
   case ReplyPath::SyllableCommit:
     // TIP 已从自己的 Runtime 上屏（音节完成或退格删空前缀）；这里只投影后续组字，避免重复插入。
     if (!commit_prefix.empty()) {
@@ -396,6 +397,12 @@ std::optional<PendingReply> ReplyComposer::basic_key(
     const bool candidate_active =
         (packet.modifiers_down & PipeMetadata::CandidateActive) != 0;
     const bool has_candidates = candidate_active && !current.at("candidates").empty();
+    if (!has_candidates && current.value("key_grid", std::string{}) == "eighteen_key") {
+      // 多义组码没有候选时保持组字，不能沿裸回车路径上屏组首字母。
+      KeyResult result{client_, epoch_, packet.request_id, true,
+                       {{"handled", true}, {"commit", nullptr}, {"diagnostic", nullptr}, {"view", current}}};
+      return stage(result, ReplyPath::IgnoredNavigation, uiless);
+    }
     const auto path = has_candidates ? ReplyPath::Selection : ReplyPath::LocalCommit;
     return dispatch(session, packet, epoch, path, uiless,
                     std::move(local_text));
@@ -1170,6 +1177,21 @@ std::optional<PendingReply> ReplyComposer::configured_key(
   if (style != TsfPreeditStyle::Local && style != TsfPreeditStyle::Pinyin &&
       style != TsfPreeditStyle::Empty)
     throw std::invalid_argument("Invalid TSF preedit style");
+  if (packet.modifiers_down & PipeMetadata::GroupedPanelKey) {
+    // 组码不能被用户定义的字母快捷键、以词定字或释义页截成确定字符。
+    armed_gloss_column_ = 0;
+    translation_page_active_ = false;
+    return dispatch(session, packet, epoch, ReplyPath::HostCharacter,
+                    (packet.modifiers_down & FanyImePipeFlags::UiLess) != 0);
+  }
+  const auto panel_view = session.view();
+  const auto text = static_cast<uint32_t>(packet.wch);
+  if (panel_view.value("key_grid", std::string{"none"}) == "eighteen_key" &&
+      !panel_view.at("editing_text").get_ref<const std::string &>().empty() &&
+      ((text >= 'a' && text <= 'z') || (text >= 'A' && text <= 'Z')) &&
+      (PipeMetadata::key_modifiers(packet.modifiers_down) & ~1u) == 0)
+    return dispatch(session, packet, epoch, ReplyPath::HostCharacter,
+                    (packet.modifiers_down & FanyImePipeFlags::UiLess) != 0);
   if (auto word = session.word_character(packet, epoch, word_binding)) {
     armed_gloss_column_ = 0;
     return stage(word->key, word->exact

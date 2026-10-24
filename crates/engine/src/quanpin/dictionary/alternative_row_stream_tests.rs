@@ -140,7 +140,7 @@ fn legacy_merge_alternative_segmentations(
             .iter()
             .chain(alternatives.iter().skip(1))
             .any(|item| item.word == best_alternative.word))
-    .then(|| best_alternative.word.clone());
+    .then(|| best_alternative.word.to_string());
 
     let capacity = result
         .len()
@@ -235,7 +235,7 @@ fn alternative_stream_preserves_promotion_ties_and_metadata() {
                     })
                     .collect();
                 let best_word = if duplicate && width > 0 {
-                    primary[width - 1].word.clone()
+                    primary[width - 1].word.to_string()
                 } else {
                     "合成替词😀".into()
                 };
@@ -276,8 +276,11 @@ fn alternative_stream_preserves_promotion_ties_and_metadata() {
                 let (actual, new) =
                     count(|| merge_alternative_rows(result, primary.iter().cloned(), alternatives));
                 rows_equal(&actual, &expected);
+                // 冻结实现为重复的最佳词面复制一份字符串，新实现只克隆 `SharedString`；两条备选同词，晋升时必有重复，于是再省一次。
+                let promoted = best_weight.saturating_mul(ALTERNATIVE_SEGMENTATION_PROMOTION_RATIO)
+                    >= primary.first().map_or(0, |item| item.weight);
                 assert_eq!(
-                    new + usize::from(width > 0),
+                    new + usize::from(width > 0) + usize::from(promoted),
                     old,
                     "width={width}, duplicate={duplicate}, weight={best_weight}"
                 );
@@ -358,10 +361,10 @@ fn alternative_stream_keeps_cached_fields_and_fifo_age() {
         let mut after = QuanpinDictionary::new(&fixture.paths);
         before.cache = FifoCache::new(2);
         after.cache = FifoCache::new(2);
-        before.cache.insert("xi'an".into(), rows.clone());
-        after.cache.insert("xi'an".into(), rows);
-        before.cache.insert("second".into(), Vec::new());
-        after.cache.insert("second".into(), Vec::new());
+        before.cache.insert("xi'an".into(), rows.clone().into());
+        after.cache.insert("xi'an".into(), rows.into());
+        before.cache.insert("second".into(), Vec::new().into());
+        after.cache.insert("second".into(), Vec::new().into());
         let before_cached = before.cache.get_ref_by("xi'an").unwrap().clone();
         let after_cached = after.cache.get_ref_by("xi'an").unwrap().clone();
         let segments = vec!["xi".into(), "an".into()];
@@ -375,8 +378,8 @@ fn alternative_stream_keeps_cached_fields_and_fifo_age() {
         assert_eq!(after.cache.get_ref_by("xi'an").unwrap(), &after_cached);
         actual[0].word.push_str("修改");
         assert_eq!(after.cache.get_ref_by("xi'an").unwrap(), &after_cached);
-        before.cache.insert("third".into(), Vec::new());
-        after.cache.insert("third".into(), Vec::new());
+        before.cache.insert("third".into(), Vec::new().into());
+        after.cache.insert("third".into(), Vec::new().into());
         for dictionary in [&before, &after] {
             assert!(dictionary.cache.get_ref_by("xi'an").is_none());
             assert!(dictionary.cache.get_ref_by("second").is_some());

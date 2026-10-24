@@ -25,6 +25,8 @@ pub enum RuntimeError {
 pub trait InputEngine {
     /// 可选的逐字符触点旁路；没有触屏输入的引擎忽略它。
     fn set_touch_point(&mut self, _point: Option<(u8, msime_engine::TouchPoint)>) {}
+    /// 隐私输入禁止上屏后联想；不提供该能力的引擎没有状态可清。
+    fn set_prediction_allowed(&mut self, _allowed: bool) {}
     /// Ends the committed-word context the Engine learns and ranks against. Engines without one ignore it.
     fn reset_context(&mut self) {}
     /// The committed text the Engine's neural sentence models condition on, pushed by the runtime whenever the text it keeps changes. Engines without such models ignore it.
@@ -280,6 +282,9 @@ pub enum SegmentCommand {
 impl InputEngine for Session {
     fn set_touch_point(&mut self, point: Option<(u8, msime_engine::TouchPoint)>) {
         Session::set_touch_point(self, point);
+    }
+    fn set_prediction_allowed(&mut self, allowed: bool) {
+        Session::set_prediction_allowed(self, allowed);
     }
     fn reset_context(&mut self) {
         Session::reset_context(self);

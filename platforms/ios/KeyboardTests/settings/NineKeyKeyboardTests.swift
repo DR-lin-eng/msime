@@ -2605,7 +2605,8 @@ final class NineKeyKeyboardTests: XCTestCase {
     XCTAssertTrue(toolbar.isHidden)
     XCTAssertEqual(reading.frame.width, 0, accuracy: 0.5, "the strip draws no spelling")
     XCTAssertTrue(try button("preeditButton", in: controller).isHidden)
-    XCTAssertEqual(controller.inlineMarkedText, "nihao", "the spelling is written into the field")
+    // 全拼宿主快照显示分词；输入框里的拼音样式预编辑使用同一出口。
+    XCTAssertEqual(controller.inlineMarkedText, "ni'hao", "分词拼音写入输入框")
     let candidate = try button("candidate-1", in: controller)
     let candidateFrame = candidate.convert(candidate.bounds, to: strip)
     XCTAssertLessThanOrEqual(candidateFrame.minX, 2.5, "the first candidate starts at the leading edge")
@@ -2805,8 +2806,8 @@ final class NineKeyKeyboardTests: XCTestCase {
         key.sendActions(for: .primaryActionTriggered)
       }
       controller.view.layoutIfNeeded()
-      XCTAssertEqual(try button("preeditButton", in: controller).accessibilityValue, "nihao",
-                     "round \(round): the keystrokes never reached the engine")
+      XCTAssertEqual(try button("preeditButton", in: controller).accessibilityValue, "ni'hao",
+                     "第 \(round) 轮：按键未形成分词预编辑")
       XCTAssertTrue(try XCTUnwrap(button("candidate-1", in: controller).configuration?.title).contains("你好"),
                     "round \(round): no Chinese candidate")
       controller.viewWillDisappear(false)

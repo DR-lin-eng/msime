@@ -15,6 +15,8 @@ enum class ReplyPath {
   AutoCommitAndContinue,
   // TIP 从自己的宿主会话写出的提交（音节完成、退格删空前缀），回复至多带后续组字。
   SyllableCommit,
+  // 面板组码或切回实体键盘，由 TIP 独立会话写提交，Server 只回后续组字。
+  HostCharacter,
   // 整句改字时的回车：TIP 从自己的宿主会话上屏改好的整句（MSIME_COMMIT_RAW），这边的会话做同样的事，不发回复帧。
   ConversionCommit,
   Selection,

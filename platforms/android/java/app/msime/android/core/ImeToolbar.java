@@ -58,6 +58,7 @@ final class ImeToolbar {
             s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton,
             s.textEditShortcutButton, s.undoShortcutButton, s.redoShortcutButton};
         for (Button button : shortcutButtons) bindEditor(button);
+        s.imeTextEditPanel.bindShortcut(s.textEditShortcutButton);
         for (Button button : new Button[] {s.moreButton, dismissButton}) {
             bindEditor(button);
             if (button.getParent() instanceof LinearLayout parent) parent.removeView(button);
@@ -208,8 +209,8 @@ final class ImeToolbar {
             KeyboardShortcutIconPolicy.Icon.REDO, () -> performHistory(true));
         s.redoShortcutButton.setContentDescription("重做");
         s.voiceShortcutButton = s.shortcutButton(s.shortcutBar, "语音",
-            KeyboardShortcutIconPolicy.Icon.VOICE, s::showVoiceResult);
-        s.voiceShortcutButton.setContentDescription("打开语音结果");
+            KeyboardShortcutIconPolicy.Icon.VOICE, s::startVoiceRecognition);
+        s.voiceShortcutButton.setContentDescription("语音输入");
         s.keyId(s.voiceShortcutButton, "SoftVoice");
         s.aiPolishShortcutButton = s.button(s.shortcutBar, "AI", s.imePanels::showAiPolish);
         s.aiPolishShortcutButton.setContentDescription("打开 AI 润色");

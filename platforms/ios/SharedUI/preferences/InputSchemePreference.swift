@@ -164,6 +164,47 @@ enum ChineseInputScheme: String, CaseIterable {
   }
 }
 
+/// iOS 双拼字母键布局。它与当前选中的双拼方案分开保存，因此切换小鹤、自然码或微软双拼时不会丢掉 14 键选择。
+enum TouchShuangpinLayoutPreference {
+  enum Layout: String, CaseIterable, Hashable {
+    case twentySixKey = "twenty_six_key"
+    case fourteenKey = "fourteen_key"
+
+    var title: String { self == .fourteenKey ? "14 键" : "26 键" }
+  }
+
+  static let documentKey = "touch_shuangpin_layout"
+  private static let appGroupKey = "shuangpinKeyboardLayout"
+
+  static var layout: Layout {
+    get {
+      Layout(rawValue: InputSchemePreference.appGroupDefaults.string(forKey: appGroupKey) ?? "")
+        ?? .twentySixKey
+    }
+    set { InputSchemePreference.appGroupDefaults.set(newValue.rawValue, forKey: appGroupKey) }
+  }
+
+  static func layout(in document: [String: Any]?) -> Layout {
+    Layout(rawValue: document?[documentKey] as? String ?? "") ?? .twentySixKey
+  }
+
+  /// 文档是权威来源；键盘和设置页读到文档后才更新 App Group 镜像。
+  static func mirror(_ document: [String: Any]?) {
+    guard document != nil else { return }
+    layout = layout(in: document)
+  }
+
+  /// 与方案选择使用同一个 PreferencesStore 写入路径，避免只写 App Group 后被下一次会话重置。
+  @discardableResult
+  static func save(_ value: Layout, stateRoot: URL? = nil) -> Bool {
+    guard MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot, {
+      $0[documentKey] = value.rawValue
+    }) else { return false }
+    layout = value
+    return true
+  }
+}
+
 /// 五笔用 86 还是 98 码表。方案仍只有一个 `wubi`，版本是共享偏好文档里与它并列的 `wubi_profile`，就像双拼方案旁边的 `shuangpin_profile`；Engine 按它读写 `wubi86` 或 `wubi98` 词库。
 ///
 /// 文档是唯一的权威来源。App Group 里的这份只是镜像，给方案名、键盘方案卡片这类不读文档的同步取值用，由读到文档的一方（设置页、键盘重载文档时）写入。

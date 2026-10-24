@@ -104,9 +104,9 @@ char *msime_client_relay_cloud_clipboard(const uint8_t *request, size_t length);
 /* 向自建中继发端到端加密驱动（msime_client_cloud_clipboard_e2e）给出的一个请求，给自己跑驱动、自己保存密钥串的宿主用：Android 把中继的密钥串交给 AndroidKeyStore 加密，不经上面那个由 Rust 把密钥串存成明文文件的入口跑驱动。request 是 length 字节（最多 131072）的 UTF-8 JSON {url: 中继基地址, token: 中继令牌, method: GET|PUT|POST|DELETE, path: 驱动给的路径（必须在 /v1/users/me/clipboard 之下）, body: 可选，驱动给的 JSON 正文文本}。url 和 token 是宿主在这次操作开始时从偏好的 cloud_clipboard_relay 读到的那一份，整次操作都传同一份，中途改了偏好也不会发到另一个中继；校验规则与偏好相同，不合规时 error 是 relay_not_configured。Value 是 {status, body}，状态码和正文原样交回驱动。不读偏好、不读写任何密钥串。请求不合规时 error 是 invalid_cloud_clipboard（不发出去），中继拒绝令牌时是 relay_unauthorized，连不上或响应过大是 relay_unavailable。阻塞网络：放在工作线程上调用。 */
 char *msime_client_relay_cloud_clipboard_exchange(const uint8_t *request, size_t length);
 /* Anonymous usage reporting to https://api.msime.app/v1/telemetry/events (no credentials). Every request is UTF-8 JSON of length bytes; maximum 16 KiB (256 KiB for record_crash). directory is an absolute directory the host owns for its telemetry files (the queue telemetry.json, telemetry-state.json with the random install id, the session marker and telemetry-crashes/). platform is windows, macos, linux, android, ios or harmony (aliases such as win, darwin, ohos are mapped); version is the real app version. Consent: enabled (the usage_reporting switch, default on) or, for hosts on the shared preferences, preferences_directory to read usage_reporting from; with reporting off, begin and flush clear everything and send nothing.
- * begin {directory, platform, version, enabled?|preferences_directory?}: call once at host start. Closes the previous session (session_crash only when it left a crash record; a leftover marker alone is no crash), queues crash records as crash events with paths reduced to file names, queues today's active, writes a new marker. Value {enabled, crash_record_path?, previous_session_crashed?, crashes?}. No network.
- * end {directory}: the host is exiting normally; queues the session event. Value true when a session was running. No network.
- * record_crash {directory, message, stack}: from a crash handler that may allocate (C++ terminate handler). Writes the session's crash record only; first line of message is the summary, stack is frames as module+offset or symbol. Value false when no session runs or a record exists. An async-signal handler instead writes crash_record_path from begin itself: open(O_WRONLY|O_CREAT|O_EXCL, 0600), the summary line, '\n', the frames.
+ * begin {directory, platform, version, enabled?|preferences_directory?}：宿主启动时调用一次。为每个留下了崩溃记录、尚未结束的会话补报 session_crash（只留下标记的不算崩溃；同目录里几个进程各自的会话按 id 区分），把崩溃记录排成 crash 事件（路径只留文件名），排进当天的 active，写下新会话的标记。Value {enabled, crash_record_path?, session_id?, previous_session_crashed?, crashes?}。不联网。
+ * end {directory, session?}：宿主正常退出，排进 session 事件。session 是 begin 返回的 session_id，给了就只结束这个会话，不给则结束标记里记着的会话（标记可能已属于同目录里后来启动的别的进程）。有对应会话在运行时 Value 为 true。不联网。
+ * record_crash {directory, message, stack, session?}：给可以分配内存的崩溃处理（C++ terminate handler）用，只写会话的崩溃记录；message 第一行是摘要，stack 是 module+offset 或符号形式的帧。session 是 begin 返回的 session_id，给了就写这个会话的记录，不给则写标记里记着的会话的记录。没有会话在运行或记录已存在时 Value 为 false。async-signal 处理函数改为自己写 begin 返回的 crash_record_path：open(O_WRONLY|O_CREAT|O_EXCL, 0600)、摘要行、'\n'、各帧。
  * flush (same request as begin): queues today's active and sends the queue oldest first; 400 drops an event, 429/5xx/network keep it (Retry-After honoured across processes). Value {enabled, sent, dropped, remaining, deferred}. Blocks on the network: background thread only.
  * clear {directory}: usage reporting was just turned off. */
 char *msime_client_telemetry_begin(const uint8_t *request, size_t length);
@@ -334,6 +334,8 @@ char *msime_client_snapshot_activate(uint64_t handle, const uint8_t *expected_ve
  * is optional, its members are not.
  */
 char *msime_client_default_preferences(void);
+/* 触控板设置元数据：defaults 为共享默认值，horizontal_dp 和 vertical_dp 各含 minimum / maximum。纯计算，返回标准 JSON 结果，用 string_free 释放。 */
+char *msime_client_text_trackpad_options(void);
 /* 「重置所有设置」：directory 是绝对的偏好目录（UTF-8，<=16384 字节）。在偏好锁里读出当前文档，换成本目录所属版本的默认偏好（服务凭据与 fuzzy_pinyin.seeded 保留），再按 expected_revision 比较并交换写回，返回新的 PreferencesSnapshot。修订号不符时失败且不写入。词库、统计不受影响；默认关闭剪贴板历史，因此与 msime_client_save_preferences 一样清空已存的历史。会读写文件，请在工作线程调用。 */
 char *msime_client_restore_default_preferences(const uint8_t *directory, size_t length,
                                                uint64_t expected_revision);
@@ -375,8 +377,12 @@ char *msime_client_touch_quick_symbols(const uint8_t *value, size_t length);
  * Creates the directory/lock file if absent, never overwrites preference contents.
  */
 char *msime_client_load_preferences(const uint8_t *directory, size_t length);
-/* 三个可重绑切换热键（keybindings.toggle_english_candidates、toggle_full_width、toggle_punctuation）按共享 KeyChord 契约解码。请求是 JSON {"keybindings": object}（<=65536 字节）；keybindings 缺省或为 null 时按出厂值，不是 object 时返回错误。value 是 {"english_candidates","full_width","punctuation"}，每项是 null（写法为空或不合法：不绑定）或 {"key": 主键规范名, "ctrl": bool, "alt": bool, "shift": bool, "meta": bool}；规范名是 client-core KeyChord 的 Display 输出（KeyA-KeyZ、Digit0-Digit9、F1-F12、Space、Semicolon、Equal、Comma、Minus、Period、Slash、Backquote、BracketLeft、Backslash、BracketRight、Quote），宿主按规范名认键，写法的解析只在 Rust 一侧。结果用 msime_client_string_free 释放。 */
+/* 可重绑切换热键（keybindings.toggle_english_candidates、toggle_full_width、toggle_punctuation、toggle_voice_input）按共享 KeyChord 契约解码。请求是 JSON {"keybindings": object}（<=65536 字节）；keybindings 缺省或为 null 时按出厂值，不是 object 时返回错误。value 是 {"english_candidates","full_width","punctuation","voice_input"}，每项是 null（写法为空或不合法：不绑定）或 {"key": 主键规范名, "ctrl": bool, "alt": bool, "shift": bool, "meta": bool}；规范名是 client-core KeyChord 的 Display 输出（KeyA-KeyZ、Digit0-Digit9、F1-F12、Space、Semicolon、Equal、Comma、Minus、Period、Slash、Backquote、BracketLeft、Backslash、BracketRight、Quote），宿主按规范名认键，写法的解析只在 Rust 一侧。结果用 msime_client_string_free 释放。 */
 char *msime_client_toggle_hotkey_chords(const uint8_t *request, size_t length);
+// 录键试写：{"field": 槽位, "chord": 写法, "keybindings": 偏好, "voice_ctrl_f9": bool}。
+// value 为 {"ok": true, "chord": 规范写法}，或 {"ok": false, "kind": "invalid"|"conflict", "owner"?: 占用者}。
+// 请求最多 64 KiB，不落盘；返回值通过 msime_client_string_free 释放。
+char *msime_client_check_toggle_hotkey(const uint8_t *request, size_t length);
 /* 私有的聚合打字统计。JSON 请求（<=65536 字节）：
  * {directory:绝对路径,action:{operation:"load"|"reset"}}
  * {directory,action:{operation:"set_enabled",enabled:bool}}
@@ -486,6 +492,12 @@ char *msime_client_personal_dictionary_request(const uint8_t *request, size_t le
  * atomically: use a worker. Failures carry the shared community_* codes the
  * settings pages already have wording for, not a Display string. */
 char *msime_client_custom_skin_library(const uint8_t *request, size_t length);
+
+/* 共用键盘设计操作，不写磁盘。请求 operation 为 catalog、reset、template（index）、
+ * background（index、design）或 optimize_contrast（design）。返回普通 {ok,value} JSON；
+ * catalog 返回 default、templates、backgrounds，其余返回完整设计。未知字段、无效设计、
+ * 越界索引和超过 1 MiB 的请求返回 keyboard_skin_invalid。结果由 msime_client_string_free 释放。 */
+char *msime_client_keyboard_skin_design(const uint8_t *request, size_t length);
 /* JSON {directory:absolute state root,id:publication uuid,name,design}. Starts
  * a skin trial and imports the design into the library, answering
  * {skin,trial}. One call rather than two: the trial is what remembers the skin
@@ -598,6 +610,20 @@ char *msime_client_voice_capture(uint32_t milliseconds);
  * "windows". Other targets fail with "voice capture devices unavailable". Enumerates through
  * COM: call off the UI thread. Ids and labels may identify the user's hardware: never log them. */
 char *msime_client_voice_capture_devices(void);
+#ifdef _WIN32
+/* 原生语音审阅面板复用 Server 控制协议。create 不录音，返回 {handle:uint64}，至多 32 个活动句柄。
+ * recognize 消费句柄一次，在工作线程阻塞到识别结束，返回 {text}；不自动输入或修改剪贴板。
+ * language 为 1..64 字节 ASCII 语言标签。progress 可空，非空时在调用线程借用 UTF-8 JSON
+ * {phase:connecting|recording|recognizing|processing|complete|cancelled|failed,level:0..1,text?:string}。
+ * 回调不能展开异常，可重入 control；不保留其借用缓冲区，也不记录或落盘音频／文本。
+ * control 可从任何线程调用：0 请求结束录音，1 取消，2 关闭并取消；关闭后句柄永不复用。
+ * 执行中的调用继续持有自己的取消信号；宿主关闭窗口时先 control(2)，再等待 recognize 返回。
+ * 完成／失败不隐式关闭句柄，调用方必须 control(2)。所有返回字符串用 string_free 释放。 */
+char *msime_client_windows_voice_session_create(void);
+char *msime_client_windows_voice_session_control(uint64_t handle, uint32_t operation);
+char *msime_client_windows_voice_session_recognize(uint64_t handle, const uint8_t *language, size_t length,
+    void (*progress)(const uint8_t *, size_t, void *), void *context);
+#endif
 char *msime_client_voice_apply(uint64_t session, uint64_t generation,
                                const uint8_t *text, size_t length);
 /* On-device speech models and user-dictionary hotwords. JSON request buffers of length bytes; standard responses. Error text of the model calls is a stable code beginning with "local_model_".
@@ -641,6 +667,8 @@ char *msime_client_resource_pack_install(const uint8_t *request, size_t length,
                                          void *context);
 void msime_client_resource_pack_cancel(const uint8_t *pack, size_t length);
 char *msime_client_resource_pack_remove(const uint8_t *request, size_t length);
+/* 重新校验资源包的全部固定文件，不写入：{state_root, pack} -> {path}。 */
+char *msime_client_resource_pack_verify(const uint8_t *request, size_t length);
 char *msime_client_resource_pack_adopt(const uint8_t *request, size_t length);
 /* 卸载已发布的包：{state_root, pack} -> {removed}。先释放模型映射，未安装时 removed=false。 */
 char *msime_client_resource_pack_remove(const uint8_t *request, size_t length);
@@ -746,8 +774,12 @@ char *msime_client_apply_translations(uint64_t session, uint64_t generation,
  * target_language absent or "en" reads msime-english.db and the user's glosses. fr/ja/es/ru/de/ko read only offline-glosses/zh-<lang>.db beside resources, or, when that is absent and state_root (absolute; pass the translation query's state_root) is given, the same file in the downloaded <state_root>/resource-packs/offline-glosses pack; they ignore user_data. When neither is installed the result is {generation,translations:[]}, not an error. Any other value is an invalid request. Only Chinese candidates get a non-English gloss. */
 char *msime_client_candidate_gloss_request(const uint8_t *request, size_t request_length,
                                            const uint8_t *resources, size_t resources_length);
-/* Pronounce copied English texts without a session, for the line a host draws beside a gloss.
- * JSON request: {generation,items:[{text,language}]}; language must be "en". text is an English candidate or one line of an English gloss; only its first term is pronounced, without a leading to/a/an/the, and a term with any unknown word gets nothing. The response is {generation,pronunciations:[{text,language,pronunciation}]} with "/…/" IPA, omitting texts that have none. The table is pronunciations/en-phonetic.db beside resources; when it is not installed the result is {generation,pronunciations:[]}, not an error. May run on a worker thread. */
+/* 不持有会话地查询英文候选或英文释义的读音，可在宿主工作线程调用。
+ * JSON 请求：{generation,items:[{text,language}],supplementary_resources?}；language 必须为 "en"。
+ * text 为英文候选或一行英文释义；只读首个词组，忽略开头的 to/a/an/the，任一词未知则不返回该组。
+ * 响应为 {generation,pronunciations:[{text,language,pronunciation}]}，读音为 "/…/" IPA，没有音标的项省略。
+ * 优先读 resources 旁的 pronunciations/en-phonetic.db；缺失时可从 supplementary_resources 下读取同名相对路径。
+ * 补充目录为可选的绝对路径，最多 4096 字节；缺省保持旧行为。两处均未安装时返回空 pronunciations，不报错。 */
 char *msime_client_pronunciation_request(const uint8_t *request, size_t request_length,
                                          const uint8_t *resources, size_t resources_length);
 /* Break copied Chinese candidates into words with their English, without a session, for a line a host draws under the gloss lines (never a committable gloss column).
@@ -772,14 +804,15 @@ char *msime_client_set_english_mode(uint64_t session, bool enabled);
  * 创建和重建会话时按偏好自动开启：全拼看 touch_keyboard_layout 是否为 nine_key（fourteen_key 则开 14 键）；注音还要求 touch_keyboard_schemes 选中（或在没有选中项时启用了）zhuyin_nine_key，这个方案只有 Android 写，桌面宿主为全拼九宫格写下的 nine_key 不会让注音会话离开大千键位。宿主设下的网格只保留到方案或 touch_keyboard_layout 改变为止。
  * View.touch_keyboard_layout 是已应用的宿主呈现偏好；日文九键宿主只用它，不开启引擎的九键模式。 */
 char *msime_client_set_nine_key_mode(uint64_t session, bool enabled);
-/* 换引擎的组码网格：0 关，1 九键（同 msime_client_set_nine_key_mode），2 全拼 14 键（QWERTY 上相邻两个字母一个键，L、M 单独一键），3 九键双拼（表按已应用的 nine_key_shuangpin_profile 取）。只在组字结束后调用；14 键和九键双拼只给全拼，对其他方案开启、在组字中切换都会被拒绝，其他取值报错，会话不变。Value 是 View。
- * View.key_grid 是权威状态："none"、"nine_key"、"fourteen_key" 或 "nine_key_shuangpin"。View.nine_key 只在九键下为真。几种网格共用 View.nine_key_spellings、nine_key_reading、nine_key_single_character、nine_key_strokes，以及 msime_client_choose_nine_key_spelling 和 msime_client_set_nine_key_filter；14 键的分词键照九键送 '\''。14 键下数字不是输入，照常是选词键。九键双拼的数字从 msime_client_character 进来（方案用到的数字，可以有 1 和 0），和九键一样不当选词键，没有英文九键；创建和重建会话时 touch_keyboard_layout 为 nine_key_shuangpin 的全拼会话自动开启它。 */
+/* 切换引擎的组码网格：0 关闭，1 九键（同 msime_client_set_nine_key_mode），2 当前全拼或双拼方案的 14 键（QWERTY 上相邻两个字母一个键，L、M 单独一键），3 九键双拼（表按已应用的 nine_key_shuangpin_profile 取），4 十八键全拼，5 十八键双拼（Q WE RT Y U IO P / A SD FG H JK L / Z XC V BN M）。只在组字结束后调用；14 键只给全拼或双拼，九键双拼和网格 4 只给全拼，网格 5 只给双拼。对其他方案开启、在组字中切换都会被拒绝，其他取值报错，会话不变。返回值中的 View 反映结果。
+ * View.key_grid 是权威状态："none"、"nine_key"、"fourteen_key"、"eighteen_key" 或 "nine_key_shuangpin"；两种十八键均为 "eighteen_key"，按 scheme 区分。View.nine_key 只在九键下为真。Android 和 iOS 双拼会话在创建和重建时按 touch_shuangpin_layout 选择 26 或 14 键，Android 另支持 18 键；其他宿主保留但忽略该偏好。字母双拼网格从已应用的 shuangpin_profile 及自定义表派生，分号与 L 共键。几种网格共用 View.nine_key_spellings、nine_key_reading、nine_key_single_character、nine_key_strokes，以及 msime_client_choose_nine_key_spelling 和 msime_client_set_nine_key_filter；字母网格的分词键照九键送 '\''。字母网格下数字不是输入，照常是选词键。九键双拼的数字从 msime_client_character 进来（方案用到的数字，可以有 1 和 0），和九键一样不当选词键，没有英文九键；创建和重建会话时 touch_keyboard_layout 为 nine_key_shuangpin 的全拼会话自动开启它。 */
 char *msime_client_set_key_grid(uint64_t session, uint8_t grid);
-/* 14 键的一键：letter 是这一组里的任一小写字母，引擎归成这一组，宿主约定送首字母（q e t u o a d g j l z c b m）。返回与 msime_client_character 相同的输入响应。不在 14 键下、方案不是全拼、在本地模式或专用英文里、26 键正在组字、或 letter 不是 a-z 时 handled=false，会话不变。
- * 硬件键盘的字母照常经 msime_client_character 走全拼 26 键：14 键组字进行中它们 handled=false，同九键。 */
+/* 字母网格的一键：letter 是这一组里的任一小写字母，引擎归成这一组，宿主约定送当前网格各组的首字母。返回与 msime_client_character 相同的输入响应。不在 14 或 18 键下、方案不支持当前网格、在本地模式或专用英文里、26 键正在组字、或 letter 不是 a-z（双拼另接受分号）时 handled=false，会话不变。
+ * 硬件键盘的字母照常经 msime_client_character 走当前方案的 26 键：字母网格组字进行中它们 handled=false，同九键。 */
 char *msime_client_grid_key(uint64_t session, uint8_t letter);
-/* 标出隐私会话（隐私模式、不允许学习的输入框）：这个会话的选词位置和上屏效率不记入打字统计。用户在设置里关掉学习不算隐私会话。学习本身仍由偏好里的 learning 决定。Value 是设下的布尔值。 */
+/* 标出隐私会话（隐私模式、不允许学习的输入框）：不记录选词位置和上屏效率，并立即禁止、清除上屏后联想；宿主须重新读取 View，以丢弃旧候选代次。用户单独关掉学习不算隐私会话；学习本身仍由 learning 偏好决定。Value 是设下的布尔值。 */
 char *msime_client_set_private_session(uint64_t session, bool enabled);
+/* Android 的 next_word_prediction 偏好开启时，View.prediction=true 标记上屏后的空闲联想：editing_text、preedit 和 reading 为空；只有显式选择候选才上屏。空格、回车、数字、导航和失焦不提交联想；普通状态省略 prediction 字段，宿主缺省按 false 读取。 */
 /* 中日英循环切换的状态机（`crates/client-core/src/language_cycle.rs`），一个键在 中 → 日 → 英 → 中 之间转圈。顺序来自旧版 Windows 正式版 `engine/contracts/trilingual_input.h` 的 `Next()`：中文 → 日文 → 英文 → 中文；参与循环的是「切换中英文」那一组快捷键，不是 Ctrl+Shift+J。
  * 参数：enabled 是 keybindings.trilingual_cycle；mode 是按下循环键那一刻的模式，0 中文、1 日文、2 英文；scheme 是实际在跑的方案，编号同 View.scheme；last_chinese_scheme 是要回去的中文方案（0/1/2/5/6/9），-1 表示还没记下；has_composition 是宿主会话里还有组字（已选词段或未上屏的拼音）。
  * Value 是 {mode, scheme, commit_raw}：mode 同上编号；scheme 是进入中文时要切到的方案，null 表示只换中英模式；commit_raw 为真时先原样上屏正在组的内容（已选词段保留，剩下没选的拼音串照原样出去），再换模式。value 为 null 表示这一键不循环（开关关着，这一组快捷键仍是二态切换），宿主照旧自己处理这个键。非法编号返回错误。
@@ -804,6 +837,9 @@ char *msime_client_punctuation(uint64_t session, uint8_t ascii);
  * inspected and no document text is retained. */
 char *msime_client_punctuation_with_context(uint64_t session, uint8_t ascii,
                                             uint32_t preceding);
+
+/* 无会话、无 I/O 的跨次空格策略。请求含 config（enabled/excluded_apps）、application、context（scheme/local_mode），可带 text、preceding Unicode 标量、secure、full_width。返回 {enabled,text}；先询问 enabled，再读取必要的前文。最多 65536 字节；结果按通常的 ok/value 信封返回，由 msime_client_string_free 释放。 */
+char *msime_client_cross_commit_spacing(const uint8_t *request, size_t length);
 /* Balance Engine nesting after the host emitted a paired closing mark. Only
  * the ASCII book-title opening '<' is accepted. */
 char *msime_client_balance_paired_punctuation_after_auto_close(uint64_t session,
@@ -966,6 +1002,16 @@ char *msime_client_translation_gloss_save(const uint8_t *request, size_t request
 /* TranslationQuery accepts the optional sentence:true flag for an explicit
  * single-item sentence request (up to 512 Unicode characters); ordinary
  * candidate gloss requests retain their normal limits. */
+#if defined(_WIN32)
+/* Windows 原生手写面板，阻塞调用，只能放在工作线程，不依赖 WebView。
+ * 请求为 <=262144 字节的 JSON；{operation:"status"} 返回 {system_recognizer:bool}。
+ * {operation:"recognize",request:{language?:"zh-CN",strokes:[{points:[{x,y},...]}]},model?:绝对路径}
+ * 使用 420×420 DIP 坐标；系统识别优先，失败或无结果时可用可信模型回退。
+ * 返回标准封装 {candidates:[...]}；错误码 invalid_stroke、no_chinese_recognizer、
+ * handwriting_unavailable、invalid_handwriting_model；本安装包不提供手写时为 handwriting_not_offered。
+ * 不访问输入会话、不联网、不保留请求；调用方用 msime_client_string_free 释放响应。 */
+char *msime_client_windows_handwriting(const uint8_t *request, size_t length);
+#endif
 #if !defined(_WIN32)
 char *msime_client_translation_provider_request(const uint8_t *query,
                                                 size_t query_length,
@@ -990,23 +1036,22 @@ char *msime_client_emoji_provider_request(const uint8_t *query,
                                           size_t query_length,
                                           const uint8_t *socket_path,
                                           size_t socket_length);
-/* Query the verified local msime-others.db Emoji catalog. Resources is an absolute
- * generation directory containing msime-others.db; no provider socket is needed.
- * Optional offset is a nonnegative SQL row offset (default 0); limit is 1..255.
- * Optional group filters a catalog subdivision; list_groups:true returns
- * {groups:[name,...]} in catalog order instead of an item page.
- * list_symbol_groups:true returns {symbol_groups:[{parent,title},...]}.
- * Optional parent narrows symbols to a parent category before paging.
- * list_plugin_symbol_groups:true with plugins (absolute plugins directory) returns
- * {plugin_symbol_groups:[{pack,pack_name,tab:"symbols"|"kaomoji",title,keywords,items:[text,...]},...]}:
- * 已安装符号集插件的全部组，包按名字排序、组按清单顺序；keywords 没写时为空串。宿主把 symbols 组追加在内置符号之后、以 pack_name 为上级分类，
- * kaomoji 组追加在颜文字 All 之后，不与内置目录去重。没传 plugins 时为空列表。
- * Advance offset by limit, not returned item count: each page deduplicates text. */
+#endif
+/* 从已校验的 msime-others.db 读取本地表情目录；resources 为含该文件的绝对目录。
+ * 无需提供商套接字，Windows 和 Unix 宿主使用同一接口。
+ * offset 为非负行偏移（缺省 0），limit 为 1..255。
+ * group 筛选目录子类；list_groups:true 返回 {groups:[name,...]}。
+ * list_symbol_groups:true 返回 {symbol_groups:[{parent,title},...]}。
+ * parent 在分页前筛选符号父类，避免不同父类下的同名子类混淆。
+ * list_plugin_symbol_groups:true 搭配绝对 plugins 目录，返回
+ * {plugin_symbol_groups:[{pack,pack_name,tab,title,keywords,items:[text,...]},...]}。
+ * 插件组独立于内置数据库；包按名称、组按清单顺序，不与内置目录去重。
+ * cursor:true 返回 next_offset 和 complete；必须按 next_offset 推进，
+ * 空页可能只是坏行。缺省模式按 limit 推进，每页按文本去重。 */
 char *msime_client_emoji_catalog_request(const uint8_t *query,
                                          size_t query_length,
                                          const uint8_t *resources,
                                          size_t resources_length);
-#endif
 /* Shared Doubao authentication policy. Input (max 32768 bytes):
  * {auth_mode,app_id,token,resource_id}; an absent or empty mode means api_key.
  * Response value: {headers:[[name,value],...]}. Contains credentials: never
@@ -1212,7 +1257,16 @@ char *msime_client_music_pack(const uint8_t *request, size_t length);
  * "reorder_scripts" {ids:[id]}：ids 按给出的顺序排到最前，其余按原来的相对顺序；有重复或没有授权条目的 id 时整个拒绝。
  * 失败时为 {ok:false, error: 失败码, detail?}：失败码与桌面外壳相同（invalid、storage、plugin_invalid、plugin_unsupported_source、plugin_archive、plugin_reserved、plugin_storage、plugin_script_missing、plugin_script_changed、plugin_script_grant_invalid、plugin_script_limit、plugin_script_memory、plugin_script_grants_format、mention_invalid、mention_format、mention_storage），detail 存在时是被拒的包或条目违反的规则，中文，给设置页显示。会读写文件，导入最多复制一个音乐包大小的数据：宿主有工作线程时在工作线程上调用。 */
 char *msime_client_plugins(const uint8_t *request, size_t length);
-/* 不带编码的常用语（<=4 MiB）：{directory: 偏好目录的绝对路径, action:{operation:"load"|"add"{text}|"remove"{id}|"replace"{id,text}|"move"{id,index}|"install_pack"{resource}|"remove_pack"{id}}}。Value 是整份文档 {phrases:[{id,text,pack}],packs:[{id,name,revision}],skipped?}；错误是固定的代码（common_phrases_io、_corrupt、_invalid、_duplicate、_limit、_too_large、_not_found）。设置进程和键盘进程都会调用，调用时锁住文件。在工作线程上调用。 */
+/* 离线世界时钟；JSON 请求最多 16384 字节，返回值用 msime_client_string_free 释放。 */
+char *msime_client_world_clock(const uint8_t *request, size_t length);
+/* 不带编码的常用语（<=4 MiB）：{directory: 偏好目录的绝对路径, action:{operation, ...}}。
+ * 正文操作：load、add{text,note?}、remove{id}、replace{id,text,note?}、move{id,index}、install_pack{resource}、remove_pack{id}。
+ * 本机分类：add_category{name}、rename_category{id,name}、remove_category{id}、categorize{id,category:UUID|null}、set_expanded_category{category:UUID|"all"|""}。
+ * 备份分类合并：import_categories{categories:[{id,name,texts:[正文]}],expanded_category:备份分类UUID|"all"|"",phrase_ids:[本次新增UUID]}，原子合并，保留已有正文归属。
+ * Value 为 {phrases:[{id,text,pack,note?,category?}],packs:[{id,name,revision}],categories?:[{id,name}],expanded_category?:UUID|"",skipped?}；省略 expanded_category 表示 "all"。
+ * 错误码：common_phrases_io、_corrupt、_invalid、_note_invalid、_duplicate、_limit、_too_large、_not_found、_category_invalid、_category_duplicate、_category_limit。
+ * 设置进程和键盘进程都会调用，调用时锁住文件。在工作线程上调用。 */
+
 char *msime_client_common_phrases(const uint8_t *request, size_t length);
 /* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush"|"synchronize"|"third_party_matches"{entries}, ...}}，格式见 client-services 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued；third_party_matches 只读地核对最多 128 个准备发布到社区的词，value 的 third_party_matches 是其中出现在搜狗细胞词库导入的集合里的下标。词条经个人词库队列传过去，键盘在下一次会话时应用。synchronize 在 budget_millis（1–2000，默认 2000）毫秒软预算内逐批应用个人队列并补充待发项，每批至多 128 项并释放维护租约，返回 {synchronized,pending_count,failed_count,snapshot_error,sent}，pending_count 包括未发送的集合条目；普通操作的 Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
 char *msime_client_dictionary_collections(const uint8_t *request, size_t length);

@@ -241,9 +241,13 @@ export interface SettingsClient {
   feedback?: FeedbackClient;
 }
 
-/** 一次切换热键试写：`field` 是 `keybindings` 的三个切换热键字段名，`chord` 是录下的写法（空串表示解绑），`keybindings` 与 `voice_ctrl_f9` 是页面当前草稿。 */
+/** 一次切换热键试写：`field` 是 `keybindings` 的切换热键字段名，`chord` 是录下的写法（空串表示解绑），`keybindings` 与 `voice_ctrl_f9` 是页面当前草稿。 */
 export interface ToggleHotkeyCheckRequest {
-  field: "toggle_english_candidates" | "toggle_full_width" | "toggle_punctuation";
+  field:
+    | "toggle_english_candidates"
+    | "toggle_full_width"
+    | "toggle_punctuation"
+    | "toggle_voice_input";
   chord: string;
   keybindings: Record<string, unknown>;
   voice_ctrl_f9: boolean;

@@ -28,6 +28,7 @@ fn options(root: &Path) -> EngineOptions {
         single_character_only: false,
         learning: false,
         learn_english_on_enter: true,
+        next_word_prediction: false,
         autocorrect_transposition: true,
         autocorrect_neighbor: true,
         fuzzy_pinyin_rules: 0,
@@ -109,6 +110,92 @@ fn type_text(session: &mut Session, text: &[u8]) {
 const ENGLISH_SCHEMA: &str = "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);
     CREATE TABLE en_zh_glosses(english TEXT PRIMARY KEY,chinese_gloss TEXT);
     CREATE TABLE zh_en_glosses(chinese TEXT PRIMARY KEY,english_gloss TEXT);";
+
+#[test]
+fn quanpin_host_preedit_uses_segmentation_without_changing_editing_or_commit() {
+    for (raw, display) in [
+        (b"nihao".as_slice(), "ni'hao"),
+        (b"ni'hao".as_slice(), "ni'hao"),
+        (b"nihao'".as_slice(), "ni'hao'"),
+        (b"sahnghao".as_slice(), "sahng'hao"),
+        (b"sahnghao'".as_slice(), "sahng'hao'"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut options = helpcode_fixture(root.path(), "", "");
+        options.helpcode = false;
+        let mut session = Session::new(&options).unwrap();
+        type_text(&mut session, raw);
+        let view = session.snapshot().unwrap();
+        assert_eq!(view.preedit, display);
+        assert_eq!(view.editing_text.as_bytes(), raw);
+        assert_eq!(view.caret_position, raw.len());
+        session.set_caret(Some(2));
+        let moved = session.snapshot().unwrap();
+        assert_eq!(moved.preedit, display);
+        assert_eq!(moved.editing_text, view.editing_text);
+        assert_eq!(moved.caret_position, 2);
+        session.command(Command::MoveEnd).unwrap();
+        assert_eq!(
+            session
+                .command(Command::CommitRaw)
+                .unwrap()
+                .commit
+                .as_bytes(),
+            raw
+        );
+    }
+}
+
+#[test]
+fn quanpin_host_preedit_keeps_literal_and_local_modes_unsegmented() {
+    let root = tempfile::tempdir().unwrap();
+    let options = options(root.path());
+    let mut session = Session::new(&options).unwrap();
+    session.set_dedicated_english(true).unwrap();
+    type_text(&mut session, b"nihao");
+    assert_eq!(session.snapshot().unwrap().preedit, "nihao");
+    session.command(Command::Cancel).unwrap();
+    session.set_dedicated_english(false).unwrap();
+    for raw in [b"Ynihao".as_slice(), b"https://example.test".as_slice()] {
+        for byte in raw {
+            assert!(
+                session
+                    .character(*byte, byte.is_ascii_uppercase())
+                    .unwrap()
+                    .handled
+            );
+        }
+        let view = session.snapshot().unwrap();
+        assert_eq!(view.preedit.as_bytes(), raw);
+        session.command(Command::Cancel).unwrap();
+    }
+}
+
+#[test]
+fn quanpin_host_preedit_preserves_case_and_shuangpin_display_preference() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = options(root.path());
+    let mut session = Session::new(&options).unwrap();
+    for byte in b"niHao" {
+        assert!(
+            session
+                .character(*byte, byte.is_ascii_uppercase())
+                .unwrap()
+                .handled
+        );
+    }
+    assert_eq!(session.snapshot().unwrap().preedit, "niHao");
+    assert_eq!(session.snapshot().unwrap().editing_text, "niHao");
+    drop(session);
+    options.scheme = SchemeType::Shuangpin as u8;
+    for (raw_display, expected) in [(true, "nihc"), (false, "ni'hao")] {
+        options.shuangpin_preedit_uses_raw = raw_display;
+        let mut session = Session::new(&options).unwrap();
+        type_text(&mut session, b"nihc");
+        assert_eq!(session.snapshot().unwrap().preedit, expected);
+        assert_eq!(session.snapshot().unwrap().editing_text, "nihc");
+    }
+}
 
 #[test]
 fn normalizes_full_pinyin_using_the_expected_word_length() {
@@ -749,7 +836,9 @@ fn helpcode_settings_reach_the_real_engine() {
             let mut session = Session::new(&value).unwrap();
             type_text(&mut session, b"ni");
             assert!(session.character(b'H', true).unwrap().handled);
-            assert_eq!(session.snapshot().unwrap().preedit, "niH");
+            let snapshot = session.snapshot().unwrap();
+            assert_eq!(snapshot.preedit, if enabled { "ni'H" } else { "niH" });
+            assert_eq!(snapshot.editing_text, "niH");
         }
     }
     value.helpcode_schema = "unknown".into();

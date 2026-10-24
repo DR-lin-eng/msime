@@ -19,6 +19,7 @@ fn import_engine_options() -> msime_engine::host::EngineOptions {
         single_character_only: false,
         learning: false,
         learn_english_on_enter: true,
+        next_word_prediction: false,
         autocorrect_transposition: true,
         autocorrect_neighbor: true,
         fuzzy_pinyin_rules: 0,

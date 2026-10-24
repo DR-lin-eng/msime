@@ -289,6 +289,90 @@ fn ordinary_candidate_positions_skip_missing_journal_work() {
 }
 
 #[test]
+fn personal_context_keeps_only_the_matching_learned_leader() {
+    // 日志必须准确对应当前首选；其它读音、来源、权重或删除记录不能锁住它。
+    for (dictionary, key, value, operation, weight, enabled, expected) in [
+        ("pinyin", "ni", "甲", "upsert", 100, true, "甲"),
+        ("pinyin", "ni", "甲", "upsert", 100, false, "丙"),
+        ("pinyin", "li", "甲", "upsert", 100, true, "丙"),
+        ("pinyin", "ni", "乙", "upsert", 100, true, "丙"),
+        ("pinyin", "ni", "甲", "upsert", 99, true, "丙"),
+        ("pinyin", "ni", "甲", "delete", 100, true, "丙"),
+        ("english", "ni", "甲", "upsert", 100, true, "丙"),
+    ] {
+        let fixture = Fixture::new(CONTEXT_FIXTURE);
+        let journal = crate::user_dictionary::journal::open_journal(&fixture.journal()).unwrap();
+        journal
+            .execute(
+                "INSERT INTO personal_bigram(previous,word,count) VALUES('子','丙',32)",
+                [],
+            )
+            .unwrap();
+        journal.execute(
+            "INSERT INTO user_dictionary_operations(dictionary,key,value,operation,weight) VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![dictionary, key, value, operation, weight],
+        ).unwrap();
+        drop(journal);
+        let mut session = fixture.session_with(|options| {
+            options.scheme = SchemeType::Quanpin;
+            if enabled {
+                options.frequency.mode = FrequencyAdjustmentMode::Promote;
+            }
+        });
+        type_text(&mut session, "hao");
+        select_word(&mut session, "子");
+        type_text(&mut session, "ni");
+        assert_eq!(
+            words(&session)[0],
+            expected,
+            "{dictionary}/{key}/{value}/{operation}/{weight}, enabled={enabled}"
+        );
+        if !enabled {
+            let result = session.pin(index_of(&session, "甲"));
+            assert!(result.handled && result.diagnostic.is_none(), "{result:?}");
+            assert_eq!(words(&session)[0], "甲", "关闭调频仍须尊重手动置顶");
+        }
+        if expected == "甲" {
+            assert_eq!(
+                words(&session),
+                ["甲", "丙", "乙"],
+                "保留首选后其它候选仍按上下文排序"
+            );
+            // 前缀管线也走同一重排入口；只有拼音字典行可以复用拼音权重日志。
+            type_text(&mut session, "hao");
+            session.set_caret(Some(2));
+            assert!(session.input.prefix_active);
+            assert_eq!(session.input.prefix_query_input, "ni");
+            let original = session.input.prefix_candidates.clone();
+            for (source, scheme, leader) in [
+                (CandidateSource::UserDatabase, SchemeType::Quanpin, "甲"),
+                (CandidateSource::Database, SchemeType::Wubi, "丙"),
+                (CandidateSource::Generated, SchemeType::Quanpin, "甲"),
+            ] {
+                session.input.prefix_active = true;
+                session.input.prefix_candidates = original.clone();
+                session.input.prefix_candidates[0].source = source;
+                session.input.prefix_candidates[0].scheme = scheme;
+                session.input.update_mixed_candidates();
+                assert!(session.input.prefix_active);
+                let injected = session
+                    .input
+                    .mixed_candidates
+                    .iter()
+                    .find(|row| row.word == "甲")
+                    .unwrap();
+                assert_eq!(injected.source, source);
+                assert_eq!(injected.scheme, scheme);
+                assert_eq!(
+                    session.input.mixed_candidates[0].word, leader,
+                    "{source:?}/{scheme:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn personal_rerank_refresh_reuses_shown_rows_and_preserves_learning_order() {
     let fixture = Fixture::new(CONTEXT_FIXTURE);
     let mut session = fixture.session();
@@ -341,6 +425,203 @@ fn personal_rerank_refresh_reuses_shown_rows_and_preserves_learning_order() {
 /// One directory standing in for all four runtime roots, as the reference session tests used.
 struct Fixture {
     directory: tempfile::TempDir,
+}
+
+fn prediction_fixture() -> Fixture {
+    Fixture::new(
+        "CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_1_c VALUES('chi','c','吃',1000);
+CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_2_c VALUES('chi''fan','cf','吃饭',100);
+CREATE TABLE tbl_3_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_3_c VALUES('chi''dong''xi','cdx','吃东西',80);
+INSERT INTO tbl_3_c VALUES('chi''fan''cai','cfc','吃饭菜',60);
+CREATE TABLE tbl_1_f(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_1_f VALUES('fan','f','饭',1000);
+CREATE TABLE tbl_2_f(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_2_f VALUES('fan''hou','fh','饭后',50);
+CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_1_n VALUES('ni','n','你',1000);",
+    )
+}
+
+#[test]
+fn next_word_prediction_is_opt_in_and_has_no_composing_text() {
+    let fixture = prediction_fixture();
+    let mut off = fixture.session_with(|options| options.learning = false);
+    type_text(&mut off, "chi");
+    assert_eq!(select_word(&mut off, "吃").commit.as_deref(), Some("吃"));
+    assert!(off.snapshot().candidates.is_empty());
+    let mut on = fixture.session_with(|options| {
+        options.next_word_prediction = true;
+        options.learning = false;
+    });
+    type_text(&mut on, "chi");
+    assert_eq!(select_word(&mut on, "吃").commit.as_deref(), Some("吃"));
+    let snapshot = on.snapshot();
+    assert!(snapshot.prediction);
+    assert!(snapshot.preedit.is_empty() && snapshot.editing_text.is_empty());
+    assert!(snapshot.candidates.iter().any(|row| row.word == "饭"));
+    assert!(snapshot.candidates.iter().any(|row| row.word == "东西"));
+    assert!(snapshot.candidates.iter().all(|row| row.pinyin.is_empty()));
+    assert_eq!(select_word(&mut on, "饭").commit.as_deref(), Some("饭"));
+    assert!(on.snapshot().candidates.iter().any(|row| row.word == "菜"));
+}
+
+#[test]
+fn next_word_prediction_never_commits_on_space_return_delete_or_finish() {
+    let fixture = prediction_fixture();
+    for command in [
+        Command::CommitCandidate,
+        Command::CommitRaw,
+        Command::Backspace,
+        Command::DeleteForward,
+    ] {
+        let mut session = fixture.session_with(|options| options.next_word_prediction = true);
+        type_text(&mut session, "chi");
+        select_word(&mut session, "吃");
+        let result = session.command(command);
+        assert!(!result.handled && result.commit.is_none(), "{command:?}");
+        assert!(!session.snapshot().prediction);
+    }
+    let mut session = fixture.session_with(|options| options.next_word_prediction = true);
+    type_text(&mut session, "chi");
+    select_word(&mut session, "吃");
+    assert!(session.finish(0).commit.is_none());
+    assert!(session.snapshot().candidates.is_empty());
+}
+
+#[test]
+fn next_word_prediction_clears_for_new_input_layout_mode_and_external_context() {
+    let fixture = prediction_fixture();
+    for action in 0..6 {
+        let mut session = fixture.session_with(|options| options.next_word_prediction = true);
+        type_text(&mut session, "chi");
+        select_word(&mut session, "吃");
+        match action {
+            0 => {
+                assert!(!session.character(b'1', false).handled);
+            }
+            1 => {
+                session.character(b'n', false);
+            }
+            2 => session.set_key_grid(Some(KeyGrid::NineKey)),
+            3 => session.set_dedicated_english(true),
+            4 => session.reset_context(),
+            _ => {
+                session.punctuation(b',');
+            }
+        }
+        assert!(!session.snapshot().prediction);
+    }
+}
+
+#[test]
+fn next_word_prediction_works_after_shuangpin_and_nine_key_selection() {
+    let fixture = prediction_fixture();
+    for grid in [false, true] {
+        let mut session = fixture.session_with(|options| {
+            options.next_word_prediction = true;
+            if !grid {
+                options.scheme = SchemeType::Shuangpin;
+            }
+        });
+        if grid {
+            session.set_nine_key_enabled(true);
+        }
+        type_text(&mut session, if grid { "244" } else { "ii" });
+        select_word(&mut session, "吃");
+        assert!(session.snapshot().prediction);
+        assert!(session
+            .snapshot()
+            .candidates
+            .iter()
+            .any(|row| row.word == "饭"));
+    }
+}
+
+#[test]
+fn next_word_prediction_works_after_letter_grid_selection() {
+    let fixture = prediction_fixture();
+    for grid in [KeyGrid::FourteenKey, KeyGrid::EighteenKey] {
+        let mut session = fixture.session_with(|options| options.next_word_prediction = true);
+        session.set_key_grid(Some(grid));
+        for value in b"chi" {
+            assert!(session.grid_key(*value).handled);
+        }
+        assert_eq!(
+            select_word(&mut session, "吃").commit.as_deref(),
+            Some("吃")
+        );
+        assert!(session.snapshot().prediction);
+        assert!(session.snapshot_for_host(false).prediction);
+        assert_eq!(
+            select_word(&mut session, "饭").commit.as_deref(),
+            Some("饭")
+        );
+    }
+}
+
+#[test]
+fn next_word_prediction_clears_on_direct_candidate_key_and_conversion_navigation() {
+    let fixture = prediction_fixture();
+    for conversion in [false, true] {
+        let mut session = fixture.session_with(|options| options.next_word_prediction = true);
+        type_text(&mut session, "chi");
+        select_word(&mut session, "吃");
+        let result = if conversion {
+            session.conversion_left_from(0)
+        } else {
+            session.candidate_key(b'1')
+        };
+        assert!(!result.handled && result.commit.is_none());
+        assert!(!session.snapshot().prediction);
+    }
+}
+
+#[test]
+fn next_word_prediction_uses_learned_transitions_only_when_learning_is_enabled() {
+    let fixture = prediction_fixture();
+    let store =
+        crate::user_dictionary::ngram_store::PersonalNgramStore::for_journal(&fixture.journal());
+    store
+        .record(&[crate::lattice::personal::PersonalTransition {
+            earlier: String::new(),
+            previous: "吃".into(),
+            word: "合成词".into(),
+            times: 3,
+        }])
+        .unwrap();
+    for learning in [false, true] {
+        let mut session = fixture.session_with(|options| {
+            options.next_word_prediction = true;
+            options.learning = learning;
+        });
+        type_text(&mut session, "chi");
+        select_word(&mut session, "吃");
+        assert_eq!(
+            session
+                .snapshot()
+                .candidates
+                .iter()
+                .any(|row| row.word == "合成词"),
+            learning
+        );
+    }
+}
+
+#[test]
+fn next_word_prediction_reset_does_not_learn_across_the_discarded_context() {
+    let fixture = prediction_fixture();
+    let mut session = fixture.session_with(|options| options.next_word_prediction = true);
+    type_text(&mut session, "chi");
+    select_word(&mut session, "吃");
+    session.reset_context();
+    type_text(&mut session, "fan");
+    select_word(&mut session, "饭");
+    let store =
+        crate::user_dictionary::ngram_store::PersonalNgramStore::for_journal(&fixture.journal());
+    assert!(store.next_words("吃", 8).is_empty());
 }
 
 impl Fixture {
@@ -423,7 +704,7 @@ fn words(session: &Session) -> Vec<String> {
         .snapshot()
         .candidates
         .into_iter()
-        .map(|item| item.word)
+        .map(|item| item.word.into_string())
         .collect()
 }
 
@@ -517,6 +798,123 @@ INSERT INTO tbl_1_n VALUES('ni','n','你',8000);",
 fn select_word(session: &mut Session, word: &str) -> crate::types::KeyResult {
     let index = index_of(session, word);
     session.select(index)
+}
+
+#[test]
+fn xiaohe_initial_frequency_learning_survives_a_different_previous_word() {
+    for extra_reading in ["", "INSERT INTO tbl_1_l VALUES('liao','l','乙',80);"] {
+        for mode in [
+            FrequencyAdjustmentMode::Disabled,
+            FrequencyAdjustmentMode::Promote,
+        ] {
+            let fixture = Fixture::new(&format!(
+                "CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_l VALUES('lai','l','甲',100),('le','l','乙',90);\
+{extra_reading}\
+CREATE TABLE tbl_2_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+CREATE TABLE tbl_1_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_w VALUES('wan','w','丙',100);",
+            ));
+            let configure = |options: &mut SessionOptions| {
+                options.scheme = SchemeType::Shuangpin;
+                options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+                options.helpcode = false;
+                options.frequency = FrequencyAdjustmentOptions {
+                    mode,
+                    trigger_count: 1,
+                    linear_step: 1,
+                };
+            };
+            let mut session = fixture.session_with(configure);
+            type_text(&mut session, "l");
+            assert_eq!(words(&session)[0], "甲");
+            for _ in 0..5 {
+                if session.snapshot().editing_text.is_empty() {
+                    type_text(&mut session, "l");
+                }
+                let index = index_of(&session, "乙");
+                assert_eq!(session.snapshot().candidates[index].canonical_pinyin, "le");
+                let result = session.select(index);
+                assert_eq!(result.commit.as_deref(), Some("乙"));
+                assert_eq!(result.diagnostic, None);
+            }
+            type_text(&mut session, "l");
+            assert_eq!(words(&session)[0], "乙", "连续选择时上下文也能提升候选");
+            session.command(Command::Cancel);
+            type_text(&mut session, "wj");
+            assert_eq!(
+                select_word(&mut session, "丙").commit.as_deref(),
+                Some("丙")
+            );
+            let expected = if mode == FrequencyAdjustmentMode::Disabled {
+                "甲"
+            } else {
+                "乙"
+            };
+            type_text(&mut session, "l");
+            assert_eq!(
+                words(&session)[0],
+                expected,
+                "改变上文后的排序，mode={mode:?}"
+            );
+            drop(session);
+            let mut reopened = fixture.session_with(configure);
+            type_text(&mut reopened, "l");
+            assert_eq!(
+                words(&reopened)[0],
+                expected,
+                "新会话的持久排序，mode={mode:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn xiaohe_initial_promote_reaches_first_from_beyond_the_first_five_rows() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_l VALUES('lai','l','甲',100),('lai','l','丁',95),\
+('lai','l','戊',94),('lai','l','己',93),('lai','l','庚',92),\
+('lai','l','辛',91),('le','l','乙',90);\
+CREATE TABLE tbl_2_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+CREATE TABLE tbl_1_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_w VALUES('wan','w','丙',100);",
+    );
+    let configure = |options: &mut SessionOptions| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+        options.helpcode = false;
+        options.frequency = FrequencyAdjustmentOptions {
+            mode: FrequencyAdjustmentMode::Promote,
+            trigger_count: 1,
+            linear_step: 1,
+        };
+    };
+    let mut session = fixture.session_with(configure);
+    type_text(&mut session, "l");
+    assert_eq!(index_of(&session, "乙"), 6);
+    for _ in 0..5 {
+        if session.snapshot().editing_text.is_empty() {
+            type_text(&mut session, "l");
+        }
+        let result = select_word(&mut session, "乙");
+        assert_eq!(result.commit.as_deref(), Some("乙"));
+        assert_eq!(result.diagnostic, None);
+    }
+    type_text(&mut session, "l");
+    assert_eq!(words(&session)[0], "乙");
+    session.command(Command::Cancel);
+    type_text(&mut session, "wj");
+    assert_eq!(
+        select_word(&mut session, "丙").commit.as_deref(),
+        Some("丙")
+    );
+    type_text(&mut session, "l");
+    assert_eq!(words(&session)[0], "乙", "换上文后仍使用已调高的全局词频");
+    drop(session);
+    let mut reopened = fixture.session_with(configure);
+    type_text(&mut reopened, "l");
+    assert_eq!(words(&reopened)[0], "乙", "重建会话后保持已持久化的顺序");
 }
 
 #[test]
@@ -738,7 +1136,7 @@ fn caret_commands_redecode_and_selection_returns_to_the_end() {
     let whole: Vec<String> = snapshot
         .candidates
         .into_iter()
-        .map(|item| item.word)
+        .map(|item| item.word.into_string())
         .collect();
     assert_eq!(whole.first().map(String::as_str), Some("你"));
     session.command(Command::MoveEnd);
@@ -853,7 +1251,8 @@ fn caret_prefix_expands_its_own_initial_list() {
     let (grew, allocations) =
         crate::ime::personal_rerank::allocations::count(|| session.expand_initial_candidates());
     assert!(grew);
-    assert_eq!(allocations, 315, "光标前缀展开申请次数：{allocations}");
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 207, "光标前缀展开申请次数：{allocations}");
     let widened = words(&session);
     assert_eq!(widened.len(), 30);
     assert!(widened.contains(&"丝".to_owned()), "{widened:?}");
@@ -1909,7 +2308,7 @@ fn real_resources_mix_japanese_conversions() {
         let words: Vec<String> = snapshot
             .candidates
             .into_iter()
-            .map(|item| item.word)
+            .map(|item| item.word.into_string())
             .collect();
         session.command(Command::Cancel);
         (words, japanese)
@@ -2022,6 +2421,95 @@ INSERT INTO tbl_1_h VALUES('hao','h','好',100);",
 }
 
 // ---- shuangpin candidate assembly ----
+
+#[test]
+fn shuangpin_trailing_initial_prediction_consumes_keys_and_learns_full_reading() {
+    for kind in [
+        ShuangpinProfileKind::Xiaohe,
+        ShuangpinProfileKind::Ziranma,
+        ShuangpinProfileKind::Shoudao,
+        ShuangpinProfileKind::Microsoft,
+    ] {
+        let profile = crate::shuangpin::profile::profile(kind).unwrap();
+        let mut encoded = crate::shuangpin::utils::encode_pinyin("ni'hao'te'le", profile).unwrap();
+        encoded.pop();
+        for manual in [false, true] {
+            let fixture = Fixture::new(&format!(
+                "{QUANPIN_FIXTURE} CREATE TABLE tbl_4_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+            ));
+            let typed = if manual {
+                encoded.clone()
+            } else {
+                encoded.replace('\'', "")
+            };
+            let mut session = fixture.session_with(|options| {
+                options.scheme = SchemeType::Shuangpin;
+                options.shuangpin_profile = kind;
+                options.helpcode = false;
+                options.autocorrect_types = 0;
+            });
+            type_text(&mut session, &typed);
+            assert_eq!(words(&session)[0], "你好特乐", "{kind:?}, {manual}");
+            let snapshot = session.snapshot();
+            assert_eq!(snapshot.candidates[0].canonical_pinyin, "ni'hao'te'le");
+            assert_eq!(snapshot.candidates[0].pinyin, typed.replace('\'', ""));
+            let selected = session.select(0);
+            assert_eq!(selected.diagnostic, None);
+            assert_eq!(selected.commit.as_deref(), Some("你好特乐"));
+            assert!(session.snapshot().editing_text.is_empty());
+            let journal = Connection::open(fixture.journal()).unwrap();
+            let learned: i64 = journal
+                .query_row(
+                    "SELECT count(*) FROM user_dictionary_operations \
+                     WHERE key='ni''hao''te''le' AND value='你好特乐' AND operation<>'delete'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(learned > 0, "{kind:?}, {manual}");
+        }
+    }
+}
+
+#[test]
+fn shuangpin_incomplete_tail_selection_preserves_the_unfinished_syllable() {
+    for kind in [
+        ShuangpinProfileKind::Xiaohe,
+        ShuangpinProfileKind::Ziranma,
+        ShuangpinProfileKind::Shoudao,
+        ShuangpinProfileKind::Microsoft,
+    ] {
+        let profile = crate::shuangpin::profile::profile(kind).unwrap();
+        let encoded = crate::shuangpin::utils::encode_pinyin("ni'hao'te'le", profile).unwrap();
+        for manual in [false, true] {
+            let fixture = Fixture::new(&format!(
+                "{QUANPIN_FIXTURE} CREATE TABLE tbl_4_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+            ));
+            let prefix = if manual {
+                encoded.clone()
+            } else {
+                encoded.replace('\'', "")
+            };
+            let typed = format!("{prefix}{}q", if manual { "'" } else { "" });
+            let mut session = fixture.session_with(|options| {
+                options.scheme = SchemeType::Shuangpin;
+                options.shuangpin_profile = kind;
+                options.helpcode = false;
+                options.autocorrect_types = 0;
+            });
+            type_text(&mut session, &typed);
+            assert_eq!(words(&session)[0], "你好特乐", "{kind:?}, {manual}");
+            assert_eq!(
+                session.snapshot().candidates[0].source,
+                CandidateSource::Generated
+            );
+            let selected = session.select(0);
+            assert_eq!(selected.diagnostic, None);
+            assert_eq!(selected.commit.as_deref(), Some("你好特乐"));
+            assert_eq!(session.snapshot().editing_text, "q", "{kind:?}, {manual}");
+        }
+    }
+}
 
 #[test]
 fn complete_shuangpin_and_ambiguous_direct_helpcodes_both_commit_the_whole_input() {
@@ -2207,6 +2695,133 @@ fn end_trigger_modes(
         trigger_backtick: backtick,
         trigger_uppercase: uppercase,
         ..crate::types::ShuangpinHelpcodeModes::default()
+    }
+}
+
+#[test]
+fn shuangpin_manual_tab_filters_only_after_tab() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+        options.shuangpin_helpcode_modes.manual_tab = true;
+        options.helpcode_table = Some(Arc::new(crate::helpcode::HelpcodeKeymap::from_codes(
+            [
+                ("你".to_owned(), "na".to_owned()),
+                ("拟".to_owned(), "xq".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        )));
+    });
+    assert!(!session.character(b'\t', false).handled);
+    type_text(&mut session, "nihc");
+    assert_eq!(words(&session)[0], "你好");
+    assert!(session.character(b'\t', false).handled);
+    assert_eq!(session.snapshot().editing_text, "nihc|");
+    type_text(&mut session, "x");
+    assert_eq!(words(&session)[0], "拟好");
+    assert_eq!(session.command(Command::Backspace).commit, None);
+    assert!(session.input.engine.request().end_helpcodes.is_empty());
+    session.command(Command::Backspace);
+    assert_eq!(session.snapshot().editing_text, "nihc");
+    type_text(&mut session, "x");
+    assert!(session.input.engine.request().end_helpcodes.is_empty());
+    assert!(!session.input.has_active_helpcode());
+    session.command(Command::Cancel);
+    session
+        .input
+        .engine
+        .set_shuangpin_helpcode_modes(crate::types::ShuangpinHelpcodeModes::default());
+    type_text(&mut session, "nihcx");
+    assert!(session.input.has_active_helpcode());
+}
+
+#[test]
+fn shuangpin_manual_tab_preserves_microsoft_pairs() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    for (typed, segmentation) in [
+        ("veyige", "zhe'yi'ge"),
+        ("uurufa", "shu'ru'fa"),
+        ("vijxuuru", "zhi'jie'shu'ru"),
+    ] {
+        let mut session = fixture.session_with(|options| {
+            options.scheme = SchemeType::Shuangpin;
+            options.shuangpin_profile = ShuangpinProfileKind::Microsoft;
+            options.shuangpin_helpcode_modes.manual_tab = true;
+        });
+        type_text(&mut session, typed);
+        assert_eq!(
+            session.snapshot().normalized_segmentation,
+            segmentation,
+            "{typed}"
+        );
+        assert!(!session.input.has_active_helpcode(), "{typed}");
+        assert!(session.character(b'\t', false).handled, "{typed}");
+    }
+}
+
+#[test]
+fn shuangpin_manual_tab_owns_only_complete_normal_composition() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    for (scheme, enabled, manual, typed, accepts) in [
+        (SchemeType::Shuangpin, true, true, "", false),
+        (SchemeType::Shuangpin, true, true, "n", false),
+        (SchemeType::Shuangpin, true, true, "nihc", true),
+        (SchemeType::Shuangpin, false, true, "nihc", false),
+        (SchemeType::Shuangpin, true, false, "nihc", false),
+        (SchemeType::Quanpin, true, true, "nihao", false),
+    ] {
+        let mut session = fixture.session_with(|options| {
+            options.scheme = scheme;
+            options.helpcode = enabled;
+            options.shuangpin_helpcode_modes.manual_tab = manual;
+        });
+        type_text(&mut session, typed);
+        assert_eq!(session.snapshot().spelling_symbols.contains('\t'), accepts);
+        assert_eq!(session.character(b'\t', false).handled, accepts);
+    }
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.helpcode_trigger_key = Some(b'=');
+        options.shuangpin_helpcode_modes.manual_tab = true;
+    });
+    type_text(&mut session, "nihc");
+    assert!(!session.snapshot().spelling_symbols.contains('='));
+    assert!(!session.character(b'=', false).handled);
+    session.command(Command::MoveLeft);
+    assert!(!session.snapshot().spelling_symbols.contains('\t'));
+    session.command(Command::MoveEnd);
+    assert!(session.character(b'\t', false).handled);
+    assert!(!session.snapshot().spelling_symbols.contains('\t'));
+    type_text(&mut session, "na");
+    let result = session.finish(0);
+    let commit = result.commit.unwrap();
+    assert!(!commit.contains(['\t', '|']));
+    session.set_dedicated_english(true);
+    type_text(&mut session, "nihc");
+    assert!(!session.snapshot().spelling_symbols.contains('\t'));
+    session.character(b'\t', false);
+    assert_eq!(session.snapshot().editing_text, "nihc");
+}
+
+#[test]
+fn shuangpin_manual_tab_raw_commits_omit_internal_codes() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    for finish in [false, true] {
+        let mut session = fixture.session_with(|options| {
+            options.scheme = SchemeType::Shuangpin;
+            options.shuangpin_helpcode_modes.manual_tab = true;
+        });
+        type_text(&mut session, "nihc");
+        assert!(session.character(b'\t', false).handled);
+        type_text(&mut session, "na");
+        let result = if finish {
+            session.finish(usize::MAX)
+        } else {
+            session.command(Command::CommitRaw)
+        };
+        assert_eq!(result.commit.as_deref(), Some("nihc"));
     }
 }
 
@@ -2651,6 +3266,18 @@ INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);\
 CREATE TABLE tbl_2_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 CREATE TABLE tbl_3_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
 
+/// 生产词库里字面整句可能比纠错词更高频；纠错候选仍应出现在候选列表中，而不是只在它胜过字面整句时出现。
+const SHUANGPIN_NONLEADING_TYPO_FIXTURE: &str =
+    "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_m VALUES('mei','m','没',1000000);\
+CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_g VALUES('gen','g','跟',1000000),('guan','g','关',1000);\
+CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_x VALUES('xi','x','系',1000000);\
+CREATE TABLE tbl_2_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',1);\
+CREATE TABLE tbl_3_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
+
 const QUANPIN_EXTRA_LETTER_FIXTURE: &str =
     "CREATE TABLE tbl_1_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_s VALUES('shang','s','上',1000);\
@@ -2743,6 +3370,26 @@ fn shuangpin_offers_the_typo_sentence_under_the_autocorrect_switch() {
     );
 }
 
+#[test]
+fn shuangpin_offers_a_nonleading_typo_sentence_from_a_full_dictionary() {
+    let fixture = Fixture::new(SHUANGPIN_NONLEADING_TYPO_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+        options.autocorrect_types = crate::types::autocorrect_type::TRANSPOSITION
+            | crate::types::autocorrect_type::NEIGHBOR;
+    });
+    type_text(&mut session, "mwgfxi");
+    let snapshot = session.snapshot();
+    let corrected = snapshot
+        .candidates
+        .iter()
+        .position(|item| item.word == "没关系")
+        .unwrap_or_else(|| panic!("{:?}", words(&session)));
+    assert!(corrected > 0, "{:?}", words(&session));
+    assert_eq!(snapshot.candidates[corrected].corrected_from, "mwgfxi");
+}
+
 /// 双拼方案在宿主重建会话时切换。重建后的会话按新方案的编码纠错：自然码下 `mzgrci` 纠回没关系，小鹤的误触串 `mwgfxi` 不再纠；切回小鹤后反过来。
 #[test]
 fn a_rebuilt_session_corrects_with_its_new_profile() {
@@ -2797,7 +3444,7 @@ fn a_mixed_list_holds_both_producers_wubi_first() {
     let schemes: Vec<(String, SchemeType)> = snapshot
         .candidates
         .iter()
-        .map(|item| (item.word.clone(), item.scheme))
+        .map(|item| (item.word.to_string(), item.scheme))
         .collect();
     assert_eq!(schemes.first(), Some(&("工".to_owned(), SchemeType::Wubi)));
     assert!(schemes.contains(&("哥哥".to_owned(), SchemeType::Quanpin)));
@@ -2846,7 +3493,8 @@ fn ignored_scheme_key_does_not_clone_preedit_for_change_detection() {
     });
 
     assert!(!result.handled);
-    assert_eq!(allocations, 22);
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 19);
 }
 
 #[test]
@@ -2860,7 +3508,15 @@ fn typing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection() {
     });
 
     assert!(result.handled);
-    assert_eq!(allocations, 125);
+    let matched_rows = session
+        .snapshot()
+        .candidates
+        .iter()
+        .filter(|row| row.pinyin == "ni'h")
+        .count();
+    assert_eq!(matched_rows, 5);
+    // SharedString 克隆只增加引用计数，候选行重建的分配预算低于旧实现。
+    assert_eq!(allocations, 98);
 }
 
 #[test]
@@ -2873,7 +3529,8 @@ fn backspacing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection()
         crate::ime::personal_rerank::allocations::count(|| session.command(Command::Backspace));
 
     assert!(result.handled);
-    assert_eq!(allocations, 14);
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 11);
 }
 
 #[test]
@@ -2886,7 +3543,8 @@ fn url_entry_readiness_at_the_end_does_not_build_the_preedit_twice() {
         crate::ime::personal_rerank::allocations::count(|| session.character(b'.', false));
 
     assert!(result.handled);
-    assert_eq!(allocations, 4);
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 6);
 }
 
 #[test]
@@ -2933,7 +3591,8 @@ fn setting_the_caret_does_not_build_editing_text_to_clamp_it() {
     });
 
     assert_eq!(session.snapshot().caret_position, 2);
-    assert_eq!(allocations, 21);
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 18);
 }
 
 #[test]
@@ -2946,8 +3605,9 @@ fn moving_the_caret_does_not_build_the_preedit_twice() {
         crate::ime::personal_rerank::allocations::count(|| session.command(Command::MoveLeft));
 
     assert!(result.handled);
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert_eq!(
-        allocations, 21,
+        allocations, 18,
         "光标移动复用编辑文本长度后的分配次数：{allocations}"
     );
 }
@@ -2963,7 +3623,8 @@ fn typing_at_a_caret_reuses_the_editing_text_length() {
         crate::ime::personal_rerank::allocations::count(|| session.character(b'x', false));
 
     assert!(result.handled);
-    assert_eq!(allocations, 191, "光标处输入的分配次数：{allocations}");
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 164, "光标处输入的分配次数：{allocations}");
 }
 
 #[test]
@@ -3039,7 +3700,8 @@ fn selecting_a_shuangpin_candidate_does_not_clone_the_full_request() {
         crate::ime::personal_rerank::allocations::count(|| session.select(index));
 
     assert_eq!(result.commit.as_deref(), Some("你好"));
-    assert_eq!(allocations, 17, "双拼候选选择分配次数：{allocations}");
+    // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
+    assert_eq!(allocations, 14, "双拼候选选择分配次数：{allocations}");
 }
 
 #[test]
@@ -3324,7 +3986,7 @@ fn selecting_a_quanpin_row_in_mixed_wubi_advances_like_quanpin() {
         snapshot
             .candidates
             .iter()
-            .map(|item| item.word.clone())
+            .map(|item| item.word.to_string())
             .zip(snapshot.candidate_answers_key)
             .collect()
     };
@@ -3526,7 +4188,7 @@ fn a_quanpin_sentence_beside_a_wubi_row_is_learned_and_the_wubi_row_is_not() {
                 && item.word.chars().count() == 2
         })
         .unwrap_or_else(|| panic!("no generated sentence in {:?}", words(&session)));
-    let sentence = snapshot.candidates[index].word.clone();
+    let sentence = snapshot.candidates[index].word.to_string();
     assert_eq!(
         session.select(index).commit.as_deref(),
         Some(sentence.as_str())
@@ -3557,7 +4219,7 @@ fn generated_sentence_learning_borrows_candidate_fields() {
                 && item.word.chars().count() == 2
         })
         .unwrap();
-    let sentence = session.snapshot().candidates[index].word.clone();
+    let sentence = session.snapshot().candidates[index].word.to_string();
     let (result, allocations) =
         crate::ime::personal_rerank::allocations::count(|| session.select(index));
     assert_eq!(result.commit.as_deref(), Some(sentence.as_str()));
@@ -3646,7 +4308,7 @@ INSERT INTO tbl_1_g VALUES{};",
     let listed: Vec<(String, SchemeType)> = snapshot
         .candidates
         .iter()
-        .map(|item| (item.word.clone(), item.scheme))
+        .map(|item| (item.word.to_string(), item.scheme))
         .collect();
     assert_eq!(listed[0], ("王".to_owned(), SchemeType::Wubi));
     // Slot 2 of the pinyin group, which starts after the one wubi row.
@@ -3769,7 +4431,7 @@ fn schemes(session: &Session) -> Vec<(String, SchemeType)> {
         .snapshot()
         .candidates
         .into_iter()
-        .map(|item| (item.word, item.scheme))
+        .map(|item| (item.word.into_string(), item.scheme))
         .collect()
 }
 
@@ -4494,7 +5156,7 @@ INSERT INTO tbl_1_n VALUES('ni','n','你',100),('ni','n','拟',90),('ni','n','�
     let query = session.online_query().expect("a quanpin query");
     let at = |session: &Session, slot: usize| {
         let item = session.snapshot().candidates[slot].clone();
-        (item.word, item.source)
+        (item.word.into_string(), item.source)
     };
 
     assert!(session.apply_online_candidate(&query, "泥", CandidateSource::CloudSuggestion));
@@ -4608,7 +5270,7 @@ fn repeated_dedicated_english_preserves_chinese_grid_composition() {
         assert_eq!(session.snapshot(), before, "{grid:?}");
         assert_eq!(
             session.select(0).commit,
-            Some(before.candidates[0].word.clone())
+            Some(before.candidates[0].word.to_string())
         );
     }
 }
@@ -4629,7 +5291,7 @@ fn repeated_dedicated_english_preserves_english_t9_composition() {
     assert_eq!(session.snapshot(), before);
     assert_eq!(
         session.select(0).commit,
-        Some(before.candidates[0].word.clone())
+        Some(before.candidates[0].word.to_string())
     );
 
     type_text(&mut session, "435");
@@ -4640,6 +5302,48 @@ fn repeated_dedicated_english_preserves_english_t9_composition() {
     session.set_dedicated_english(true);
     assert!(!session.grid_composing());
     assert!(session.snapshot().preedit.is_empty());
+}
+
+#[test]
+fn fourteen_key_shuangpin_separates_touch_groups_from_hardware_letters() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+    });
+    let table = crate::nine_key_shuangpin::resolve_fourteen_key_shuangpin(
+        ShuangpinProfileKind::Xiaohe,
+        None,
+    )
+    .unwrap();
+    session.set_key_grid(Some(KeyGrid::FourteenKeyShuangpin(table)));
+    type_text(&mut session, "nihc");
+    assert!(!session.grid_composing());
+    assert!(!session.grid_key(b'n').handled);
+    assert_eq!(
+        select_word(&mut session, "你好").commit.as_deref(),
+        Some("你好")
+    );
+    for key in *b"nihc" {
+        assert!(session.grid_key(key).handled);
+    }
+    assert!(session.grid_composing());
+    assert_eq!(session.snapshot().editing_text, "bugc");
+    assert_eq!(session.snapshot().scheme, SchemeType::Shuangpin);
+    assert!(!session.character(b'q', false).handled);
+    assert!(words(&session).contains(&"你好".to_owned()));
+    assert_eq!(
+        select_word(&mut session, "你好").commit.as_deref(),
+        Some("你好")
+    );
+    session.set_dedicated_english(true);
+    assert!(!session.grid_key(b'n').handled);
+    session.set_dedicated_english(false);
+    assert!(session.grid_key(b'n').handled);
+    session.command(Command::Cancel);
+    let mut quanpin = fixture.session();
+    quanpin.set_key_grid(Some(KeyGrid::FourteenKeyShuangpin(table)));
+    assert!(!quanpin.grid_key(b'n').handled);
 }
 
 /// 14 键：组码只从 `grid_key` 进九宫格，组里任一字母都归成首字母；硬件键盘的字母照常走全拼，九宫格组字中不处理。
@@ -5162,9 +5866,9 @@ fn shuangpin_snapshot_does_not_build_unused_raw_preedit() {
         crate::ime::personal_rerank::allocations::count(|| session.snapshot());
 
     assert_eq!(snapshot.preedit, "ni'hao");
-    // 邮箱入口 `@` 及追加的字面符号各占一次分配。
+    // 邮箱入口 `@` 及追加的字面符号各占一次分配。快照克隆候选行时 `SharedString` 字段只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert_eq!(
-        allocations, 38,
+        allocations, 32,
         "shuangpin snapshot allocations: {allocations}"
     );
 }
@@ -5175,35 +5879,9 @@ fn japanese_engine_refresh_reuses_candidate_strings() {
     let mut session = fixture.session_with(|options| options.scheme = SchemeType::JapaneseRomaji);
     type_text(&mut session, "ka");
     let before = session.input.engine.candidates().to_vec();
-    let pointers = session
-        .input
-        .engine
-        .candidates()
-        .iter()
-        .map(|row| {
-            (
-                row.word.as_ptr(),
-                row.pinyin.as_ptr(),
-                row.canonical_pinyin.as_ptr(),
-            )
-        })
-        .collect::<Vec<_>>();
     session.input.engine.handle_key(SchemeKey::Requery);
+    // 会话的混排候选经 `clone_candidate_rows` 与引擎候选共用 `SharedString` 存储。重查时日文 provider 对这些共享字段 `clear()` 只是放手，随后的 `push_str` 新建字符串和 `Arc`，原缓冲区不会原地复用，指针必然变化（混排那份也不再另行复制）；这里只能确认重查后内容不变。
     assert_eq!(session.input.engine.candidates(), before);
-    assert_eq!(
-        session
-            .input
-            .engine
-            .candidates()
-            .iter()
-            .map(|row| (
-                row.word.as_ptr(),
-                row.pinyin.as_ptr(),
-                row.canonical_pinyin.as_ptr()
-            ))
-            .collect::<Vec<_>>(),
-        pointers
-    );
 }
 
 #[test]
@@ -5323,7 +6001,7 @@ fn a_date_row_commits_and_leaves_date_time_mode() {
     type_text(&mut session, "rq");
     let snapshot = session.snapshot();
     assert_eq!(snapshot.preedit, "Trq");
-    assert_eq!(snapshot.candidates.len(), 17);
+    assert_eq!(snapshot.candidates.len(), 20);
     assert_eq!(snapshot.candidates[0].word, "2026年8月9日");
     assert_eq!(snapshot.candidates[16].word, "丙午年六月二十七日");
     assert!(snapshot
@@ -5583,7 +6261,7 @@ fn date_time_menu_opens_the_full_format_list() {
     assert!(result.handled);
     assert!(result.commit.is_none());
     let page = words(&session);
-    assert_eq!(page.len(), 17, "{page:?}");
+    assert_eq!(page.len(), 20, "{page:?}");
     assert_eq!(page[0], "2026年8月9日");
     assert_eq!(page[16], "丙午年六月二十七日");
     assert!(!session.snapshot().preedit.is_empty());
@@ -5595,7 +6273,7 @@ fn date_time_menu_opens_the_full_format_list() {
     // 非选词键先换回原来的候选再照常处理：退格删掉最后一个字母，候选跟着变。
     type_text(&mut session, "riqi");
     session.select(2);
-    assert_eq!(words(&session).len(), 17);
+    assert_eq!(words(&session).len(), 20);
     assert!(session.command(Command::Backspace).handled);
     let after = words(&session);
     assert!(
@@ -6086,7 +6764,7 @@ fn chaizi_rows(session: &Session) -> Vec<(String, CandidateSource)> {
         .snapshot()
         .candidates
         .into_iter()
-        .map(|item| (item.word, item.source))
+        .map(|item| (item.word.into_string(), item.source))
         .collect()
 }
 
@@ -6574,7 +7252,9 @@ fn dedicated_english_refresh_reuses_candidate_row_storage() {
     assert!(session.input.dedicated_english_candidates.len() >= 2);
     let pointer = session.input.dedicated_english_candidates.as_ptr();
     let capacity = session.input.dedicated_english_candidates.capacity();
-    let words = session.input.dedicated_english_candidates.clone();
+    let words = crate::ime::personal_rerank::allocations::unshared_rows(
+        &session.input.dedicated_english_candidates,
+    );
 
     let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
         session.input.update_dedicated_english_candidates();
@@ -6996,24 +7676,10 @@ fn korean_hanja_refresh_reuses_candidate_strings() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
     let mut session = korean_session(&fixture);
     open_hanja(&mut session, "gks");
-    let pointers = session
-        .input
-        .engine
-        .candidates()
-        .iter()
-        .map(|row| (row.word.as_ptr(), row.pinyin.as_ptr()))
-        .collect::<Vec<_>>();
+    let before = session.input.engine.candidates().to_vec();
     session.input.engine.handle_key(SchemeKey::Requery);
-    assert_eq!(
-        session
-            .input
-            .engine
-            .candidates()
-            .iter()
-            .map(|row| (row.word.as_ptr(), row.pinyin.as_ptr()))
-            .collect::<Vec<_>>(),
-        pointers
-    );
+    // 会话的混排候选经 `clone_candidate_rows` 与引擎候选共用 `SharedString` 存储。重查时韩文汉字对这些共享字段 `clear()` 只是放手，随后的 `push_str` 新建字符串和 `Arc`，原缓冲区不会原地复用，指针必然变化（混排那份也不再另行复制）；这里只能确认重查后内容不变。
+    assert_eq!(session.input.engine.candidates(), before);
 }
 
 #[test]
@@ -7590,10 +8256,10 @@ fn slash_opens_the_command_list_and_letters_filter_it() {
     assert_eq!(result.commit.as_deref(), Some("张三 2026-08-09"));
     assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
 
-    // A complete built-in trigger lists every reading of the date/time mode.
+    // 内置日期触发词输入完整后，列出全部格式。
     session.character(b'/', false);
     type_text(&mut session, "rq");
-    assert_eq!(words(&session).len(), 17);
+    assert_eq!(words(&session).len(), 20);
 
     // Nothing matches: the literal text is the only row, and Enter commits it too.
     session.command(Command::Cancel);
@@ -7832,7 +8498,7 @@ fn symbol_mode_rows(fixture: &Fixture, typed: &str) -> Vec<String> {
         .snapshot()
         .candidates
         .iter()
-        .map(|item| item.word.clone())
+        .map(|item| item.word.to_string())
         .collect()
 }
 
@@ -8259,9 +8925,9 @@ fn cached_plugin_rows_do_not_allocate_a_temporary_row_vector() {
             let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
                 assert!(session.input.update_local_candidates().is_none());
             });
+            // 缓存行的 `SharedString` 字段克隆只加引用计数，只剩输出向量一次申请。
             assert_eq!(
-                allocations,
-                count * 2 + 1,
+                allocations, 1,
                 "{count} 行缓存插件候选重建产生了 {allocations} 次分配"
             );
             assert_eq!(session.input.local_candidates, cached);
@@ -9191,34 +9857,10 @@ fn stroke_candidate_refresh_reuses_row_storage() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
     let mut session = stroke_session(&fixture);
     type_text(&mut session, "hs");
-    let pointers = session
-        .input
-        .engine
-        .candidates()
-        .iter()
-        .map(|row| {
-            (
-                row.word.as_ptr(),
-                row.pinyin.as_ptr(),
-                row.canonical_pinyin.as_ptr(),
-            )
-        })
-        .collect::<Vec<_>>();
+    let before = session.input.engine.candidates().to_vec();
     session.input.engine.handle_key(SchemeKey::Requery);
-    assert_eq!(
-        session
-            .input
-            .engine
-            .candidates()
-            .iter()
-            .map(|row| (
-                row.word.as_ptr(),
-                row.pinyin.as_ptr(),
-                row.canonical_pinyin.as_ptr()
-            ))
-            .collect::<Vec<_>>(),
-        pointers
-    );
+    // 会话的混排候选经 `clone_candidate_rows` 与引擎候选共用 `SharedString` 存储。重查时笔画对 `pinyin` 的 `clear()` 只是放手、随后 `push_str` 新建存储，对 `canonical_pinyin`、`word` 的 `clone_from` 经 `DerefMut` 先复制共享的那份，原缓冲区都不会原地复用，指针必然变化（混排那份也不再另行复制）；这里只能确认重查后内容不变。
+    assert_eq!(session.input.engine.candidates(), before);
 }
 
 #[test]
@@ -10046,7 +10688,7 @@ fn a_wubi_only_session_still_mixes_quanpin_rows() {
             .snapshot()
             .candidates
             .into_iter()
-            .map(|item| (item.word, item.scheme))
+            .map(|item| (item.word.into_string(), item.scheme))
             .collect()
     };
     let narrowed_rows = schemes(&narrowed);
@@ -10877,7 +11519,7 @@ INSERT INTO tbl_1_h VALUES('hao','h','好',100),('hao','h','号',50);",
             .candidates
             .into_iter()
             .filter(|item| item.source == CandidateSource::Generated && item.sentence_association)
-            .map(|item| item.word)
+            .map(|item| item.word.into_string())
             .collect()
     };
     let cases = |session: &mut Session, expected: &[&str]| {
@@ -11497,7 +12139,7 @@ fn the_conversion_starts_from_the_highlighted_row() {
     let mut session = conversion_session(&fixture);
     // 另一条整句排在第二位（宿主高亮着它，比如 runtime 把它重排到了前面）。
     let mut second = session.input.mixed_candidates[0].clone();
-    second.word = "我去北京".to_owned();
+    second.word = "我去北京".into();
     second.sentence_words = vec!["我".into(), "去".into(), "北京".into()];
     session.input.mixed_candidates.insert(1, second);
     assert!(session.conversion_left_from(1).handled);
@@ -11535,7 +12177,7 @@ fn sources(session: &Session) -> Vec<(String, CandidateSource)> {
         .snapshot()
         .candidates
         .into_iter()
-        .map(|item| (item.word, item.source))
+        .map(|item| (item.word.into_string(), item.source))
         .collect()
 }
 
@@ -12243,4 +12885,154 @@ fn enumeration_comma_respects_command_prefix_and_composition() {
         options.punctuation_marks.enumeration_comma_slash = true;
     });
     assert_eq!(disabled.punctuation(b'/').commit.as_deref(), Some("、"));
+}
+
+/// 相对日期复用普通候选与九键出口，整段提交不留下原始拼写，也不学习生成文字。
+#[test]
+fn relative_date_keywords_reach_quanpin_and_nine_key_and_commit() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_2_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_j VALUES('jin''tian','jt','今天',500),('jin''nian','jn','今年',500);\
+        CREATE TABLE tbl_2_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_z VALUES('zuo''tian','zt','昨天',500);\
+        CREATE TABLE tbl_2_q(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_q VALUES('qian''tian','qt','前天',500),('qu''nian','qn','去年',500);\
+        CREATE TABLE tbl_2_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_m VALUES('ming''tian','mt','明天',500),('ming''nian','mn','明年',500);\
+        CREATE TABLE tbl_2_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_h VALUES('hou''tian','ht','后天',500);\
+        CREATE TABLE tbl_2_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_l VALUES('lai''nian','ln','来年',500);\
+        CREATE TABLE tbl_2_r(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+        INSERT INTO tbl_2_r VALUES('ri''qi','rq','日期',500);",
+    );
+    let cases = [
+        ("riqi", "日期", "今天(8月9日 星期日)"),
+        ("jintian", "今天", "今天(8月9日 星期日)"),
+        ("zuotian", "昨天", "昨天(8月8日 星期六)"),
+        ("qiantian", "前天", "前天(8月7日 星期五)"),
+        ("mingtian", "明天", "明天(8月10日 星期一)"),
+        ("houtian", "后天", "后天(8月11日 星期二)"),
+        ("mingnian", "明年", "明年(2027年)"),
+        ("qunian", "去年", "去年(2025年)"),
+        ("jinnian", "今年", "今年(2026年)"),
+        ("lainian", "来年", "来年(2027年)"),
+    ];
+    for nine_key in [false, true] {
+        let mut session = fixture.session_with(|options| options.learning = true);
+        TestClock::install(&mut session);
+        session.set_nine_key_enabled(nine_key);
+        for (keyword, anchor, expected) in cases {
+            let typed: String = if nine_key {
+                keyword
+                    .bytes()
+                    .map(|letter| match letter {
+                        b'a'..=b'c' => '2',
+                        b'd'..=b'f' => '3',
+                        b'g'..=b'i' => '4',
+                        b'j'..=b'l' => '5',
+                        b'm'..=b'o' => '6',
+                        b'p'..=b's' => '7',
+                        b't'..=b'v' => '8',
+                        _ => '9',
+                    })
+                    .collect()
+            } else {
+                keyword.to_owned()
+            };
+            type_text(&mut session, &typed);
+            let rows = words(&session);
+            assert!(
+                rows.contains(&anchor.to_owned()),
+                "{nine_key} {keyword}: {rows:?}"
+            );
+            assert!(
+                rows.contains(&expected.to_owned()),
+                "{nine_key} {keyword}: {rows:?}"
+            );
+            if !nine_key && keyword == "jintian" {
+                assert!(select_word(&mut session, "📅日期").commit.is_none());
+                assert!(words(&session).contains(&expected.to_owned()));
+                assert_eq!(words(&session).len(), 20);
+            }
+            assert_eq!(
+                select_word(&mut session, expected).commit.as_deref(),
+                Some(expected)
+            );
+            assert!(session.snapshot().editing_text.is_empty());
+            assert!(session.snapshot().candidates.is_empty());
+        }
+        assert_eq!(
+            count(
+                &fixture.journal(),
+                "SELECT count(*) FROM user_dictionary_operations"
+            ),
+            0
+        );
+    }
+    let mut disabled = fixture.session_with(|options| options.local_modes.date_time_inline = false);
+    TestClock::install(&mut disabled);
+    type_text(&mut disabled, "jintian");
+    assert!(!words(&disabled)
+        .iter()
+        .any(|word| word.contains("2026") || word.contains('(')));
+}
+
+/// 十八键的两个字母都参与全拼解码；实体字母仍走确定拼写，组码本身不作为文字上屏。
+#[test]
+fn eighteen_key_uses_ambiguous_groups_and_preserves_exact_hardware_input() {
+    let sql = format!(
+        "{QUANPIN_FIXTURE}
+        CREATE TABLE tbl_1_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+        INSERT INTO tbl_1_b VALUES('bo','b','波',150);
+        INSERT INTO tbl_2_b VALUES('bo''hao','bh','波好',150);"
+    );
+    let fixture = Fixture::new(&sql);
+    let mut session = fixture.session();
+    session.set_key_grid(Some(KeyGrid::EighteenKey));
+    type_text(&mut session, "nihao");
+    assert_eq!(session.snapshot().editing_text, "nihao");
+    assert!(!words(&session).contains(&"波好".into()));
+    assert!(!session.grid_key(b'n').handled);
+    session.command(Command::Cancel);
+
+    for letter in b"nihao" {
+        assert!(session.grid_key(*letter).handled);
+    }
+    assert_eq!(session.snapshot().editing_text, "bihai");
+    let ambiguous = words(&session);
+    assert!(ambiguous.contains(&"你好".into()), "{ambiguous:?}");
+    assert!(ambiguous.contains(&"波好".into()), "{ambiguous:?}");
+    assert!(!session.grid_key(b'1').handled);
+    assert!(!session.grid_key(b'A').handled);
+    assert_eq!(
+        select_word(&mut session, "波好").commit.as_deref(),
+        Some("波好")
+    );
+
+    for letter in b"ni" {
+        assert!(session.grid_key(*letter).handled);
+    }
+    let spelling = session
+        .snapshot()
+        .nine_key_spellings
+        .iter()
+        .position(|item| item == "ni")
+        .unwrap();
+    assert!(session.choose_nine_key_spelling(spelling).handled);
+    for letter in b"hao" {
+        assert!(session.grid_key(*letter).handled);
+    }
+    assert!(!words(&session).contains(&"波好".into()));
+    assert!(session.command(Command::Backspace).handled);
+    assert_eq!(session.snapshot().editing_text, "biha");
+    assert!(session.grid_key(b'o').handled);
+    let expected = session.snapshot().candidates[0].word.clone();
+    assert_eq!(
+        session.command(Command::CommitRaw).commit.as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(session.snapshot().editing_text.is_empty());
+    session.set_dedicated_english(true);
+    assert!(!session.grid_key(b'n').handled);
 }

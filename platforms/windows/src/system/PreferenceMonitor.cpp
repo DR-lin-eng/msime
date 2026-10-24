@@ -22,6 +22,13 @@ void PreferenceMonitor::request_stop() {
   }
   wake_.notify_all();
 }
+void PreferenceMonitor::wake() {
+  {
+    std::lock_guard lock(mutex_);
+    wake_pending_ = true;
+  }
+  wake_.notify_all();
+}
 void PreferenceMonitor::stop() {
   if (input_.on_worker_thread())
     throw std::logic_error("Cannot join preference monitor from input queue");
@@ -40,6 +47,7 @@ void PreferenceMonitor::run() {
       std::lock_guard lock(mutex_);
       if (stopping_)
         break;
+      wake_pending_ = false;
     }
     if (!input_.stats().accepting) {
       status_ = PreferenceMonitorStatus::InputUnavailable;
@@ -94,8 +102,9 @@ void PreferenceMonitor::run() {
       status_ = PreferenceMonitorStatus::ReadFailed;
     }
     std::unique_lock lock(mutex_);
-    if (wake_.wait_for(lock, interval_, [&] { return stopping_; }))
-      break;
+    // 等待队列回执时只做短轮询；否则一次唤醒后的配置广播仍会再晚一个空闲周期。
+    const auto delay = receipt ? std::chrono::milliseconds(10) : interval_;
+    wake_.wait_for(lock, delay, [&] { return stopping_ || wake_pending_; });
   }
   status_ = PreferenceMonitorStatus::Stopped;
 }

@@ -27,8 +27,8 @@ class SettingsUpdaterTests(unittest.TestCase):
         framework = self.native / "Contents/Frameworks/Sparkle.framework"
         (framework / "Versions/B").mkdir(parents=True)
         (framework / "Versions/B/Sparkle").write_bytes(b"synthetic-framework")
-        (framework / "Versions/Current").symlink_to("B")
-        (framework / "Sparkle").symlink_to("Versions/Current/Sparkle")
+        (framework / "Versions/Current").symlink_to("B", target_is_directory=True)
+        (framework / "Sparkle").symlink_to(Path("Versions") / "Current" / "Sparkle")
         self.write_plists()
 
     def write_plists(self):

@@ -32,6 +32,108 @@
 #include <chrono>
 #include "../../../../shared/contracts/ipc_negotiation.h"
 
+bool CMetasequoiaIME::_HasGroupedPanelComposition() const
+{
+    auto *host = _pCompositionProcessorEngine ? _pCompositionProcessorEngine->GetHostEngineAdapter() : nullptr;
+    std::string raw, error;
+    msime::tsf::EngineResult current;
+    return host && host->valid() && host->view(&raw, &error) &&
+           msime::tsf::EngineSessionAdapter::parse_result(raw, &current, &error) &&
+           current.view.key_grid == "eighteen_key" &&
+           (!current.view.editing_text.empty() || !current.view.phrase_prefix.empty());
+}
+
+bool CMetasequoiaIME::_CaptureGroupedPanelOwner(msime::panel_key::Owner &owner, ITfContext **context)
+{
+    *context = nullptr;
+    if (!_pThreadMgr || !_pCompositionProcessorEngine || _serverUnavailableFallbackActive ||
+        !SupportsGroupedPanelKeys() || _IsKeyboardDisabled() ||
+        _localSessionResetPending.load(std::memory_order_acquire) ||
+        !_pCompositionProcessorEngine->GetIMEMode(_pThreadMgr, _tfClientId) ||
+        Global::InputModeScheme.load(std::memory_order_relaxed) != msime::windows::scheme::Quanpin)
+        return false;
+    const auto generation = _deferredKeyFocusGeneration;
+    const auto workerToken = _CaptureFocusSessionToken();
+    const HWND foreground = GetForegroundWindow();
+    GUITHREADINFO info = {};
+    info.cbSize = sizeof(info);
+    if (!GetGUIThreadInfo(GetCurrentThreadId(), &info) || !info.hwndFocus) return false;
+    const HWND focus = info.hwndFocus;
+    ITfDocumentMgr *document = nullptr;
+    if (FAILED(_pThreadMgr->GetFocus(&document)) || !document) return false;
+    const HRESULT topResult = document->GetTop(context);
+    document->Release();
+    if (FAILED(topResult) || !*context) return false;
+    const bool matches = _IsDeferredKeyOwnerCurrent(*context, generation, foreground) &&
+                         _IsFocusSessionCurrent(workerToken, *context);
+    info = {};
+    info.cbSize = sizeof(info);
+    if (!matches || generation != _deferredKeyFocusGeneration || workerToken != _CaptureFocusSessionToken() ||
+        foreground != GetForegroundWindow() || !GetGUIThreadInfo(GetCurrentThreadId(), &info) ||
+        info.hwndFocus != focus)
+    {
+        (*context)->Release();
+        *context = nullptr;
+        return false;
+    }
+    owner = {generation, workerToken, reinterpret_cast<std::uintptr_t>(*context),
+             reinterpret_cast<std::uintptr_t>(foreground), reinterpret_cast<std::uintptr_t>(focus)};
+    return owner.valid();
+}
+
+bool CMetasequoiaIME::_IsGroupedPanelReplayCurrent(uint64_t token)
+{
+    if (!_hasDeferredKeyInFlight || token == 0 || _deferredKeyReplayToken != token ||
+        !_deferredKeyInFlight.keyState.groupedPanelKey) return false;
+    const auto expected = _deferredKeyInFlight.groupedOwner;
+    msime::panel_key::Owner current;
+    ITfContext *context = nullptr;
+    if (!_CaptureGroupedPanelOwner(current, &context)) return false;
+    context->Release();
+    return _hasDeferredKeyInFlight && token == _deferredKeyReplayToken && current == expected &&
+           expected.generation == _deferredKeyFocusGeneration && expected.worker_token == _CaptureFocusSessionToken();
+}
+
+bool CMetasequoiaIME::_HandleGroupedPanelKey(const msime::panel_key::Request &request)
+{
+    if (!msime::panel_key::valid(request)) return false;
+    msime::panel_key::Owner owner;
+    ITfContext *context = nullptr;
+    if (!_CaptureGroupedPanelOwner(owner, &context)) return false;
+    struct ReleaseContext {
+        ITfContext *value;
+        ~ReleaseContext() { value->Release(); }
+    } release{context};
+    auto *host = _pCompositionProcessorEngine->GetHostEngineAdapter();
+    std::string raw, error;
+    msime::tsf::EngineResult current;
+    if (!host || !host->valid() || !host->view(&raw, &error) ||
+        !msime::tsf::EngineSessionAdapter::parse_result(raw, &current, &error) ||
+        current.view.scheme != msime::windows::scheme::Quanpin || current.view.dedicated_english ||
+        current.view.local_mode != "none" ||
+        ((!current.view.editing_text.empty() || !current.view.phrase_prefix.empty()) &&
+         current.view.key_grid != "eighteen_key")) return false;
+    // 不能只检查当前空组合：尚未执行的硬件字母也会开始一段确定全拼。
+    if ((_hasDeferredKeyInFlight && !_deferredKeyInFlight.keyState.groupedPanelKey) ||
+        _deferredKeyClassificationPending || _HasPendingApplicationKeyReplay()) return false;
+    for (const auto &key : _deferredKeyDowns)
+        if (!key.keyState.groupedPanelKey) return false;
+    const auto now = GetTickCount64();
+    if (request.operation == msime::panel_key::Operation::Query)
+        return _groupedPanelLeases.query(request.nonce, owner, now);
+    return _groupedPanelLeases.press(request.nonce, owner, now, [&] {
+        if (!_DeferredKeyQueueHasCapacity() ||
+            !_IsDeferredKeyOwnerCurrent(context, owner.generation, reinterpret_cast<HWND>(owner.foreground)))
+            return false;
+        _KEYSTROKE_STATE state = {};
+        state.Category = CATEGORY_COMPOSING;
+        state.Function = FUNCTION_INPUT;
+        state.groupedPanelKey = true;
+        return _QueueDeferredKeyDown(context, request.letter - 'a' + 'A', 0,
+                                     static_cast<WCHAR>(request.letter), 0, state, &owner);
+    });
+}
+
 // 0xF003, 0xF004 are the keys that the touch keyboard sends for next/previous
 #define THIRDPARTY_NEXTPAGE static_cast<WORD>(0xF003)
 #define THIRDPARTY_PREVPAGE static_cast<WORD>(0xF004)
@@ -39,6 +141,13 @@
 namespace
 {
 constexpr UINT kMaxDeferredKeyReplayAttempts = 8;
+
+// 诊断日志里拼「1」或「0」时，`L"x=" + (cond ? L"1" : L"0")` 两边都是指针，会变成指针加。
+// 统一走这个函数，返回 std::wstring，和左右两侧的 wstring 串接。
+inline std::wstring BoolFlag(bool value)
+{
+    return value ? L"1" : L"0";
+}
 
 // A recovery checkpoint may need one INPUT for every raw pinyin character and
 // one MOVE_LEFT for every character to the right of the caret.  Keep enough
@@ -584,6 +693,8 @@ LRESULT CALLBACK CMetasequoiaIME::_BareShiftKeyboardHookProc(int code, WPARAM wP
         else if (!isKeyUp)
         {
             owner->_bareShiftArmed = false;
+            // 普通按下即使没有交给 TSF，也必须同时取消两路轻点判定。
+            owner->_shiftHotkeyArmed = false;
         }
     }
 
@@ -662,6 +773,12 @@ void CMetasequoiaIME::_TrackModifierHotkeyArming(WPARAM wParam, LPARAM lParam, b
     const bool isCtrl = IsControlVk(code);
     const bool isOtherModifier = IsAltVk(code) || IsWinVk(code);
 
+    // TSF 直接处理的键可能不到线程钩子，两条路径必须共同取消单按判定。
+    if (!isShift)
+    {
+        _bareShiftArmed = false;
+    }
+
     if (!isShift && !isCtrl && !isOtherModifier)
     {
         _shiftHotkeyArmed = false;
@@ -676,7 +793,9 @@ void CMetasequoiaIME::_TrackModifierHotkeyArming(WPARAM wParam, LPARAM lParam, b
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (isShift && IsOnlyModifierPhysicallyDown(VK_SHIFT))
+    // 钩子已经取消的这一轮不能被重复通知重新布防；先按着别的普通键也属于组合键。
+    if (isShift && IsOnlyModifierPhysicallyDown(VK_SHIFT) && !IsOtherKeyboardKeyDown() &&
+        (_bareShiftHook == nullptr || _bareShiftDownMask == 0 || _bareShiftArmed))
     {
         _shiftHotkeyArmed = true;
         _ctrlHotkeyArmed = false;
@@ -762,8 +881,13 @@ bool CMetasequoiaIME::_MatchModifierReleaseHotkey(WPARAM wParam, _Out_ GUID *hot
     const UINT code = LOWORD(wParam);
     const auto now = std::chrono::steady_clock::now();
 
-    // The arming latch already proves that this modifier was pressed alone;
-    // unlike PureShiftKeyUp, it does not depend on a host's stale GetKeyState.
+    // 实体仍按住时不能靠宿主的松开回调切换，保留布防等待真实松开。
+    if (IsShiftVk(code) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0)
+    {
+        return false;
+    }
+
+    // 布防记录证明这次单按过；不依赖宿主可能陈旧的 GetKeyState。
     if (IsShiftVk(code) && _shiftHotkeyArmed)
     {
         const bool fire = now < _modifierHotkeyExpire && FanyUtils::ReadConfiguredSwitchLanguageHotkeys().shift;
@@ -1386,7 +1510,7 @@ bool CMetasequoiaIME::_HasDeferredKeyBarrier() const
 {
     if (_localSessionResetPending.load(std::memory_order_acquire) || _focusResetPending || _activationRequired ||
         _deferredKeyProjectionValid || !_deferredKeyDowns.empty() || _hasDeferredKeyInFlight ||
-        _HasPendingApplicationKeyReplay())
+        _HasPendingApplicationKeyReplay() || _wubiCommitOwner.active())
     {
         return true;
     }
@@ -1548,6 +1672,9 @@ bool CMetasequoiaIME::_RefreshDeferredRecoveryPrefix(_In_ ITfContext *pContext)
         return false;
     }
 
+    // 多义来源不能从 rawInput 还原，断线取消它，不把组码当确定字母恢复。
+    if (_HasGroupedPanelComposition()) return true;
+
     // 与 _RequestLocalSessionReset 一致：这些方案的现有组字会在 reset 时上屏，不能再入队重放。
     if (msime::windows::scheme::CommitsOnBlur(Global::InputModeScheme.load(std::memory_order_relaxed)))
     {
@@ -1560,6 +1687,14 @@ bool CMetasequoiaIME::_RefreshDeferredRecoveryPrefix(_In_ ITfContext *pContext)
     const size_t rawLength = raw.size();
     const size_t caret = min(rawLength, composition.caret);
     const size_t moveLeftCount = rawLength - caret;
+    // 这里把当前整串拼音摊回按键，重连之后它们会连同失败的那个键一起重放：用户在屏幕上看到的
+    // 就是「整段输入被重来一次」(#9518)。只记长度与光标，不记内容。
+    if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+    {
+        QueueTsfDiagnosticLog(L"[msime][deferred-recovery] stage=prefix raw_len=" + std::to_wstring(rawLength) +
+                              L" caret=" + std::to_wstring(caret) + L" move_left=" +
+                              std::to_wstring(moveLeftCount));
+    }
     if (rawLength + moveLeftCount > MAX_DEFERRED_KEY_DOWN_COUNT)
     {
         return false;
@@ -1607,6 +1742,11 @@ void CMetasequoiaIME::_ArmDeferredRecoveryForTransport(_In_opt_ ITfContext *pCon
         return;
     }
 
+    if (_HasGroupedPanelComposition())
+    {
+        _ClearDeferredKeyDowns();
+        return;
+    }
     ITfContext *recoveryContext = pContext ? pContext : _pContext;
     const bool activeDeferredState = !_deferredKeyDowns.empty() || _deferredKeyProjectionValid;
     if (!activeDeferredState)
@@ -2377,19 +2517,22 @@ STDAPI CMetasequoiaIME::OnTestKeyDown(ITfContext *pContext, WPARAM wParam, LPARA
 }
 
 bool CMetasequoiaIME::_QueueDeferredKeyDown(_In_ ITfContext *pContext, WPARAM wParam, LPARAM lParam,
-                                            WCHAR translatedWch, UINT modifiersDown, const _KEYSTROKE_STATE &keyState)
+                                            WCHAR translatedWch, UINT modifiersDown, const _KEYSTROKE_STATE &keyState,
+                                            const msime::panel_key::Owner *groupedOwner)
 {
     // Repeats are owned but do not enqueue another global configuration toggle.
     if ((keyState.Function == FUNCTION_TOGGLE_CHARACTER_SET || keyState.Function == FUNCTION_TOGGLE_JAPANESE) &&
         (lParam & 0x40000000) != 0)
         return true;
-    if (pContext == nullptr || !_DeferredKeyQueueHasCapacity())
+    if (pContext == nullptr || !_DeferredKeyQueueHasCapacity() ||
+        (keyState.groupedPanelKey && (!groupedOwner || !groupedOwner->valid())))
     {
         return false;
     }
 
     pContext->AddRef();
     DeferredKeyDown key;
+    if (groupedOwner) key.groupedOwner = *groupedOwner;
     key.kind = keyState.Category == CATEGORY_NONE && keyState.Function == FUNCTION_NONE
                    ? DeferredKeyDown::Kind::ApplicationText
                    : DeferredKeyDown::Kind::KeyDown;
@@ -2443,6 +2586,8 @@ bool CMetasequoiaIME::_QueueDeferredPreservedKey(_In_ ITfContext *pContext, REFG
 
 void CMetasequoiaIME::_ClearDeferredKeyDowns()
 {
+    _groupedPanelLeases.clear();
+    _wubiCommitOwner.clear();
     _ClearApplicationKeyReplay();
     _deferredKeyClassificationPending = false;
     _backspaceHoldArmed = false;
@@ -2458,6 +2603,18 @@ void CMetasequoiaIME::_ClearDeferredKeyDowns()
                         hadInFlight ? _deferredKeyInFlight.keyState.Function : 0, -1, _IsComposing(),
                         _pCompositionProcessorEngine ? _pCompositionProcessorEngine->GetVirtualKeyLength() : 0, S_FALSE,
                         inFlightToken);
+        // 整队作废的时候把当时的传输状态一起记下来：重置是否还挂着、前缀有多长、代次走到哪。
+        if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+        {
+            QueueTsfDiagnosticLog(L"[msime][deferred-clear] stage=queue-cleared queued=" +
+                                  std::to_wstring(queuedCount) + L" in_flight=" + BoolFlag(hadInFlight) +
+                                  L" applied_prefix=" + std::to_wstring(_deferredAppliedPrefix.size()) +
+                                  L" reset_pending=" +
+                                  BoolFlag(_localSessionResetPending.load(std::memory_order_acquire)) +
+                                  L" composing=" + BoolFlag(_IsComposing()) + L" generation=" +
+                                  std::to_wstring(_deferredKeyFocusGeneration) + L" token=" +
+                                  std::to_wstring(inFlightToken));
+        }
     }
     // A posted drain belongs to the current message window/generation.  It
     // may never run if Deactivate destroys that window, so never carry this
@@ -2518,6 +2675,8 @@ void CMetasequoiaIME::_CompleteDeferredKeyReplay(uint64_t replayToken)
     {
         return;
     }
+
+    if (_wubiCommitOwner.current(replayToken)) return;
 
     DebugTsfIssue47(L"deferred-replay-complete", FANY_IME_NO_REQUEST_ID, static_cast<UINT>(_deferredKeyInFlight.wParam),
                     _deferredKeyInFlight.translatedWch, _deferredKeyInFlight.keyState.Category,
@@ -2626,6 +2785,15 @@ void CMetasequoiaIME::_RetryDeferredKeyReplay(uint64_t replayToken)
     {
         return;
     }
+    if (_wubiCommitOwner.current(replayToken))
+    {
+        if (_wubiCommitOwner.applied())
+        {
+            _FinishWubiWorkerEdit(replayToken, false);
+            return;
+        }
+        _wubiCommitOwner.clear();
+    }
     if (_deferredKeyInFlight.focusGeneration != _deferredKeyFocusGeneration)
     {
         DebugTsfIssue47(L"deferred-replay-focus-changed", FANY_IME_NO_REQUEST_ID,
@@ -2638,6 +2806,13 @@ void CMetasequoiaIME::_RetryDeferredKeyReplay(uint64_t replayToken)
         return;
     }
 
+    if (_deferredKeyInFlight.keyState.groupedPanelKey || _HasGroupedPanelComposition())
+    {
+        // 已发送的组码可能已到 Server，清空本批并用新焦点代次取消双方，不能重放首字母。
+        _ClearDeferredKeyDowns();
+        MarkNamedpipeSessionDirtyForOwner(this);
+        return;
+    }
     if (_deferredKeyInFlight.replayAttempts >= kMaxDeferredKeyReplayAttempts)
     {
         DebugTsfIssue47(L"deferred-replay-abandoned", FANY_IME_NO_REQUEST_ID,
@@ -2685,7 +2860,7 @@ void CMetasequoiaIME::_RetryDeferredKeyReplay(uint64_t replayToken)
 
 void CMetasequoiaIME::_ScheduleDeferredKeyDownDrain(bool allowSyncFallback)
 {
-    if (!_deferredKeyDowns.empty() && !_hasDeferredKeyInFlight && !_HasPendingApplicationKeyReplay() &&
+    if (!_deferredKeyDowns.empty() && !_hasDeferredKeyInFlight && !_wubiCommitOwner.active() && !_HasPendingApplicationKeyReplay() &&
         !_deferredKeyDrainPosted && _msgWndHandle &&
         IsWindow(_msgWndHandle))
     {
@@ -2749,6 +2924,20 @@ bool CMetasequoiaIME::_ResolveDeferredKeyClassification(uint64_t replayToken)
     if (!ownerCurrent || !enabled || _localSessionResetPending.load(std::memory_order_acquire) ||
         GetForegroundWindow() != captured.foregroundWindow)
     {
+        // 这四个条件都会整队作废，但含义完全不同：前三项是焦点或键盘状态真的变了，最后一项是
+        // 传输在重连。重置标志挂在这里时作废队列，会让组字永远结束不了，反过来又让重置清不掉，
+        // 正是 #9519 的闭环。日志把命中的是哪一项分开记。
+        if (Global::TsfDiagnosticLogEnabled.load(std::memory_order_relaxed))
+        {
+            QueueTsfDiagnosticLog(L"[msime][deferred-clear] stage=classification-aborted owner_current=" +
+                                  BoolFlag(ownerCurrent) + L" enabled=" + BoolFlag(enabled) +
+                                  L" reset_pending=" +
+                                  BoolFlag(_localSessionResetPending.load(std::memory_order_acquire)) +
+                                  L" foreground_changed=" +
+                                  BoolFlag(GetForegroundWindow() != captured.foregroundWindow) +
+                                  L" composing=" + BoolFlag(_IsComposing()) + L" queued=" +
+                                  std::to_wstring(_deferredKeyDowns.size()));
+        }
         _ClearDeferredKeyDowns();
         return false;
     }
@@ -2782,7 +2971,7 @@ bool CMetasequoiaIME::_ResolveDeferredKeyClassification(uint64_t replayToken)
 void CMetasequoiaIME::_DrainOneDeferredKeyDown()
 {
     _deferredKeyDrainPosted = false;
-    if (_hasDeferredKeyInFlight || _HasPendingApplicationKeyReplay() || _deferredKeyDowns.empty() ||
+    if (_hasDeferredKeyInFlight || _wubiCommitOwner.active() || _HasPendingApplicationKeyReplay() || _deferredKeyDowns.empty() ||
         !Global::g_connected)
     {
         return;
@@ -2842,6 +3031,12 @@ void CMetasequoiaIME::_DrainOneDeferredKeyDown()
         return;
     }
 
+    if (key.keyState.groupedPanelKey && !_IsGroupedPanelReplayCurrent(replayToken))
+    {
+        _ClearDeferredKeyDowns();
+        MarkNamedpipeSessionDirtyForOwner(this);
+        return;
+    }
     if (!_ResolveDeferredKeyClassification(replayToken)) return;
     BOOL eaten = FALSE;
     if (key.kind == DeferredKeyDown::Kind::ApplicationKey)
@@ -2888,6 +3083,13 @@ void CMetasequoiaIME::_DrainOneDeferredKeyDown()
         return;
     }
 
+    if ((key.keyState.groupedPanelKey && !SupportsGroupedPanelKeys()) ||
+        (_serverUnavailableFallbackActive && (key.keyState.groupedPanelKey || _HasGroupedPanelComposition())))
+    {
+        _ClearDeferredKeyDowns();
+        MarkNamedpipeSessionDirtyForOwner(this);
+        return;
+    }
     if (_serverUnavailableFallbackActive)
     {
         _KEYSTROKE_STATE offlineState = key.keyState;
@@ -3220,7 +3422,20 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
         const bool japaneseCandidateEnter =
             code == VK_RETURN && KeystrokeState.Category != CATEGORY_NONE && _IsComposing() &&
             _JapaneseEnterCommitsCandidate(capturedModifiers);
-        if (japaneseCandidateEnter)
+        const bool groupedCandidateEnter = code == VK_RETURN && capturedModifiers == 0 &&
+                                           _HasGroupedPanelComposition();
+        if (groupedCandidateEnter)
+        {
+            std::string raw, error;
+            msime::tsf::EngineResult current;
+            auto *host = _pCompositionProcessorEngine->GetHostEngineAdapter();
+            if (!host || !host->view(&raw, &error) ||
+                !msime::tsf::EngineSessionAdapter::parse_result(raw, &current, &error))
+                return KeyDownDispatchResult::Retry;
+            // 空候选的回车不产生主管道事件，也不把组码当原文结束组字。
+            if (current.view.candidates.empty()) return KeyDownDispatchResult::Complete;
+        }
+        if (japaneseCandidateEnter || groupedCandidateEnter)
         {
             KeystrokeState.Category = CATEGORY_CANDIDATE;
             KeystrokeState.Function = FUNCTION_FINALIZE_CANDIDATELIST;
@@ -3239,22 +3454,29 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
         if (hasLocalCommitObservation)
         {
             localCommitObservation = GlobalIme::word_for_creating_word;
-            const auto composition = _pCompositionProcessorEngine->GetKeyCompositionState();
-            localCommitObservation.append(composition.rawInput);
+            const CStringRange &raw = _pCompositionProcessorEngine->GetKeystrokeBuffer();
+            if (raw.Get() != nullptr)
+            {
+                localCommitObservation.append(raw.Get(), raw.GetLength());
+            }
+            localCommitObservation = msime::tsf::ReadLocalCommitObservation(
+                _pCompositionProcessorEngine->GetHostEngineAdapter(), std::move(localCommitObservation),
+                FanyUtils::string_to_wstring);
             if (localCommitObservation.size() >= 128)
             {
-                // 不发送截断后的观察值，避免 Server 确认与 TSF 实际上屏不同的文字。
+                // 不截断成另一段文字；超界时保留 Server 既有的拒绝路径。
                 localCommitObservation.clear();
             }
         }
         // CandidateActive：通配转换的候选列表（CANDIDATE_ORIGINAL）里每个键都带；普通组字的增量候选只给释义列、Ctrl+Enter 和释义页认的键带上，其他键靠没有这一位走别的路（裸回车上屏原文、以词定字），见 Global::CandidateKeyReportsActiveList。
         const bool candidateActive =
-            _candidateMode == CANDIDATE_ORIGINAL || japaneseCandidateEnter ||
+            _candidateMode == CANDIDATE_ORIGINAL || japaneseCandidateEnter || groupedCandidateEnter ||
             (_candidateMode != CANDIDATE_NONE && _pCandidateListUIPresenter != nullptr &&
              Global::CandidateKeyReportsActiveList(code, Global::ModifiersDown));
         const UINT ipcModifiers =
             Global::ModifiersDown | (candidateActive ? msime::windows::PipeMetadata::CandidateActive : 0u) |
-            (IsAutoRepeat(lParam) ? msime::windows::PipeMetadata::AutoRepeat : 0u);
+            (IsAutoRepeat(lParam) ? msime::windows::PipeMetadata::AutoRepeat : 0u) |
+            (KeystrokeState.groupedPanelKey ? msime::windows::PipeMetadata::GroupedPanelKey : 0u);
         WriteDataToNamedPipe(Global::Keycode, wch, ipcModifiers, nullptr, 0,
                              localCommitObservation,
                              hasLocalCommitObservation && !localCommitObservation.empty()
@@ -3264,6 +3486,12 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
         // 每个键之前比较一次字段属性，变了就排在这个键前面报给 Server。
         _NoteFieldTraitsForServer();
         PerfTimer sendKeyEventTimer;
+        // 必须在 IPC 和可能重入的 COM 之前注册；worker 可能比本地编辑会话先到。
+        if (deferredReplayToken != 0 && KeystrokeState.Function == FUNCTION_INPUT &&
+            Global::InputModeScheme.load(std::memory_order_relaxed) == msime::windows::scheme::Wubi &&
+            _pCompositionProcessorEngine->GetHostEngineAdapter() &&
+            _pCompositionProcessorEngine->GetHostEngineAdapter()->valid())
+            _wubiCommitOwner.begin(deferredReplayToken, GetTickCount64());
         const KeyEventSendResult sendResult = SendKeyEventToUIProcess(&requestId);
         if (KeystrokeState.Function == FUNCTION_TOGGLE_CHARACTER_SET || KeystrokeState.Function == FUNCTION_TOGGLE_JAPANESE)
         {

@@ -164,6 +164,10 @@ Java/Kotlin 宿主按 `java/app/msime/android/<feature>/` 分为 `account`、`ca
 
 剪贴板历史的拒绝理由按 Apple `ClipboardHistoryStore.Failure` 分开命名：空白文本、单条超过 10,000 字或 40,000 字节、以及 200 条全部固定各有自己的提示，最后一条明确要求先取消固定或删除一条；Android 没有 iOS 的粘贴授权提示，空白文案相应去掉该从句。全部固定是独立的 `ClipboardHistory.FullException`，与读不出或写不回历史文件的普通 `IllegalStateException` 分开，避免把用户指向错误的动作。面板状态行同时说明点按插入以及在「管理」中固定或删除。理由分类与文案由无 Android 依赖的 `ClipboardHistoryPolicy` 提供并在 JVM 回归中验证。
 
+「更多工具 → 拍照识字」提供原生拍照面板，配套 OCR 模块需经主进程手动导入并校验完整摘要，输入法进程只读加载。**当前正式模块尚未提供**：`resources/ocr-module-android.lock.json` 为 `artifact: null`，导入按钮不可用，不能选择任意 APK 启用。基础包不包含 OCR 依赖，不自动下载模块；Google Play 渠道拒绝外部可执行模块。相机权限、图片生命周期与 ML Kit 诊断边界见 [PRIVACY.md](../../PRIVACY.md#android-拍照识字配套模块尚未提供)。
+
+设备专项 `bash platforms/android/tests/device/ocr-product-smoke.sh <serial>` 只接受专用 x86_64 API 28/35 AVD，构建当次模块并生成临时固定摘要锁，然后构建原生产品进行离线导入、只读加载、拍照及编辑器验收，退出时恢复正式锁。相机输入先由 `java -Djava.awt.headless=true platforms/android/tests/device/fixtures/OcrCameraImage.java <绝对图片路径>` 生成，再用 `MSIME_ANDROID_CAMERA_IMAGE=<绝对图片路径> bash platforms/android/tests/device/start-emulator.sh <28或35>` 启动新 AVD；已有活跃 AVD 会拒绝该参数，避免静默忽略夹具。专项不发布模块，成功也不代表许可、分发或真机验收完成。
+
 语音结果按 Android 平台能力适配：键盘可见且已有麦克风权限时，系统语音识别服务（SpeechRecognizer）、本地模型和豆包流式都直接在键区里聆听（`ImeVoiceEntry`），键区换成带麦克风圆盘、脉冲环和音量光圈的聆听面板，识别完直接上屏；输入位置在聆听期间变了才存进语音结果。系统识别服务的失败按错误码给出具体原因并带上错误码，识别服务自身故障（网络、服务端、服务起不来等）和空结果时再提示可在设置里改用本地模型或豆包；权限被拒（`ERROR_INSUFFICIENT_PERMISSIONS`）时，即使已经收到聆听回调，也转交识别窗口再试一次；`ERROR_CLIENT`、`ERROR_SERVER_DISCONNECTED` 只在聆听前重试，用户主动结束后不重试。识别窗口等到 `onResume` 才启动录音，避免前台交接尚未完成就再次被拒。错误码 9 只说明录音权限链被拒绝，不能单凭它断言某个应用没有开启权限。还没有麦克风权限、配置了上传式服务商，或者设置应用的语音面板发起时，用独立 Activity 录音或调起系统语音识别服务，窗口里显示「正在录音」和「完成」「取消」，录音由该服务持有，MSIME 只接收有界文本。两份清单都声明了对 `android.speech.RecognitionService` 的包可见性。主应用进程与独立 `:ime` 进程通过应用私有目录中的非阻塞文件锁交接最新一条结果；结果最多 10,000 个 Unicode 码点、10 分钟有效，并在插入前一次性 claim，避免两个键盘实例重复插入。键盘“更多”工具页提供与 Apple 同级的语音结果入口，结果面板内提供 Android 平台的系统语音识别入口；共享 `touch_voice_shortcut` 开启后，候选栏显示直达语音结果按钮。存在 Engine 组合或本地模式时拒绝打开结果，确认插入前还会比对 InputConnection 身份、选择位置 generation 及光标前后/选中文本快照；真实上下文仅短暂保存在内存，不写日志或交接文件。
 
 本地语音识别（共享设置里 provider 为 `local`、`asr_model_path` 指向共享安装器写好的模型目录）在同一个语音 Activity 里用 sherpa-onnx 在本机识别，音频不离开设备：共享层只在路径为绝对路径时下发 `modelPath`，宿主再确认目录里有 `msime-model.json` 才开始。识别复用 `shared/voice/LocalAsr` 与桌面同一套清单、热词和 VAD 逻辑，经 JNI 编进 `libmsime_android.so`；运行时 `libsherpa-onnx-c-api.so` 与 `libonnxruntime.so` 由 `build-native.sh` 通过 `scripts/fetch_voice_runtime.py` 按 `resources/voice-runtime.lock.json` 下载校验后只从 .aar 中取出，不进版本库，并与其它原生库同样检查 16KB 对齐和依赖白名单。瘦包（`MSIME_ANDROID_OMIT_ON_DEMAND=1`）构建时 `build-apk.sh` 给 `build-native.sh` 传 `--omit-voice-runtime`，这两个库不进 jniLibs，`verify-native.sh` 只要求三个宿主库，两个运行库在时照样检查、且必须成对；应用在用户打开「离线识别」而还没有这两个库时下载资源包 `voice-runtime`（语音页的运行库那一行也能点「下载」「重试」）：取同一个固定的 .aar，只取出 arm64 的这两个库，按 `resources/voice-runtime-android.lock.json` 的长度和 SHA-256 校验后以只读权限发布到 `files/bootstrap/state/resource-packs/voice-runtime/`，再把路径交给 LocalAsr 加载。录音、模型加载与解码都在后台线程，边说边把部分结果显示在录音窗口；热词来自用户词库，经共享 `msime_client_voice_hotwords` 读取，清单声明 `pinyin` 模式的模型在识别后再经 `msime_client_voice_hotword_correct` 按拼音纠正。模型闲置 2 分钟后释放，系统回收内存时立即释放。模型缺失或损坏、运行时无法加载时直接提示错误，不会退回系统语音识别服务。
@@ -221,6 +225,8 @@ Android Tauri 设置仅在 Android WebView 注入统计能力，桌面设置不�
 数字键面固定是 1 2 3 在上，与字母键面同一个行序。中文的 26 键、14 键、手写、笔画和注音 9 键按「123」借用拼音九键的数字键面（左栏底部另有 `#+=` 打开扩展符号页，0、小数点和统计口径见 `.agents/notes/implemented/feature/2026-10-15-mobile-default-number-pad.md`）；英文、日文罗马字、越南语、藏文、韩文两套式和本地工具模式仍是新设计的 123 层（1 到 0 排一行，下面是符号行）。共享偏好里的 `touch_number_keypad_order` 和 `touch_twenty_six_key_number_layout` 仍随配置和同步原样保留，但键盘不读它们，设置页也不再列出。全拼 9 键按“符号”切到数字键面时仍然是九键，与 Apple 一致，不再交给 26 键符号页——那会把十列键盘塞进用户特意选的三列布局。九个网格键改印自身数字（含只喂分词符的 1 键），无障碍描述改为“数字 N”，点击以本地输入来源直接上屏数字而不进入拼音会话；数字键面的左栏换成另一张符号表，默认 `+ - * / = % ( ) : @ ， 。 ？ ！`（本地设置 `platform.android.nine_key_digit_symbols`，设置页「九键数字键盘左侧符号」可改），右列从删除、重输、！ 换成删除、字面上屏的小数点 `.`（不随中文标点变成「。」）和带语音手势的空格键，`0` 移到底行中间；返回字母键面恢复分词/ABC–WXYZ 键面、长按弹出和原来的标点栏。在数字 / 符号键面上（九键和 26 键都算），光标前末尾是 `12*12` 这样带二元运算的算式时，工具栏品牌键右边出现「= 144」，点按以字面上屏 `=144`（算式后已有 `=` 时只上屏 `144`）；`ImeCalculator` 在选区变化和切换键面时读光标前最多 64 个字符，密码框不读，求值在无 Android 依赖的 `ArithmeticResultPolicy`（BigDecimal，加减乘除、括号、`×` `÷` 与全角字符）。两套九键都自带数字键面，因此快捷条的 Shift 在它们的数字键面同样隐藏。键面与描述由无 Android 依赖的 `NineKeyLayout` 提供并在 JVM 回归中验证。
 
 全拼 14 键（触屏方案和 `touch_keyboard_layout` 都是 `fourteen_key`，引擎方案是全拼，默认不启用；设置的「中文键盘」是 26 键 / 14 键 / 9 键三档，选中即启用并切换）把 QWERTY 上相邻两个字母合成一键：`QW ER TY UI OP` / `AS DF GH JK L`（不缩进）/ `[符/分词] ZX CV BN M [⌫]`，底行是 123 |（地球）| ， | 空格 | 。 | 中/英 | 回车（26 键底行为 123 | 符 | 空格 | ， | 中/英 | 回车、逗号长按输入句号，14 键第三行左端已经有 符，所以保留带逗号句号的这一行，逗号键长按照样弹出常用标点），四行与 26 键等高，两端边键是 26 键的边键宽度。键表在无 Android 依赖的 `FourteenKeyLayout`，与 iOS、HarmonyOS 的 `FourteenKeyLayout` 和引擎 `KeyGrid::FourteenKey` 是同一张表，`scripts/test-fourteen-key-table.py` 核对四处的键、组码和 `Fourteen*` 键位 id。点一下经 `NativeClient.gridKey`（`msime_client_grid_key`）送这一组的首字母，不走 `type()`：硬件键盘的字母仍走 `character()`，是确定的全拼字母，14 键组字进行中则不受理。Engine 按组码网格解码，`View.key_grid` 是 `fourteen_key`（`nine_key` 为假），14 键的判断都看它。组字不写进编辑器，读音行显示 `nine_key_reading`（拼写写进输入框后候选栏不画读音，14 键是例外）；拼音选择与九键共用键区左侧的纵向侧栏（`SpellingPlacement.SIDEBAR`），空闲时显示符号、有拼音可选时覆盖符号栏，字母键位不会在开始组字时移动；不挤占读音或候选行，也不增加键盘高度，内容与九键左列相同但没有原样数字那一项，点音节锁定、退格先撤销锁定；展开候选是九键的三栏面板。第三排左端键组字时是「分词」（送 `'`），空闲时是「符」（打开符号面板）。两个字母的键长按弹出这两个字母，选中后先结束组字再上屏，L、M 不弹；没有按键气泡、Shift、滑行、数字行、分体、双拼键位提示和角标。英文模式、密码和网址框、本地模式画 26 键，切回中文恢复 14 键，`touch_keyboard_layout` 不变；123 打开 26 键的设计层。组字中回车、点 123 层的字符等走原样上屏（命令 2）的路径时，Engine 结束组字取首选，因为组码只是每组首字母，原样上屏会写出 `bugao` 这种字母。打字统计的来源是「全拼 14 键」（`fourteenKey`），键位 id 是 `FourteenQW` 到 `FourteenM` 共 14 个，分词键记作 `SoftSymbol`。设备验收在 `FourteenKeyDeviceSmoke`，`KeyboardHeightDeviceSmoke` 另有一轮核对 14 键与 26 键等高。
+
+Android 双拼 14 键（#8770）在「输入 › 普通话 › 双拼 › 键盘布局」选择 26 / 14 键，使用独立共享偏好 `touch_shuangpin_layout`（默认 `twenty_six_key`，默认值不写进文档），切换双拼方案或其他语言后保留。它沿用当前 `shuangpin_profile` 和已经校验的自定义表，不增加一套用户表格式；坏表与 26 键一样按小鹤运行。Engine 的 `KeyGrid::FourteenKeyShuangpin` 把 26 键编码映射到上述十四组，分号并入 L 组（双拼键面显示 `L;`，读屏为「按键 L 分号」），每个完整音节仍占两键，重码通过左侧拼音栏、锁定、分词和三栏候选面板消歧。`View.key_grid` 同样是 `fourteen_key`，`View.scheme` 在组字时仍保持双拼；`touch_keyboard_layout` 继续是原方案映射的布局，不替代引擎的实时状态。实体键盘字母仍走普通 26 键双拼，触摸组码走 `gridKey`；英文、密码、网址和本地模式显示 26 键，返回中文恢复 14 键。统计沿用所选双拼方案。全拼的 14 键、九键双拼数字表和其他平台的设置入口保持原有约定。`FourteenKeyDeviceSmoke` 默认覆盖完整全拼与双拼验收，迭代双拼专项可传 `-e shuangpin_only true`。
 
 九键双拼（#6572；触屏方案和 `touch_keyboard_layout` 都是 `nine_key_shuangpin`，引擎方案是全拼，默认不启用）在九宫格上每个音节打两位数字：先按声母所在的键，再按韵母所在的键，零声母音节按表给的两位。用哪张表看共享偏好 `nine_key_shuangpin_profile`（米旮旯 3、米旮旯 2、辜氏 2 低重码或自定义），自定义表在 `nine_key_shuangpin_custom_profile`。Engine 按 `KeyGrid::NineKeyShuangpin` 解码，`View.key_grid` 是 `nine_key_shuangpin`（`nine_key` 为假），宿主按它画九键的键面（`touchLayout` 把它当作 `QUANPIN_NINE_KEY_LAYOUT`，本地模式回落 26 键），左列拼音、三栏面板和 123 数字层都与拼音九键相同，编辑器里同样写拼音读音而不是数字。字母键面是四行：1–9 每个键印着这张表放在它上面的声母（零声母编码从这个键开始时前面加「零」）和韵母，不另印数字，点按经 `character()` 送这个数字；最后一行是「@#」/「分词」键（拼音九键的 1 键常被双拼的韵母占用，所以挪到这里）、0 和逗号，表用到 0 时 0 是组码键，否则原样上屏 0；右列 ⌫ 占两格，再是重输和！。键面不另存键位：`NativeClient.nineKeyShuangpinLayout`（`msime_client_nine_key_shuangpin_layout`）按偏好里的方案和表给出每个键的声母、韵母，请求没变时沿用；拼音九键和九键双拼是同一个触屏布局编号，换方案或换表时由 `ImeLayoutRows.shuangpinStale` 触发重建。九键双拼没有英文九键，键上没有长按字母和滑动数字。设置里「输入 › 普通话」的「九键双拼」子菜单选表（选中即切换到这个键盘），「九键双拼」页（`NineKeyShuangpinPage`）选表、看当前表每个键上的声母韵母，编辑自定义表（从内置方案开始、逐格改数字），经系统文件选择器导入导出同一份 JSON（`{initials, finals, zero_initials}`，键是数字）；表的问题由同一个接口带着出错的单位给出，能用时才能保存。打字统计记作「9 键」（`nineKey`），分词键记作 `SoftSymbol`。设备验收在 `NineKeyShuangpinDeviceSmoke`。
 
@@ -394,6 +400,8 @@ APK 包结构、双 ABI、启动 Activity、IME 声明、签名与对齐均由�
 
 ## 专用模拟器验收
 
+剪贴板手动分类专项：安装当前分支的全功能原生 APK 并准备词库后，运行 `ANDROID_SDK_ROOT=<SDK> bash platforms/android/tests/device/clipboard-categories.sh <serial>`。API 28、35 都要执行；专项复用一个测试清单入口，不改变产品清单。用例备份并恢复私有合成状态，实际创建分类、移动记录、筛选、改名、重绑输入法后重读、删除分类保留正文，以及滚动后的固定顶栏和返回顶部。`ToolbarEdgesDeviceSmoke` 另检查 320/600dp 下的固定布局和返回顶部显隐。分类最多五个，名称最多十二个 Unicode 字素；分类与剪贴板正文一样只保存在本机，不进入现有备份或云同步。
+
 系统自动填充专项：构建当前原生宿主 APK 后运行 `ANDROID_SDK_ROOT=<SDK> bash platforms/android/tests/device/inline-autofill.sh emulator-5580`，API 28 用 `emulator-5566`。测试包的合成服务只提供固定虚构账号，API 35 验证真实内联请求、系统远程视图、隐藏／再显示、切框、空响应和系统多字段填充；API 28 验证旧菜单填充。退出时恢复原填充服务。专项替换默认设备套件的一个 instrumentation 入口，不增加系统限定的 100 项数量；下次运行普通 `build-editor.sh` 会恢复默认入口。内联功能需要 Android 11 以上、支持它的填充服务及提供填充信息的应用；不支持时由系统显示原有菜单。
 
 预先安装 `system-images;android-35;default;arm64-v8a`，在一个终端运行 `ANDROID_SDK_ROOT=<SDK绝对路径> bash platforms/android/tests/device/start-emulator.sh`。脚本在忽略的 target/android/avd-home 中创建 msime-client-test，固定 emulator-5580，不使用已有个人 AVD；目标端口属于其他 AVD 时拒绝运行。需要额外磁盘空间，测试结束后应停止该专用模拟器以释放内存；脚本不会下载系统镜像，也不自动接受 SDK 许可。
@@ -458,3 +466,22 @@ adb -s <serial> shell am instrument -w app.msime.android.test/app.msime.android.
 adb -s emulator-5580 shell am instrument --no-restart -e magnifier true -w \
   app.msime.android.test/app.msime.android.test.CompositionRestartDeviceSmoke
 ```
+
+### 相对日期候选
+
+相对日期专项：先安装当前分支构建的原生完整版 APK、打开设置应用等待词库准备完成，在专用 AVD 上启用水杉输入法，再执行以下命令（API 28 同理）。测试通过真实全拼与九键按键输入「日期」及九个日期／年份触发词，展开候选并点击带触发词的结果，核对合成编辑器上屏且没有原拼写残留；结束恢复原偏好。专项复用现有 instrumentation 入口，下次普通构建恢复默认清单。
+
+```sh
+MSIME_ANDROID_RELATIVE_DATE=1 bash platforms/android/tests/device/build-editor.sh
+"$ANDROID_SDK_ROOT/platform-tools/adb" -s emulator-5580 install --no-incremental -r target/android/editor-test.apk
+"$ANDROID_SDK_ROOT/platform-tools/adb" -s emulator-5580 shell am instrument --no-restart -w \
+  app.msime.android.test/app.msime.android.test.RelativeDateDeviceSmoke
+```
+
+API 28 不支持 `--no-restart`，运行上述 instrumentation 时去掉该参数。测试跨午夜时应重跑。
+
+## 世界时钟
+
+键盘工具栏的「更多」里打开「世界时钟」，默认显示系统日期、星期和时分秒；日出日落标注时区的参考城市，未匹配到参考城市时明确提示，不请求定位。轻点卡片选择日期、时间、星期、ISO 8601 或 Unix 时间等格式插入当前输入框。通过「添加城市」按地区、国家/地区、城市离线选择，最多保存 32 个；长按已添加城市选择删除。目录包含 IANA 各国家/地区的代表时区城市和北京，并非全部城镇。
+
+设备专项：`MSIME_ANDROID_WORLD_CLOCK=1 bash platforms/android/tests/device/build-editor.sh`，安装测试 APK 后运行 `app.msime.android.test/app.msime.android.test.WorldClockDeviceSmoke`。此专项复用清单入口，保持 API 35 instrumentation 数量限制；API 28 普通启动，API 35 在设置宿主已运行时加 `--no-restart`。

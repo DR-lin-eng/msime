@@ -210,6 +210,9 @@ jobs:
       - name: Check the tooling parses under the stock macOS interpreter
         if: ${{ matrix.build == 'true' }}
         run: /usr/bin/python3 -m compileall -q scripts platforms/macos/tests platforms/ios/scripts platforms/ios/tests
+      - name: Verify account gloss queue ownership
+        if: ${{ matrix.build == 'true' }}
+        run: /usr/bin/python3 scripts/test-macos-account-gloss-queue-owner.py
       - name: Build the Rust host library
         if: ${{ matrix.build == 'true' }}
         run: cargo build --locked -p msime-host-api

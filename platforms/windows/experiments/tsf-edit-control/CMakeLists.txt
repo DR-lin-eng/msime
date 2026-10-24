@@ -22,7 +22,7 @@ target_include_directories(msime-tsf-edit-control
                            PUBLIC include
                            PRIVATE src ../../tsf/Header)
 target_compile_features(msime-tsf-edit-control PUBLIC cxx_std_17)
-target_compile_definitions(msime-tsf-edit-control PRIVATE UNICODE _UNICODE)
+target_compile_definitions(msime-tsf-edit-control PRIVATE UNICODE _UNICODE PUBLIC NOMINMAX)
 target_compile_options(msime-tsf-edit-control PRIVATE
   $<$<CXX_COMPILER_ID:MSVC>:/W4;/WX;/utf-8>
   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra>)

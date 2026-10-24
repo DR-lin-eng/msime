@@ -582,6 +582,37 @@ int main(int argc, char **) {
         assert(!capture.active); // No queued gesture leaks into restored focus.
         globalHotkey(ctrlF9); assert(capture.active);
         [controller cancelLiveVoiceInput];
+        // 额外绑定独立于固定 Ctrl+F9；同一共享解码同时供全局监视器与 IMK 事件入口使用。
+        MSIMEAppearancePreferences *voiceAppearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+        [voiceAppearance applySharedInputPreferences:@{@"keybindings": @{@"toggle_voice_input": @"Ctrl+Alt+F8"}}];
+        [controller setValue:voiceAppearance forKey:@"appearance"];
+        voiceArguments[@"MSIMEClientVoiceHotkeyCtrlF9"] = @NO;
+        [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+        NSEventModifierFlags customFlags = NSEventModifierFlagControl | NSEventModifierFlagOption;
+        NSEvent *customVoice = key(100, customFlags, NSEventTypeKeyDown);
+        globalHotkey(ctrlF9); assert(!capture.active);
+        globalHotkey(customVoice); assert(capture.active);
+        globalHotkey([NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:customFlags timestamp:1 windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:YES keyCode:100]);
+        assert(capture.active && ![[controller valueForKey:@"liveVoiceProcessing"] boolValue]);
+        globalHotkey(customVoice); assert([[controller valueForKey:@"liveVoiceProcessing"] boolValue]);
+        capture.transcript(@"synthetic custom final", YES); assert(!capture.active);
+        [voiceAppearance applySharedInputPreferences:@{@"keybindings": @{@"toggle_voice_input": @"Ctrl+Alt+F7"}}];
+        globalHotkey(customVoice); assert(!capture.active);
+        NSEvent *reboundVoice = key(98, customFlags, NSEventTypeKeyDown);
+        assert([controller handleEvent:reboundVoice client:client] && capture.active);
+        [controller cancelLiveVoiceInput];
+        voiceArguments[@"MSIMEClientVoiceEnabled"] = @NO;
+        [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+        globalHotkey(reboundVoice); assert(!capture.active);
+        voiceArguments[@"MSIMEClientVoiceEnabled"] = @YES;
+        [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+        [controller setValue:nil forKey:@"activeClient"];
+        globalHotkey(reboundVoice); assert(!capture.active);
+        [controller setValue:client forKey:@"activeClient"];
+        [voiceAppearance applySharedInputPreferences:@{@"keybindings": @{@"toggle_voice_input": @""}}];
+        globalHotkey(reboundVoice); assert(!capture.active);
+        voiceArguments[@"MSIMEClientVoiceHotkeyCtrlF9"] = @YES;
+        [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
         LiveTextFixture *nextClient = [LiveTextFixture new];
         [controller setValue:nextClient forKey:@"activeClient"];
         [controller toggleVoiceInput:nil]; assert(capture.active);
@@ -655,6 +686,39 @@ int main(int argc, char **) {
             [controller applyLiveVoiceText:@"synthetic routed" final:YES token:routeToken];
             [controller applyLiveVoiceText:@"synthetic routed" final:YES token:routeToken];
             assert(client.commits.count == imk && controller.externalCommits == external + 1);
+        }
+        {
+            [defaults setVolatileDomain:@{
+                @"MSIMEClientVoiceEnabled": @YES, @"MSIMEClientVoiceHotkeyRightAlt": @YES,
+                @"MSIMEClientVoiceASRProvider": @"system", @"MSIMEClientVoicePolish": @NO,
+                @"MSIMEClientVoiceSoundEnabled": @NO, @"MSIMEClientVoiceMuteSystemAudio": @NO
+            } forName:NSArgumentDomain];
+            LiveControllerFixture *holdController = [LiveControllerFixture alloc];
+            LiveCaptureFixture *holdCapture = [LiveCaptureFixture new];
+            holdCapture.capturedSeconds = 0.25;
+            [holdController setValue:session forKey:@"session"];
+            [holdController setValue:client forKey:@"activeClient"];
+            [holdController setValue:holdCapture forKey:@"voiceService"];
+            [holdController setValue:[LivePresentationFixture new] forKey:@"voiceOverlay"];
+            [holdController setValue:[LivePresentationFixture new] forKey:@"voiceAudioMuter"];
+            [holdController setValue:[MSIMEVoiceCueFixture new] forKey:@"voiceCuePlayer"];
+            const auto systemFlags = MSIMEPhysicalModifierFlagsState;
+            MSIMEPhysicalModifierFlagsState = +[](CGEventSourceStateID) -> CGEventFlags {
+                return NSEventModifierFlagOption | NX_DEVICERALTKEYMASK;
+            };
+            // 经过宿主的真实查询边界和录音状态机，采集器仍使用合成夹具。
+            assert([holdController handleEvent:key(61, NSEventModifierFlagOption, NSEventTypeFlagsChanged) client:client]);
+            assert(holdCapture.active && holdCapture.captureStops == 0);
+            assert([holdController handleEvent:key(61, NSEventModifierFlagOption, NSEventTypeFlagsChanged) client:client]);
+            assert(holdCapture.active && holdCapture.captureStops == 0);
+            MSIMEPhysicalModifierFlagsState = +[](CGEventSourceStateID) -> CGEventFlags {
+                return NSEventModifierFlagOption | NX_DEVICELALTKEYMASK;
+            };
+            assert([holdController handleEvent:key(61, NSEventModifierFlagOption, NSEventTypeFlagsChanged) client:client]);
+            assert(holdCapture.captureStops == 1);
+            [holdController cancelLiveVoiceInput];
+            MSIMEPhysicalModifierFlagsState = systemFlags;
+            [defaults setVolatileDomain:old forName:NSArgumentDomain];
         }
         CGEventRef injected = CGEventCreateKeyboardEvent(nullptr, 0, true);
         CGEventSetIntegerValueField(injected, kCGEventSourceUserData, MSIMEVoiceCommitEventTag);

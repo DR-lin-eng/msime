@@ -40,6 +40,7 @@ import app.msime.android.SplitKeyboardPolicy;
 import app.msime.android.SwipeHintPolicy;
 import app.msime.android.SyncSignals;
 import app.msime.android.SyncSwitch;
+import app.msime.android.TextTrackpadSettings;
 import app.msime.android.ViewPolicy;
 import app.msime.android.core.InputViewValuePolicy;
 import org.json.JSONObject;
@@ -70,7 +71,8 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
     private static final String[] ANIMATIONS = {"bounce", "ripple", "glow", "lift", "none"};
     private static final String[] ANIMATION_LABELS = {"弹起", "涟漪", "发光", "浮起", "无"};
     private record State(JSONObject preferences, AndroidLocalSettings.Snapshot local,
-                         KeyboardFeedbackStore.Settings feedback, KeyboardSkin skin, String exportDirectory) {}
+                         KeyboardFeedbackStore.Settings feedback, KeyboardSkin skin, String exportDirectory,
+                         JSONObject trackpadOptions) {}
 
     @Override protected void reload() {
         boolean dark = AppMode.dark(requireContext());
@@ -78,7 +80,8 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
             JSONObject preferences = KeyboardSheets.preferences(context);
             if (preferences == null) return null;
             return new State(preferences, AndroidLocalSettings.load(context), KeyboardFeedbackStore.load(context),
-                HostStore.keyboardSkin(preferences, dark, HostStore.seed(context)), ClipboardExport.directoryName(context));
+                HostStore.keyboardSkin(preferences, dark, HostStore.seed(context)), ClipboardExport.directoryName(context),
+                HostStore.textTrackpadOptions());
         }, this::render);
     }
 
@@ -137,6 +140,8 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
                 NineKeySidebarPolicy.summary(digitSidebar, 4),
                 () -> editSidebarSymbols("九键数字键盘左侧符号", AndroidLocalSettings.NINE_KEY_DIGIT_SYMBOLS, digitSidebar));
         }
+        layout.nav("文本编辑按键顺序", "调整文本编辑面板两侧的七个功能键，方向键与换行位置固定",
+            null, () -> new TextEditOrderSheet(this, preferences, this::reload).show());
         layout.nav("符号分类顺序", "调整符号面板底部分类的排列顺序",
             null, () -> new SymbolCategoryOrderSheet(this, settings, this::reload).show());
         // 只有双拼方案的 26 键画键位提示；本版本没有双拼时不列这一行。缺省为关，与键盘和 client-core 一致。
@@ -219,11 +224,13 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
         GroupCard gestures = GroupCard.add(sectionColumn(target, "手势"), "手势");
         boolean swipeSymbols = settings.bool(AndroidLocalSettings.SWIPE_DOWN_SYMBOLS);
         gestures.toggle("滑动输入符号", "沿设定方向滑动输入角标，中文时反方向打开字母与符号选项；关闭后仍可长按", swipeSymbols,
-            checked -> saveLocalSetting(AndroidLocalSettings.SWIPE_DOWN_SYMBOLS, checked));
+            checked -> KeyboardSheets.saveLocal(this, AndroidLocalSettings.SWIPE_DOWN_SYMBOLS, checked,
+                this::reload, this::reload));
         String swipeDirection = settings.choice(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION);
-        GroupCard.Row directionRow = gestures.nav("滑动方向", "该方向直接输入角标，中文时反方向打开选项；关闭滑动输入符号后两种滑动都不生效",
-            swipeDirectionLabel(swipeDirection), () -> pickSwipeDirection(swipeDirection));
-        directionRow.setEnabled(swipeSymbols);
+        GroupCard.Row[] directionRow = new GroupCard.Row[1];
+        directionRow[0] = gestures.nav("滑动方向", "该方向直接输入角标，中文时反方向打开选项；关闭滑动输入符号后两种滑动都不生效",
+            swipeDirectionLabel(swipeDirection), () -> pickSwipeDirection(swipeDirection, directionRow[0]));
+        directionRow[0].setEnabled(swipeSymbols);
         // 九键的滑动单独一项、默认关闭（#5580）：九键原来没有滑动，和 26 键共用上面那个默认开着的开关会改变老用户的点按。
         if (quanpinNineKey) {
             String nineKeySwipe = settings.choice(AndroidLocalSettings.NINE_KEY_SWIPE);
@@ -247,6 +254,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
             checked -> saveLocalSetting(AndroidLocalSettings.SPACE_VOICE, checked));
         gestures.note("退格键左滑可连续删除，保持按住再右滑可逐步恢复，松手后无法恢复；密码、无痕和禁止学习的输入框不支持此手势。上滑仍可快速删除，有备份时长按下滑可撤回。");
         gestures.note("空格键上滑后松手可复制当前输入框的全文，滑回可取消；复制预览遵守下方剪贴板设置。长按语音开始后，上滑仍用于取消语音。");
+        renderTrackpad(sectionColumn(target, "手势"), preferences, state.trackpadOptions());
 
         JSONObject toolbar = preferences.optJSONObject("touch_toolbar");
         if (toolbar == null) toolbar = new JSONObject();
@@ -278,6 +286,8 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
         String columns = settings.choice(AndroidLocalSettings.CLIPBOARD_COLUMNS);
         clipboard.nav("排列", "剪贴板面板里一行显示几条记录", clipboardColumnsLabel(columns),
             () -> pickClipboardColumns(columns));
+        clipboard.nav("剪贴板分类", "自定义分类名称，在键盘中手动移动记录", "管理",
+            () -> SettingsNavigator.open(requireContext(), PageId.CLIPBOARD_CATEGORIES, null));
         int historyLimit = ClipboardHistoryPolicy.limit(preferences);
         clipboard.nav("历史记录上限", "达到上限后，最旧的未固定记录会被新记录替换",
             historyLimit + " 条", () -> pickClipboardLimit(historyLimit), true);
@@ -350,8 +360,8 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
 
     private static KeyboardScheme[] layoutPair(KeyboardScheme current) {
         return switch (current) {
-            case QUANPIN, QUANPIN_FOURTEEN_KEY, QUANPIN_NINE_KEY -> new KeyboardScheme[] {KeyboardScheme.QUANPIN,
-                KeyboardScheme.QUANPIN_FOURTEEN_KEY, KeyboardScheme.QUANPIN_NINE_KEY};
+            case QUANPIN, QUANPIN_FOURTEEN_KEY, QUANPIN_EIGHTEEN_KEY, QUANPIN_NINE_KEY -> new KeyboardScheme[] {KeyboardScheme.QUANPIN,
+                KeyboardScheme.QUANPIN_EIGHTEEN_KEY, KeyboardScheme.QUANPIN_FOURTEEN_KEY, KeyboardScheme.QUANPIN_NINE_KEY};
             case ZHUYIN, ZHUYIN_NINE_KEY -> new KeyboardScheme[] {KeyboardScheme.ZHUYIN, KeyboardScheme.ZHUYIN_NINE_KEY};
             case JAPANESE, JAPANESE_NINE_KEY -> new KeyboardScheme[] {KeyboardScheme.JAPANESE, KeyboardScheme.JAPANESE_NINE_KEY};
             default -> null;
@@ -366,11 +376,12 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
         sheet.show();
     }
 
-    /** 「中文键盘」一行和选项上的排法名：按入口存下的触屏布局，`nine_key` 是「9 键」，`fourteen_key` 是「14 键」，其余是「26 键」。 */
+    /** 「中文键盘」按入口存下的触屏布局显示九、十四、十八或二十六键。 */
     private static String layoutLabel(KeyboardScheme scheme) {
         return switch (scheme.touchKeyboardLayout()) {
             case "nine_key" -> "9 键";
             case "fourteen_key" -> "14 键";
+            case "eighteen_key" -> "18 键";
             default -> "26 键";
         };
     }
@@ -389,7 +400,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
         sheet.show();
     }
 
-    /** 26 / 14 / 9 键是当前方案的那几个触屏方案（{@link #layoutPair}）；与输入页、引导页一样经 {@link SchemePreferences#withScheme} 一起写那几个键。 */
+    /** 当前方案的布局经 {@link SchemePreferences#withScheme} 与输入页、引导页按同一契约保存。 */
     private void applyScheme(KeyboardScheme scheme) {
         HostTask.run(this, context -> {
             JSONObject snapshot = HostStore.loadPreferences(context);
@@ -427,11 +438,15 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
         });
     }
 
-    private void pickSwipeDirection(String selected) {
+    private void pickSwipeDirection(String selected, GroupCard.Row row) {
         OptionSheet sheet = new OptionSheet(requireContext(), "滑动方向", null);
         for (String value : new String[] {SwipeHintPolicy.DOWN, SwipeHintPolicy.UP}) {
             sheet.option(swipeDirectionLabel(value), value.equals(selected),
-                () -> saveLocalSetting(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION, value));
+                () -> {
+                    row.setValue(swipeDirectionLabel(value));
+                    KeyboardSheets.saveLocal(this, AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION, value,
+                        this::reload, this::reload);
+                });
         }
         sheet.show();
     }
@@ -501,6 +516,38 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
 
     private void savePreference(String key, Object value) {
         savePreferences(preferences -> preferences.put(key, value));
+    }
+
+    private void renderTrackpad(LinearLayout column, JSONObject preferences, JSONObject options) {
+        GroupCard group = GroupCard.add(column, "文本编辑触控板");
+        TextTrackpadSettings value = TextTrackpadSettings.from(preferences);
+        JSONObject horizontal = options == null ? null : options.optJSONObject("horizontal_dp");
+        JSONObject vertical = options == null ? null : options.optJSONObject("vertical_dp");
+        if (value == null || horizontal == null || vertical == null) {
+            group.note("触控板设置尚未就绪，请返回后重试。");
+            return;
+        }
+        group.toggle("优先使用触控板", "打开文本编辑时显示触控板，可在面板中切回方向键",
+            value.enabled(), checked -> saveTrackpad("enabled", checked));
+        group.toggle("按住工具临时打开", "按住工具栏的文本编辑按钮打开触控板，松手返回之前的面板",
+            value.holdToOpen(), checked -> saveTrackpad("hold_to_open", checked));
+        group.slider("水平移动距离", "距离越小，左右移动字符越快",
+            NumberPolicy.strictInt(horizontal, "minimum", -1), NumberPolicy.strictInt(horizontal, "maximum", -1),
+            1, value.horizontalDp(), number -> number + " dp", number -> saveTrackpad("horizontal_dp", number));
+        group.slider("垂直移动距离", "距离越小，上下移动行越快",
+            NumberPolicy.strictInt(vertical, "minimum", -1), NumberPolicy.strictInt(vertical, "maximum", -1),
+            1, value.verticalDp(), number -> number + " dp", number -> saveTrackpad("vertical_dp", number));
+        group.toggle("双击选词与三击选行", "编辑器提供足够文字时生效；长按后拖动也可延伸选区",
+            value.tapSelection(), checked -> saveTrackpad("tap_selection", checked));
+        group.toggle("逐步振动", "跟随键盘振动和系统触感开关", value.haptics(),
+            checked -> saveTrackpad("haptics", checked));
+        group.toggle("显示移动轨迹", null, value.trail(), checked -> saveTrackpad("trail", checked));
+        group.toggle("光标文字放大镜", "显示光标附近文字；密码使用掩码，编辑器不提供文字时显示提示",
+            value.magnifier(), checked -> saveTrackpad("magnifier", checked));
+    }
+
+    private void saveTrackpad(String key, Object value) {
+        savePreferences(preferences -> KeyboardSheets.child(preferences, "android_text_trackpad").put(key, value));
     }
 
     /** 改一个工具栏开关（`touch_toolbar` 的成员或本地设置），写完重画预览（显示方式还会改变按钮行的可用状态）。 */

@@ -121,6 +121,20 @@ final class LanguageSchemesTests: XCTestCase {
                    "the raw keys are group codes, so every boundary converts as nine-key does")
   }
 
+  /// 双拼 14 键只改变字母键布局，不替换当前的小鹤、自然码或微软方案；布局字段缺省为 26 键。
+  func testShuangpinLayoutIsIndependentFromTheSelectedProfile() {
+    XCTAssertEqual(TouchShuangpinLayoutPreference.layout(in: nil), .twentySixKey)
+    let document: [String: Any] = ["touch_shuangpin_layout": "fourteen_key", "shuangpin_profile": "microsoft"]
+    XCTAssertEqual(TouchShuangpinLayoutPreference.layout(in: document), .fourteenKey)
+    XCTAssertEqual(TouchShuangpinLayoutPreference.Layout(rawValue: "nine_key"), nil)
+
+    var mapped = document
+    MetasequoiaInputSessionBridge.schemeMapping(.microsoft, enabledSchemes: ChineseInputScheme.allCases)?(&mapped)
+    XCTAssertEqual(mapped["scheme"] as? String, "shuangpin")
+    XCTAssertEqual(mapped["shuangpin_profile"] as? String, "microsoft")
+    XCTAssertEqual(mapped["touch_shuangpin_layout"] as? String, "fourteen_key")
+  }
+
   /// The cloud settings document knows quanpin, shuangpin, wubi, japanese and korean only; a device that uploaded any other `input.schema` would make every other device reject the whole document.
   func testTheCloudCarriesNoLanguageScheme() {
     for scheme in [ChineseInputScheme.cantonese, .zhuyin, .vietnamese, .tibetan, .stroke] {

@@ -1,6 +1,6 @@
 import Foundation
 
-/// 全拼 14 键的键面。三端同一张表：Android、HarmonyOS 的 `FourteenKeyLayout` 和引擎的 `KeyGrid::FourteenKey`。
+/// 全拼与双拼共用的 14 键键面。三端同一张表：Android、HarmonyOS 的 `FourteenKeyLayout` 和引擎的 `KeyGrid::FourteenKey`。
 ///
 /// QWERTY 的位置不变，相邻两个字母合成一个键，L、M 各占一键：`QW ER TY UI OP / AS DF GH JK L / ZX CV BN M`，第二排不缩进。点一下输入的是这一组而不是某个字母：键盘经 `msime_client_grid_key` 把这一组的首字母（组码 `q e t u o a d g j l z c b m`）交给引擎，由引擎消歧。长按弹出这一键的两个字母（L、M 不弹），选中后与九键一样先结束组字，再上屏这个字母。
 enum FourteenKeyLayout {
@@ -17,6 +17,13 @@ enum FourteenKeyLayout {
     /// 无障碍标签：两个字母的键读「按键 Q W」，单字母键读「字母 L」。
     var accessibilityLabel: String {
       letters.count == 1 ? "字母 \(face)" : "按键 " + face.map(String.init).joined(separator: " ")
+    }
+
+    /// 微软双拼的分号与 L 共键，键面和读屏都说明这个入口；组码与统计 id 不变。
+    func face(semicolon: Bool) -> String { semicolon && letters == "l" ? "L;" : face }
+
+    func accessibilityLabel(semicolon: Bool) -> String {
+      semicolon && letters == "l" ? "字母 L 和分号" : accessibilityLabel
     }
 
     /// 长按弹出的字母，小写；单字母键没有长按选项。

@@ -16,6 +16,8 @@ Linux 的设置应用和共享面板（Tauri/React）在行为、结构和内容
 - 后台更新检查：打开设置窗口时（启动或被叫到前台；只为面板启动的设置进程不检查）若距上次成功检查满一天、距上次尝试满六小时，就在后台线程用同一个 `check_for_update` 问一次，记录写在状态目录的 `update-check.json`，连不上也记下尝试时间，断网时不会每次打开都重试；构建时或运行时的 `MSIME_DISABLE_UPDATE_CHECK` 关掉它，PRIVACY.md「资源与更新下载」写明了这个请求；新版本只提醒一次，通知的应用名和图标按本安装包的版本取；找到的版本一并记进 `update-check.json`，`pending_update_check` 从这份记录读出它（仍高于运行的版本时），发通知的进程退出以后关于页也能直接显示。通知的「查看」只在发通知的进程还在时有效。只提醒、不安装，检查不在 Fcitx5 插件或 IBus 宿主里做，开发构建不做。
 - 其余：帮助页给 Linux 一组 `linuxHelpCards`（Linux 的键名和排查步骤）和「打开官网」；插件页在 Linux 也用可筛选的插件库；屏幕键盘标题显示与 macOS 相同的操作说明，Win 键标作 Super，Linux 的两种投递错误码各有说明；手写面板字体栈在 Apple 字体之后补 Cantarell 和思源/Noto 中文字体；诊断日志在 Linux 上经 `org.freedesktop.FileManager1.ShowItems` 选中文件，退回 `xdg-open` 打开目录。
 
+首次配置页的手动下载入口见[词库下载清单](2026-10-24-linux-dictionary-download-links.md)；它按需读取安装器清单，继续复用本篇的配置执行与进度流程。
+
 ## Alternatives considered
 
 - **在 Rust 的提交命令里关窗**：改动只在宿主一侧，macOS 也是在 `submit` 里 `destroy`。但窗口在命令返回前就关掉，页面的成功回调永远收不到，Linux 的面板进程会反复打开同一个窗口，最近使用就再也记不上；改由页面在成功后关窗。

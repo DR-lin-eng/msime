@@ -7,6 +7,7 @@ import { GroupList, Row } from "../../core/platform-controls";
 import { InputSchemeSettingsContent } from "../input-scheme-settings-content";
 import { supportedInputSchemes } from "../input-scheme-options";
 import { InputSharedSettingsSection } from "../input-shared-settings-section";
+import { CrossCommitSpacingSection } from "../cross-commit-spacing-section";
 import { AppInputModeRulesSection } from "../app-input-mode-rules-section";
 import { VimModeAppsSection } from "../vim-mode-apps-section";
 import { LocalModesSection } from "../local-modes-section";
@@ -165,6 +166,7 @@ export function InputSettingsPage() {
       mobile={mobilePlatform}
       showShiftEntry={showHelpcodeShiftEntry}
       showTriggerKey={showHelpcodeTriggerKey}
+      showManualTab={macosPlatform}
       // 当前方案所属那一族的辅助码，选法与 Android 的 `pickHelpcode` 一致：双拼 方案用 双拼，其他用 全拼。鸿蒙手机和桌面只摆出这一族，iOS 和 Android 照旧两族直列。
       activeFamily={
         harmonyPhone || !mobilePlatform
@@ -356,6 +358,20 @@ export function InputSettingsPage() {
         </>
       )}
       <InputSharedSettingsSection
+        crossCommitSpacing={
+          macosPlatform ? (
+            <CrossCommitSpacingSection
+              enabled={draft.cross_commit_spacing}
+              excludedApps={draft.cross_commit_spacing_excluded_apps}
+              onChange={(cross_commit_spacing) => onPreferencesChange({ cross_commit_spacing })}
+              onExcludedAppsChange={(cross_commit_spacing_excluded_apps) =>
+                onPreferencesChange({ cross_commit_spacing_excluded_apps })
+              }
+              pickApplication={client.pickApplication}
+              applicationNames={client.applicationNames}
+            />
+          ) : undefined
+        }
         renderGroup={panel}
         foldIntoMore={harmonyPhone}
         traditionalChineseVariants={host?.traditional_chinese_variants === true}
@@ -367,6 +383,7 @@ export function InputSettingsPage() {
         // 中英文切换提示在所有平台都放在这里；macOS 以前把它放在快捷键页。
         showInputModeHUD={showInputModeHUD}
         showInputModeFocusHUD={linuxPlatform}
+        showInputModeCornerHUD={linuxPlatform}
         showInputModeStatusItem={showInputModeStatusItem}
         showModeScope={showModeScope}
         modeExtra={

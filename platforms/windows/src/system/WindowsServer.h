@@ -98,6 +98,7 @@ public:
     return controller_->send_tsf_config(config);
   }
   bool reset_cache() { return controller_->reset_cache(); }
+  void wake_preferences() { controller_->wake_preferences(); }
   bool send_caps_lock(const FocusLease &lease, bool enabled) {
     return controller_->send_caps_lock(lease, enabled);
   }

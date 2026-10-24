@@ -33,6 +33,7 @@ export interface InputSharedSettingsSectionProps {
   showInputModeHUD: boolean;
   /** Linux 可选的聚焦提示，与真正切换中英文时的提示分开。 */
   showInputModeFocusHUD?: boolean;
+  showInputModeCornerHUD?: boolean;
   /** macOS 菜单栏的输入模式状态项开关，跟在中英文切换提示之后。 */
   showInputModeStatusItem?: boolean;
   showModeScope: boolean;
@@ -57,6 +58,8 @@ export interface InputSharedSettingsSectionProps {
   paging?: ReactNode;
   /** 「输出」组直接显示的附加行（全角输入的起始状态）。 */
   outputExtra?: ReactNode;
+  /** 已接入跨次空格的宿主提供独立开关和应用排除名单。 */
+  crossCommitSpacing?: ReactNode;
   beforeFrequency?: ReactNode;
   afterFrequency?: ReactNode;
   /** 鸿蒙手机的「输入」页只把主要分组留在视野内：这里的每个分组都放进末尾「更多」分组的同一个「更多选项」折叠中，「中文输出」单选不放，因为该页以「中文字符集」提供它。 */
@@ -76,6 +79,7 @@ export function InputSharedSettingsSection({
   ios,
   showInputModeHUD,
   showInputModeFocusHUD = false,
+  showInputModeCornerHUD = false,
   showInputModeStatusItem = false,
   showModeScope,
   mixedInput,
@@ -89,6 +93,7 @@ export function InputSharedSettingsSection({
   modeExtra,
   paging,
   outputExtra,
+  crossCommitSpacing,
   beforeFrequency,
   afterFrequency,
   foldIntoMore = false,
@@ -193,6 +198,15 @@ export function InputSharedSettingsSection({
             <InputModeHudSection
               value={preferences.input_mode_hud}
               onChange={(input_mode_hud) => onPreferencesChange({ input_mode_hud })}
+              corner={
+                showInputModeCornerHUD
+                  ? {
+                      value: preferences.input_mode_corner_hud,
+                      onChange: (input_mode_corner_hud) =>
+                        onPreferencesChange({ input_mode_corner_hud }),
+                    }
+                  : undefined
+              }
               focus={
                 showInputModeFocusHUD
                   ? {
@@ -284,6 +298,7 @@ export function InputSharedSettingsSection({
             value={preferences.chinese_english_spacing}
             onChange={(chinese_english_spacing) => onPreferencesChange({ chinese_english_spacing })}
           />
+          {crossCommitSpacing}
           {!foldIntoMore && outputExtra}
         </GroupList>,
       )}

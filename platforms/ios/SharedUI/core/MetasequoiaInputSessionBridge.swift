@@ -573,7 +573,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   private var documentRevision: UInt64 = 0
   private var appliedFuzzyPinyinRules: UInt32?
   private var suspended = false
-  /// 引擎的组码网格，取值与 `msime_client_set_key_grid` 的 `grid` 相同：0 不用网格（26 键），1 九键，2 全拼 14 键，3 九键双拼。
+  /// 引擎的组码网格，取值与 `msime_client_set_key_grid` 的 `grid` 相同：0 不用网格（26 键），1 九键，2 当前方案的 14 键，3 九键双拼。
   enum KeyGrid: UInt8 {
     case none = 0
     case nineKey = 1
@@ -1452,6 +1452,13 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   }
   func `switch`(toShuangpinProfile profile: String) -> MetasequoiaInputSnapshot {
     switchScheme("shuangpin", profile: profile)
+  }
+  /// 双拼 14 键：先切到选定的双拼方案，再打开共享引擎的 14 键网格。
+  func switchToFourteenKeyShuangpin(profile: String) -> MetasequoiaInputSnapshot {
+    let snapshot = self.switch(toShuangpinProfile: profile)
+    guard snapshot.diagnosticText == nil else { return snapshot }
+    keyGrid = .fourteenKey
+    return dispatch { msimeClientSetKeyGrid(handle, KeyGrid.fourteenKey.rawValue) }
   }
   func switchToNineKeyShuangpin() -> MetasequoiaInputSnapshot { switchToKeyGrid(.nineKeyShuangpin) }
 

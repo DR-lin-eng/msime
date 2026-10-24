@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
 import { FluentIcon, type FluentIconName } from "../core/fluent-icons";
+import { ChevronGlyph } from "../core/chevron-glyph";
 import { useToast } from "../core/toast";
 import { useMountedRef } from "../settings/use-mounted-ref";
 import * as account from "./account-style";
@@ -25,19 +26,7 @@ export function MeSubpageHeader({
         disabled={backDisabled}
         onClick={onBack}
       >
-        <svg
-          width="12"
-          height="21"
-          viewBox="0 0 12 21"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M10 2 2 10.5 10 19" />
-        </svg>
+        <ChevronGlyph variant="subpage-back" />
         <span aria-hidden="true">我的</span>
       </button>
       <h2 className={account.subpageTitle}>{title}</h2>

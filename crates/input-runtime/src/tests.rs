@@ -1050,6 +1050,7 @@ impl InputEngine for Fixture {
             return Err(RuntimeError::Engine("injected snapshot failure".into()));
         }
         Ok(EngineSnapshot {
+            prediction: false,
             scheme: self.scheme,
             nine_key: self.key_grid == Some(KeyGrid::NineKey),
             key_grid: self.key_grid,
@@ -2661,6 +2662,7 @@ impl PhraseEngine {
 impl InputEngine for PhraseEngine {
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
         Ok(EngineSnapshot {
+            prediction: false,
             scheme: 0,
             nine_key: false,
             nine_key_spellings: Vec::new(),
@@ -5180,6 +5182,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         single_character_only: false,
         learning: false,
         learn_english_on_enter: true,
+        next_word_prediction: false,
         autocorrect_transposition: true,
         autocorrect_neighbor: true,
         fuzzy_pinyin_rules: 0,
@@ -5250,6 +5253,189 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         japanese_dictionary: String::new(),
         wubi_dictionary: String::new(),
     }
+}
+
+fn prediction_runtime() -> (tempfile::TempDir, Runtime) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.next_word_prediction = true;
+    let database = std::path::Path::new(&options.dictionaries).join("msime-pinyin.db");
+    rusqlite::Connection::open(database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_1_c VALUES('chi','c','吃',1000);
+         CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_2_c VALUES('chi''fan','cf','吃饭',100);
+         INSERT INTO tbl_2_c VALUES('chi''hao','ch','吃好',90);",
+        )
+        .unwrap();
+    let engine = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focus(true).unwrap();
+    for value in b"chi" {
+        runtime
+            .dispatch(Action::Character {
+                value: *value,
+                shift: false,
+            })
+            .unwrap();
+    }
+    let id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|row| row.text == "吃")
+        .unwrap()
+        .id;
+    assert_eq!(
+        runtime
+            .dispatch(Action::Select(id))
+            .unwrap()
+            .commit
+            .as_deref(),
+        Some("吃")
+    );
+    (directory, runtime)
+}
+
+#[test]
+fn next_word_prediction_is_idle_and_only_explicit_selection_commits_it() {
+    let (_directory, mut runtime) = prediction_runtime();
+    assert!(runtime.is_idle());
+    assert!(!runtime.has_composition());
+    assert!(runtime.view().prediction);
+    let id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|row| row.text == "饭")
+        .unwrap()
+        .id;
+    assert_eq!(
+        runtime
+            .dispatch(Action::Select(id))
+            .unwrap()
+            .commit
+            .as_deref(),
+        Some("饭")
+    );
+}
+
+#[test]
+fn next_word_prediction_passes_space_return_and_digits_to_the_editor() {
+    for action in [
+        Action::SelectHighlighted,
+        Action::Command(Command::CommitRaw),
+        Action::Character {
+            value: b'1',
+            shift: false,
+        },
+        Action::Command(Command::Backspace),
+        Action::Finish,
+    ] {
+        let (_directory, mut runtime) = prediction_runtime();
+        let transition = runtime.dispatch(action).unwrap();
+        assert!(!transition.handled && transition.commit.is_none());
+        assert!(transition.view.candidates.is_empty());
+    }
+}
+
+#[test]
+fn next_word_prediction_does_not_survive_focus_or_a_new_generation() {
+    let (_directory, mut runtime) = prediction_runtime();
+    let id = runtime.view().candidates[0].id;
+    runtime
+        .dispatch(Action::Character {
+            value: b'n',
+            shift: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        runtime.dispatch(Action::Select(id)),
+        Err(RuntimeError::StaleCandidate)
+    ));
+    let (_directory, mut runtime) = prediction_runtime();
+    let transition = runtime.focus(false).unwrap();
+    assert!(transition.commit.is_none() && transition.view.candidates.is_empty());
+}
+
+#[test]
+fn next_word_prediction_privacy_gate_clears_and_suppresses_suggestions_immediately() {
+    let (_directory, mut runtime) = prediction_runtime();
+    let id = runtime.view().candidates[0].id;
+    runtime.set_prediction_allowed(false).unwrap();
+    assert!(runtime.view().candidates.is_empty());
+    assert!(matches!(
+        runtime.dispatch(Action::Select(id)),
+        Err(RuntimeError::StaleCandidate)
+    ));
+    for value in b"chi" {
+        runtime
+            .dispatch(Action::Character {
+                value: *value,
+                shift: false,
+            })
+            .unwrap();
+    }
+    let id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|row| row.text == "吃")
+        .unwrap()
+        .id;
+    assert_eq!(
+        runtime
+            .dispatch(Action::Select(id))
+            .unwrap()
+            .commit
+            .as_deref(),
+        Some("吃")
+    );
+    assert!(runtime.view().candidates.is_empty());
+}
+
+#[test]
+fn next_word_prediction_leaves_navigation_and_shortcuts_to_the_editor() {
+    for (index, action) in [
+        Action::NextCandidate,
+        Action::PreviousCandidate,
+        Action::NextPage,
+        Action::PreviousPage,
+        Action::FirstCandidateOrHome,
+        Action::LastCandidate,
+        Action::Command(Command::MoveRight),
+        Action::Command(Command::ConversionLeft),
+        Action::SegmentMoveLeft,
+        Action::SegmentMoveRight,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_directory, mut runtime) = prediction_runtime();
+        runtime.set_left_right_navigation(true);
+        let transition = runtime.dispatch(action).unwrap();
+        assert!(
+            !transition.handled && transition.commit.is_none(),
+            "action {index}"
+        );
+        assert!(transition.view.candidates.is_empty(), "action {index}");
+    }
+}
+
+#[test]
+fn next_word_prediction_is_not_held_as_a_phrase_piece() {
+    let (_directory, mut runtime) = prediction_runtime();
+    runtime.set_phrase_preedit(true);
+    let composition_epoch = runtime.composition_epoch();
+    let id = runtime.view().candidates[0].id;
+    let transition = runtime.dispatch(Action::Select(id)).unwrap();
+    assert_eq!(transition.commit.as_deref(), Some("饭"));
+    assert!(transition.view.editing_text.is_empty());
+    assert!(runtime.is_idle());
+    assert_eq!(runtime.composition_epoch(), composition_epoch);
+    assert!(runtime.focus(false).unwrap().commit.is_none());
 }
 
 #[test]
@@ -5985,6 +6171,7 @@ impl InputEngine for DigitCommitsEngine {
         };
         let count = words.len();
         Ok(EngineSnapshot {
+            prediction: false,
             scheme: KOREAN_SCHEME,
             nine_key: false,
             nine_key_spellings: Vec::new(),
@@ -6976,6 +7163,7 @@ impl InputEngine for WubiMixedEngine {
         };
         let count = words.len();
         Ok(EngineSnapshot {
+            prediction: false,
             scheme: self.scheme,
             nine_key: false,
             nine_key_spellings: Vec::new(),
@@ -7163,6 +7351,30 @@ fn paging_reaches_candidates_the_engine_withheld() {
     );
 }
 
+/// 停在不满的末页再按 `+`，展开会把隐藏的候选放出来，末页随之后移。展开之后这一页已经不是
+/// 末页了，高亮必须真的前进，否则候选窗换了一帧、页码还停在旧页，数字键 1 选到的是翻页前
+/// 那一页的第一个候选（#9517）。
+#[test]
+fn paging_past_the_short_last_page_moves_the_highlight() {
+    // 三个候选、每页五个：只有一页，而且不满。按 `+` 会展开隐藏的七个，候选数从 3 变成 10，
+    // 末页从第 0 页后移到第 1 页——这一页已经不再是末页，高亮必须跟着走。
+    let mut runtime = withholding_runtime(3, 7, 5);
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    assert_eq!(runtime.view().page_count, 1);
+    let past = runtime.dispatch(Action::NextPage).unwrap().view;
+    assert_eq!(
+        past.page, 1,
+        "展开长出了新页之后高亮必须前进，否则数字键选的是翻页前那一页"
+    );
+    // 候选窗看到的第一行，和按 1 选中的第一个候选必须是同一行。
+    assert!(!past.candidates.is_empty());
+    let shown_first = past.candidates[0].text.clone();
+    let first = past.candidates[0].id;
+    let committed = runtime.dispatch(Action::Select(first)).unwrap();
+    assert_eq!(committed.commit.as_deref(), Some(shown_first.as_str()));
+}
+
 /// 云联想的回包在组字没变时改写候选。用户还停在第一条时，高亮留在新的第一条；
 /// 已经按 `+` 翻到下一页时，高亮留在那一页，不弹回第一页。再打一个字母仍从第一页开始。
 #[test]
@@ -7309,8 +7521,11 @@ fn candidate_page_len_matches_the_published_page_without_building_rows() {
     short.focus(true).unwrap();
     type_key(&mut short);
     assert_eq!(short.candidate_page_len(), 3);
-    short.dispatch(Action::NextPage).unwrap();
-    assert_eq!(short.candidate_page_len(), 5);
+    let next = short.dispatch(Action::NextPage).unwrap().view;
+    // 展开后长出第二页，当前页只有剩余两行；轻量计数必须与发布页一致。
+    assert_eq!(next.page, 1);
+    assert_eq!(short.candidate_page_len(), 2);
+    assert_eq!(short.candidate_page_len(), next.candidates.len());
 
     let mut runtime = withholding_runtime(12, 8, 5);
     runtime.focus(true).unwrap();
@@ -7455,21 +7670,20 @@ fn online_candidates_do_not_change_engine_after_generation_exhaustion() {
 
 #[test]
 fn expansion_that_fills_the_current_page_does_not_advance_past_it() {
-    // Three offered is a single short page. Asking for the next one has nowhere to go, so the
-    // arrivals fill this page instead - advancing would step straight over them.
-    let mut runtime = withholding_runtime(3, 4, 5);
+    // 展开只补满当前页、没有长出新页时留在原页；长出新页的场景由相邻的翻页回归覆盖。
+    let mut runtime = withholding_runtime(3, 2, 5);
     runtime.focus(true).unwrap();
     type_key(&mut runtime);
     let filled = runtime.dispatch(Action::NextPage).unwrap().view;
     assert_eq!(filled.page, 0);
-    assert_eq!(filled.page_count, 2);
+    assert_eq!(filled.page_count, 1);
     assert_eq!(filled.candidates.len(), 5);
     assert_eq!(
         filled.candidates.first().map(|c| c.text.as_str()),
         Some("candidate-0")
     );
-    // The page is no longer short, so the next request moves on as usual.
-    assert_eq!(runtime.dispatch(Action::NextPage).unwrap().view.page, 1);
+    // 所有候选已展开，再按下一页也不能越过唯一一页。
+    assert_eq!(runtime.dispatch(Action::NextPage).unwrap().view.page, 0);
 }
 
 #[test]
@@ -8039,6 +8253,7 @@ struct SpellingMarksEngine {
 impl InputEngine for SpellingMarksEngine {
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
         Ok(EngineSnapshot {
+            prediction: false,
             scheme: self.scheme,
             nine_key: false,
             nine_key_spellings: Vec::new(),

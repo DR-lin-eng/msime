@@ -429,9 +429,9 @@ class ReleaseExtrasTests(unittest.TestCase):
 class DownloadGuideTests(unittest.TestCase):
     def guide(self, *extra: str) -> str:
         return subprocess.run(
-            [sys.executable, "-I", str(SCRIPTS / "edition_bundle.py"), "download-guide", "--editions", "wubi,full,japanese", "--version", "1.2.0",
+            [sys.executable, "-I", "-X", "utf8", str(SCRIPTS / "edition_bundle.py"), "download-guide", "--editions", "wubi,full,japanese", "--version", "1.2.0",
              "--download-base", DOWNLOAD + "macos-v1.2.0/", *extra],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", check=True,
         ).stdout
 
     def test_full_edition_comes_first_with_names_from_the_edition_table(self):

@@ -31,6 +31,7 @@ Android 注音大千保留原有 4 dp 键距上限；设置页静态预览展示
 - 使用外盘 Xcode 27.1（`DEVELOPER_DIR` 指向其 `Contents/Developer`）在专用 iOS 26.5 模拟器运行 `KeyboardGeometrySettingsTests`、`OneHandModeTests`、`KeyGapRoutingTests`，30 项通过；原生 `MSIMEApp` 与键盘扩展编译通过。系统默认 Command Line Tools 不含 XCTest，直接用它会让不相关的豆包传输门禁失败；切换本任务环境变量后该套件通过，不修改全局 Xcode 选择。
 - Android 只验证了原生 Java 编译和 JVM/设备测试源文件编译，没有装进 Android 模拟器。鸿蒙缺 `ohpm` / `hvigorw`，没有完成 HAP 编译。三端均未进行真机验收。
 - macOS 偏好覆盖检查显式记录新增宽度字段仅适用于移动端，桌面屏幕键盘没有对应滑块；`preference_coverage.py` 在补齐声明前失败、补齐后通过。
+- iOS 原生界面用例 `testKeyboardSpacingSettingsPersist` 使用新间距范围换算，并在读值及调节前滚动定位滑块，避免误点底部标签栏；专用模拟器上该用例通过。
 - 同输入的几何基线、补丁重建与回滚校验保存在任务旁的验证产物中，恢复后的源码哈希必须等于原始源码。
 
 历史笔记审计：[共享几何读取](../simplification/2026-10-14-touch-keyboard-geometry-preferences.md)部分重叠，原地更新范围并互链；[Android 高度范围](2026-10-08-android-keyboard-height-range.md)保留平台高度决定，与本次宽度新增无冲突。

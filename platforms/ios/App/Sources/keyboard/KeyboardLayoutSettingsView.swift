@@ -92,7 +92,7 @@ struct KeyboardLayoutSettingsView: View {
       .contentShape(Rectangle())
       .gesture(heightDrag)
       .accessibilityIdentifier("keyboardHeightGrip")
-      .accessibilityLabel("键盘高度")
+      .accessibilityLabel("底部留白")
       .accessibilityValue(heightPercent(height))
       .accessibilityAdjustableAction { direction in
         height = KeyboardGeometry.clamped(height + (direction == .increment ? 2 : -2), 0, 48)
@@ -175,7 +175,7 @@ struct KeyboardLayoutSettingsView: View {
         .accessibilityIdentifier("appHideLanguageKeySwitch")
       DesignDivider()
       sliderRow("底部留白", value: $height, range: 0...48, identifier: "appKeyboardHeightSlider",
-                field: .height, format: heightPercent)
+                field: .height, format: { "\(Int(max(0, $0).rounded())) pt" })
       DesignDivider()
       sliderRow("单个按键高度", value: $keyHeight, range: 28...64, identifier: "appKeyHeightSlider",
                 field: .keyHeight, format: { "\(Int($0.rounded())) pt" })

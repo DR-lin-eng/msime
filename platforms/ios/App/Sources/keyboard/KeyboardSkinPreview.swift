@@ -71,12 +71,14 @@ struct KeyboardSkinPreview: View {
 
   /// 390 点宽时的画布高度。带工具栏和无顶栏两种变体是设计稿的键盘缩略图（390 × 292，去掉工具栏为 234），按键下方以主屏指示条区域收尾；候选行变体保持原先的 260，不带该区域。
   private var referenceHeight: CGFloat {
+    let stripHeight: CGFloat
     switch topStrip {
-    case .candidates: 260
-    case .toolbar: 292
-    case .hidden: 234
-    case .reserved: 292
+    case .candidates: stripHeight = 32
+    case .toolbar, .reserved: stripHeight = 46
+    case .hidden: stripHeight = 0
     }
+    return keyHeight * 4 + layout.rowSpacing * 3 + stripHeight
+      + (stripHeight > 0 ? layout.rowSpacing : 0) + 7 + (drawsHomeIndicator ? 24 : 7)
   }
 
   private var drawsHomeIndicator: Bool { topStrip != .candidates }
@@ -90,7 +92,7 @@ struct KeyboardSkinPreview: View {
     VStack(spacing: 0) {
       VStack(spacing: layout.rowSpacing) {
         if topStrip != .hidden { strip }
-        keys
+        VStack(spacing: layout.rowSpacing) { keys }
           .frame(height: keyHeight * 4 + layout.rowSpacing * 3)
           .padding(.horizontal, (390 - 14) * (1 - min(100, max(75, widthPercent)) / 100) / 2)
       }

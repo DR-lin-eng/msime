@@ -75,7 +75,7 @@ final class FourteenKeyKeyboardTests: XCTestCase {
     for width in [320.0, 414.0] {
       let controller = makeController(width: width)
       let reference = try button("returnKey", in: controller).bounds.height
-      XCTAssertGreaterThanOrEqual(reference, KeyboardHeightPercent.portraitKeyHeight(tablet: false) - 0.5)
+      XCTAssertEqual(reference, KeyboardLayoutPreference.keyHeight, accuracy: 0.5)
       XCTAssertEqual(controller.view.constraints.first { $0.identifier == "keyboardHeight" }?.constant,
                      KeyboardViewController.keyboardHeight(separateReadingRow: true),
                      "the 26-key keyboard plus the reading line, with keys as tall as the 26 keys")
@@ -298,7 +298,7 @@ final class FourteenKeyKeyboardTests: XCTestCase {
     XCTAssertTrue(InputSchemePreference.offeredSchemes.contains(.fourteenKey))
     let qw = try button("fourteenKeyQW", in: controller)
     XCTAssertTrue(shown(qw))
-    XCTAssertEqual(qw.bounds.height, KeyboardHeightPercent.portraitKeyHeight(tablet: true), accuracy: 0.5)
+    XCTAssertEqual(qw.bounds.height, KeyboardLayoutPreference.keyHeight, accuracy: 0.5)
     XCTAssertFalse(shown(try view("numberRow", in: controller)))
     XCTAssertFalse(shown(try button("tabletLayerKey", in: controller)), "the 14 keys use the phone bottom row")
     XCTAssertTrue(shown(try button("returnKey", in: controller)))

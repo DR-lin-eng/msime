@@ -70,10 +70,10 @@ final class MorePanelFoldTests: XCTestCase {
       return a.minX < b.minX
     }
     XCTAssertEqual(ordered.map(\.tool.title), expectedTitles)
-    XCTAssertEqual(panel.pageCount, (expectedTitles.count + 11) / 12)
+    XCTAssertEqual(panel.pageCount, (expectedTitles.count + grid.tilesPerPage - 1) / grid.tilesPerPage)
     for index in 0..<panel.pageCount {
-      XCTAssertEqual(tiles.filter { page(of: $0, in: scroll) == index }.count, min(12, expectedTitles.count - index * 12),
-                     "page \(index + 1) holds 4 × 3 tiles")
+      XCTAssertEqual(tiles.filter { page(of: $0, in: scroll) == index }.count, min(grid.tilesPerPage, expectedTitles.count - index * grid.tilesPerPage),
+                     "每页按可用空间分页，工具图块保持固定高度")
     }
     // 翻页能让每个图块都进入视野。
     for tile in ordered {
@@ -87,7 +87,7 @@ final class MorePanelFoldTests: XCTestCase {
     XCTAssertEqual(KeyboardFunctionTileView.height, 52)
   }
 
-  /// 三行的面板在最矮的手机竖屏键盘里也放得下：键盘高度调到最低（-12pt）、行距调到最小（4pt）时，三行格子和页码圆点都在面板里，不被裁掉。
+  /// 小键高下按可用空间分页，工具图块与页码圆点仍完整可见。
   func testThreeRowsFitTheShortestPortraitKeyArea() {
     let tools = (0..<20).map { index in KeyboardTool(id: "tool\(index)", title: "工具\(index)", face: .glyph("\(index)")) {} }
     let form = KeyboardFormFactor.phone
@@ -99,7 +99,7 @@ final class MorePanelFoldTests: XCTestCase {
       panel.frame = CGRect(x: 0, y: 0, width: 375, height: available)
       panel.layoutIfNeeded()
       let grid = descendants(panel).compactMap { $0 as? KeyboardPagedGridView }.first
-      XCTAssertEqual(grid?.rows, 3)
+      XCTAssertLessThanOrEqual(grid?.rows ?? 0, 3)
       let dots = descendants(panel).compactMap { $0 as? KeyboardPagerDotsView }.first
       for view in [grid as UIView?, dots as UIView?].compactMap({ $0 }) {
         XCTAssertLessThanOrEqual(view.convert(view.bounds, to: panel).maxY, available + 0.5, "\(type(of: panel)) in \(available)pt")
@@ -118,7 +118,7 @@ final class MorePanelFoldTests: XCTestCase {
     let phone = KeyboardMorePickerView(tools: tools, formFactor: .phone)
     phone.frame = CGRect(x: 0, y: 0, width: 380, height: 201)
     phone.layoutIfNeeded()
-    XCTAssertEqual(phone.pageCount, 2)
+    XCTAssertEqual(phone.pageCount, 3)
     let grid = descendants(tablet).compactMap { $0 as? KeyboardPagedGridView }.first
     XCTAssertEqual(grid?.tilesPerPage, 18)
     let landscape = KeyboardMorePickerView(tools: tools, formFactor: .phone, landscape: true)
@@ -274,7 +274,7 @@ final class MorePanelFoldTests: XCTestCase {
     XCTAssertEqual(bar.percent, 100)
     XCTAssertEqual(try button("spaceKey", in: controller).superview?.alpha, 1, "the keys stay live under the bar")
     let keyBlock = KeyboardViewController.keyBlockHeight(
-      keyHeight: KeyboardHeightPercent.portraitKeyHeight(tablet: false), rows: 4, rowSpacing: CGFloat(KeyboardLayoutPreference.rowSpacing))
+      keyHeight: CGFloat(KeyboardLayoutPreference.keyHeight), rows: 4, rowSpacing: CGFloat(KeyboardLayoutPreference.rowSpacing))
     XCTAssertEqual(bar.range.lowerBound, KeyboardViewController.heightPercent(adjustment: -12, keyBlock: keyBlock))
     XCTAssertEqual(bar.range.upperBound, KeyboardViewController.heightPercent(adjustment: 48, keyBlock: keyBlock))
 

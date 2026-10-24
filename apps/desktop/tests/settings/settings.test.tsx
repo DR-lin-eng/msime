@@ -4220,7 +4220,7 @@ test("the iPad digit row and Tab key switch appears only where the plugin report
       }}
     />,
   );
-  await screen.findByLabelText("键盘高度", undefined, { timeout: 3000 });
+  await screen.findByLabelText("单个按键高度", undefined, { timeout: 3000 });
   await waitFor(() => expect(screen.queryByLabelText("按键音")).not.toBeNull());
   expect(screen.queryByLabelText("数字行与 Tab 键")).toBeNull();
   expect(screen.queryByLabelText("横屏分离式键盘")).toBeNull();
@@ -4280,7 +4280,7 @@ test("the touch toolbar switches appear only on a host that reads them and save 
       }}
     />,
   );
-  await screen.findByLabelText("键盘高度", undefined, { timeout: 3000 });
+  await screen.findByLabelText("单个按键高度", undefined, { timeout: 3000 });
   expect(screen.queryByLabelText("工具栏：剪贴板历史")).toBeNull();
   android.unmount();
 
@@ -4380,7 +4380,7 @@ test("the shuangpin key hint switch is not listed on an edition without double p
       }}
     />,
   );
-  await screen.findByLabelText("键盘高度", undefined, { timeout: 3000 });
+  await screen.findByLabelText("单个按键高度", undefined, { timeout: 3000 });
   expect(screen.queryByRole("switch", { name: "双拼键位提示" })).toBeNull();
 });
 

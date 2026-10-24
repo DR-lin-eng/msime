@@ -9,7 +9,8 @@ final class KeyboardPagedGridView: UIView, UIScrollViewDelegate {
   static let dotsGap: CGFloat = 8
 
   let columns: Int
-  let rows: Int
+  private(set) var rows: Int
+  private let maximumRows: Int
   private let rowHeight: CGFloat
   private let rowGap: CGFloat
   private let columnGap: CGFloat
@@ -31,6 +32,7 @@ final class KeyboardPagedGridView: UIView, UIScrollViewDelegate {
   init(columns: Int, rows: Int = 2, rowHeight: CGFloat, rowGap: CGFloat, columnGap: CGFloat, sidePadding: CGFloat, showsDots: Bool = true) {
     self.columns = max(1, columns)
     self.rows = max(1, rows)
+    maximumRows = max(1, rows)
     self.rowHeight = rowHeight
     self.rowGap = rowGap
     self.columnGap = columnGap
@@ -120,6 +122,16 @@ final class KeyboardPagedGridView: UIView, UIScrollViewDelegate {
     let width = bounds.width
     let dotsBlock = showsDots ? Self.dotsGap + KeyboardPagerDotsView.dotSide : 0
     let scrollHeight = max(0, bounds.height - dotsBlock)
+    // 小单键布局减少每页行数，保持工具图块本身的高度，避免挤压或裁掉第三行。
+    let fittingRows = min(maximumRows, max(1, Int((scrollHeight + rowGap) / (rowHeight + rowGap))))
+    if fittingRows != rows {
+      let firstVisible = currentPage * tilesPerPage
+      let currentTiles = tiles
+      rows = fittingRows
+      setTiles(currentTiles, preservingPage: false)
+      setPage(min(firstVisible / tilesPerPage, pageCount - 1))
+      invalidateIntrinsicContentSize()
+    }
     isApplyingLayout = true
     scrollView.frame = CGRect(x: 0, y: 0, width: width, height: scrollHeight)
     if showsDots {

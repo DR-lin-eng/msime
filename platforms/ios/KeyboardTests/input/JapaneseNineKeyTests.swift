@@ -57,7 +57,7 @@ final class JapaneseNineKeyTests: XCTestCase {
     XCTAssertTrue(panel.isHidden)
     controller.view.layoutIfNeeded()
     let letter = try XCTUnwrap(nodes(controller.view).first { $0.accessibilityLabel == "字母 A" } as? UIButton)
-    XCTAssertGreaterThan(letter.bounds.height, 40)
+    XCTAssertEqual(letter.bounds.height, KeyboardLayoutPreference.keyHeight, accuracy: 0.5)
     picker.sendActions(for: .primaryActionTriggered)
     let nine = try XCTUnwrap(nodes(controller.view).first { $0.accessibilityIdentifier == "schemeCard-japaneseNineKey" } as? UIButton)
     nine.sendActions(for: .primaryActionTriggered)

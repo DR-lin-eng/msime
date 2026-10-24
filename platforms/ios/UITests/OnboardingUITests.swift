@@ -339,10 +339,15 @@ final class OnboardingUITests: XCTestCase {
   /// Scroll the 键盘 page's form until `element` is on screen. The keyboard preview above the form reads a vertical drag as a row-spacing change, so the drag runs near the left edge of the form's lower half, clear of the preview and of the slider tracks, which start further in.
   @MainActor
   private func revealBelowKeyboardPreview(_ element: XCUIElement, in app: XCUIApplication) {
-    for _ in 0..<6 {
-      if element.exists && element.isHittable { return }
-      let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.84))
-      start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.6)))
+    for _ in 0..<12 {
+      let preview = app.otherElements["keyboardLayoutPreview"]
+      let upper = preview.exists ? preview.frame.maxY + 18 : app.navigationBars.firstMatch.frame.maxY
+      let lower = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
+      if element.exists && element.isHittable && element.frame.midY > upper && element.frame.midY < lower { return }
+      let above = element.exists && element.frame.midY < upper
+      let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: above ? 0.64 : 0.84))
+      let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: above ? 0.84 : 0.64))
+      start.press(forDuration: 0.05, thenDragTo: end)
     }
     XCTAssertTrue(element.exists && element.isHittable, "\(element) never scrolled into view: \(visible(app))")
   }

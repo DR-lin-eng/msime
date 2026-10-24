@@ -535,7 +535,7 @@ test("the phone keyboard page opens with 布局 and its Chinese keyboard choice"
   expect(within(layout).getAllByText("中文键盘").length).toBeGreaterThan(0);
   expect(within(layout).queryByText("键盘高度")).toBeNull();
   const size = within(page).getByRole("region", { name: "尺寸" });
-  for (const row of ["键盘高度", "按键间距", "行间距"]) {
+  for (const row of ["底部留白", "单个按键高度", "按键间距", "行间距"]) {
     expect(within(size).getAllByText(row).length).toBeGreaterThan(0);
   }
   expect(within(size).getByRole("button", { name: "恢复屏幕键盘默认设置" }).textContent).toBe(

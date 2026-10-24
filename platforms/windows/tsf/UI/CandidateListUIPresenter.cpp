@@ -516,13 +516,26 @@ HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ I
     }
     msime::tsf::EngineResult selected;
     if (!msime::tsf::EngineSessionAdapter::parse_result(raw, &selected, &error)) return S_FALSE;
-    if (selected.has_commit && !selected.commit.empty())
+    // 完整回复已经包含 Server 暂存的全部词段；本地选择只负责推进自己的会话，不能用它的尾词覆盖整段组字。
+    const bool serverFinal = serverChoice && !serverChoice->empty() &&
+                             serverChoice->find(L'\t') == std::wstring::npos;
+    if (serverFinal || (selected.has_commit && !selected.commit.empty()))
     {
-        const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),
-                                          static_cast<int>(selected.commit.size()), nullptr, 0);
-        std::wstring commit(static_cast<size_t>(n > 0 ? n : 0), L'\0');
-        if (n > 0) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),
-                                       static_cast<int>(selected.commit.size()), commit.data(), n);
+        std::wstring commit;
+        if (serverFinal)
+        {
+            commit = *serverChoice;
+        }
+        else
+        {
+            const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),
+                                              static_cast<int>(selected.commit.size()), nullptr, 0);
+            if (n <= 0) return S_FALSE;
+            commit.assign(static_cast<size_t>(n), L'\0');
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),
+                                   static_cast<int>(selected.commit.size()), commit.data(), n) != n)
+                return S_FALSE;
+        }
         // 和空格、回车、点选一样：数字选中的符号候选恰好是一个左半边时补上右半边，上屏之后记下这一对并把光标移回两半之间。
         const WCHAR pairedClosing = _CandidateCommitPairedClosing(commit);
         const WCHAR pairedOpening = pairedClosing != 0 ? commit.front() : L'\0';
@@ -538,6 +551,9 @@ HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ I
             _DeleteCandidateList(FALSE, pContext);
             return hr;
         }
+        // Server 已结束而本地仍有剩余时，写入完整文本后再清掉本地尾巴，下一次输入从新组字开始。
+        if (serverFinal && (!selected.view.editing_text.empty() || !selected.view.phrase_prefix.empty()))
+            (void)_CancelHostComposition();
         // 选中的词写进组字范围后要结束组字。以前数字选词只关候选列表，TSF 组字还罩在刚上屏的词上，下一个字母开始的新组字把它整段替换掉：打 pingguo 按 1 得到「苹果」，再按 n 只剩「n」。真机上 WPF 文本框里复现，2026-09-12 的 005d8820b7 引入。
         _smartPunctuationShadowChar = commit.back();
         _smartPunctuationShadowValid = true;

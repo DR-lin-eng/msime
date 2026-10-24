@@ -50,6 +50,7 @@ NOT_APPLICABLE = {
     "voice_theme": "the voice overlay follows the colour mode on macOS (surface_themes_follow)",
     "touch_key_spacing_tenths": "the touch keyboard; the macOS screen keyboard panel draws the default spacing whatever is stored, and the page offers no slider (`touch_keyboard_spacing` is false)",
     "touch_row_spacing_tenths": "the touch keyboard; the macOS screen keyboard panel draws the default spacing whatever is stored, and the page offers no slider (`touch_keyboard_spacing` is false)",
+    "touch_keyboard_width_percent": "仅移动端调整普通按键区宽度；macOS 屏幕键盘保持固定宽度，共享设置页不提供此滑块",
     "touch_keyboard_height_adjustment": "the touch keyboard and the Windows panel window; the macOS screen keyboard window has a fixed height, and the page offers no slider (`touch_keyboard_height` is false)",
     "touch_keyboard_split_portrait": "仅 Android 大屏触屏键盘支持竖屏分离；macOS 屏幕键盘不采用分离布局，共享设置页不提供此开关",
     "touch_voice_shortcut": "the touch keyboard",

@@ -208,6 +208,7 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         Rect editorBounds = new Rect();
         AccessibilityNodeInfo editorNode = await(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused));
         editorNode.getBoundsInScreen(editorBounds);
+        String focusedWindow = inputFocusIdentity();
         Rect card = openFloatingPreview();
         // 这一段有五处等待，失败时只报总阶段名看不出卡在哪一处，所以每处各标一句。
         stage = step + ": preview scroll area settles";
@@ -224,15 +225,20 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
             && !node.isLongClickable());
         stage = step + ": editor keeps focus";
         Rect editorAfter = new Rect();
-        // Android 9 会从交互窗口列表移除被浮层盖住的编辑器；刷新展开前取得的同一节点核对焦点和位置。
-        if (!editorNode.refresh() || !editorNode.isFocused())
-            throw new AssertionError("Floating preview changed editor focus");
-        editorNode.getBoundsInScreen(editorAfter);
+        // API 28 的编辑器退出交互窗口列表时，原节点也可能无法刷新；系统输入焦点仍必须与展开前一致。
+        boolean editorAvailable = editorNode.refresh();
+        boolean sameInputWindow = focusedWindow.equals(inputFocusIdentity());
+        if (!sameInputWindow || editorAvailable && !editorNode.isFocused()
+                || !editorAvailable && android.os.Build.VERSION.SDK_INT != 28)
+            throw new AssertionError("Floating preview changed editor focus: same_input_window="
+                + sameInputWindow + " editor_available=" + editorAvailable
+                + " editor_focused=" + editorNode.isFocused());
+        if (editorAvailable) editorNode.getBoundsInScreen(editorAfter);
         stage = step + ": clipboard card stays in the panel";
         Rect cardAfter = new Rect();
         await(node -> node.isLongClickable() && node.getText() != null
             && node.getText().toString().startsWith("Synthetic preview line 0")).getBoundsInScreen(cardAfter);
-        if (!editorBounds.equals(editorAfter) || !card.equals(cardAfter))
+        if (editorAvailable && !editorBounds.equals(editorAfter) || !card.equals(cardAfter))
             throw new AssertionError("Floating preview moved the editor or keyboard card");
         stage = step + ": record actions stay available";
         await(described("剪贴板记录操作"));
@@ -301,6 +307,28 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
             throw new AssertionError("Synthetic editor focus switch refused");
         await(field("msime-test-password").and(AccessibilityNodeInfo::isFocused));
         previewClosed();
+    }
+
+    /** 仅在合成编辑器中比较系统输入窗口的标识，不记录 dump 或正文。 */
+    private String inputFocusIdentity() throws Exception {
+        try (var input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                automation.executeShellCommand("dumpsys input_method"))) {
+            var output = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int length;
+            while ((length = input.read(buffer)) != -1) {
+                if (output.size() + length > 1024 * 1024)
+                    throw new AssertionError("Synthetic input-method dump exceeded its bound");
+                output.write(buffer, 0, length);
+            }
+            String dump = output.toString(StandardCharsets.UTF_8.name());
+            for (String line : dump.split("\n")) {
+                String value = line.trim();
+                if (value.startsWith("mCurFocusedWindow=") && !value.startsWith("mCurFocusedWindow=null"))
+                    return value.split(" softInputMode=", 2)[0];
+            }
+            throw new AssertionError("Synthetic editor input focus was unavailable");
+        }
     }
 
     private Rect openFloatingPreview() {

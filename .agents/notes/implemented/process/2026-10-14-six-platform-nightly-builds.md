@@ -18,6 +18,8 @@ Issue #7767 希望用户在正式版之间能下载新提交的可安装构建�
 
 nightly 的回归修复保留 iOS 词库页原有的发现加载、下拉刷新和个人词库导入 sheet。HarmonyOS 接线门禁要求三条候选路径的六个释义调用完整闭合并传入显示开关，忽略注释且允许换行，防止相同参数文本的注释掩盖真实接线错误。Android 模糊拼音验收以候选内容和关闭规则后的缺席为契约；词库排序或学习改变候选排名时，仍能验证模糊规则本身。macOS DMG 创建输出系统工具错误，最多重试三次，每次前后清理半成品；持续失败继续阻止签名和上传。
 
+Android 的手动 `workflow_dispatch` 与可复用 `workflow_call` 都默认 `publish=false`：没有发布密钥的 fork 也能生成开发签名 APK artifact。显式选择 `publish=true` 仍同时要求 `ANDROID_RELEASE_KEYSTORE_BASE64` 与 `ANDROID_RELEASE_KEYSTORE_PASSWORD`，缺少时失败，并提示只构建应改用 `publish=false`；不把正式发布悄悄降级为开发签名。`scripts/test-android-release-signing.py` 执行实际 workflow 的签名入口，用合成数据验证缺省构建、凭据缺失或不完整、正常解码、非法 Base64 与退出清理。
+
 Android 发布链通过 `install-ndk.sh` 安装固定 NDK，下载解压失败或安装残缺时最多重试三次，以版本文件与宿主编译器同时存在为成功标准。Fedora RPM 打包镜像显式安装 `dbus-daemon`，让使用 `GTestDBus` 的 IBus 模式提示测试能启动私有总线；不依赖被关闭的弱依赖安装。
 
 ## Alternatives considered

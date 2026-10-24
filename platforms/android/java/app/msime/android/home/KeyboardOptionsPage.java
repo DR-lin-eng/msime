@@ -47,7 +47,7 @@ import org.json.JSONObject;
 /**
  * 键盘页：布局（中文键盘 26 / 9 键、九键字母与数字键盘的左侧符号、双拼键位提示、键盘高度、按键间距、行间距、分离式键盘、竖屏也分离、浮动键盘、键盘底栏）、按键反馈（按键音、按键振动、按键弹出预览、按键动画）、手势（滑动输入符号及其方向、滑行输入、空格滑动移动光标、长按空格语音）、键盘工具栏（预览、显示方式、各按钮）、剪贴板（工具栏显示最近复制、排列）和子页「AI 润色与回复」。
  *
- * <p>键盘与本页读同一批存储：按键间距、行间距、竖屏分离、双拼键位提示和表情/剪贴板/皮肤三个工具栏按钮在共享偏好里（`touch_key_spacing_tenths`、`touch_row_spacing_tenths`、`touch_keyboard_split_portrait`、`touch_shuangpin_key_hints`、`touch_toolbar.*`）；键盘高度、分离式键盘主开关、浮动键盘、物理键盘时候选栏跟随光标、键盘底栏、底部留白、按键弹出预览、按键动画、三个手势、常用语/输入方式/浮动键盘三个工具栏按钮和「显示方式：隐藏」（整行不显示，候选条照常显示）只有 Android 用，在 {@link AndroidLocalSettings} 里。键盘高度按设计以 75–170 % 显示，存的是 dp（{@link KeyboardHeightPolicy#heightPercentToAdjustment}），本地没写过时沿用共享偏好里旧的 `touch_keyboard_height_adjustment`。按键音和按键振动是 Android 一直以来的本地开关（`KeyboardFeedbackStore`），键盘的功能面板改的也是它们。
+ * <p>键盘与本页读同一批存储：按键区域宽度、按键间距、行间距、竖屏分离、双拼键位提示和表情/剪贴板/皮肤三个工具栏按钮在共享偏好里（`touch_keyboard_width_percent`、`touch_key_spacing_tenths`、`touch_row_spacing_tenths`、`touch_keyboard_split_portrait`、`touch_shuangpin_key_hints`、`touch_toolbar.*`）；键盘高度、分离式键盘主开关、浮动键盘、物理键盘时候选栏跟随光标、键盘底栏、底部留白、按键弹出预览、按键动画、三个手势、常用语/输入方式/浮动键盘三个工具栏按钮和「显示方式：隐藏」（整行不显示，候选条照常显示）只有 Android 用，在 {@link AndroidLocalSettings} 里。键盘高度按设计以 75–170 % 显示，存的是 dp（{@link KeyboardHeightPolicy#heightPercentToAdjustment}），本地没写过时沿用共享偏好里旧的 `touch_keyboard_height_adjustment`。按键音和按键振动是 Android 一直以来的本地开关（`KeyboardFeedbackStore`），键盘的功能面板改的也是它们。
  */
 public class KeyboardOptionsPage extends ReloadingDetailPage {
     private final ClipboardExportActions clipboardExport = new ClipboardExportActions(this, this::reload);
@@ -64,7 +64,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
 
     @Override protected void onContentDestroyed() { clipboardExport.destroyed(); }
     @Override protected java.util.List<String> sectionTitles() {
-        return java.util.List.of("布局", "反馈", "手势", "工具栏", "剪贴板");
+        return java.util.List.of("布局", "尺寸", "反馈", "手势", "工具栏", "剪贴板");
     }
 
     private static final String[] ANIMATIONS = {"bounce", "ripple", "glow", "lift", "none"};
@@ -145,20 +145,40 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
                 preferences.optBoolean(ShuangpinKeyHintPolicy.PREFERENCE_KEY, false),
                 checked -> savePreference(ShuangpinKeyHintPolicy.PREFERENCE_KEY, checked));
         }
+        GroupCard dimensions = GroupCard.add(sectionColumn(target, "尺寸"), "尺寸");
+        KeyboardPreview preview = new KeyboardPreview(requireContext());
+        preview.setKeyboard(state.skin(), current == KeyboardScheme.QUANPIN_NINE_KEY, current.title());
+        preview.setGeometry(
+            KeyboardSpacingPolicy.widthPercent(NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100)),
+            KeyboardSpacingPolicy.keySpacing(NumberPolicy.strictInt(preferences, "touch_key_spacing_tenths", -1)),
+            KeyboardSpacingPolicy.rowSpacing(NumberPolicy.strictInt(preferences, "touch_row_spacing_tenths", -1)),
+            settings.has(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
+                ? settings.integer(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
+                : NumberPolicy.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE));
+        dimensions.addView(preview);
         int height = KeyboardHeightPolicy.heightAdjustmentToPercent(
             settings.has(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
                 ? settings.integer(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
                 : NumberPolicy.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE));
-        layout.slider("键盘高度", KeyboardHeightPolicy.MIN_HEIGHT_PERCENT, KeyboardHeightPolicy.MAX_HEIGHT_PERCENT, 1, height,
+        dimensions.slider("键盘高度", KeyboardHeightPolicy.MIN_HEIGHT_PERCENT, KeyboardHeightPolicy.MAX_HEIGHT_PERCENT, 1, height,
             KeyboardHeightPolicy::displayPercent,
             percent -> saveLocalSetting(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT,
                 KeyboardHeightPolicy.heightPercentToAdjustment(percent)));
-        layout.slider("按键间距", KeyboardSpacingPolicy.MIN_KEY_SPACING_TENTHS, KeyboardSpacingPolicy.MAX_KEY_SPACING_TENTHS, 1,
+        dimensions.slider("按键区域宽度", KeyboardSpacingPolicy.MIN_WIDTH_PERCENT, KeyboardSpacingPolicy.MAX_WIDTH_PERCENT, 1,
+            KeyboardSpacingPolicy.widthPercent(NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100)),
+            value -> value + "%", value -> savePreference("touch_keyboard_width_percent", value));
+        dimensions.footer("宽度仅调整普通键盘的按键区域；单手、分离和浮动模式使用各自的宽度。");
+        dimensions.slider("按键间距", KeyboardSpacingPolicy.MIN_KEY_SPACING_TENTHS, KeyboardSpacingPolicy.MAX_KEY_SPACING_TENTHS, 1,
             KeyboardSpacingPolicy.keySpacing(NumberPolicy.strictInt(preferences, "touch_key_spacing_tenths", -1)),
             KeyboardSpacingPolicy::display, value -> savePreference("touch_key_spacing_tenths", value));
-        layout.slider("行间距", KeyboardSpacingPolicy.MIN_ROW_SPACING_TENTHS, KeyboardSpacingPolicy.MAX_ROW_SPACING_TENTHS, 1,
+        dimensions.slider("行间距", KeyboardSpacingPolicy.MIN_ROW_SPACING_TENTHS, KeyboardSpacingPolicy.MAX_ROW_SPACING_TENTHS, 1,
             KeyboardSpacingPolicy.rowSpacing(NumberPolicy.strictInt(preferences, "touch_row_spacing_tenths", -1)),
             KeyboardSpacingPolicy::display, value -> savePreference("touch_row_spacing_tenths", value));
+        dimensions.button("恢复默认宽度与间距", null, "恢复", () -> savePreferences(values -> {
+            values.remove("touch_keyboard_width_percent");
+            values.remove("touch_key_spacing_tenths");
+            values.remove("touch_row_spacing_tenths");
+        }));
         layout.toggle("数字行", "26 键和韩文键盘的字母上方多一行 1–0，键盘整体高出一行；手机横屏时放不下，不显示",
             settings.bool(AndroidLocalSettings.NUMBER_ROW),
             checked -> saveLocalSetting(AndroidLocalSettings.NUMBER_ROW, checked));

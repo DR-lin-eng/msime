@@ -23,13 +23,18 @@ enum KeyboardLayoutPreference {
     set { defaults.set(newValue, forKey: hideLanguageKeyKey) }
   }
   static let oneHandedKey = "keyboard.oneHanded"
+  static let widthPercentKey = "keyboard.width.percent"
+  static var widthPercent: Double {
+    get { spacing(key: widthPercentKey, fallback: 100, range: 75...100) }
+    set { defaults.set(SharedNumber.clamped(newValue.rounded(), to: 75...100), forKey: widthPercentKey) }
+  }
   static var keySpacing: Double {
-    get { spacing(key: keySpacingKey, fallback: 6, range: 3...6) }
-    set { defaults.set(SharedNumber.clamped(newValue, to: 3...6), forKey: keySpacingKey) }
+    get { spacing(key: keySpacingKey, fallback: 6, range: 0...12) }
+    set { defaults.set(SharedNumber.clamped(newValue, to: 0...12), forKey: keySpacingKey) }
   }
   static var rowSpacing: Double {
-    get { spacing(key: rowSpacingKey, fallback: 7, range: 4...10) }
-    set { defaults.set(SharedNumber.clamped(newValue, to: 4...10), forKey: rowSpacingKey) }
+    get { spacing(key: rowSpacingKey, fallback: 7, range: 0...16) }
+    set { defaults.set(SharedNumber.clamped(newValue, to: 0...16), forKey: rowSpacingKey) }
   }
   /// Keyboard height adjustment relative to the platform's current default, in points.
   ///
@@ -54,7 +59,7 @@ enum KeyboardLayoutPreference {
   }
 
   static func resetToDefaults() {
-    for stored in [keySpacingKey, rowSpacingKey, heightAdjustmentKey, voiceShortcutKey] {
+    for stored in [widthPercentKey, keySpacingKey, rowSpacingKey, heightAdjustmentKey, voiceShortcutKey] {
       defaults.removeObject(forKey: stored)
     }
   }
@@ -63,10 +68,11 @@ enum KeyboardLayoutPreference {
   /// 只写传了值的那几项，其余保持文档里的样子。设置页原先每次都把四项一起写：键盘里调过高度之后，设置页上停留的还是旧高度，这时动一下任何别的控件，旧高度就被写回文档，键盘下次出现又变回设置页的值。
   @discardableResult
   static func saveGeometry(keySpacing: Double? = nil, rowSpacing: Double? = nil, heightAdjustment: Double? = nil,
-                           voiceShortcut: Bool? = nil, stateRoot: URL? = nil) -> Bool {
+                           widthPercent: Double? = nil, voiceShortcut: Bool? = nil, stateRoot: URL? = nil) -> Bool {
     guard let mapping = MetasequoiaInputSessionBridge.geometryMapping(
-      keySpacing: keySpacing, rowSpacing: rowSpacing, heightAdjustment: heightAdjustment, voiceEnabled: voiceShortcut),
+      keySpacing: keySpacing, rowSpacing: rowSpacing, heightAdjustment: heightAdjustment, widthPercent: widthPercent, voiceEnabled: voiceShortcut),
       MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot, mapping) else { return false }
+    if let widthPercent { self.widthPercent = widthPercent }
     if let keySpacing { self.keySpacing = keySpacing }
     if let rowSpacing { self.rowSpacing = rowSpacing }
     if let heightAdjustment { self.heightAdjustment = heightAdjustment }
@@ -76,6 +82,8 @@ enum KeyboardLayoutPreference {
 
   /// 把共享文档里的几何、语音与快捷符号镜像到 App Group。缺少几何项时保持原值，快捷符号缺省时采用共享默认；键盘和设置页每次出现都按文档对齐。
   static func mirrorGeometry(_ preferences: [String: Any]) {
+    // 旧文档或恢复默认时缺失字段，必须清掉上一次的宽度镜像。
+    widthPercent = SharedNumber.strictInt(preferences["touch_keyboard_width_percent"]).map { Double($0) } ?? 100
     defaults.set(normalizeQuickPunctuationSymbols(preferences["touch_quick_punctuation_symbols"] as? [String] ?? []),
                  forKey: quickPunctuationSymbolsKey)
     if let spacing = sharedKeySpacing(preferences["touch_key_spacing_tenths"]) { keySpacing = spacing }
@@ -114,7 +122,7 @@ enum KeyboardLayoutPreference {
   @discardableResult
   static func resetGeometry(stateRoot: URL? = nil) -> Bool {
     let written = MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot) { preferences in
-      for key in ["touch_key_spacing_tenths", "touch_row_spacing_tenths", "touch_keyboard_height_adjustment",
+      for key in ["touch_keyboard_width_percent", "touch_key_spacing_tenths", "touch_row_spacing_tenths", "touch_keyboard_height_adjustment",
                   "touch_voice_shortcut", "touch_quick_punctuation_symbols"] {
         preferences.removeValue(forKey: key)
       }
@@ -190,12 +198,12 @@ enum KeyboardLayoutPreference {
   /// Values from the canonical document are integer tenths/points. Reject booleans and fractions before clamping so malformed synced data cannot silently become a valid geometry setting.
   static func sharedKeySpacing(_ value: Any?) -> Double? {
     guard let integer = SharedNumber.strictInt(value) else { return nil }
-    return SharedNumber.clamped(Double(integer) / 10, to: 3...6)
+    return SharedNumber.clamped(Double(integer) / 10, to: 0...12)
   }
 
   static func sharedRowSpacing(_ value: Any?) -> Double? {
     guard let integer = SharedNumber.strictInt(value) else { return nil }
-    return SharedNumber.clamped(Double(integer) / 10, to: 4...10)
+    return SharedNumber.clamped(Double(integer) / 10, to: 0...16)
   }
 
   static func sharedHeightAdjustment(_ value: Any?) -> Double? {

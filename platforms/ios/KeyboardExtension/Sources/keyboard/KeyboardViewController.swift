@@ -1077,6 +1077,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     root.addArrangedSubview(candidateStrip)
     // 候选栏和手写区不是键：落在它们里面的触摸照旧，它们的按钮也不来接键距里的触摸。
     root.gapRoutingExclusions = [candidateStrip, handwriting]
+    root.gapRoutingMarginExclusions = [oneHandRow]
     installOneHandRow(in: root)
     let numberRow = makeNumberRow()
     numberRowView = numberRow
@@ -1291,6 +1292,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 方案在按键建好之前就已应用，那一步已经请求过布局。
     guard keyColumn.superview === oneHandRow else { return }
     let mode = KeyboardOneHandLayout.effective(oneHandedMode, formFactor: formFactor)
+    applyCustomKeyboardWidth()
     guard mode != appliedOneHanded else { return }
     appliedOneHanded = mode
     let on = mode != .off
@@ -5347,12 +5349,28 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return KeyboardLayoutPreference.quickPunctuationSymbols
   }
 
+  /// 普通键区独立调宽，候选和工具栏保持全宽。特殊模式保留自己的宽度，避免重复缩放。
+  private var customKeyboardWidthRatio: CGFloat {
+    KeyboardOneHandLayout.effective(oneHandedMode, formFactor: formFactor) == .off && !wantsSplitKeyboard && !(traitCollection.userInterfaceIdiom == .pad && formFactor == .phone)
+      ? CGFloat(KeyboardLayoutPreference.widthPercent / 100) : 1
+  }
+
+  private func applyCustomKeyboardWidth() {
+    let available = max(0, view.bounds.width - formFactor.padding.leading - formFactor.padding.trailing)
+    let inset = available * (1 - customKeyboardWidthRatio) / 2
+    let margins = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+    if oneHandRow.layoutMargins != margins {
+      oneHandRow.isLayoutMarginsRelativeArrangement = true
+      oneHandRow.layoutMargins = margins
+    }
+  }
+
   private func updateLetterRowInsets() {
     guard letterRowViews.count > 1, let row = letterRowViews[1] as? UIStackView else { return }
     // 手机的中间一排两侧各缩进半个键，微软双拼用 `;` 键填上这块空位；iPad 的中间一排缩进 2.5% 开始，以回车结尾（`TabletLetterLayout`）。
     // 这个比例按按键区域本身的宽度计算，单手模式会把它收窄。
     let keysWidth = KeyboardOneHandLayout.keysWidth(
-      available: view.bounds.width - formFactor.padding.leading - formFactor.padding.trailing, mode: appliedOneHanded ?? .off)
+      available: (view.bounds.width - formFactor.padding.leading - formFactor.padding.trailing) * customKeyboardWidthRatio, mode: appliedOneHanded ?? .off)
     let margins: UIEdgeInsets
     if formFactor == .tablet {
       margins = UIEdgeInsets(top: 0, left: keysWidth * TabletLetterLayout.middleRowLeadingInset, bottom: 0, right: 0)
@@ -5370,6 +5388,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func applyLayoutPreferences() {
     guard actionRow != nil else { return }
     let layout = KeyboardLayoutPreference.geometry
+    applyCustomKeyboardWidth()
     updateLetterRowInsets()
     guard appliedLayout != layout else { return }
     appliedLayout = layout
@@ -7424,6 +7443,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       appliedCandidateColumnWidth = column
       if !visibleCandidates.isEmpty { renderCandidateStrip() }
     }
+    applyCustomKeyboardWidth()
     updateLetterRowInsets()
     if let globe = actionGlobeButton, globe.isHidden != !needsInputModeSwitchKey {
       updateKeyboardLayout()
@@ -7436,11 +7456,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     formFactor == .phone && letterRowViews.first?.isHidden == false
   }
 
-  /// 手机竖屏 26 键在存储行距之外增加 4pt 留白；横屏空间更紧，沿用存储行距。
+  /// 手机竖屏 26 键保留最多 4pt 的设计留白；小行距时同步收紧，零行距时不再额外留空。
   private var keyRowSpacing: CGFloat {
+    let spacing = CGFloat(KeyboardLayoutPreference.rowSpacing)
     let letterPadding: CGFloat = showsPhoneLetterRows && !isLandscape
-      ? KeyboardFormFactor.phoneLetterRowPadding : 0
-    return CGFloat(KeyboardLayoutPreference.rowSpacing) + letterPadding
+      ? min(KeyboardFormFactor.phoneLetterRowPadding, spacing) : 0
+    return spacing + letterPadding
   }
 
   /// 26 键收紧键帽后，把省下的高度放到键区上下，保持九键和英文键盘的外框一致。

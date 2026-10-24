@@ -235,12 +235,18 @@ final class OnboardingUITests: XCTestCase {
     XCTAssertFalse(app.buttons["layoutPreset_msime"].exists)
     // 语音入口已移到 语音输入 → 启动方式，所以这一页上无论标识符是什么，都没有与它相关的开关。
     XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "语音入口")).firstMatch.exists)
+    // 先把滑块滚入可点击区域，避免调节动作落到底部标签栏。
+    func adjust(_ slider: XCUIElement, to value: CGFloat) {
+      revealBelowKeyboardPreview(slider, in: app)
+      slider.adjust(toNormalizedSliderPosition: value)
+    }
     func position(_ slider: XCUIElement) throws -> CGFloat {
+      revealBelowKeyboardPreview(slider, in: app)
       let raw = try XCTUnwrap(slider.value as? String)
       let value = try XCTUnwrap(Double(raw.replacingOccurrences(of: "%", with: "")))
       if raw.contains("%") { return CGFloat(value / 100) }
-      let minimum = slider.identifier == "appKeySpacingSlider" ? 3.0 : 4.0
-      let maximum = slider.identifier == "appKeySpacingSlider" ? 6.0 : 10.0
+      let minimum = 0.0
+      let maximum = slider.identifier == "appKeySpacingSlider" ? 12.0 : 16.0
       return CGFloat((value - minimum) / (maximum - minimum))
     }
     let originalKeys = try position(keys), originalRows = try position(rows)
@@ -253,11 +259,11 @@ final class OnboardingUITests: XCTestCase {
       self.reachSettingsLink("keyboardLayoutLink", in: app)
       self.settingsEntry("keyboardLayoutLink", in: app).tap()
       guard keys.waitForExistence(timeout: 5) else { return }
-      keys.adjust(toNormalizedSliderPosition: originalKeys)
-      rows.adjust(toNormalizedSliderPosition: originalRows)
+      adjust(keys, to: originalKeys)
+      adjust(rows, to: originalRows)
     }
-    keys.adjust(toNormalizedSliderPosition: originalKeys > 0.5 ? 0 : 1)
-    rows.adjust(toNormalizedSliderPosition: originalRows > 0.5 ? 0 : 1)
+    adjust(keys, to: originalKeys > 0.5 ? 0 : 1)
+    adjust(rows, to: originalRows > 0.5 ? 0 : 1)
     let changedKeys = try position(keys), changedRows = try position(rows)
 
     reachSettingsLink("keyboardLayoutLink", in: app)
@@ -265,8 +271,8 @@ final class OnboardingUITests: XCTestCase {
     XCTAssertTrue(keys.waitForExistence(timeout: 5))
     XCTAssertEqual(try position(keys), changedKeys, accuracy: 0.01)
     XCTAssertEqual(try position(rows), changedRows, accuracy: 0.01)
-    keys.adjust(toNormalizedSliderPosition: originalKeys)
-    rows.adjust(toNormalizedSliderPosition: originalRows)
+    adjust(keys, to: originalKeys)
+    adjust(rows, to: originalRows)
     restore.done = true
   }
 

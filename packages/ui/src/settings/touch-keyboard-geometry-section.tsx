@@ -21,6 +21,9 @@ export type {
 
 export interface TouchKeyboardGeometrySectionProps extends TouchKeyboardToolbarSectionProps {
   heightAdjustment: number;
+  /** 仅移动宿主提供，普通键区居中缩放。 */
+  widthPercent?: number;
+  onWidthPercentChange?: (value: number) => void;
   keySpacingTenths: number;
   rowSpacingTenths: number;
   /** 宿主的键盘按 `touch_keyboard_height_adjustment` 改变高度时为 true（缺省）；macOS 和 Linux 的键盘窗口高度固定，不画「键盘高度」。 */
@@ -64,6 +67,8 @@ const heightText = (value: number) => (value === 0 ? "标准" : `${value > 0 ? "
 /** 「屏幕键盘」页共用的触屏键盘控件，即预览之后的各组：「尺寸」（高度、间距和重置）、「工具栏」，宿主有 iPad 数字行和 Tab 键或横屏分离式键盘时的「布局」，以及宿主有滑行输入时的「手势」。 */
 export function TouchKeyboardGeometrySection({
   heightAdjustment,
+  widthPercent,
+  onWidthPercentChange,
   keySpacingTenths,
   rowSpacingTenths,
   showHeight = true,
@@ -114,11 +119,25 @@ export function TouchKeyboardGeometrySection({
   // 只列这一页上看得到的几项：工具栏按钮只在触屏宿主的「工具栏」组里出现，以前桌面上也写着它。
   const resetSubjects = touchKeyboardResetSubjects({
     height: showHeight,
+    width: widthPercent !== undefined,
     spacing: showSpacing,
     voiceShortcut: showVoiceShortcut,
     toolbar: toolbarComponents || harmonyToolbar !== undefined,
   });
   const resetDescription = `${resetSubjects}回到默认`;
+  const widthRow = widthPercent !== undefined && (
+    <SliderRow
+      title="按键区域宽度"
+      wide={phone}
+      description={phone ? undefined : "普通键区居中收窄；单手、分离和浮动模式使用各自的宽度。"}
+      displayValue={`${widthPercent}%`}
+      valueText={`${widthPercent}%`}
+      min={75}
+      max={100}
+      value={widthPercent}
+      onChange={(value) => onWidthPercentChange?.(value)}
+    />
+  );
 
   return (
     <>
@@ -142,6 +161,7 @@ export function TouchKeyboardGeometrySection({
               value={heightAdjustment}
               onChange={onHeightAdjustmentChange}
             />
+            {widthRow}
             <SliderRow
               title="按键间距"
               wide
@@ -190,6 +210,7 @@ export function TouchKeyboardGeometrySection({
                 onChange={onHeightAdjustmentChange}
               />
             )}
+            {widthRow}
             {showSpacing && (
               <>
                 <SliderRow

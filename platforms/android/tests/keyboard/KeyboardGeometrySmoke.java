@@ -26,6 +26,10 @@ public final class KeyboardGeometrySmoke {
 
     public static void main(String[] args) {
         // 与 crates/client-core 的 default_touch_key_spacing_tenths / default_touch_row_spacing_tenths 同值。
+        check(KeyboardSpacingPolicy.widthPercent(80) == 80);
+        check(KeyboardSpacingPolicy.widthPercent(75) == 75);
+        check(KeyboardSpacingPolicy.widthPercent(74) == 100);
+        check(KeyboardSpacingPolicy.widthPercent(101) == 100);
         check(KeyboardSpacingPolicy.keySpacing(-1) == 60);
         check(BoundsPolicy.nonNegative(-1) == 0 && BoundsPolicy.nonNegative(7) == 7);
         check(BoundsPolicy.nonNegative(-1L) == 0L && BoundsPolicy.nonNegative(7L) == 7L);
@@ -101,16 +105,17 @@ public final class KeyboardGeometrySmoke {
             && KeyboardHeightPolicy.designKeyHeight(127) == 58
             && KeyboardHeightPolicy.designKeyHeight(170) == 78);
         check(KeyboardHeightPolicy.displayPercent(127).equals("127%"));
-        check(KeyboardSpacingPolicy.keySpacing(29) == 30);
-        check(KeyboardSpacingPolicy.keySpacing(61) == 60);
-        check(KeyboardSpacingPolicy.rowSpacing(39) == 40);
-        check(KeyboardSpacingPolicy.rowSpacing(101) == 100);
+        check(KeyboardSpacingPolicy.keySpacing(0) == 0);
+        check(KeyboardSpacingPolicy.keySpacing(121) == 120);
+        check(KeyboardSpacingPolicy.rowSpacing(0) == 0);
+        check(KeyboardSpacingPolicy.rowSpacing(161) == 160);
         check(KeyboardSpacingPolicy.keySpacing(35) == 35);
         check(KeyboardSpacingPolicy.rowSpacing(95) == 95);
         check(KeyboardSpacingPolicy.layoutKeySpacing(-1, KeyboardLayout.ZHUYIN_LAYOUT) == 40);
         check(KeyboardSpacingPolicy.layoutKeySpacing(35, KeyboardLayout.ZHUYIN_LAYOUT) == 35);
         check(KeyboardSpacingPolicy.layoutKeySpacing(-1, KeyboardLayout.STANDARD_TOUCH_LAYOUT) == 60);
-        check(KeyboardSpacingPolicy.layoutKeySpacing(61, KeyboardLayout.KOREAN_LAYOUT) == 60);
+        check(KeyboardSpacingPolicy.layoutKeySpacing(121, KeyboardLayout.KOREAN_LAYOUT) == 120);
+        check(KeyboardSpacingPolicy.layoutKeySpacing(120, KeyboardLayout.ZHUYIN_LAYOUT) == 40);
         check(KeyboardHeightPolicy.heightAdjustment(Integer.MIN_VALUE) == 0);
         // 九宫格加高只扩大上方键区；缩小时仍四行均分，底行不能被压扁。
         for (int adjustment = -46; adjustment <= 129; adjustment++) {

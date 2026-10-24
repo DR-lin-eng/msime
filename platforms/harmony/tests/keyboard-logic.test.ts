@@ -1911,13 +1911,21 @@ group("a report says which release it came from, or says nothing", () => {
   check(OsVersionPolicy.release("x".repeat(65)) === null, "an implausibly long value is refused");
   check(OsVersionPolicy.release("6.0\u00001") === null, "and so is one with a control character");
 });
+group("移动键盘宽度兼容旧文档并保留合法调整", () => {
+  check(KeyboardGeometry.widthPercent(undefined) === 100, "旧文档满宽");
+  check(KeyboardGeometry.widthPercent(80) === 80, "自定义宽度");
+  check(KeyboardGeometry.widthPercent(75) === 75, "最小宽度");
+  for (const invalid of [74, 101, 80.5, NaN, Infinity]) {
+    check(KeyboardGeometry.widthPercent(invalid) === 100, "异常值不缩小键盘");
+  }
+});
 group("spacing clamps to its range and falls back on a negative", () => {
   check(
     KeyboardGeometry.keySpacing(-1) === KeyboardGeometry.DEFAULT_KEY_SPACING_TENTHS,
     "a negative key spacing takes the default rather than the minimum",
   );
   check(
-    KeyboardGeometry.keySpacing(10) === KeyboardGeometry.MIN_KEY_SPACING_TENTHS,
+    KeyboardGeometry.keySpacing(0) === KeyboardGeometry.MIN_KEY_SPACING_TENTHS,
     "below-range key spacing clamps up",
   );
   check(
@@ -1929,7 +1937,7 @@ group("spacing clamps to its range and falls back on a negative", () => {
     "a negative row spacing takes the default",
   );
   check(
-    KeyboardGeometry.rowSpacing(10) === KeyboardGeometry.MIN_ROW_SPACING_TENTHS,
+    KeyboardGeometry.rowSpacing(0) === KeyboardGeometry.MIN_ROW_SPACING_TENTHS,
     "below-range row spacing clamps up",
   );
   check(
@@ -9597,8 +9605,8 @@ group(
       KeyboardGeometry.MAX_ROW_SPACING_TENTHS,
     );
     check(
-      minimum === 176 && standard === 197 && tallest === 254,
-      "the key area spans 176–254vp, 197 by default",
+      minimum === 164 && standard === 197 && tallest === 272,
+      "键区允许 164–272vp，默认仍为 197vp",
     );
     check(
       same(FunctionPanelPolicy.pickerGrid(false, tallest, row, chrome), 3, 12),

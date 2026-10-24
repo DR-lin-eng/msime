@@ -50,6 +50,8 @@ enum KeyGapRouting {
 /// 候选栏、手写区这类不是键的子树放进 `gapRoutingExclusions`，落在它们里面的命中原样返回，它们的按钮也不会被选来接空隙里的触摸。面板和弹层加在键盘根视图上而不在这里，盖住键区时先命中的是它们自己。
 final class KeyAreaStackView: UIStackView {
   var gapRoutingExclusions: [UIView] = []
+  /// 调窄键区产生的两侧留白不属于按键，不能按居中字母行的边距扩大触摸范围。
+  var gapRoutingMarginExclusions: [UIStackView] = []
   /// 把键帽左侧 `KeyGapRouting.returnYield` 让给紧挨在左边的 `yieldReceiver` 的键：底行的回车让给中/英。两者不相邻（别的布局把中/英挪走或藏起来）时不起作用。
   weak var yieldingKey: UIControl?
   weak var yieldReceiver: UIControl?
@@ -67,7 +69,8 @@ final class KeyAreaStackView: UIStackView {
     let frames = keys.map { Self.layoutFrame(of: $0, in: gap) }
     let reach = KeyGapRouting.reach(
       spacing: gap.spacing, axis: gap.axis,
-      margins: gap.isLayoutMarginsRelativeArrangement ? gap.layoutMargins : nil)
+      margins: gap.isLayoutMarginsRelativeArrangement && !gapRoutingMarginExclusions.contains(where: { $0 === gap })
+        ? gap.layoutMargins : nil)
     let local = convert(point, to: gap)
     guard let index = KeyGapRouting.nearest(to: local, in: frames, reach: reach) else { return hit }
     // 顶栏和第一排之间的间隔比行距还窄时，整段间隔都在第一排的够得着范围内；离候选栏这类非键区域更近的点仍然不交给键，空隙两侧各归一半。

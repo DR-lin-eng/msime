@@ -3942,11 +3942,12 @@ fn touch_spelling_position_defaults_to_the_editor_independently_of_the_candidate
 }
 
 #[test]
-fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
+fn touch_keyboard_geometry_preserves_defaults_bounds_and_legacy_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
     let mut legacy = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
     for key in [
+        "touch_keyboard_width_percent",
         "touch_key_spacing_tenths",
         "touch_row_spacing_tenths",
         "touch_keyboard_height_adjustment",
@@ -3960,6 +3961,7 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
     let bytes = serde_json::to_vec(&legacy).unwrap();
     fs::write(store.path(), &bytes).unwrap();
     let loaded = store.load().unwrap();
+    assert_eq!(loaded.preferences.touch_keyboard_width_percent, 100);
     assert_eq!(loaded.preferences.touch_key_spacing_tenths, 60);
     assert_eq!(loaded.preferences.touch_row_spacing_tenths, 70);
     assert_eq!(loaded.preferences.touch_keyboard_height_adjustment, 0);
@@ -3981,6 +3983,7 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
         .save(
             0,
             Preferences {
+                touch_keyboard_width_percent: 80,
                 touch_key_spacing_tenths: 35,
                 touch_row_spacing_tenths: 95,
                 touch_keyboard_height_adjustment: 24,
@@ -4010,19 +4013,29 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
         serde_json::to_value(TwentySixKeyNumberLayout::NineKey).unwrap(),
         "nine_key"
     );
+    assert_eq!(saved.preferences.touch_keyboard_width_percent, 80);
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .preferences
+            .touch_keyboard_width_percent,
+        80
+    );
     assert_eq!(saved.preferences.touch_key_spacing_tenths, 35);
     assert_eq!(saved.preferences.touch_row_spacing_tenths, 95);
     assert_eq!(saved.preferences.touch_keyboard_height_adjustment, 24);
     assert!(saved.preferences.touch_voice_shortcut);
 
     for (key, value) in [
-        ("touch_key_spacing_tenths", 29),
-        ("touch_key_spacing_tenths", 61),
-        ("touch_row_spacing_tenths", 39),
-        ("touch_row_spacing_tenths", 101),
+        ("touch_keyboard_width_percent", 74),
+        ("touch_keyboard_width_percent", 101),
+        ("touch_key_spacing_tenths", 121),
+        ("touch_row_spacing_tenths", 161),
     ] {
         let mut invalid = saved.preferences.clone();
         match key {
+            "touch_keyboard_width_percent" => invalid.touch_keyboard_width_percent = value,
             "touch_key_spacing_tenths" => invalid.touch_key_spacing_tenths = value,
             _ => invalid.touch_row_spacing_tenths = value,
         }
@@ -4039,6 +4052,23 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
             invalid.validate(),
             Err(PreferencesError::InvalidTouchKeyboardSpacing)
         ));
+    }
+
+    // 新范围的两端均可保存，显式的零不回落成旧的最小间距。
+    for (width, key, row) in [(75, 0, 0), (100, 120, 160)] {
+        let current = store.load().unwrap();
+        let changed = store
+            .save(
+                current.revision,
+                Preferences {
+                    touch_keyboard_width_percent: width,
+                    touch_key_spacing_tenths: key,
+                    touch_row_spacing_tenths: row,
+                    ..current.preferences
+                },
+            )
+            .unwrap();
+        assert_eq!(store.load().unwrap(), changed);
     }
 }
 
@@ -6571,6 +6601,7 @@ const NOT_CREDENTIALS: &[&str] = &[
     "second_third_candidate.keys",
     "sentence_association.neural_keyboard",
     "touch_key_spacing_tenths",
+    "touch_keyboard_width_percent",
     "touch_keyboard_height_adjustment",
     "touch_keyboard_layout",
     "touch_keyboard_schemes",

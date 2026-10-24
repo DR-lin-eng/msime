@@ -2839,6 +2839,7 @@
 				};
 			};
 			buildConfigurationList = F2E2CDFBDD97E684209EED18 /* Build configuration list for PBXProject "MSIMEClient" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -2848,19 +2849,18 @@
 			mainGroup = 92F92DCF577FC5887F3B9395;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 6D00B944494B7757B6A99FF3 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				0BE59DE21DA81B1FEB625925 /* MSIMEApp */,
+				84336D10E80EEDAAE2814136 /* MSIMEClientUITests */,
+				F76F718BFCA05760B5EDAB31 /* MSIMEDoubaoTransport */,
+				09FA25997A7208D8622286B9 /* MSIMEDoubaoTransportTests */,
 				292C206FC359697E0EA95DDD /* MSIMEKeyboardExtension */,
 				69CEC806C67E3F35E458FA5A /* MSIMEKeyboardTestHost */,
 				5D2366474DFB6CD078500AA0 /* MSIMEKeyboardTests */,
 				F21120A0A35140FF782BAC4A /* MSIMEServiceTests */,
 				2F38F350505FF1F8159DB17F /* MSIMESharedTests */,
-				84336D10E80EEDAAE2814136 /* MSIMEClientUITests */,
-				F76F718BFCA05760B5EDAB31 /* MSIMEDoubaoTransport */,
-				09FA25997A7208D8622286B9 /* MSIMEDoubaoTransportTests */,
 			);
 		};
 /* End PBXProject section */

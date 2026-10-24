@@ -1,16 +1,25 @@
 package app.msime.android;
 
-/** Shared touch-key spacing and gap conversions for Android keyboard layouts. */
+/** Android 触屏键盘的宽度、间距与像素换算。 */
 public final class KeyboardSpacingPolicy {
     private KeyboardSpacingPolicy() { }
 
     /** 默认键距 6 dp、行距 7 dp，与共享偏好 client-core 的默认值一致。 */
     public static final int DEFAULT_KEY_SPACING_TENTHS = 60;
     public static final int DEFAULT_ROW_SPACING_TENTHS = 70;
-    public static final int MIN_KEY_SPACING_TENTHS = 30;
-    public static final int MAX_KEY_SPACING_TENTHS = 60;
-    public static final int MIN_ROW_SPACING_TENTHS = 40;
-    public static final int MAX_ROW_SPACING_TENTHS = 100;
+    public static final int MIN_KEY_SPACING_TENTHS = 0;
+    public static final int MAX_KEY_SPACING_TENTHS = 120;
+    public static final int MIN_ROW_SPACING_TENTHS = 0;
+    public static final int MAX_ROW_SPACING_TENTHS = 160;
+
+    public static final int DEFAULT_WIDTH_PERCENT = 100;
+    public static final int MIN_WIDTH_PERCENT = 75;
+    public static final int MAX_WIDTH_PERCENT = 100;
+
+    /** 缺失或损坏的宽度回到默认，合法值与共享偏好一致。 */
+    public static int widthPercent(int value) {
+        return value < MIN_WIDTH_PERCENT || value > MAX_WIDTH_PERCENT ? DEFAULT_WIDTH_PERCENT : value;
+    }
 
     public static int keySpacing(int value) {
         return clamp(value, MIN_KEY_SPACING_TENTHS, MAX_KEY_SPACING_TENTHS,

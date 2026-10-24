@@ -67,11 +67,11 @@ test.each([false, true])("keeps editable spacing bounds in phone layout %s", (ph
   );
   const key = screen.getByLabelText("按键间距") as HTMLInputElement;
   const row = screen.getByLabelText("行间距") as HTMLInputElement;
-  expect([key.min, key.max, row.min, row.max]).toEqual(["30", "60", "40", "100"]);
+  expect([key.min, key.max, row.min, row.max]).toEqual(["0", "120", "0", "160"]);
   fireEvent.change(key, { target: { value: "0" } });
   fireEvent.change(row, { target: { value: "110" } });
-  expect(baseProps.onKeySpacingChange).toHaveBeenLastCalledWith(30);
-  expect(baseProps.onRowSpacingChange).toHaveBeenLastCalledWith(100);
+  expect(baseProps.onKeySpacingChange).toHaveBeenLastCalledWith(0);
+  expect(baseProps.onRowSpacingChange).toHaveBeenLastCalledWith(110);
 });
 
 test("forwards geometry, toolbar, feedback, and reset actions", () => {
@@ -291,4 +291,26 @@ test("puts the shuangpin key hint switch in the size group when that group is al
   expect(
     hints.compareDocumentPosition(screen.getByText("键盘高度")) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
+});
+
+test("移动端宽度滑块与恢复默认使用同一组尺寸", () => {
+  const onWidthPercentChange = vi.fn();
+  const onReset = vi.fn();
+  const { rerender } = render(
+    <TouchKeyboardGeometrySection
+      {...baseProps}
+      widthPercent={80}
+      onWidthPercentChange={onWidthPercentChange}
+      onReset={onReset}
+      layoutRows={<div>中文键盘</div>}
+    />,
+  );
+  const width = screen.getByLabelText("按键区域宽度") as HTMLInputElement;
+  expect([width.min, width.max, width.value]).toEqual(["75", "100", "80"]);
+  fireEvent.change(width, { target: { value: "90" } });
+  expect(onWidthPercentChange).toHaveBeenCalledWith(90);
+  fireEvent.click(screen.getByRole("button", { name: "恢复屏幕键盘默认设置" }));
+  expect(onReset).toHaveBeenCalledWith("高度、宽度、间距、顶部语音入口和工具栏按钮");
+  rerender(<TouchKeyboardGeometrySection {...baseProps} />);
+  expect(screen.queryByLabelText("按键区域宽度")).toBeNull();
 });

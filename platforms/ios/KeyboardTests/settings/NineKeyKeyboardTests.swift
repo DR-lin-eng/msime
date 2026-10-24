@@ -783,8 +783,8 @@ final class NineKeyKeyboardTests: XCTestCase {
     XCTAssertTrue(KeyboardLayoutPreference.voiceShortcutEnabled)
     KeyboardLayoutPreference.keySpacing = 99
     KeyboardLayoutPreference.rowSpacing = -99
-    XCTAssertEqual(KeyboardLayoutPreference.keySpacing, 6)
-    XCTAssertEqual(KeyboardLayoutPreference.rowSpacing, 4)
+    XCTAssertEqual(KeyboardLayoutPreference.keySpacing, 12)
+    XCTAssertEqual(KeyboardLayoutPreference.rowSpacing, 0)
   }
 
   func testKeyboardHeightFollowsTheSetting() throws {
@@ -1127,8 +1127,8 @@ final class NineKeyKeyboardTests: XCTestCase {
     XCTAssertTrue(bridge.setTouchKeyboardGeometry(
       keySpacing: 99, rowSpacing: -1, heightAdjustment: 99, voiceEnabled: true))
     let preferences = try XCTUnwrap(bridge.sharedPreferences)
-    XCTAssertEqual((preferences["touch_key_spacing_tenths"] as? NSNumber)?.intValue, 60)
-    XCTAssertEqual((preferences["touch_row_spacing_tenths"] as? NSNumber)?.intValue, 40)
+    XCTAssertEqual((preferences["touch_key_spacing_tenths"] as? NSNumber)?.intValue, 120)
+    XCTAssertEqual((preferences["touch_row_spacing_tenths"] as? NSNumber)?.intValue, 0)
     XCTAssertEqual((preferences["touch_keyboard_height_adjustment"] as? NSNumber)?.intValue, 48)
     XCTAssertEqual(preferences["touch_voice_shortcut"] as? Bool, true)
 

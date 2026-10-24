@@ -891,6 +891,7 @@ interface PreparedPreferences {
   tencent_tmt: TencentTranslationConfig;
   niutrans: NiuTransTranslationConfig;
   /** Tenths of a vp, which is the unit the shared settings store these in. */
+  touch_keyboard_width_percent?: number;
   touch_key_spacing_tenths: number;
   touch_row_spacing_tenths: number;
   /** Added to the total height of the key rows, between -12 and 48 vp. */
@@ -1038,6 +1039,7 @@ export interface KeyboardPreferences {
   readonly candidateFallbackFonts: string[];
   /** The 2in1 candidate window's colours in its mode, from the resolved theme with the native tokens behind it. */
   readonly candidateColors: CandidateColors;
+  readonly widthPercent: number;
   readonly keySpacingTenths: number;
   readonly rowSpacingTenths: number;
   readonly heightAdjustment: number;
@@ -1323,6 +1325,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     candidateEnglishFont: null,
     candidateFallbackFonts: ['Noto Sans SC', 'Microsoft YaHei'],
     candidateColors: GlobalTheme.candidateColors(null, false),
+    widthPercent: 100,
     keySpacingTenths: KeyboardGeometry.DEFAULT_KEY_SPACING_TENTHS,
     rowSpacingTenths: KeyboardGeometry.DEFAULT_ROW_SPACING_TENTHS,
     heightAdjustment: KeyboardGeometry.DEFAULT_HEIGHT_ADJUSTMENT_VP,
@@ -1726,6 +1729,7 @@ export class KeyboardSession implements HardwareKeyTarget {
       candidateColors: candidateColors,
       // Clamped rather than trusted: the store validates, but an older document or a host that
       // never learned the bounds would otherwise draw a keyboard nobody can hit.
+      widthPercent: KeyboardGeometry.widthPercent(preferences.touch_keyboard_width_percent),
       keySpacingTenths: KeyboardGeometry.keySpacing(preferences.touch_key_spacing_tenths),
       rowSpacingTenths: KeyboardGeometry.rowSpacing(preferences.touch_row_spacing_tenths),
       heightAdjustment:

@@ -139,6 +139,7 @@ export function ScreenKeyboardPreview({
   keySpacingTenths,
   rowSpacingTenths,
   heightAdjustment = 0,
+  widthPercent = 100,
   layout,
   touchRows,
   phone = false,
@@ -151,6 +152,7 @@ export function ScreenKeyboardPreview({
   keySpacingTenths?: number;
   rowSpacingTenths?: number;
   heightAdjustment?: number;
+  widthPercent?: number;
   /** 省略时取 `ScreenKeyboardLayoutContext`，即宿主自己的键盘。 */
   layout?: "desktop" | "touch";
   /** 触屏键盘画哪几排键。省略时是通用的 26 键；HarmonyOS 的「尺寸」预览按当前的中文键盘传入（`harmonyTouchKeyboardRows`），切到 9 键或 14 键时预览跟着变。 */
@@ -189,10 +191,13 @@ export function ScreenKeyboardPreview({
   // 触屏键盘按手机竖屏的比例画：桌面画布 1100 宽时，每排十个键被拉成又扁又宽的长条，不像手机上的键盘；700 宽时单键约为宽 3 高 4 的竖长方形，与手机上的键接近。桌面键盘仍是 1100。
   const canvasWidth = phoneLook ? thumbnailWidth : touch ? 700 : 1100;
   const inset = phoneLook ? thumbnailInset : 7;
+  const keyInset =
+    inset +
+    (thumbnail ? 0 : ((canvasWidth - inset * 2) * (1 - clamp(widthPercent, 75, 100) / 100)) / 2);
   const rowsTop = phoneLook ? thumbnailToolbarHeight + 8 : 28;
   // 默认插图保持逐字节等价，非默认的几何则明显跟随 iOS 键盘设置里的滑块。缩略图保留设计的固定几何，因为它展示的是皮肤而不是用户的键距。手机预览的画布约等于手机的 vp 宽度，键距和行距直接按 dp 画。
-  const keyGap = thumbnail ? 6 : phone ? keySpacing : 4 + keySpacing - 6;
-  const rowGap = thumbnail ? 11 : phone ? rowSpacing : 4 + rowSpacing - 7;
+  const keyGap = thumbnail ? 6 : phone ? keySpacing : Math.max(0, 4 + keySpacing - 6);
+  const rowGap = thumbnail ? 11 : phone ? rowSpacing : Math.max(0, 4 + rowSpacing - 7);
   // 手机预览：每排键 44 高，「键盘高度」的增减摊到各排，底下留 8。
   const phoneHeight =
     rowsTop + layoutRows.length * phoneKeyHeight + rowGap * (layoutRows.length - 1) + 8;
@@ -216,6 +221,7 @@ export function ScreenKeyboardPreview({
       data-preview-skin={skin}
       data-key-shape={keyShape}
       data-key-material={keyMaterial}
+      data-width-percent={thumbnail ? 100 : clamp(widthPercent, 75, 100)}
       data-key-spacing={keySpacing.toFixed(1)}
       data-row-spacing={rowSpacing.toFixed(1)}
       data-keyboard-height={canvasHeight}
@@ -325,9 +331,9 @@ export function ScreenKeyboardPreview({
         />
       )}
       {layoutRows.map((row, rowIndex) => {
-        const available = canvasWidth - inset * 2 - keyGap * (row.length - 1);
+        const available = canvasWidth - keyInset * 2 - keyGap * (row.length - 1);
         const total = row.reduce((sum, item) => sum + item.weight, 0);
-        let x = inset;
+        let x = keyInset;
         const y = rowsTop + rowIndex * (height + rowGap);
         return (
           <g data-keyboard-row={rowIndex} key={rowIndex}>

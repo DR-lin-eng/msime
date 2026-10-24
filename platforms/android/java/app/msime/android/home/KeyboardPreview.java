@@ -56,6 +56,11 @@ public final class KeyboardPreview extends View {
     private String caption = "";
     @Nullable private KeyboardSkin skin;
     private float cornerRadiusDp = 16f;
+    private int widthPercent = 100;
+    private float keyGapDp = 5;
+    private float rowGapDp = 5;
+    private int heightAdjustmentDp;
+    private boolean customGeometry;
     private boolean colorsValid;
     private int inkColor;
     private int letterCapColor;
@@ -102,6 +107,18 @@ public final class KeyboardPreview extends View {
     /** {@link #setKeyboard(KeyboardSkin, boolean, String)} without a space-bar label. */
     public void setKeyboard(@Nullable KeyboardSkin skin, boolean nineKey) {
         setKeyboard(skin, nineKey, "");
+    }
+
+    /** 设置页使用键盘实际保存的宽度和间距；皮肤缩略图仍用其固定几何。 */
+    public void setGeometry(int widthPercent, int keySpacingTenths, int rowSpacingTenths, int heightAdjustment) {
+        this.widthPercent = app.msime.android.KeyboardSpacingPolicy.widthPercent(widthPercent);
+        keyGapDp = app.msime.android.KeyboardSpacingPolicy.keySpacing(keySpacingTenths) / 10f;
+        rowGapDp = app.msime.android.KeyboardSpacingPolicy.rowSpacing(rowSpacingTenths) / 10f;
+        heightAdjustmentDp = app.msime.android.KeyboardHeightPolicy.windowHeightAdjustment(heightAdjustment,
+            getResources().getConfiguration().screenHeightDp);
+        customGeometry = true;
+        requestLayout();
+        invalidate();
     }
 
     /** 圆角半径（dp）；默认 16，社区皮肤卡上的小预览用 6，与外面那圈描边对齐。 */
@@ -194,13 +211,18 @@ public final class KeyboardPreview extends View {
      *
      * 社区皮肤卡原先把预览框写死为 80 dp 高，手机上约 170 dp 宽，比键盘本身扁得多，键面被横向拉宽压扁。由宽度推高度后，缩略图与真实键盘同一比例。
      */
+    private float referenceHeightDp() {
+        return customGeometry ? 12 + 24 + rows.length * KeyboardGeometry.KEY_ROW_HEIGHT_DP
+            + heightAdjustmentDp + rowGapDp * (rows.length - 1) : REFERENCE_HEIGHT_DP;
+    }
+
     @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY) {
             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
             return;
         }
         int width = MeasureSpec.getSize(widthMeasureSpec);
-        int height = Math.round(width * REFERENCE_HEIGHT_DP / REFERENCE_WIDTH_DP);
+        int height = Math.round(width * referenceHeightDp() / REFERENCE_WIDTH_DP);
         if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.AT_MOST) {
             height = BoundsPolicy.atMost(height, MeasureSpec.getSize(heightMeasureSpec));
         }
@@ -215,7 +237,7 @@ public final class KeyboardPreview extends View {
     private float scale() {
         return BoundsPolicy.atMost(DimensionPolicy.shorterSide(
             getWidth() / DimensionPolicy.floatPixels(getContext(), REFERENCE_WIDTH_DP),
-            getHeight() / DimensionPolicy.floatPixels(getContext(), REFERENCE_HEIGHT_DP)), 1f);
+            getHeight() / DimensionPolicy.floatPixels(getContext(), referenceHeightDp())), 1f);
     }
 
     /** 字号取设计值与键面能容下的较小者，保证标签不出键。 */
@@ -234,11 +256,14 @@ public final class KeyboardPreview extends View {
         float s = scale();
         // 缩小时按参考键盘的宽高比等比画，居中放进视图，空出的边露出皮肤底色；只缩不拉，键面不会被卡片的扁长比例压扁。整宽预览（s 为 1）仍铺满视图。
         float w = s < 1f ? DimensionPolicy.floatPixels(getContext(), REFERENCE_WIDTH_DP) * s : getWidth();
-        float h = s < 1f ? DimensionPolicy.floatPixels(getContext(), REFERENCE_HEIGHT_DP) * s : getHeight();
+        float h = s < 1f ? DimensionPolicy.floatPixels(getContext(), referenceHeightDp()) * s : getHeight();
         int saved = canvas.save();
         canvas.translate((getWidth() - w) / 2f, (getHeight() - h) / 2f);
         float pad = DimensionPolicy.floatPixels(getContext(), 6) * s;
-        float gap = DimensionPolicy.floatPixels(getContext(), 5) * s;
+        float gap = DimensionPolicy.floatPixels(getContext(), keyGapDp) * s;
+        float rowGap = DimensionPolicy.floatPixels(getContext(), rowGapDp) * s;
+        float keyWidth = (w - pad * 2) * widthPercent / 100f;
+        float keyLeft = (w - keyWidth) / 2f;
         float stripHeight = DimensionPolicy.floatPixels(getContext(), 24) * s;
         float radius = (skin == null ? DimensionPolicy.floatPixels(getContext(), 6)
             : BoundsPolicy.atMost(DimensionPolicy.floatPixels(getContext(), (float) skin.cornerRadius()),
@@ -258,27 +283,27 @@ public final class KeyboardPreview extends View {
 
         float top = pad + stripHeight;
         float available = h - top - pad;
-        float rowHeight = (available - gap * (rows.length - 1)) / rows.length;
-        float unit = (w - pad * 2 - gap * 9) / 10f;
+        float rowHeight = (available - rowGap * (rows.length - 1)) / rows.length;
+        float unit = (keyWidth - gap * 9) / 10f;
         paint.setTextAlign(Paint.Align.CENTER);
         for (int r = 0; r < rows.length; r++) {
             String[] row = rows[r];
-            float y = top + r * (rowHeight + gap);
+            float y = top + r * (rowHeight + rowGap);
             boolean bottom = r == rows.length - 1;
             float[] widths = rowWeights;
             float total = 0;
             for (int c = 0; c < row.length; c++) {
                 float weight = bottom ? ("空格".equals(row[c]) ? 4f : "↵".equals(row[c]) || "123".equals(row[c]) ? 1.5f : 1f)
-                    : rows == FULL_ROWS && r == 2 && ("⇧".equals(row[c]) || "⌫".equals(row[c])) ? 1.5f : 1f;
+                    : rows[0].length == 10 && r == 2 && ("⇧".equals(row[c]) || "⌫".equals(row[c])) ? 1.5f : 1f;
                 widths[c] = weight;
                 total += weight;
             }
-            float rowWidth = w - pad * 2 - gap * (row.length - 1);
+            float rowWidth = keyWidth - gap * (row.length - 1);
             // 全键盘第二行比第一行少一键，按设计居中缩进半个键位。
-            float x = pad;
-            if (rows == FULL_ROWS && r == 1) x = (w - (unit * 9 + gap * 8)) / 2f;
+            float x = keyLeft;
+            if (rows[0].length == 10 && r == 1) x = (w - (unit * 9 + gap * 8)) / 2f;
             for (int c = 0; c < row.length; c++) {
-                float width = rows == FULL_ROWS && r == 1 ? unit : rowWidth * widths[c] / total;
+                float width = rows[0].length == 10 && r == 1 ? unit : rowWidth * widths[c] / total;
                 key.set(x, y, x + width, y + rowHeight);
                 String face = row[c];
                 boolean action = "↵".equals(face);

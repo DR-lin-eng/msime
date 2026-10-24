@@ -21,19 +21,22 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
     private static final String BOTTOM_PADDING_HEIGHT_SETTING = "platform.android.bottom_padding_height";
 
     private boolean portraitOnly;
+    private boolean fixedKeysOnly;
 
     @Override public void onCreate(Bundle arguments) {
+        fixedKeysOnly = arguments != null && "true".equals(arguments.getString("fixed-keys-only"));
         portraitOnly = arguments != null && "true".equals(arguments.getString("portrait-split"));
         super.onCreate(arguments);
     }
 
     @Override protected String successDescription() {
+        if (fixedKeysOnly) return "fixed 40dp keys stay 40dp with 48dp bottom space and independent row gaps";
         if (portraitOnly) return "portrait split live setting, native control and narrow cover window fallback";
         return "keyboard height live preview, composition preservation, persistence, restart, bottom padding and a bottom row as tall as the letter rows";
     }
 
     @Override protected void runChecks() throws Exception {
-        PortraitSplitDeviceChecks.run(this);
+        if (!fixedKeysOnly) PortraitSplitDeviceChecks.run(this);
         if (portraitOnly) return;
         File root = getTargetContext().getFilesDir();
         JSONObject options = new JSONObject(new String(Files.readAllBytes(
@@ -60,6 +63,29 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             publish(localSettings, localBaseline.toString().getBytes(StandardCharsets.UTF_8));
             restartIme();
             openEditor();
+            if (fixedKeysOnly) {
+                float density = getTargetContext().getResources().getDisplayMetrics().density;
+                snapshot.getJSONObject("preferences").put("touch_key_height", 40)
+                    .put("touch_row_spacing_tenths", 70).put("scheme", "quanpin")
+                    .put("last_chinese_scheme", "quanpin").put("touch_keyboard_layout", "twenty_six_key");
+                publish(preferences, snapshot.toString().getBytes(StandardCharsets.UTF_8));
+                Rect base = settledKeyBounds(localSettings, new JSONObject().put(BOTTOM_BAR_SETTING, false).put(HEIGHT_SETTING, 0));
+                stage = "fixed key height with added bottom space";
+                Rect extra = settledKeyBounds(localSettings, new JSONObject().put(BOTTOM_BAR_SETTING, false).put(HEIGHT_SETTING, 48));
+                int expected = Math.round(40 * density);
+                if (Math.abs(base.height() - expected) > 2 || Math.abs(extra.height() - expected) > 2)
+                    throw new AssertionError("Configured key height changed: " + base.height() + " -> " + extra.height());
+                if (Math.abs((base.bottom - extra.bottom) - Math.round(48 * density)) > 3)
+                    throw new AssertionError("Additional keyboard space did not become bottom padding");
+                stage = "independent row spacing";
+                snapshot.put("revision", revision + 2);
+                snapshot.getJSONObject("preferences").put("touch_row_spacing_tenths", 160);
+                publish(preferences, snapshot.toString().getBytes(StandardCharsets.UTF_8));
+                Rect spaced = settledKeyBounds(localSettings, new JSONObject().put(BOTTOM_BAR_SETTING, false).put(HEIGHT_SETTING, 48));
+                if (Math.abs(spaced.height() - expected) > 2)
+                    throw new AssertionError("Changing row spacing stretched the key");
+                return;
+            }
             stage = "baseline keyboard height";
             int standard = keyHeight("n");
 
@@ -71,11 +97,8 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             tap(key("完成"));
             awaitHeightSetting(localSettings, 55);
             int tall = keyHeight("n");
-            int minimumDelta = Math.round(8 * getTargetContext()
-                .getResources().getDisplayMetrics().density);
-            if (tall < standard + minimumDelta)
-                throw new AssertionError("Taller keyboard did not enlarge key faces: "
-                    + standard + " -> " + tall + ", expected delta " + minimumDelta);
+            if (Math.abs(tall - standard) > 2)
+                throw new AssertionError("Increasing keyboard space changed fixed key height: " + standard + " -> " + tall);
 
             stage = "increase keyboard height to the new maximum";
             openHeightBar();
@@ -83,8 +106,8 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             tap(key("完成"));
             awaitHeightSetting(localSettings, 129);
             int maximum = keyHeight("n");
-            if (maximum <= tall)
-                throw new AssertionError("170% did not enlarge key faces beyond 130%: "
+            if (Math.abs(maximum - standard) > 2)
+                throw new AssertionError("170% changed fixed key height: "
                     + tall + " -> " + maximum);
 
             stage = "decrease keyboard height";
@@ -93,8 +116,8 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             tap(key("完成"));
             awaitHeightSetting(localSettings, -46);
             int shortHeight = keyHeight("n");
-            if (shortHeight >= standard)
-                throw new AssertionError("Shorter keyboard did not shrink key faces: "
+            if (Math.abs(shortHeight - standard) > 2)
+                throw new AssertionError("Legacy negative space changed fixed key height: "
                     + standard + " -> " + shortHeight);
 
             stage = "cancel keeps the saved height";
@@ -113,7 +136,7 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             awaitHeightSetting(localSettings, 18);
             openEditor();
             int keptHeight = keyHeight("n");
-            if (keptHeight <= shortHeight + 2)
+            if (Math.abs(keptHeight - standard) > 2)
                 throw new AssertionError("Height adjusted before hiding was not kept: "
                     + shortHeight + " -> " + keptHeight);
 
@@ -159,7 +182,7 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
                     throw new AssertionError("Independent bottom padding target was not preserved: " + heightDp);
             }
 
-            // 底行与字母键同高（#6354、#6472）：默认、75% 和 130% 时空格键都和「n」一样高——底行和三行键一起均分高度调整，两者最多差 1 dp。默认高度时从「q」的上沿到空格的下沿是四行 52 dp 加三份行距（229 dp），与原来三行 56 dp 加 39 dp 的底栏键帽（228 dp）基本相同。同样关掉键盘底栏，排除手势导航 AVD 上的差异。
+            // 底行与字母键使用独立的 40 dp 高度；调整键盘空间只改下方留白。
             stage = "bottom row matches the letter rows";
             float density = getTargetContext().getResources().getDisplayMetrics().density;
             int tolerance = Math.round(density) + 2;
@@ -172,7 +195,7 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
                         + " dp: space " + space.height() + " vs n " + letter.height());
                 if (adjustment == 0) {
                     int span = space.bottom - keyBounds("q").top;
-                    int expected = Math.round(229 * density);
+                    int expected = Math.round((4 * 40 + 3 * 7) * density);
                     if (Math.abs(span - expected) > Math.round(2 * density) + 2)
                         throw new AssertionError("Default key area changed: " + span + " px from q to space, expected "
                             + expected);

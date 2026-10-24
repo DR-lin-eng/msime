@@ -11,6 +11,13 @@ export interface HitOffset {
 
 export class KeyboardGeometry {
   static readonly DEFAULT_HEIGHT_ADJUSTMENT_VP: number = 0;
+  static keyHeight(value: number | undefined): number {
+    return value !== undefined && Number.isInteger(value) && value >= 28 && value <= 64 ? value : 40;
+  }
+
+  static bottomSpace(value: number): number {
+    return Math.max(0, KeyboardGeometry.heightAdjustment(value));
+  }
   static readonly MIN_HEIGHT_ADJUSTMENT_VP: number = -12;
   static readonly MAX_HEIGHT_ADJUSTMENT_VP: number = 48;
   static readonly STANDARD_ROW_HEIGHT_VP: number = 48;
@@ -67,20 +74,6 @@ export class KeyboardGeometry {
   /** 高度条上标注的键盘高度：调整后的按键行占标准 176vp 的整数百分比，因此共享的 -12..48 范围显示为 93..127%。 */
   static heightPercent(adjustmentVp: number): number {
     return Math.round(100 + (adjustmentVp * 100) / KeyboardGeometry.HEIGHT_PERCENT_BASE_VP);
-  }
-
-  /** Divide the total adjustment across rows without losing a density-independent pixel. */
-  static adjustedRowHeight(
-    baseHeight: number,
-    adjustment: number | null,
-    rowCount: number,
-    rowIndex: number,
-  ): number {
-    if (baseHeight <= 0 || rowCount <= 0 || rowIndex < 0 || rowIndex >= rowCount) {
-      throw new Error("Invalid keyboard height geometry");
-    }
-    const total: number = baseHeight * rowCount + KeyboardGeometry.heightAdjustment(adjustment);
-    return Math.floor(total / rowCount) + (rowIndex < total % rowCount ? 1 : 0);
   }
 
   static halfGapPixels(tenths: number, density: number): number {

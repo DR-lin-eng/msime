@@ -12,6 +12,14 @@ public final class KeyboardSpacingPolicy {
     public static final int MIN_ROW_SPACING_TENTHS = 0;
     public static final int MAX_ROW_SPACING_TENTHS = 160;
 
+    public static final int DEFAULT_KEY_HEIGHT_DP = 40;
+    public static final int MIN_KEY_HEIGHT_DP = 28;
+    public static final int MAX_KEY_HEIGHT_DP = 64;
+
+    public static int keyHeight(int value) {
+        return value < MIN_KEY_HEIGHT_DP || value > MAX_KEY_HEIGHT_DP ? DEFAULT_KEY_HEIGHT_DP : value;
+    }
+
     public static final int DEFAULT_WIDTH_PERCENT = 100;
     public static final int MIN_WIDTH_PERCENT = 75;
     public static final int MAX_WIDTH_PERCENT = 100;

@@ -151,6 +151,7 @@ final class ImeStyler {
         if (s.actionRow != null)
             ViewPolicy.setHorizontalPaddingPreservingVertical(s.actionRow, edge);
         s.keyRows.requestLayout();
+        s.imeBottomBar.apply(s.imeFrame.keyboard);
         if (s.keyboardRoot != null) {
             s.keyboardRoot.requestLayout();
             s.keyboardRoot.getRootView().requestLayout();
@@ -167,16 +168,9 @@ final class ImeStyler {
         Object tag = node.getTag();
         if (tag instanceof MSIMEInputService.KeyboardHeightRole) {
             MSIMEInputService.KeyboardHeightRole role = (MSIMEInputService.KeyboardHeightRole) tag;
-            // 九宫格加高只扩大上方键区，其余布局及缩小量仍四行均分；总高始终为四行默认键高加整份调整。
-            boolean nineKeyGrid = s.imeLayoutRows.nineKeyGridDrawn()
-                && (role.bottomRow || role.nineKeyGrid);
-            int heightDp;
-            if (role.bottomRow) {
-                heightDp = role.baseHeight + KeyboardHeightPolicy.bottomRowAdjustment(adjustment, nineKeyGrid);
-            } else {
-                int share = role.withBottomRow ? adjustment : KeyboardHeightPolicy.keyRowsAdjustment(adjustment, nineKeyGrid);
-                heightDp = KeyboardHeightPolicy.adjustedRowHeight(role.baseHeight, share, role.rowCount, role.rowIndex);
-            }
+            // 先确定单键高度，再加行距；键盘高度调整只留在键区下方，不分摊到键帽或触摸矩形。
+            int heightDp = Math.round(role.baseHeight * s.touchKeyHeight
+                / (float) KeyboardGeometry.KEY_ROW_HEIGHT_DP);
             int height = s.pixels(heightDp);
             height += s.halfSpacingPixels(s.touchRowSpacingTenths) * 2 * role.rowSpacings;
             if (node.getLayoutParams() != null) {

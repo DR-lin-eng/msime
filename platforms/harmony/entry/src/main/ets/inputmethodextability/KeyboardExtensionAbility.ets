@@ -395,7 +395,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     const heightVp: number = tall
       ? KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
         KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-        settings.candidatePreeditFontSize, true)
+        settings.candidatePreeditFontSize, true, true, settings.keyHeight)
       : (KeyboardMetrics.candidateHeightVp(settings.candidateLayout, this.candidateCount,
         settings.candidateShowPreedit, settings.candidateDecorationTopVp,
         KeyboardSession.shared.glossRows(), settings.candidateFontSize,
@@ -421,7 +421,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     const height: number = KeyboardMetrics.totalHeightVp(
       settings.rowSpacingTenths, settings.heightAdjustment,
       KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-      settings.candidatePreeditFontSize, true) * this.density;
+      settings.candidatePreeditFontSize, true, true, settings.keyHeight) * this.density;
     const width: number = DESKTOP_SURFACE_WIDTH_VP * this.density;
     this.panel.moveTo(Math.round((this.screenWidth - width) / 2),
       Math.round(this.screenHeight - height - TOOLBAR_MARGIN_VP * this.density))
@@ -980,7 +980,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
           // 刚创建时还没有组字也没有面板，工具条画不画只看工具栏设置，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。
           : KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-            settings.candidatePreeditFontSize, false, !TouchToolbarPolicy.rowHidden(settings.toolbarTools));
+            settings.candidatePreeditFontSize, false, !TouchToolbarPolicy.rowHidden(settings.toolbarTools), settings.keyHeight);
         // 软键盘占满屏幕宽度，候选窗口只按内容取宽，避免在桌面上遮住候选所对应的文本。
         const widthPx: number = desktop
           ? Math.round(KeyboardMetrics.CANDIDATE_WINDOW_WIDTH_VP * screen.densityPixels)

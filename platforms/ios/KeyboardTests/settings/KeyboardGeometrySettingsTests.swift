@@ -2,6 +2,21 @@ import XCTest
 
 /// The app's 键盘布局 page saves where the keyboard reads: the shared document first, the App Group after it.
 final class KeyboardGeometrySettingsTests: XCTestCase {
+  func testIndividualKeyHeightPersistsIndependentlyOfBottomSpace() throws {
+    let previousHeight = KeyboardLayoutPreference.keyHeight
+    defer { KeyboardLayoutPreference.keyHeight = previousHeight }
+    _ = MetasequoiaInputSessionBridge(stateRoot: state)
+    XCTAssertTrue(KeyboardLayoutPreference.saveGeometry(keyHeight: 52, stateRoot: state))
+    XCTAssertTrue(KeyboardLayoutPreference.saveGeometry(rowSpacing: 12, heightAdjustment: 48, stateRoot: state))
+    let document = try XCTUnwrap(MetasequoiaInputSessionBridge.loadSharedPreferences(stateRoot: state))
+    XCTAssertEqual(document["touch_key_height"] as? Int, 52)
+    XCTAssertEqual(document["touch_row_spacing_tenths"] as? Int, 120)
+    XCTAssertEqual(document["touch_keyboard_height_adjustment"] as? Int, 48)
+    XCTAssertEqual(KeyboardLayoutPreference.keyHeight, 52)
+    KeyboardLayoutPreference.mirrorGeometry([:])
+    XCTAssertEqual(KeyboardLayoutPreference.keyHeight, 40)
+  }
+
   func testHiddenLanguageKeyPersistsUntilLayoutReset() throws {
     KeyboardLayoutPreference.hideLanguageKey = true
     XCTAssertFalse(KeyboardLayoutPreference.geometry.showsBottomLanguage)

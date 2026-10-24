@@ -74,6 +74,26 @@ test.each([false, true])("keeps editable spacing bounds in phone layout %s", (ph
   expect(baseProps.onRowSpacingChange).toHaveBeenLastCalledWith(110);
 });
 
+test("keeps individual key height independent from bottom space and row spacing", () => {
+  const onKeyHeightChange = vi.fn();
+  render(
+    <TouchKeyboardGeometrySection
+      {...baseProps}
+      keyHeight={40}
+      onKeyHeightChange={onKeyHeightChange}
+    />,
+  );
+  const height = screen.getByLabelText("单个按键高度") as HTMLInputElement;
+  const bottom = screen.getByLabelText("底部留白") as HTMLInputElement;
+  expect([height.min, height.max, height.value]).toEqual(["28", "64", "40"]);
+  fireEvent.change(bottom, { target: { value: "48" } });
+  fireEvent.change(screen.getByLabelText("行间距"), { target: { value: "160" } });
+  expect(height.value).toBe("40");
+  expect(onKeyHeightChange).not.toHaveBeenCalled();
+  fireEvent.change(height, { target: { value: "52" } });
+  expect(onKeyHeightChange).toHaveBeenCalledWith(52);
+});
+
 test("forwards geometry, toolbar, feedback, and reset actions", () => {
   render(<TouchKeyboardGeometrySection {...baseProps} />);
 

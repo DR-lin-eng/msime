@@ -176,6 +176,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var handwritingColumns: [UIStackView] = []
   private var handwritingResults: [String] = []
   private var handwritingActionHeight: NSLayoutConstraint?
+  private var fixedActionHeight: NSLayoutConstraint?
   private var candidatePanel: KeyboardCandidatePanelView?
   /// 面板正在显示的那一代候选。选择和长按菜单都按它里面的代次和全局序号找候选；九键面板换代时整份换掉。
   private var candidatePanelSnapshot: CandidatePanelSnapshot?
@@ -722,7 +723,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     ])
     installKeyboard()
     let height = view.heightAnchor.constraint(equalToConstant:
-      preferredKeyboardHeight + CGFloat(KeyboardLayoutPreference.heightAdjustment))
+      preferredKeyboardHeight + max(0, CGFloat(KeyboardLayoutPreference.heightAdjustment)))
     height.priority = .init(999)
     height.identifier = "keyboardHeight"
     height.isActive = true
@@ -1077,7 +1078,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     root.addArrangedSubview(candidateStrip)
     // 候选栏和手写区不是键：落在它们里面的触摸照旧，它们的按钮也不来接键距里的触摸。
     root.gapRoutingExclusions = [candidateStrip, handwriting]
-    root.gapRoutingMarginExclusions = [oneHandRow]
+    root.gapRoutingMarginExclusions = [oneHandRow, keyColumn]
     installOneHandRow(in: root)
     let numberRow = makeNumberRow()
     numberRowView = numberRow
@@ -1196,6 +1197,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     standardRowHeights = standardRows.map {
       ($0, $0.heightAnchor.constraint(equalTo: actionRow.heightAnchor))
     }
+    // 单键高度独立于键盘空间；显式约束底行后，字母行通过等高约束使用同一个高度。
+    fixedActionHeight = actionRow.heightAnchor.constraint(equalToConstant: KeyboardLayoutPreference.keyHeight)
+    fixedActionHeight?.isActive = true
     // Keep the three keypad rows the same height as the bottom controls.
     nineKeyHeight = nineKeyContainer.heightAnchor.constraint(
       equalTo: actionRow.heightAnchor, multiplier: 3, constant: 14)
@@ -5574,6 +5578,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     handwriting.isHidden = !writes
     handwritingPad.isHidden = !writes
     if writes { handwriting.activate() }
+    fixedActionHeight?.constant = CGFloat(KeyboardLayoutPreference.keyHeight)
+    fixedActionHeight?.isActive = !writes
     handwritingActionHeight?.isActive = writes
     // Dachen takes the digit row and four punctuation keys for bopomofo, so Zhuyin draws its own four rows in place of the letter rows and the number row.
     let dachen = isChineseMode && inputScheme.isZhuyin && !isInLocalMode
@@ -7456,7 +7462,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     formFactor == .phone && letterRowViews.first?.isHidden == false
   }
 
-  /// 手机竖屏 26 键保留最多 4pt 的设计留白；小行距时同步收紧，零行距时不再额外留空。
+  /// 行距只使用用户设置；增加键盘空间不改变键帽。
   private var keyRowSpacing: CGFloat {
     let spacing = CGFloat(KeyboardLayoutPreference.rowSpacing)
     let letterPadding: CGFloat = showsPhoneLetterRows && !isLandscape
@@ -7464,13 +7470,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return spacing + letterPadding
   }
 
-  /// 26 键收紧键帽后，把省下的高度放到键区上下，保持九键和英文键盘的外框一致。
+  /// 单键固定高度后，额外键盘空间只放在键区下方。
   private func applyPhoneLetterVerticalPadding() {
     let inset: CGFloat = showsPhoneLetterRows && !isLandscape
       ? KeyboardFormFactor.phoneLetterVerticalPadding : 0
-    let margins = UIEdgeInsets(top: inset, left: 0, bottom: inset, right: 0)
-    if keyColumn.layoutMargins != margins || keyColumn.isLayoutMarginsRelativeArrangement != (inset > 0) {
-      keyColumn.isLayoutMarginsRelativeArrangement = inset > 0
+    let extra = max(0, sharedKeyboardHeightAdjustment)
+    let margins = UIEdgeInsets(top: inset, left: 0, bottom: inset + extra, right: 0)
+    if keyColumn.layoutMargins != margins || keyColumn.isLayoutMarginsRelativeArrangement != (inset + extra > 0) {
+      keyColumn.isLayoutMarginsRelativeArrangement = inset + extra > 0
       keyColumn.layoutMargins = margins
     }
   }
@@ -7491,7 +7498,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   private func updatePreferredKeyboardHeight() {
-    let adjustedHeight = preferredKeyboardHeight + sharedKeyboardHeightAdjustment
+    applyPhoneLetterVerticalPadding()
+    fixedActionHeight?.constant = CGFloat(KeyboardLayoutPreference.keyHeight)
+    let adjustedHeight = preferredKeyboardHeight + max(0, sharedKeyboardHeightAdjustment)
     if keyboardHeightConstraint?.constant != adjustedHeight { keyboardHeightConstraint?.constant = adjustedHeight }
   }
 

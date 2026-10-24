@@ -62,6 +62,7 @@ export function useTouchKeyboardSettingsReset({
     // Delete optional fields instead of storing current defaults. This keeps reset forward-compatible
     // when a host changes its fallback values.
     delete next.touch_keyboard_width_percent;
+    delete next.touch_key_height;
     delete next.touch_key_spacing_tenths;
     delete next.touch_row_spacing_tenths;
     delete next.touch_keyboard_height_adjustment;

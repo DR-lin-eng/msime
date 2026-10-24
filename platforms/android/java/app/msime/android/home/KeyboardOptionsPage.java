@@ -154,16 +154,21 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
             KeyboardSpacingPolicy.rowSpacing(NumberPolicy.strictInt(preferences, "touch_row_spacing_tenths", -1)),
             settings.has(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
                 ? settings.integer(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
-                : NumberPolicy.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE));
+                : NumberPolicy.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE),
+            KeyboardSpacingPolicy.keyHeight(NumberPolicy.strictInt(preferences, "touch_key_height", 40)));
         dimensions.addView(preview);
         int height = KeyboardHeightPolicy.heightAdjustmentToPercent(
             settings.has(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
                 ? settings.integer(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
                 : NumberPolicy.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE));
-        dimensions.slider("键盘高度", KeyboardHeightPolicy.MIN_HEIGHT_PERCENT, KeyboardHeightPolicy.MAX_HEIGHT_PERCENT, 1, height,
+        dimensions.slider("键盘空间", KeyboardHeightPolicy.MIN_HEIGHT_PERCENT, KeyboardHeightPolicy.MAX_HEIGHT_PERCENT, 1, height,
             KeyboardHeightPolicy::displayPercent,
             percent -> saveLocalSetting(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT,
                 KeyboardHeightPolicy.heightPercentToAdjustment(percent)));
+        dimensions.slider("单个按键高度", KeyboardSpacingPolicy.MIN_KEY_HEIGHT_DP, KeyboardSpacingPolicy.MAX_KEY_HEIGHT_DP, 1,
+            KeyboardSpacingPolicy.keyHeight(NumberPolicy.strictInt(preferences, "touch_key_height", 40)),
+            value -> value + " dp", value -> savePreference("touch_key_height", value));
+        dimensions.footer("默认参考苹果键盘的单键比例。增加键盘空间会留在下方，行间距单独调整，按键不会自动拉长。");
         dimensions.slider("按键区域宽度", KeyboardSpacingPolicy.MIN_WIDTH_PERCENT, KeyboardSpacingPolicy.MAX_WIDTH_PERCENT, 1,
             KeyboardSpacingPolicy.widthPercent(NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100)),
             value -> value + "%", value -> savePreference("touch_keyboard_width_percent", value));
@@ -176,6 +181,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
             KeyboardSpacingPolicy::display, value -> savePreference("touch_row_spacing_tenths", value));
         dimensions.button("恢复默认宽度与间距", null, "恢复", () -> savePreferences(values -> {
             values.remove("touch_keyboard_width_percent");
+            values.remove("touch_key_height");
             values.remove("touch_key_spacing_tenths");
             values.remove("touch_row_spacing_tenths");
         }));

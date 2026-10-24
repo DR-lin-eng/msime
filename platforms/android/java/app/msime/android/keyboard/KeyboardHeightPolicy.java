@@ -73,6 +73,17 @@ public final class KeyboardHeightPolicy {
             + KEYBOARD_ROW_COUNT * KeyboardSpacingPolicy.rowSpacing(rowSpacingTenths) / 10f;
     }
 
+    /** 实际键帽高度只取单键设置，外框高度和行距不参与计算。 */
+    public static int fixedKeyHeight(int value) {
+        return KeyboardSpacingPolicy.keyHeight(value);
+    }
+
+    public static float keyAreaHeightDp(int adjustment, int windowHeightDp, int rowSpacingTenths, int keyHeight) {
+        return fixedKeyHeight(keyHeight) * KEYBOARD_ROW_COUNT
+            + Math.max(0, windowHeightAdjustment(adjustment, windowHeightDp))
+            + KEYBOARD_ROW_COUNT * KeyboardSpacingPolicy.rowSpacing(rowSpacingTenths) / 10f;
+    }
+
     public static int designKeyHeight(int percent) {
         int clamped = BoundsPolicy.bounded(percent, MIN_HEIGHT_PERCENT, MAX_HEIGHT_PERCENT);
         return (KeyboardGeometry.DESIGN_KEY_HEIGHT_DP * clamped + 50) / 100;

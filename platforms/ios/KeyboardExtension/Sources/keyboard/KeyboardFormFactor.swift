@@ -7,11 +7,11 @@ enum KeyboardFormFactor: Equatable {
   case phone
   case tablet
 
-  /// 26 键手机竖屏为较矮的键帽额外留出的排间距。
-  static let phoneLetterRowPadding: CGFloat = 4
+  /// 单键高度独立设置后不再附加隐式排间距，使用用户保存的行距。
+  static let phoneLetterRowPadding: CGFloat = 0
 
-  /// 26 键手机竖屏为补回键盘总高而在键区上下增加的留白。
-  static let phoneLetterVerticalPadding: CGFloat = 10
+  /// 不再为旧键帽高度补偿留白，额外空间由底部留白控件显式设置。
+  static let phoneLetterVerticalPadding: CGFloat = 0
 
   static func resolve(
     idiom: UIUserInterfaceIdiom, horizontalSizeClass: UIUserInterfaceSizeClass
@@ -38,17 +38,9 @@ enum KeyboardFormFactor: Equatable {
   /// 各排按键保留用户的行距（`touch_row_spacing_tenths`，0–16，默认 7），不把顶部间隔写进共享偏好。
   var topRowGap: CGFloat { self == .tablet ? 9 : 4 }
 
-  /// 默认键盘高度下一排按键的高度。
-  ///
-  /// 竖屏用设计稿的按键高度（`KeyboardHeightPercent.portraitKeyHeight`）：手机 52pt、26 键字母页 44pt，iPad 54pt。设计稿没有画横屏键盘，所以横屏沿用以前按系统尺寸做的横屏键盘的按键高度：手机 34pt，其中手写为 40pt，让书写区仍然够用；iPad 为更高的 73pt，和系统键盘一样随更宽的屏幕变大。
+  /// 用户设定的单个按键高度，横竖屏与键盘外框高度不会自动放大它。
   func keyHeight(landscape: Bool, handwriting: Bool, letterKeys: Bool = false) -> CGFloat {
-    guard landscape else {
-      return self == .phone && letterKeys ? 44 : KeyboardHeightPercent.portraitKeyHeight(tablet: self == .tablet)
-    }
-    switch self {
-    case .phone: return handwriting ? 40 : 34
-    case .tablet: return 73
-    }
+    CGFloat(KeyboardLayoutPreference.keyHeight)
   }
 
   /// 键盘按几排按键来排布：四排；iPad 显示数字行时为五排，因为那是整整多出的一排，而不是从字母行里挤出来的。
@@ -58,15 +50,11 @@ enum KeyboardFormFactor: Equatable {
   func keyboardHeight(topRow: CGFloat, rowSpacing: CGFloat, landscape: Bool, handwriting: Bool,
                       numberRow: Bool = false, letterKeys: Bool = false) -> CGFloat {
     let keyBlock = KeyboardHeightPercent.keyBlockHeight(
-      keyHeight: keyHeight(landscape: landscape, handwriting: handwriting, letterKeys: letterKeys),
+      keyHeight: CGFloat(KeyboardLayoutPreference.keyHeight),
       rows: keyRows(numberRow: numberRow), rowSpacing: rowSpacing)
-    let standardRowSpacing = rowSpacing - (self == .phone && !landscape && letterKeys
-      ? Self.phoneLetterRowPadding : 0)
-    let standardBlock = KeyboardHeightPercent.keyBlockHeight(
-      keyHeight: keyHeight(landscape: landscape, handwriting: handwriting),
-      rows: keyRows(numberRow: numberRow), rowSpacing: standardRowSpacing)
-    // 26 键的键帽从 52pt 收紧到 44pt 后，用上下内边距补回这 20pt，切换布局时键盘外框不跳。
-    let letterHeightCompensation = self == .phone && letterKeys ? standardBlock - keyBlock : 0
+    // 单键高度与底部空间独立，字母页的补偿留白不再靠拉高任何一排消化。
+    let letterHeightCompensation: CGFloat = self == .phone && letterKeys && !landscape
+      ? Self.phoneLetterVerticalPadding * 2 : 0
     return padding.top + topRow + (topRow > 0 ? topRowGap : 0)
       + keyBlock + letterHeightCompensation
       + padding.bottom

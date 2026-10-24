@@ -62,9 +62,10 @@ export class KeyboardMetrics {
     preeditFontSize: number = KeyboardMetrics.CANDIDATE_PREEDIT_FONT_SIZE,
     compact: boolean = false,
     withStrip: boolean = true,
+    keyHeightVp: number = 40,
   ): number {
     const keys: number =
-      KeyboardMetrics.ROW_HEIGHT_VP * KeyboardMetrics.KEY_ROWS + heightAdjustmentVp;
+      keyHeightVp * KeyboardMetrics.KEY_ROWS + Math.max(0, heightAdjustmentVp);
     if (!compact) {
       return (
         KeyboardMetrics.TOUCH_ROOT_TOP_PADDING_VP +

@@ -112,6 +112,8 @@ export type Preferences = PunctuationPreferences &
       | "nine_key_shuangpin";
     touch_keyboard_schemes?: TouchKeyboardSchemePreferences;
     touch_keyboard_width_percent?: number;
+    /** 单个触屏键帽高度，默认 40 dp；独立于底部留白与行间距。 */
+    touch_key_height?: number;
     touch_key_spacing_tenths?: number;
     touch_row_spacing_tenths?: number;
     touch_keyboard_height_adjustment?: number;

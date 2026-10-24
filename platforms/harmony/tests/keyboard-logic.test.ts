@@ -1961,20 +1961,14 @@ group("an unset height adjustment is the default, not the minimum", () => {
   );
 });
 
-group("row heights spend the whole adjustment without losing a pixel", () => {
-  const base = KeyboardGeometry.STANDARD_ROW_HEIGHT_VP;
-  for (const adjustment of [0, 1, 7, -5, 47, 48]) {
-    for (const rowCount of [1, 3, 4, 5]) {
-      let sum = 0;
-      for (let row = 0; row < rowCount; row++) {
-        sum += KeyboardGeometry.adjustedRowHeight(base, adjustment, rowCount, row);
-      }
-      const expected = base * rowCount + KeyboardGeometry.heightAdjustment(adjustment);
-      check(
-        sum === expected,
-        `rows must sum to ${expected} for adjustment ${adjustment} across ${rowCount} rows, got ${sum}`,
-      );
-    }
+group("单键高度独立于底部留白和行距", () => {
+  for (const height of [28, 40, 64]) {
+    check(KeyboardGeometry.keyHeight(height) === height, "保留显式单键尺寸");
+    const normal = KeyboardMetrics.totalHeightVp(70, 0, 0, 18, 15, false, true, height);
+    const taller = KeyboardMetrics.totalHeightVp(70, 48, 0, 18, 15, false, true, height);
+    check(taller - normal === 48, "48vp 增量只进入底部空间");
+    check(KeyboardMetrics.totalHeightVp(160, 0, 0, 18, 15, false, true, height) - normal === 27,
+      "三个行间隙独立增加，按键尺寸保持不变");
   }
 });
 
@@ -2012,28 +2006,10 @@ group("candidate window height follows the shared layout orientation", () => {
   );
 });
 
-group("invalid geometry is rejected rather than silently clamped", () => {
-  assertThrows(
-    () => KeyboardGeometry.adjustedRowHeight(0, 0, 3, 0),
-    /Invalid keyboard height/,
-    "rejects invalid input",
-  );
-  assertThrows(
-    () => KeyboardGeometry.adjustedRowHeight(48, 0, 0, 0),
-    /Invalid keyboard height/,
-    "rejects invalid input",
-  );
-  assertThrows(
-    () => KeyboardGeometry.adjustedRowHeight(48, 0, 3, 3),
-    /Invalid keyboard height/,
-    "rejects invalid input",
-  );
-  assertThrows(
-    () => KeyboardGeometry.adjustedRowHeight(48, 0, 3, -1),
-    /Invalid keyboard height/,
-    "rejects invalid input",
-  );
-  checks += 4;
+group("损坏单键高度回到默认值", () => {
+  for (const value of [undefined, 0, 27, 65, 40.5, NaN]) {
+    check(KeyboardGeometry.keyHeight(value) === 40, "旧文档和损坏值回到默认 40vp");
+  }
 });
 
 group("display strings match the Java formatting", () => {
@@ -10123,7 +10099,7 @@ group("the design key changes whenever the drawing would", () => {
 group("the panel is as tall as what the view stacks inside it", () => {
   // 设计稿的 Harmony 框架：顶部 8，50vp 的条带，10vp 间距，四行 44vp 及其间三个行间距，底部 6。
   check(
-    KeyboardMetrics.totalHeightVp() === 8 + 50 + 10 + 44 * 4 + 7 * 3 + 6,
+    KeyboardMetrics.totalHeightVp() === 8 + 50 + 10 + 40 * 4 + 7 * 3 + 6,
     "the touch total counts the padding, the strip, its gap, every key row, the gaps between them and the bottom padding",
   );
   check(
@@ -10131,7 +10107,7 @@ group("the panel is as tall as what the view stacks inside it", () => {
       KeyboardMetrics.TOUCH_ROOT_TOP_PADDING_VP +
         KeyboardMetrics.STRIP_HEIGHT_VP +
         KeyboardMetrics.STRIP_GAP_VP +
-        KeyboardMetrics.ROW_HEIGHT_VP * KeyboardMetrics.KEY_ROWS +
+        40 * KeyboardMetrics.KEY_ROWS +
         KeyboardMetrics.touchRowGapsVp(KeyboardMetrics.ROW_SPACING_VP * 10) +
         KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP,
     "and it is built from the constants the view lays itself out with",
@@ -10150,7 +10126,7 @@ group("the panel is as tall as what the view stacks inside it", () => {
     KeyboardMetrics.COMPOSITION_ROW_HEIGHT_VP +
     KeyboardMetrics.candidateRowHeightVp(KeyboardMetrics.CANDIDATE_FONT_SIZE, true) +
     KeyboardMetrics.CANDIDATE_CARD_PADDING_VP * 2 +
-    KeyboardMetrics.ROW_HEIGHT_VP * KeyboardMetrics.KEY_ROWS +
+    40 * KeyboardMetrics.KEY_ROWS +
     KeyboardMetrics.ROW_SPACING_VP * KeyboardMetrics.KEY_ROWS +
     KeyboardMetrics.ROOT_VERTICAL_PADDING_VP * 2;
   check(
@@ -10208,33 +10184,11 @@ group("the panel is as tall as what the view stacks inside it", () => {
     "and one per key row on a 2in1 surface, as before",
   );
   check(
-    KeyboardMetrics.totalHeightVp(70, -12) < KeyboardMetrics.totalHeightVp(70, 0),
-    "a negative adjustment shortens it",
+    KeyboardMetrics.totalHeightVp(70, -12) === KeyboardMetrics.totalHeightVp(70, 0),
+    "旧负值不缩小已设定的按键",
   );
 });
 
-group("the height adjustment is spread across rows without losing a pixel", () => {
-  const rows = KeyboardMetrics.KEY_ROWS;
-  const base = KeyboardMetrics.ROW_HEIGHT_VP;
-  for (const adjustment of [0, 1, 7, 12, -12, 48]) {
-    let total = 0;
-    for (let index = 0; index < rows; index++) {
-      total += KeyboardGeometry.adjustedRowHeight(base, adjustment, rows, index);
-    }
-    check(
-      total === base * rows + adjustment,
-      `the rows still sum to the adjusted total at ${adjustment}`,
-    );
-  }
-  check(
-    KeyboardGeometry.heightAdjustment(null) === KeyboardGeometry.DEFAULT_HEIGHT_ADJUSTMENT_VP,
-    "an unset adjustment takes the default rather than clamping to the minimum",
-  );
-  check(
-    KeyboardGeometry.heightAdjustment(999) === KeyboardGeometry.MAX_HEIGHT_ADJUSTMENT_VP,
-    "an out-of-range adjustment is clamped",
-  );
-});
 
 group("an emoji catalog page is checked before it is trusted", () => {
   const item: EmojiItem = EmojiCatalogModel.item("\u{1f600}", "grinning", "Smileys and emotion");

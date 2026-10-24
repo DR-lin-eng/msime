@@ -60,6 +60,7 @@ public final class KeyboardPreview extends View {
     private float keyGapDp = 5;
     private float rowGapDp = 5;
     private int heightAdjustmentDp;
+    private int keyHeightDp = 40;
     private boolean customGeometry;
     private boolean colorsValid;
     private int inkColor;
@@ -111,6 +112,11 @@ public final class KeyboardPreview extends View {
 
     /** 设置页使用键盘实际保存的宽度和间距；皮肤缩略图仍用其固定几何。 */
     public void setGeometry(int widthPercent, int keySpacingTenths, int rowSpacingTenths, int heightAdjustment) {
+        setGeometry(widthPercent, keySpacingTenths, rowSpacingTenths, heightAdjustment, 40);
+    }
+
+    public void setGeometry(int widthPercent, int keySpacingTenths, int rowSpacingTenths, int heightAdjustment, int keyHeight) {
+        keyHeightDp = app.msime.android.KeyboardSpacingPolicy.keyHeight(keyHeight);
         this.widthPercent = app.msime.android.KeyboardSpacingPolicy.widthPercent(widthPercent);
         keyGapDp = app.msime.android.KeyboardSpacingPolicy.keySpacing(keySpacingTenths) / 10f;
         rowGapDp = app.msime.android.KeyboardSpacingPolicy.rowSpacing(rowSpacingTenths) / 10f;
@@ -212,8 +218,8 @@ public final class KeyboardPreview extends View {
      * 社区皮肤卡原先把预览框写死为 80 dp 高，手机上约 170 dp 宽，比键盘本身扁得多，键面被横向拉宽压扁。由宽度推高度后，缩略图与真实键盘同一比例。
      */
     private float referenceHeightDp() {
-        return customGeometry ? 12 + 24 + rows.length * KeyboardGeometry.KEY_ROW_HEIGHT_DP
-            + heightAdjustmentDp + rowGapDp * (rows.length - 1) : REFERENCE_HEIGHT_DP;
+        return customGeometry ? 12 + 24 + rows.length * keyHeightDp
+            + Math.max(0, heightAdjustmentDp) + rowGapDp * (rows.length - 1) : REFERENCE_HEIGHT_DP;
     }
 
     @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
@@ -283,7 +289,8 @@ public final class KeyboardPreview extends View {
 
         float top = pad + stripHeight;
         float available = h - top - pad;
-        float rowHeight = (available - rowGap * (rows.length - 1)) / rows.length;
+        float rowHeight = customGeometry ? DimensionPolicy.floatPixels(getContext(), keyHeightDp) * s
+            : (available - rowGap * (rows.length - 1)) / rows.length;
         float unit = (keyWidth - gap * 9) / 10f;
         paint.setTextAlign(Paint.Align.CENTER);
         for (int r = 0; r < rows.length; r++) {

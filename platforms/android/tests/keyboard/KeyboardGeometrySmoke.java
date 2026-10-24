@@ -25,6 +25,11 @@ public final class KeyboardGeometrySmoke {
     }
 
     public static void main(String[] args) {
+        check(KeyboardHeightPolicy.fixedKeyHeight(40) == 40);
+        check(KeyboardHeightPolicy.fixedKeyHeight(28) == 28);
+        check(KeyboardHeightPolicy.fixedKeyHeight(64) == 64);
+        check(KeyboardHeightPolicy.fixedKeyHeight(65) == 40);
+
         // 与 crates/client-core 的 default_touch_key_spacing_tenths / default_touch_row_spacing_tenths 同值。
         check(KeyboardSpacingPolicy.widthPercent(80) == 80);
         check(KeyboardSpacingPolicy.widthPercent(75) == 75);

@@ -3231,26 +3231,19 @@ CMetasequoiaIME::KeyDownDispatchResult CMetasequoiaIME::_DispatchKeyDown(
         Global::ModifiersDown = Global::CharacterModifiers(capturedModifiers, wch, code);
 
         PerfTimer writeShmTimer;
-        // Enter is finalized by the in-process TSF path. Reuse the legacy
-        // pinyin payload to carry the exact bounded text that path is about
-        // to commit, allowing the Server session to validate and clear its
-        // matching raw composition instead of rejecting an unobserved commit.
+        // 回车由进程内 TSF 上屏；校验消息必须读取同一个宿主原文。
+        // 宿主拥有组字时旧键击缓冲为空，不能用它证明 Server 应当清空哪一段。
         std::wstring localCommitObservation;
         const bool hasLocalCommitObservation =
             code == VK_RETURN && _IsComposing() && _pCompositionProcessorEngine;
         if (hasLocalCommitObservation)
         {
             localCommitObservation = GlobalIme::word_for_creating_word;
-            const CStringRange &raw = _pCompositionProcessorEngine->GetKeystrokeBuffer();
-            if (raw.Get() != nullptr)
-            {
-                localCommitObservation.append(raw.Get(), raw.GetLength());
-            }
+            const auto composition = _pCompositionProcessorEngine->GetKeyCompositionState();
+            localCommitObservation.append(composition.rawInput);
             if (localCommitObservation.size() >= 128)
             {
-                // A truncated observation is worse than an explicit fail
-                // closed response: the Server must not acknowledge text that
-                // differs from what TSF committed.
+                // 不发送截断后的观察值，避免 Server 确认与 TSF 实际上屏不同的文字。
                 localCommitObservation.clear();
             }
         }

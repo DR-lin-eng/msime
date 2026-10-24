@@ -141,7 +141,9 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
             catch (Exception | AssertionError error) { failure[0] = rootCause(error); }
         }
         Bundle result = new Bundle();
-        Throwable error = failure[0];
+        Throwable error = failure[0] == null ? null : rootCause(failure[0]);
+        if (error != null && error.getStackTrace().length > 0)
+            observations.append("synthetic failure site: ").append(error.getStackTrace()[0]).append("\n");
         result.putString("stream", observations.toString() + (error == null
             ? "MSIME_DEVICE_SMOKE_PASSED: toolbar layout, touch feedback observation, click lifecycle and synthetic toolbar pixels\n"
             : "MSIME_DEVICE_SMOKE_FAILED: toolbar layout (" + error.getClass().getSimpleName() + ")"
@@ -320,7 +322,10 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
             method(type, "bindCountedAction", Button.class, Runnable.class).invoke(service, key,
                 (Runnable) () -> clicks++);
             Object letters = field(type, "imeLetterRows").get(service);
-            method(letters.getClass(), "bindLetterGestures", Button.class, String.class).invoke(letters, key, "a");
+            // 真实字母绑定现在携带一次手势的触点槽，测试也传入同形数组。
+            Object touch = java.lang.reflect.Array.newInstance(loader.loadClass("app.msime.android.KeyTouchSample"), 1);
+            method(letters.getClass(), "bindLetterGestures", Button.class, String.class, touch.getClass())
+                .invoke(letters, key, "a", touch);
             overlay = field(type, "imeDebugOverlay").get(service);
             pending = field(overlay.getClass(), "pendingKeyAt");
             activity.setContentView(rows);

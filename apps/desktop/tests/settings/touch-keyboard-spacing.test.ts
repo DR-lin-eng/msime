@@ -9,11 +9,11 @@ test("uses default spacing independently for omitted dimensions", () => {
 
 test.each([
   [35, 95, 3.5, 9.5],
-  [0, 0, 3, 4],
-  [65, 110, 6, 10],
+  [0, 0, 0, 0],
+  [125, 170, 12, 16],
   [30, 40, 3, 4],
   [60, 100, 6, 10],
-  [-Infinity, Infinity, 3, 10],
+  [-Infinity, Infinity, 0, 16],
 ])("converts %s/%s tenths to bounded dp", (key, row, keySpacing, rowSpacing) => {
   expect(touchKeyboardSpacing(key, row)).toEqual({ keySpacing, rowSpacing });
 });

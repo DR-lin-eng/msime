@@ -5,6 +5,7 @@ import UIKit
 ///
 /// 设计稿里的按键弹出预览没有做：键盘本身不支持。手势里的滑动输入符号和长按空格语音输入与 Android 一样是本机开关（`KeyboardLayoutPreference.swipeSymbols`、`spaceVoice`），默认开。工具栏语音按钮的开关挪到了语音输入页，由那一页单独写 `touch_voice_shortcut`；这里每次只保存用户刚动的那一项几何尺寸，见 `save(_:)`。
 struct KeyboardLayoutSettingsView: View {
+  @State private var widthPercent = KeyboardLayoutPreference.widthPercent
   @State private var keySpacing = KeyboardLayoutPreference.keySpacing
   @State private var rowSpacing = KeyboardLayoutPreference.rowSpacing
   @State private var height = KeyboardLayoutPreference.heightAdjustment
@@ -32,7 +33,7 @@ struct KeyboardLayoutSettingsView: View {
 
   private enum Axis { case vertical, horizontal }
   /// 一次保存只写用户刚动的那一项，见 `save(_:)`。
-  private enum Field { case height, keySpacing, rowSpacing }
+  private enum Field { case height, width, keySpacing, rowSpacing }
   private static let spacingDragScale: Double = 18
 
   var body: some View {
@@ -72,7 +73,7 @@ struct KeyboardLayoutSettingsView: View {
       KeyboardSkinPreview(
         skin: skin, nineKey: nineKey, fourteenKey: scheme == .fourteenKey,
         layout: KeyboardGeometry(keySpacing: keySpacing, rowSpacing: rowSpacing, showsBottomLanguage: !hideLanguageKey),
-        heightAdjustment: height
+        heightAdjustment: height, widthPercent: widthPercent
       )
       .gesture(spacingDrag)
       .accessibilityIdentifier("keyboardLayoutPreview")
@@ -129,9 +130,9 @@ struct KeyboardLayoutSettingsView: View {
         dragAxis = axis
         switch axis {
         case .vertical:
-          rowSpacing = KeyboardGeometry.clamped(base.rowSpacing + Double(value.translation.height) / Self.spacingDragScale, 4, 10)
+          rowSpacing = KeyboardGeometry.clamped(base.rowSpacing + Double(value.translation.height) / Self.spacingDragScale, 0, 16)
         case .horizontal:
-          keySpacing = KeyboardGeometry.clamped(base.keySpacing + Double(value.translation.width) / Self.spacingDragScale, 3, 6)
+          keySpacing = KeyboardGeometry.clamped(base.keySpacing + Double(value.translation.width) / Self.spacingDragScale, 0, 12)
         }
       }
       .onEnded { _ in
@@ -153,7 +154,8 @@ struct KeyboardLayoutSettingsView: View {
   // MARK: - 分组
 
   private var layoutGroup: some View {
-    DesignGroup(title: "布局", footer: saveFailed ? SettingsSaveFailure.message : nil) {
+    DesignGroup(title: "布局", footer: saveFailed ? SettingsSaveFailure.message
+      : "宽度仅调整普通键盘的按键区域；单手、分离和 iPad 浮动键盘使用各自的宽度。") {
       chineseKeyboardRow
       DesignDivider()
       // 只有双拼方案的 26 键画键位提示；本版本没有双拼时不列这一行。
@@ -174,9 +176,12 @@ struct KeyboardLayoutSettingsView: View {
       sliderRow("键盘高度", value: $height, range: -12...48, identifier: "appKeyboardHeightSlider",
                 field: .height, format: heightPercent)
       DesignDivider()
-      sliderRow("按键间距", value: $keySpacing, range: 3...6, identifier: "appKeySpacingSlider", field: .keySpacing)
+      sliderRow("按键区域宽度", value: $widthPercent, range: 75...100, identifier: "appKeyboardWidthSlider",
+                field: .width, format: { "\(Int($0.rounded()))%" })
       DesignDivider()
-      sliderRow("行间距", value: $rowSpacing, range: 4...10, identifier: "appRowSpacingSlider", field: .rowSpacing)
+      sliderRow("按键间距", value: $keySpacing, range: 0...12, identifier: "appKeySpacingSlider", field: .keySpacing)
+      DesignDivider()
+      sliderRow("行间距", value: $rowSpacing, range: 0...16, identifier: "appRowSpacingSlider", field: .rowSpacing)
     }
   }
 
@@ -306,7 +311,7 @@ struct KeyboardLayoutSettingsView: View {
 
   private var resetGroup: some View {
     DesignGroup(footer: UIDevice.current.userInterfaceIdiom == .pad
-      ? "把这一页的间距、高度、中/英键和横屏分离式键盘恢复成默认值。" : "把这一页的间距、高度和中/英键恢复成默认值。") {
+      ? "把这一页的间距、宽度、高度、中/英键和横屏分离式键盘恢复成默认值。" : "把这一页的间距、宽度、高度和中/英键恢复成默认值。") {
       Button {
         saveFailed = !KeyboardLayoutPreference.resetGeometry()
         readPreferences()
@@ -405,6 +410,7 @@ struct KeyboardLayoutSettingsView: View {
   private func save(_ field: Field) {
     let saved = switch field {
     case .height: KeyboardLayoutPreference.saveGeometry(heightAdjustment: height)
+    case .width: KeyboardLayoutPreference.saveGeometry(widthPercent: widthPercent)
     case .keySpacing: KeyboardLayoutPreference.saveGeometry(keySpacing: keySpacing)
     case .rowSpacing: KeyboardLayoutPreference.saveGeometry(rowSpacing: rowSpacing)
     }
@@ -435,6 +441,7 @@ struct KeyboardLayoutSettingsView: View {
     let preferences = MetasequoiaInputSessionBridge.loadSharedPreferences()
     // 文档里的选择（取不到时退回 App Group 镜像）就是键盘下次打开时用的方案。
     scheme = InputSchemePreference.current(in: preferences).scheme
+    widthPercent = KeyboardLayoutPreference.widthPercent
     keySpacing = KeyboardLayoutPreference.keySpacing
     rowSpacing = KeyboardLayoutPreference.rowSpacing
     height = KeyboardLayoutPreference.heightAdjustment
@@ -452,6 +459,7 @@ struct KeyboardLayoutSettingsView: View {
     // 文档是权威：先抄进 App Group，再从 App Group 读回页面，两边才是同一个值。
     KeyboardLayoutPreference.mirrorGeometry(preferences)
     quickSymbols = KeyboardLayoutPreference.quickPunctuationSymbols.joined()
+    widthPercent = KeyboardLayoutPreference.widthPercent
     keySpacing = KeyboardLayoutPreference.keySpacing
     rowSpacing = KeyboardLayoutPreference.rowSpacing
     height = KeyboardLayoutPreference.heightAdjustment

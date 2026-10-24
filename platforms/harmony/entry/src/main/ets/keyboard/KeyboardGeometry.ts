@@ -20,10 +20,15 @@ export class KeyboardGeometry {
   static readonly HANDWRITING_BODY_HEIGHT_VP: number = 220;
   static readonly DEFAULT_KEY_SPACING_TENTHS: number = 60;
   static readonly DEFAULT_ROW_SPACING_TENTHS: number = 70;
-  static readonly MIN_KEY_SPACING_TENTHS: number = 30;
-  static readonly MAX_KEY_SPACING_TENTHS: number = 60;
-  static readonly MIN_ROW_SPACING_TENTHS: number = 40;
-  static readonly MAX_ROW_SPACING_TENTHS: number = 100;
+  static readonly MIN_KEY_SPACING_TENTHS: number = 0;
+  static readonly MAX_KEY_SPACING_TENTHS: number = 120;
+  static readonly MIN_ROW_SPACING_TENTHS: number = 0;
+  static readonly MAX_ROW_SPACING_TENTHS: number = 160;
+
+  /** 普通键区的宽度；旧文档缺失字段时回到满宽。 */
+  static widthPercent(value: number | undefined): number {
+    return value !== undefined && Number.isInteger(value) && value >= 75 && value <= 100 ? value : 100;
+  }
 
   static keySpacing(value: number): number {
     return KeyboardGeometry.clamp(

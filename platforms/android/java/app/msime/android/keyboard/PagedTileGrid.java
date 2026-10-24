@@ -71,7 +71,7 @@ public final class PagedTileGrid extends ViewGroup {
     public record PickerGrid(int rows, float rowGap) {}
 
     /**
-     * 输入方式和功能面板每页几行、行距多少，与 iOS `KeyboardPagedGridView.pickerRows` / `pickerRowGap`、鸿蒙 `FunctionPanelPolicy.pickerGrid` 同一条规则：手机横屏两行、行距 16，其余三行、行距 12。安卓的键区横竖屏一样高，最矮时（高度 75%、行距 4 dp）只有 178 dp，三行磁贴连同面板的边距和页点放不进去：键区放不下行距 12 时先把行距收小，收到 4 还放不下就退回两行，不裁掉磁贴。
+     * 输入方式和功能面板每页几行、行距多少，与 iOS `KeyboardPagedGridView.pickerRows` / `pickerRowGap`、鸿蒙 `FunctionPanelPolicy.pickerGrid` 同一条规则：手机横屏两行、行距 16，其余三行、行距 12。安卓的键区横竖屏一样高，最矮时（高度 75%、零行距）只有 162 dp：三行磁贴放不下时先收紧间隔，再退回两行；两行的间隔也按剩余空间收紧，避免裁掉磁贴。
      *
      * @param phoneLandscape 手机（`smallestScreenWidthDp` < 600）横屏
      * @param keyAreaDp 面板能占的键区高度（{@link KeyboardHeightPolicy#keyAreaHeightDp}）
@@ -79,9 +79,11 @@ public final class PagedTileGrid extends ViewGroup {
      * @param chromeDp 面板里网格以外的高度：上下内边距、页点和它的边距
      */
     public static PickerGrid pickerGrid(boolean phoneLandscape, float keyAreaDp, float rowHeightDp, float chromeDp) {
-        if (phoneLandscape) return new PickerGrid(2, 16f);
+        // 零行距和最低键高时，方案面板的两行也可能放不下固定的 16 dp 间隔。
+        float twoRowGap = Math.max(0f, Math.min(16f, (float) Math.floor(keyAreaDp - chromeDp - 2 * rowHeightDp)));
+        if (phoneLandscape) return new PickerGrid(2, twoRowGap);
         float gap = Math.min(12f, (float) Math.floor((keyAreaDp - chromeDp - 3 * rowHeightDp) / 2));
-        return gap >= 4f ? new PickerGrid(3, gap) : new PickerGrid(2, 16f);
+        return gap >= 4f ? new PickerGrid(3, gap) : new PickerGrid(2, twoRowGap);
     }
 
     /** 第 {@code index} 个条目所在的页。 */

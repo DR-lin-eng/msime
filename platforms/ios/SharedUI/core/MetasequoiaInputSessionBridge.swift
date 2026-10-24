@@ -765,13 +765,15 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
 
   /// 只写传了值的那几项。设置 App 一次只改一项，只写这一项，就不会把它页面上停留着的旧值（比如键盘里刚调过的高度）写回文档。
   static func geometryMapping(keySpacing: Double? = nil, rowSpacing: Double? = nil,
-                              heightAdjustment: Double? = nil,
+                              heightAdjustment: Double? = nil, widthPercent: Double? = nil,
                               voiceEnabled: Bool? = nil) -> ((inout [String: Any]) -> Void)? {
-    guard [keySpacing, rowSpacing, heightAdjustment].allSatisfy({ $0?.isFinite ?? true }) else { return nil }
-    let keySpacingTenths = keySpacing.map { Int((SharedNumber.clamped($0, to: 3...6) * 10).rounded()) }
-    let rowSpacingTenths = rowSpacing.map { Int((SharedNumber.clamped($0, to: 4...10) * 10).rounded()) }
+    guard [keySpacing, rowSpacing, heightAdjustment, widthPercent].allSatisfy({ $0?.isFinite ?? true }) else { return nil }
+    let keySpacingTenths = keySpacing.map { Int((SharedNumber.clamped($0, to: 0...12) * 10).rounded()) }
+    let rowSpacingTenths = rowSpacing.map { Int((SharedNumber.clamped($0, to: 0...16) * 10).rounded()) }
     let clampedHeight = heightAdjustment.map { Int(SharedNumber.clamped($0, to: -12...48).rounded()) }
+    let clampedWidth = widthPercent.map { Int(SharedNumber.clamped($0, to: 75...100).rounded()) }
     return { preferences in
+      if let clampedWidth { preferences["touch_keyboard_width_percent"] = clampedWidth }
       if let keySpacingTenths { preferences["touch_key_spacing_tenths"] = keySpacingTenths }
       if let rowSpacingTenths { preferences["touch_row_spacing_tenths"] = rowSpacingTenths }
       if let clampedHeight { preferences["touch_keyboard_height_adjustment"] = clampedHeight }
@@ -783,6 +785,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   @discardableResult
   func resetTouchKeyboardGeometry() -> Bool {
     updateAndPersist { preferences in
+      preferences.removeValue(forKey: "touch_keyboard_width_percent")
       preferences.removeValue(forKey: "touch_key_spacing_tenths")
       preferences.removeValue(forKey: "touch_row_spacing_tenths")
       preferences.removeValue(forKey: "touch_keyboard_height_adjustment")

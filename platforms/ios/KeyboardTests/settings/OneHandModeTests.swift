@@ -5,11 +5,16 @@ import XCTest
 @MainActor
 final class OneHandModeTests: XCTestCase {
   private var stored: Any?
+  private var storedWidth: Any?
+  private var storedRowSpacing = 7.0
   private var storedScheme = InputSchemePreference.scheme
 
   override func setUp() {
     super.setUp()
     stored = KeyboardLayoutPreference.defaults.object(forKey: KeyboardLayoutPreference.oneHandedKey)
+    storedRowSpacing = KeyboardLayoutPreference.rowSpacing
+    storedWidth = KeyboardLayoutPreference.defaults.object(forKey: KeyboardLayoutPreference.widthPercentKey)
+    KeyboardLayoutPreference.widthPercent = 100
     storedScheme = InputSchemePreference.scheme
     KeyboardLayoutPreference.defaults.removeObject(forKey: KeyboardLayoutPreference.oneHandedKey)
     InputSchemePreference.scheme = .quanpin
@@ -18,6 +23,9 @@ final class OneHandModeTests: XCTestCase {
   override func tearDown() {
     if let stored { KeyboardLayoutPreference.defaults.set(stored, forKey: KeyboardLayoutPreference.oneHandedKey) }
     else { KeyboardLayoutPreference.defaults.removeObject(forKey: KeyboardLayoutPreference.oneHandedKey) }
+    if let storedWidth { KeyboardLayoutPreference.defaults.set(storedWidth, forKey: KeyboardLayoutPreference.widthPercentKey) }
+    else { KeyboardLayoutPreference.defaults.removeObject(forKey: KeyboardLayoutPreference.widthPercentKey) }
+    KeyboardLayoutPreference.rowSpacing = storedRowSpacing
     InputSchemePreference.scheme = storedScheme
     super.tearDown()
   }
@@ -146,6 +154,37 @@ final class OneHandModeTests: XCTestCase {
     let tile = try control("moreCard-单手模式", in: controller)
     XCTAssertFalse(tile.isEnabled)
     XCTAssertEqual(KeyboardLayoutPreference.oneHanded, .right)
+  }
+
+  func testCustomWidthCentersKeysAndLeavesTheGutterUntappable() throws {
+    func letter(_ label: String, in controller: KeyboardViewController) throws -> CGRect {
+      let key = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == label })
+      return KeyAreaStackView.layoutFrame(of: key, in: controller.view)
+    }
+    let full = makeController()
+    let fullQ = try letter("字母 Q", in: full)
+    KeyboardLayoutPreference.widthPercent = 80
+    let narrow = makeController()
+    let narrowQ = try letter("字母 Q", in: narrow)
+    XCTAssertGreaterThan(narrowQ.minX, fullQ.minX + 30)
+    XCTAssertLessThan(narrowQ.width, fullQ.width)
+    XCTAssertFalse(narrow.view.hitTest(CGPoint(x: 8, y: narrowQ.midY), with: nil) is UIControl)
+    KeyboardLayoutPreference.oneHanded = .right
+    let handedAt80 = try letter("字母 Q", in: makeController())
+    KeyboardLayoutPreference.widthPercent = 100
+    let handedAt100 = try letter("字母 Q", in: makeController())
+    XCTAssertEqual(handedAt80.minX, handedAt100.minX, accuracy: 0.5)
+    XCTAssertEqual(handedAt80.width, handedAt100.width, accuracy: 0.5)
+  }
+
+  func testZeroRowSpacingAlsoRemovesPhoneLetterPadding() throws {
+    KeyboardLayoutPreference.rowSpacing = 0
+    let controller = makeController()
+    let q = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 Q" })
+    let a = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 A" })
+    let top = KeyAreaStackView.layoutFrame(of: q, in: controller.view)
+    let middle = KeyAreaStackView.layoutFrame(of: a, in: controller.view)
+    XCTAssertEqual(middle.minY - top.maxY, 0, accuracy: 0.5)
   }
 
   private func makeController() -> KeyboardViewController {

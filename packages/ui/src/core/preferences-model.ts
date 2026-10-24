@@ -111,6 +111,7 @@ export type Preferences = PunctuationPreferences &
       | "fourteen_key"
       | "nine_key_shuangpin";
     touch_keyboard_schemes?: TouchKeyboardSchemePreferences;
+    touch_keyboard_width_percent?: number;
     touch_key_spacing_tenths?: number;
     touch_row_spacing_tenths?: number;
     touch_keyboard_height_adjustment?: number;

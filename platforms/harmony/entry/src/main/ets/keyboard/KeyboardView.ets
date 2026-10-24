@@ -655,6 +655,7 @@ struct KeyboardView {
   @State polishBusy: boolean = false;
   @State polishConfigured: boolean = false;
   @State hoveredCandidate: number = -1;
+  @State geometryWidth: number = KeyboardSession.shared.preferences().widthPercent;
   @State geometryKeySpacing: number = KeyboardSession.shared.preferences().keySpacingTenths;
   @State geometryRowSpacing: number = KeyboardSession.shared.preferences().rowSpacingTenths;
   /** 屏幕上按键行的高度调整值：已保存的值，或高度条打开期间正在预览的值。 */
@@ -2857,6 +2858,7 @@ struct KeyboardView {
   /** Read the stored preferences into the view's skins, geometry and scheme. */
   private applySettings(): void {
     this.settings = KeyboardSession.shared.preferences();
+    this.geometryWidth = this.settings.widthPercent;
     this.geometryKeySpacing = this.settings.keySpacingTenths;
     this.geometryRowSpacing = this.settings.rowSpacingTenths;
     this.geometryHeight = this.settings.heightAdjustment;
@@ -6196,6 +6198,7 @@ struct KeyboardView {
       return;
     }
     this.settings = KeyboardSession.shared.preferences();
+    this.geometryWidth = this.settings.widthPercent;
     this.geometryKeySpacing = this.settings.keySpacingTenths;
     this.geometryRowSpacing = this.settings.rowSpacingTenths;
     this.geometryHeight = this.settings.heightAdjustment;
@@ -9620,7 +9623,14 @@ struct KeyboardView {
       .width('100%')
       .alignItems(VerticalAlign.Center)
     } else {
-      this.keyArea()
+      Row() {
+        Column({ space: this.rowSpacing() }) {
+          this.keyArea()
+        }
+        .width(`${this.geometryWidth}%`)
+      }
+      .width('100%')
+      .justifyContent(FlexAlign.Center)
     }
   }
 

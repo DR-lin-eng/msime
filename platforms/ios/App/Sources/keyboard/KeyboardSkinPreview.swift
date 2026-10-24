@@ -47,6 +47,7 @@ struct KeyboardSkinPreview: View {
   var fourteenKey = false
   var layout: KeyboardGeometry = KeyboardLayoutPreference.geometry
   var heightAdjustment: Double = 0
+  var widthPercent: Double = 100
   var topStrip: KeyboardPreviewTopStrip = .candidates
   /// 在 q–p 键的上角画数字提示，和设计稿的键盘缩略图一样。
   var letterHints: Bool = false
@@ -89,6 +90,7 @@ struct KeyboardSkinPreview: View {
       VStack(spacing: layout.rowSpacing) {
         if topStrip != .hidden { strip }
         keys
+          .padding(.horizontal, (390 - 14) * (1 - min(100, max(75, widthPercent)) / 100) / 2)
       }
       .padding(.horizontal, 7).padding(.top, 7).padding(.bottom, drawsHomeIndicator ? 0 : 7)
       if drawsHomeIndicator { homeIndicator }

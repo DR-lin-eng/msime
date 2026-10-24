@@ -82,7 +82,7 @@ test("keyboard spacing follows snapshots with shared defaults and rendering limi
       },
     }),
   );
-  expect(gaps()).toEqual(["3px", "4px"]);
+  expect(gaps()).toEqual(["0px", "0px"]);
   act(() => emit({ ...first, revision: 3 }));
   expect(gaps()).toEqual(["6px", "7px"]);
   act(() =>
@@ -96,7 +96,7 @@ test("keyboard spacing follows snapshots with shared defaults and rendering limi
       },
     }),
   );
-  expect(gaps()).toEqual(["6px", "10px"]);
+  expect(gaps()).toEqual(["6.5px", "11px"]);
 });
 
 test("keyboard subscribes before load and rejects stale snapshots without remounting", async () => {

@@ -1178,10 +1178,13 @@ pub struct Preferences {
     /// 总是写进文档，哪怕等于默认值：以前的版本在等于默认值时省略它，于是文档里没有它只能说明是以前的版本写的，按以前的默认列表读（[`TouchKeyboardScheme::LEGACY_DEFAULT_ENABLED`]）。新装的默认值已经不同，再省略就分不出这两种文档。
     #[serde(default = "TouchKeyboardSchemePreferences::without_stored_list")]
     pub touch_keyboard_schemes: TouchKeyboardSchemePreferences,
-    /// Horizontal key gap in tenths of a density-independent pixel.
+    /// 普通移动键盘按键区的宽度百分比；候选栏和工具栏不缩放。
+    #[serde(default = "default_touch_keyboard_width_percent")]
+    pub touch_keyboard_width_percent: u8,
+    /// 横向按键间距，单位为十分之一 dp。
     #[serde(default = "default_touch_key_spacing_tenths")]
     pub touch_key_spacing_tenths: u8,
-    /// Vertical row gap in tenths of a density-independent pixel.
+    /// 纵向行间距，单位为十分之一 dp。
     #[serde(default = "default_touch_row_spacing_tenths")]
     pub touch_row_spacing_tenths: u8,
     /// Touch-keyboard height adjustment in density-independent pixels.
@@ -3056,6 +3059,10 @@ pub fn normalize_touch_quick_symbols(symbols: &[String]) -> Vec<String> {
     }
 }
 
+fn default_touch_keyboard_width_percent() -> u8 {
+    100
+}
+
 fn default_touch_key_spacing_tenths() -> u8 {
     60
 }
@@ -3129,6 +3136,7 @@ impl Default for Preferences {
             touch_keyboard_layout: TouchKeyboardLayout::default(),
             touch_keyboard_split_portrait: false,
             touch_keyboard_schemes: TouchKeyboardSchemePreferences::default(),
+            touch_keyboard_width_percent: default_touch_keyboard_width_percent(),
             touch_key_spacing_tenths: default_touch_key_spacing_tenths(),
             touch_row_spacing_tenths: default_touch_row_spacing_tenths(),
             touch_keyboard_height_adjustment: 0,
@@ -3981,8 +3989,9 @@ impl Preferences {
         if !(1..=MAX_CANDIDATE_PAGE_SIZE).contains(&self.candidate_page_size) {
             return Err(PreferencesError::InvalidPageSize);
         }
-        if !(30..=60).contains(&self.touch_key_spacing_tenths)
-            || !(40..=100).contains(&self.touch_row_spacing_tenths)
+        if !(75..=100).contains(&self.touch_keyboard_width_percent)
+            || self.touch_key_spacing_tenths > 120
+            || self.touch_row_spacing_tenths > 160
             || !(-12..=48).contains(&self.touch_keyboard_height_adjustment)
         {
             return Err(PreferencesError::InvalidTouchKeyboardSpacing);
@@ -4135,7 +4144,7 @@ pub enum PreferencesError {
     InvalidNiuTrans,
     #[error("candidate page size must be between 1 and 10")]
     InvalidPageSize,
-    #[error("touch keyboard key spacing must be 3.0-6.0 and row spacing must be 4.0-10.0")]
+    #[error("触屏键盘宽度必须为 75–100%，键距为 0–12 dp，行距为 0–16 dp，高度调整为 -12–48 dp")]
     InvalidTouchKeyboardSpacing,
     #[error("快捷符号必须是去重的单字素列表，最多十二项且不含空白或控制字符")]
     InvalidTouchQuickSymbols,

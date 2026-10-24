@@ -13,6 +13,23 @@ final class KeyboardGeometrySettingsTests: XCTestCase {
     XCTAssertTrue(KeyboardLayoutPreference.geometry.showsBottomLanguage)
   }
 
+  func testWidthPersistsIndependentlyAndMissingDocumentFieldRestoresFullWidth() throws {
+    _ = MetasequoiaInputSessionBridge(stateRoot: state)
+    XCTAssertTrue(KeyboardLayoutPreference.saveGeometry(
+      keySpacing: 0, rowSpacing: 16, heightAdjustment: 24, widthPercent: 80, stateRoot: state))
+    XCTAssertTrue(KeyboardLayoutPreference.saveGeometry(keySpacing: 12, stateRoot: state))
+    let document = try XCTUnwrap(MetasequoiaInputSessionBridge.loadSharedPreferences(stateRoot: state))
+    XCTAssertEqual(document["touch_keyboard_width_percent"] as? Int, 80)
+    XCTAssertEqual(document["touch_keyboard_height_adjustment"] as? Int, 24)
+    XCTAssertEqual(document["touch_key_spacing_tenths"] as? Int, 120)
+    XCTAssertEqual(document["touch_row_spacing_tenths"] as? Int, 160)
+    XCTAssertTrue(KeyboardLayoutPreference.resetGeometry(stateRoot: state))
+    XCTAssertEqual(KeyboardLayoutPreference.widthPercent, 100)
+    KeyboardLayoutPreference.widthPercent = 75
+    KeyboardLayoutPreference.mirrorGeometry([:])
+    XCTAssertEqual(KeyboardLayoutPreference.widthPercent, 100)
+  }
+
   func testSharedGeometryRejectsFractionalAndBooleanValues() {
     XCTAssertNil(KeyboardLayoutPreference.sharedKeySpacing(NSNumber(value: 45.5)))
     XCTAssertNil(KeyboardLayoutPreference.sharedRowSpacing(NSNumber(value: true)))
@@ -24,6 +41,7 @@ final class KeyboardGeometrySettingsTests: XCTestCase {
 
   private var state: URL!
   private var previous: (Double, Double, Double, Bool) = (0, 0, 0, false)
+  private var previousWidthPercent = 100.0
   private var previousShuangpinKeyHints = true
   private var previousHideLanguageKey = false
 
@@ -33,11 +51,13 @@ final class KeyboardGeometrySettingsTests: XCTestCase {
       .appendingPathComponent("msime-geometry-settings-\(UUID().uuidString)", isDirectory: true)
     previous = (KeyboardLayoutPreference.keySpacing, KeyboardLayoutPreference.rowSpacing,
                 KeyboardLayoutPreference.heightAdjustment, KeyboardLayoutPreference.voiceShortcutEnabled)
+    previousWidthPercent = KeyboardLayoutPreference.widthPercent
     previousShuangpinKeyHints = KeyboardLayoutPreference.shuangpinKeyHints
     previousHideLanguageKey = KeyboardLayoutPreference.hideLanguageKey
   }
 
   override func tearDown() {
+    KeyboardLayoutPreference.widthPercent = previousWidthPercent
     KeyboardLayoutPreference.keySpacing = previous.0
     KeyboardLayoutPreference.rowSpacing = previous.1
     KeyboardLayoutPreference.heightAdjustment = previous.2

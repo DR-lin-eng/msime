@@ -29,6 +29,7 @@ final class ImeFrame {
     private OneHandRow row;
     private OneHandGutterView gutter;
     private String appliedMode = "";
+    private int appliedWidthPercent = -1;
     private boolean keysCollapsed;
     private boolean keysCovered;
 
@@ -76,6 +77,7 @@ final class ImeFrame {
     private LinearLayout column() {
         if (column != null && row != null && row.getParent() == keyboard) return column;
         row = new OneHandRow(s);
+        row.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
         column = LayoutPolicy.column(s);
         row.keys = column;
         gutter = new OneHandGutterView(s);
@@ -131,8 +133,13 @@ final class ImeFrame {
         if (s.skin != null) {
             gutter.setColors(Color.parseColor(s.skin.keyBackground()), Color.parseColor(s.skin.toolbarIcon()));
         }
-        if (mode.equals(appliedMode)) return;
+        int widthPercent = oneHanded(mode) || s.splitKeyboardDrawn() || s.floatingDrawn()
+            ? 100 : s.touchKeyboardWidthPercent;
+        if (mode.equals(appliedMode) && widthPercent == appliedWidthPercent) return;
         appliedMode = mode;
+        appliedWidthPercent = widthPercent;
+        // 用权重总和保留两侧空白，屏幕旋转后按测得宽度重新分配，不缓存像素。
+        row.setWeightSum(oneHanded(mode) ? 1f : 100f / widthPercent);
         if (gutter.getParent() != null) row.removeView(gutter);
         if (!oneHanded(mode)) {
             ViewPolicy.hide(gutter);

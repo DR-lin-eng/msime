@@ -18,17 +18,20 @@ export interface UseTouchKeyboardSettingsResetOptions {
 /** 「恢复默认」说明和确认框里列出的几项：只列这一页实际给出的控件，例如 macOS 没有键盘高度，桌面宿主没有工具栏按钮，不在文案里提它们。 */
 export function touchKeyboardResetSubjects({
   height,
+  width = false,
   spacing,
   voiceShortcut,
   toolbar,
 }: {
   height: boolean;
+  width?: boolean;
   spacing: boolean;
   voiceShortcut: boolean;
   toolbar: boolean;
 }) {
   const subjects = [
     height && "高度",
+    width && "宽度",
     spacing && "间距",
     voiceShortcut && "顶部语音入口",
     toolbar && "工具栏按钮",
@@ -58,6 +61,7 @@ export function useTouchKeyboardSettingsReset({
     const next = { ...draft };
     // Delete optional fields instead of storing current defaults. This keeps reset forward-compatible
     // when a host changes its fallback values.
+    delete next.touch_keyboard_width_percent;
     delete next.touch_key_spacing_tenths;
     delete next.touch_row_spacing_tenths;
     delete next.touch_keyboard_height_adjustment;

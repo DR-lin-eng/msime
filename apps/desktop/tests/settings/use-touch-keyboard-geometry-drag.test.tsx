@@ -61,10 +61,10 @@ test("captures current spacing on each press and keeps it during draft changes",
 });
 
 test.each([
-  [-1000, 0, 30, undefined],
-  [1000, 0, 60, undefined],
-  [0, -1000, undefined, 40],
-  [0, 1000, undefined, 100],
+  [-1000, 0, 0, undefined],
+  [1000, 0, 120, undefined],
+  [0, -1000, undefined, 0],
+  [0, 1000, undefined, 160],
 ])("bounds spacing after a drag by %s/%s", (x, y, key, row) => {
   const { result } = renderHook(() => {
     const [draft, setDraft] = useState<Preferences | undefined>(initial);

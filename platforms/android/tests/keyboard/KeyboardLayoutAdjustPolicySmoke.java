@@ -14,9 +14,13 @@ public final class KeyboardLayoutAdjustPolicySmoke {
             KeyboardLayoutAdjustPolicy.Axis.HORIZONTAL)
             == KeyboardLayoutAdjustPolicy.Axis.HORIZONTAL);
         check(KeyboardLayoutAdjustPolicy.chooseAxis(Float.NaN, 1, null) == null);
-        check(KeyboardLayoutAdjustPolicy.keySpacingFromDrag(60, 18) == 60);
+        check(KeyboardLayoutAdjustPolicy.keySpacingFromDrag(60, 18) == 70);
         check(KeyboardLayoutAdjustPolicy.keySpacingFromDrag(60, -54) == 30);
         check(KeyboardLayoutAdjustPolicy.rowSpacingFromDrag(70, 54) == 100);
+        check(KeyboardLayoutAdjustPolicy.keySpacingFromDrag(60, 1000) == 120);
+        check(KeyboardLayoutAdjustPolicy.keySpacingFromDrag(60, -1000) == 0);
+        check(KeyboardLayoutAdjustPolicy.rowSpacingFromDrag(70, 1000) == 160);
+        check(KeyboardLayoutAdjustPolicy.rowSpacingFromDrag(70, -1000) == 0);
         check(KeyboardLayoutAdjustPolicy.heightFromDrag(0, -12) == 12);
         check(KeyboardLayoutAdjustPolicy.heightFromDrag(0, 60) == -12);
         check(KeyboardLayoutAdjustPolicy.heightFromDrag(Integer.MIN_VALUE, Float.POSITIVE_INFINITY)

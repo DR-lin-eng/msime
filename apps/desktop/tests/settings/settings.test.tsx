@@ -6169,14 +6169,14 @@ test("touch keyboard geometry mirrors Apple defaults and persists height and spa
     clientX: 100,
     clientY: 118,
   });
-  expect(preview.getAttribute("data-row-spacing")).toBe("10.0");
+  expect(preview.getAttribute("data-row-spacing")).toBe("10.5");
   saveSettingsNow();
   await screen.findByText("已保存");
   expect(save).toHaveBeenCalledWith(7, {
     ...initial.preferences,
     touch_keyboard_height_adjustment: 24,
     touch_key_spacing_tenths: 55,
-    touch_row_spacing_tenths: 100,
+    touch_row_spacing_tenths: 105,
     touch_voice_shortcut: true,
   });
 });
@@ -10608,4 +10608,57 @@ test("macOS 从输入法菜单进入云词库，设置页不提供重复入口",
   expect(screen.queryByRole("button", { name: "打开云词库" })).toBeNull();
   expect(screen.queryByRole("region", { name: "云词库" })).toBeNull();
   expect(openCloudDictionary).not.toHaveBeenCalled();
+});
+
+test("移动端尺寸可保存宽度与零间距，预览及恢复默认保持一致", async () => {
+  const save = vi.fn().mockImplementation(async (_revision, preferences) => ({
+    ...initial,
+    revision: 8,
+    preferences,
+  }));
+  render(
+    <SettingsPage
+      initialPage="screen-keyboard"
+      client={{
+        host: testHost({ platform: "harmony" }),
+        load: async () => initial,
+        save,
+      }}
+    />,
+  );
+  const width = await screen.findByRole("slider", { name: "按键区域宽度" });
+  const preview = screen.getByRole("img", { name: "屏幕键盘完整布局预览" });
+  const firstKeyX = () =>
+    Number(
+      preview
+        .querySelector("[data-keyboard-row='0'] path")
+        ?.getAttribute("d")
+        ?.match(/^M([\d.]+)/)?.[1],
+    );
+  const fullX = firstKeyX();
+  fireEvent.change(width, { target: { value: "80" } });
+  fireEvent.change(screen.getByRole("slider", { name: "按键间距" }), { target: { value: "0" } });
+  fireEvent.change(screen.getByRole("slider", { name: "行间距" }), { target: { value: "160" } });
+  expect(preview.getAttribute("data-width-percent")).toBe("80");
+  expect(preview.getAttribute("data-key-spacing")).toBe("0.0");
+  expect(preview.getAttribute("data-row-spacing")).toBe("16.0");
+  expect(firstKeyX()).toBeGreaterThan(fullX);
+  saveSettingsNow();
+  await screen.findByText("已保存");
+  expect(save).toHaveBeenCalledWith(
+    7,
+    expect.objectContaining({
+      touch_keyboard_width_percent: 80,
+      touch_key_spacing_tenths: 0,
+      touch_row_spacing_tenths: 160,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "恢复屏幕键盘默认设置" }));
+  await answerConfirm("cancel");
+  expect(preview.getAttribute("data-width-percent")).toBe("80");
+  fireEvent.click(screen.getByRole("button", { name: "恢复屏幕键盘默认设置" }));
+  await answerConfirm("confirm");
+  await waitFor(() => expect(preview.getAttribute("data-width-percent")).toBe("100"));
+  expect(preview.getAttribute("data-key-spacing")).toBe("6.0");
+  expect(preview.getAttribute("data-row-spacing")).toBe("7.0");
 });

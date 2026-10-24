@@ -35,7 +35,7 @@ enum KeyboardFormFactor: Equatable {
 
   /// 顶部那一行与第一排按键之间的间隔（dc.html `kbGap`）：手机 4，iPad 9。手机原是设计稿的 11，理由见 `padding`。
   ///
-  /// 设计稿的各排按键之间也用同样的间隔，这里则与 Android 一样保留用户的排间距（`touch_row_spacing_tenths`，取值 4-10，默认 7）：共享的取值范围放不下 11，而且用户调过的间距应当保持不变。
+  /// 各排按键保留用户的行距（`touch_row_spacing_tenths`，0–16，默认 7），不把顶部间隔写进共享偏好。
   var topRowGap: CGFloat { self == .tablet ? 9 : 4 }
 
   /// 默认键盘高度下一排按键的高度。

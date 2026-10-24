@@ -10,7 +10,7 @@ Status: implemented
 
 共享 `touchKeyboardGeometryPreferences` 统一解析三项几何偏好，设置页、拖动预览和 `DesktopKeyboard` 直接导入使用。读取使用 `??`，因此缺失值回落到 `defaultTouchKeyboardGeometry`，显式的零仍然有效；函数不做范围裁剪，拖动起始值仍在 `pointerdown` 时捕获，拖动中的范围约束继续由现有 hook 负责。桌面键盘仅使用两项间距，宿主声明 `touch_keyboard_spacing` 为 false（macOS）时改用默认间距，见[精简悬浮工具栏、屏幕键盘和手写输入三页的设置](2026-10-16-toolbar-keyboard-handwriting-settings-prune.md)；偏好快照订阅、主题、宿主识别与语音入口不受读取抽取影响。Windows 原生设置窗口的同步和取值规则仍由[原生屏幕键盘设置笔记](../feature/2026-10-11-windows-settings-screen-keyboard.md)负责，本篇只收拢共享 UI 的几何契约。
 
-`touch-keyboard-spacing.ts` 持有十分之一 dp 的键距 `30..60` 与行距 `40..100` 范围，供设置滑块和拖动 hook 使用。`touchKeyboardSpacing` 使用共享默认值，将间距先除以十、再裁剪成绘制用的 dp，供 `KeyboardPanel` 和 `ScreenKeyboardPreview` 使用。只对 `undefined` 应用参数默认值，保留零、NaN 和无穷值原有的计算语义。原始偏好读取仍不裁剪；设置说明显示存储值，缩略图固定几何、手机预览直接使用 dp、普通预览基准偏移以及拖动捕获时序均由原消费者保持。
+`touch-keyboard-spacing.ts` 持有十分之一 dp 的键距 `0..120` 与行距 `0..160` 范围，供设置滑块和拖动 hook 使用。`touchKeyboardSpacing` 使用共享默认值，将间距先除以十、再裁剪成绘制用的 dp，供 `KeyboardPanel` 和 `ScreenKeyboardPreview` 使用。只对 `undefined` 应用参数默认值，保留零、NaN 和无穷值原有的计算语义。原始偏好读取仍不裁剪；设置说明显示存储值，缩略图固定几何、手机预览直接使用 dp、普通预览基准偏移以及拖动捕获时序均由原消费者保持。
 
 检索现有几何和间距笔记后，Windows 原生设置笔记与本次默认值、拖动时序部分重叠，保留其原生同步决定并链接；双拼键位提示笔记持有布局开关，键盘高度回弹和 Android 首帧配色笔记持有原生持久化、快照来源，均不涉及本次共享 UI 解析器，不改写这些决定。
 
@@ -21,6 +21,8 @@ Status: implemented
 - **让读取函数顺便裁剪范围** — 可减少调用处代码，但读取偏好和编辑中的约束是不同职责，会改变现有对异常存储值的处理边界。
 
 ## Consequences
+
+移动端宽度与间距扩展沿用本篇的共享读取与渲染机制，见[移动端键区尺寸](../feature/2026-10-24-mobile-keyboard-dimensions.md)。默认值与显式零的读取语义保持不变。
 
 - 共享设置页、拖动 hook 和桌面键盘使用同一个几何偏好解析器，显式零和既有默认值保持不变。
 - 读取函数新增一个共享 UI 内部模块及单元测试，通过直接导入供三个消费者使用；绘制换算与编辑范围由一个同域模块负责；拖动捕获时序和原生宿主同步保持原位置。新增模块通过直接导入使用，不扩大包的公共导出面。

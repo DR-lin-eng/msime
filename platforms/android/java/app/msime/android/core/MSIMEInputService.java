@@ -289,6 +289,7 @@ public final class MSIMEInputService extends InputMethodService {
     private String spellingPosition = CandidatePreeditStylePolicy.EDITOR;
     CandidateAppearance.Palette candidateAppearance =
         CandidateAppearance.fromSkin(KeyboardSkin.system(false));
+    int touchKeyboardWidthPercent = KeyboardSpacingPolicy.DEFAULT_WIDTH_PERCENT;
     int touchKeySpacingTenths = KeyboardSpacingPolicy.DEFAULT_KEY_SPACING_TENTHS;
     int touchRowSpacingTenths = KeyboardSpacingPolicy.DEFAULT_ROW_SPACING_TENTHS;
     int touchKeyboardHeightAdjustment = KeyboardHeightPolicy.DEFAULT_HEIGHT_ADJUSTMENT_DP;
@@ -2398,6 +2399,8 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     private void applyTouchGeometry(JSONObject preferences) {
+        touchKeyboardWidthPercent = KeyboardSpacingPolicy.widthPercent(
+            NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100));
         touchKeySpacingTenths = KeyboardSpacingPolicy.keySpacing(preferences == null ? -1
             : NumberPolicy.strictInt(preferences, "touch_key_spacing_tenths", -1));
         touchRowSpacingTenths = KeyboardSpacingPolicy.rowSpacing(preferences == null ? -1
@@ -2760,7 +2763,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     private String touchGeometryKey() {
-        return touchKeySpacingTenths + ":" + touchRowSpacingTenths + ":"
+        return touchKeyboardWidthPercent + ":" + touchKeySpacingTenths + ":" + touchRowSpacingTenths + ":"
             + touchKeyboardHeightAdjustment + ":"
             + touchVoiceShortcutEnabled + ":" + voiceInputEnabled + ":" + voiceLanguage + ":"
             + shuangpinKeyHintsEnabled + ":" + splitKeyboardPortrait;
@@ -2855,6 +2858,8 @@ public final class MSIMEInputService extends InputMethodService {
             NumberPolicy.strictInt(preferences, "candidate_font_size", 16));
         int nextPreeditFontSize = CandidateAppearance.fontSize(
             NumberPolicy.strictInt(preferences, "candidate_preedit_font_size", nextFontSize));
+        int nextWidthPercent = KeyboardSpacingPolicy.widthPercent(
+            NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100));
         int nextKeySpacing = KeyboardSpacingPolicy.keySpacing(
             NumberPolicy.strictInt(preferences, "touch_key_spacing_tenths", -1));
         int nextRowSpacing = KeyboardSpacingPolicy.rowSpacing(
@@ -2921,7 +2926,8 @@ public final class MSIMEInputService extends InputMethodService {
         if (learningSuppressed()) sessionSnapshot.getJSONObject("preferences").put("learning", false);
         JSONObject result = value(NativeClient.updatePreferences(session, sessionSnapshot.toString()));
         markPrivateSession();
-        boolean geometryChanged = touchKeySpacingTenths != nextKeySpacing
+        boolean geometryChanged = touchKeyboardWidthPercent != nextWidthPercent
+            || touchKeySpacingTenths != nextKeySpacing
             || touchRowSpacingTenths != nextRowSpacing
             || touchKeyboardHeightAdjustment != nextHeightAdjustment
             || splitKeyboardPortrait != nextSplitPortrait;
@@ -2936,6 +2942,7 @@ public final class MSIMEInputService extends InputMethodService {
         candidateFontSize = nextFontSize;
         candidatePreeditFontSize = nextPreeditFontSize;
         spellingPosition = nextSpellingPosition;
+        touchKeyboardWidthPercent = nextWidthPercent;
         touchKeySpacingTenths = nextKeySpacing;
         touchRowSpacingTenths = nextRowSpacing;
         touchKeyboardHeightAdjustment = nextHeightAdjustment;
@@ -6871,6 +6878,7 @@ public final class MSIMEInputService extends InputMethodService {
     private void resetTouchGeometry() {
         if (touchGeometrySaving || traditionalOutputSaving || session == 0
                 || preferencesSnapshot == null || preferencesDirectory.isEmpty()) return;
+        touchKeyboardWidthPercent = KeyboardSpacingPolicy.DEFAULT_WIDTH_PERCENT;
         touchKeySpacingTenths = KeyboardSpacingPolicy.DEFAULT_KEY_SPACING_TENTHS;
         touchRowSpacingTenths = KeyboardSpacingPolicy.DEFAULT_ROW_SPACING_TENTHS;
         touchKeyboardHeightAdjustment = KeyboardHeightPolicy.DEFAULT_HEIGHT_ADJUSTMENT_DP;
@@ -6906,6 +6914,7 @@ public final class MSIMEInputService extends InputMethodService {
                 if (expectedRevision < 0) throw new JSONException("Invalid preferences revision");
                 JSONObject preferences = pending.getJSONObject("preferences");
                 if (reset) {
+                    preferences.remove("touch_keyboard_width_percent");
                     preferences.remove("touch_key_spacing_tenths");
                     preferences.remove("touch_row_spacing_tenths");
                     preferences.remove("touch_keyboard_height_adjustment");

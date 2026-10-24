@@ -670,7 +670,7 @@ fn settings_sync_out_of_range_values_skip_only_their_key() {
     let values = BTreeMap::from([
         (
             "platform.android.touch_key_spacing_tenths".to_owned(),
-            AccountPreferenceValue::Integer(500),
+            AccountPreferenceValue::Integer(121),
         ),
         (
             "platform.android.touch_row_spacing_tenths".to_owned(),
@@ -711,6 +711,10 @@ fn settings_sync_out_of_range_values_skip_only_their_key() {
         defaults.touch_key_spacing_tenths
     );
     assert_eq!(
+        applied.preferences.touch_row_spacing_tenths,
+        defaults.touch_row_spacing_tenths
+    );
+    assert_eq!(
         applied.preferences.touch_keyboard_height_adjustment,
         defaults.touch_keyboard_height_adjustment
     );
@@ -736,6 +740,28 @@ fn settings_sync_out_of_range_values_skip_only_their_key() {
         applied.skipped,
         ["platform.android.touch_key_spacing_tenths"]
     );
+}
+
+#[test]
+fn settings_sync_android_keyboard_spacing_accepts_expanded_bounds() {
+    let schema = full_schema();
+    for (key_spacing, row_spacing) in [(0_u8, 0_u8), (1, 1), (120, 160)] {
+        let values = BTreeMap::from([
+            (
+                "platform.android.touch_key_spacing_tenths".to_owned(),
+                AccountPreferenceValue::Integer(i64::from(key_spacing)),
+            ),
+            (
+                "platform.android.touch_row_spacing_tenths".to_owned(),
+                AccountPreferenceValue::Integer(i64::from(row_spacing)),
+            ),
+        ]);
+        let applied = apply(&Preferences::default(), values, &schema);
+        assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+        assert_eq!(applied.preferences.touch_key_spacing_tenths, key_spacing);
+        assert_eq!(applied.preferences.touch_row_spacing_tenths, row_spacing);
+        applied.preferences.validate().unwrap();
+    }
 }
 
 #[test]

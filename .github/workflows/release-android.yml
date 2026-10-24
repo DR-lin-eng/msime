@@ -4,7 +4,8 @@ on:
     inputs:
       version: {description: Semantic version (defaults to platforms/android/version.txt), required: false, type: string}
       prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
-      publish: {description: Publish the build as an android-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: true, type: boolean}
+      # 默认只生成开发签名构建；发布现有安装可升级的包时显式开启并提供两项发布密钥。
+      publish: {description: Publish the build as an android-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: false, type: boolean}
       play_track: {description: 正式版的 AAB 上传到哪条 Google Play 轨道（alpha 是封闭测试）；none 只留 workflow artifact，Play 上第一个包要手动上传时用它, required: false, default: alpha, type: choice, options: [none, internal, alpha, beta, production]}
       play_status: {description: 在 Play 上建成的版本状态：draft 要有人在 Play Console 里点发布，completed 直接推给这条轨道的用户（应用还没通过过审核时 Play 只接受 draft）, required: false, default: draft, type: choice, options: [draft, completed]}
   workflow_call:
@@ -93,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$PUBLISH" == true ]]; then
-            [[ -n "$RELEASE_KEYSTORE_BASE64" && -n "$MSIME_ANDROID_RELEASE_KEYSTORE_PASSWORD" ]] || { echo "ANDROID_RELEASE_KEYSTORE_BASE64 and ANDROID_RELEASE_KEYSTORE_PASSWORD must be provided together" >&2; exit 1; }
+            [[ -n "$RELEASE_KEYSTORE_BASE64" && -n "$MSIME_ANDROID_RELEASE_KEYSTORE_PASSWORD" ]] || { echo "::error::publish=true requires both ANDROID_RELEASE_KEYSTORE_BASE64 and ANDROID_RELEASE_KEYSTORE_PASSWORD repository secrets; use publish=false for development-signed build artifacts" >&2; exit 1; }
             export MSIME_ANDROID_RELEASE_KEYSTORE="$RUNNER_TEMP/msime-release.p12"
             trap 'rm -f "$MSIME_ANDROID_RELEASE_KEYSTORE"' EXIT
             printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$MSIME_ANDROID_RELEASE_KEYSTORE"

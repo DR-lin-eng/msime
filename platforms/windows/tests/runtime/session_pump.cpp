@@ -1,4 +1,5 @@
 #include "SessionPump.h"
+#include "PipeMetadata.h"
 #include "ipc_negotiation.h"
 #include "UiSelectionDelivery.h"
 #include "CandidatePresentation.h"
@@ -72,7 +73,51 @@ public:
   }
 };
 } // namespace
+void grouped_panel_pump_tests(const std::string &options) {
+  // 未协商、带修饰键或键码与组码不一致时，必须在输入线程接收之前拒绝。
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    FocusGate gate;
+    InputQueue queue(gate, 2, 8, options);
+    FixtureTransport transport;
+    transport.ticket.capabilities = mode == 0 ? 0 : FanyImeProtocol::GroupedPanelKeys;
+    transport.packets.resize(2);
+    auto &packet = transport.packets[1];
+    packet.keycode = mode == 2 ? 'N' : 'B';
+    packet.wch = 'b';
+    packet.modifiers_down = PipeMetadata::GroupedPanelKey | (mode == 1 ? 2u : 0u);
+    unsigned keys = 0;
+    SessionPump pump(transport, queue, gate,
+      [&](InputState &, const FocusLease &, const FanyImeNamedpipeData &) -> std::optional<PendingReply> {
+        ++keys;
+        return std::nullopt;
+      }, [](const FocusRoute &, const FanyImeNamedpipeData &) { return true; });
+    require(pump.run(transport.ticket) == PumpResult::DispatchFailed && keys == 0);
+    queue.stop();
+  }
+  // 协商完成后的组码走真实主通道与会话，不能被当成 UILess 候选页标志。
+  {
+    FocusGate gate;
+    InputQueue queue(gate, 2, 8, options);
+    FixtureTransport transport;
+    transport.ticket.capabilities = FanyImeProtocol::GroupedPanelKeys;
+    transport.packets.resize(2);
+    auto &packet = transport.packets[1];
+    packet.keycode = 'B'; packet.wch = 'b';
+    packet.modifiers_down = PipeMetadata::GroupedPanelKey;
+    unsigned keys = 0;
+    SessionPump pump(transport, queue, gate,
+      [&](InputState &state, const FocusLease &lease, const FanyImeNamedpipeData &key) {
+        ++keys;
+        auto reply = state.configured_key(lease, key, TsfPreeditStyle::Local, {});
+        require(reply && reply->source.transition.at("view").at("key_grid") == "eighteen_key");
+        return reply;
+      }, [](const FocusRoute &, const FanyImeNamedpipeData &) { return true; });
+    require(pump.run(transport.ticket) == PumpResult::Disconnected && keys == 1);
+    queue.stop();
+  }
+}
 void session_pump_tests(const std::string &options) {
+  grouped_panel_pump_tests(options);
   // 真实 pump 的主通道：协商后的本地 UI-less 只收到导航意图；旧宿主仍收到候选页。
   for (bool capable : {false, true}) for (bool serverPage : {false, true}) {
     for (auto key : {0x28u, 0x22u}) {
@@ -810,7 +855,7 @@ void session_pump_tests(const std::string &options) {
           return result;
         }, [](const FocusRoute &, const FanyImeNamedpipeData &) { return true; });
     require(pump.run(transport.ticket) == PumpResult::Disconnected && keys == 12);
-    require(transport.writes.size() == 13 + (uiless ? 12 : mode == 1 ? 9 : 0));
+    require(transport.writes.size() == 13u + (uiless ? 12u : mode == 1 ? 9u : 0u));
     queue.stop();
   }
   for (auto event : {FanyImePipeEventType::PuncSwitch,

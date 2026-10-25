@@ -2,6 +2,7 @@
 #include "../../../common/HostApiString.h"
 #include "LinuxEdition.h"
 #include "KeyRouterAdapter.h"
+#include "ToggleHotkeyChord.h"
 #include "BackspaceHoldPolicy.h"
 #include "../clipboard/ClipboardText.h"
 #include "../clipboard/ClipboardAtomicWrite.h"
@@ -568,6 +569,7 @@ struct State {
   // 空格锁定固定为开，不读存下的 `hotkey_hold_space_lock`：空格只在按住录音组合键期间才被拦下，平常打字不受影响，设置页也不再给这个开关（`voice_space_lock_switch`）。
   bool voice_hotkey_hold_space_lock = true;
   bool voice_hotkey_ctrl_f9 = true;
+  msime::host_api::ToggleHotkeyChord voice_toggle_chord;
   // The lock state as the last key event reported it; IBus sends no event of its own when it changes.
   bool caps_lock = false;
   // 当前模式来自这次聚焦的应用例外，用户还没有手动切换：全局作用域不拿全局状态覆盖它。
@@ -923,6 +925,7 @@ struct State {
     voice_hotkey_ctrl_win = voice_preferences.value("hotkey_ctrl_win", false);
     voice_hotkey_rctrl_ralt = voice_preferences.value("hotkey_rctrl_ralt", false);
     voice_hotkey_ctrl_f9 = voice_preferences.value("hotkey_ctrl_f9", true);
+    voice_toggle_chord = msime::host_api::decode_toggle_hotkey(preferences, "voice_input");
     const auto keybindings = preferences.value("keybindings", Json::object());
     mode_ctrl_space_enabled = keybindings.value("switch_language_ctrl_space", true);
     mode_shift_enabled = keybindings.value("switch_language_shift", true);
@@ -1197,6 +1200,7 @@ struct State {
     voice_hotkey_ctrl_win = voice.value("hotkey_ctrl_win", false);
     voice_hotkey_rctrl_ralt = voice.value("hotkey_rctrl_ralt", false);
     voice_hotkey_ctrl_f9 = voice.value("hotkey_ctrl_f9", true);
+    voice_toggle_chord = msime::host_api::decode_toggle_hotkey(preferences, "voice_input");
     const auto keybindings = preferences.value("keybindings", Json::object());
     mode_ctrl_space_enabled = keybindings.value("switch_language_ctrl_space", true);
     mode_shift_enabled = keybindings.value("switch_language_shift", true);
@@ -4951,7 +4955,14 @@ guint canonical_modifiers(guint flags) {
     return (m & ~IBUS_SUPER_MASK) | IBUS_MOD4_MASK;
   return m;
 }
-// Hold shortcuts match the physical key, as the Windows hook does: X11, GDK and mutter report the modifier state from before the key, so a modifier's own bit may or may not be set on its own press and is ignored here.
+// 自定义切换键精确匹配修饰键；真实事件使用 evdev 位置，合成事件回退到规范化符号。
+bool voice_toggle_hotkey(const State &s, guint key, guint modifiers, guint keycode = 0) {
+  const guint allowed = IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_SHIFT_MASK | IBUS_MOD4_MASK;
+  return (modifiers & ~allowed) == 0 && s.voice_toggle_chord.matches(
+      msime::linux_host::toggle_key_name(key, keycode), modifiers & IBUS_CONTROL_MASK,
+      modifiers & IBUS_MOD1_MASK, modifiers & IBUS_SHIFT_MASK, modifiers & IBUS_MOD4_MASK);
+}
+// 按住录音按物理修饰键判定；不同桌面传入的状态可能尚未包含该键自己的位。
 bool voice_hotkey(const State &s, guint key, guint modifiers) {
   if (key == IBUS_F9 && modifiers == IBUS_CONTROL_MASK)
     return s.voice_hotkey_ctrl_f9;
@@ -6843,9 +6854,12 @@ void show_input_mode_hint(IBusEngine *engine, [[maybe_unused]] ModeHintTrigger t
 #ifdef MSIME_IBUS_MODE_BADGE
   // 标志跟随「显示水杉图标」（show_app_logo，默认关），与 macOS 一致。
   const bool show_logo = configured.at("preferences").value("show_app_logo", false);
+  const bool allow_corner = preferences.value("input_mode_corner_hud", true);
   const bool x11_session = mode_badge_x11_session();
-  auto *badge = msime::linux_host::mode_badge_surface_wanted(x11_session, show_logo) ? mode_badge_surface() : nullptr;
-  hint = msime::linux_host::mode_badge_hint(badge != nullptr, badge && badge->follows_caret(), x11_session, show_logo);
+  auto *badge =
+      msime::linux_host::mode_badge_surface_wanted(x11_session, show_logo, allow_corner) ? mode_badge_surface() : nullptr;
+  hint = msime::linux_host::mode_badge_hint(badge != nullptr, badge && badge->follows_caret(), x11_session,
+                                          show_logo, allow_corner);
   // 获得焦点时客户端还没报光标：GTK、Qt 的输入法模块在 FocusIn 之后才在空闲回调里补报 set_cursor_location，这时的 cursor_area 还是上一个位置或全 0。先等它报来（set_cursor_location 里放），最多等 focus_caret_wait_ms。
   if (hint == msime::linux_host::ModeBadgeHint::CaretBadge && trigger == ModeHintTrigger::FocusEntered) {
     s.mode_hint_after_focus = true;
@@ -7023,7 +7037,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   // Physical key identity survives releasing Shift before the letter. Use a
   // normalized keysym only for synthetic events without a hardware keycode.
   const guint host_stroke = keycode != 0 ? keycode
-      : ((key >= 'A' && key <= 'Z' ? key - 'A' + 'a' : key) | 0x80000000u);
+      : (msime::linux_host::toggle_key_symbol(key) | 0x80000000u);
   if (s.host_shortcut_strokes.count(host_stroke) != 0) {
     if (release) s.host_shortcut_strokes.erase(host_stroke);
     return TRUE;
@@ -7136,6 +7150,15 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   s.pure_shift_candidate = false;
   s.pure_ctrl_candidate = false;
   const guint modifiers = canonical_modifiers(flags);
+  if (s.voice_enabled && !s.voice_provider_socket.empty() && s.focused && !s.blocked &&
+      voice_toggle_hotkey(s, key, modifiers, keycode)) {
+    s.host_shortcut_strokes.insert(host_stroke);
+    guarded(engine, "voice_toggle_hotkey", [&] {
+      if (s.voice_active) voice_stop(engine);
+      else voice_start(engine);
+    });
+    return TRUE;
+  }
   const bool screen_keyboard_key =
       (key == IBUS_k || key == IBUS_K) &&
       modifiers == (IBUS_CONTROL_MASK | IBUS_SHIFT_MASK | IBUS_MOD4_MASK);

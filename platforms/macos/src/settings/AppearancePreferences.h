@@ -77,6 +77,8 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 - (NSFont *)candidateFontOfSize:(CGFloat)size;
 - (NSFont *)candidateFontOfSize:(CGFloat)size englishFirst:(BOOL)englishFirst;
 @property(nonatomic) NSUInteger preeditFontSize;
+/// 共享偏好中的译文字号，缺省为 12 点；设置入口由共享设置页提供。
+@property(nonatomic, readonly) NSUInteger translationFontSize;
 @property(nonatomic) BOOL showsCandidatePreedit;
 /// The candidate window's own style: `candidate_scale_percent` (50-200, 100 by default), which multiplies the candidate fonts and every length of the window; `candidate_opacity_percent` (50-100, 100 by default), which fades only the card surface, its border and a package background; `candidate_corner_radius` (0-32 points), nil to keep the theme's or the package's card radius; and `candidate_padding` (0-16 points between the card's edge and its candidates), nil to keep the theme's or the package's `pad`. A value outside its range is refused and leaves the setting as it was.
 @property(nonatomic) NSInteger candidateScalePercent;
@@ -121,14 +123,19 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic, copy) NSString *defaultImeMode;
 @property(nonatomic, copy) NSString *imeModeScope;
 - (void)activateInputModeForApplication:(NSString *)identifier;
+/// 最近激活时已取得的应用标识；按键路径可读取它而不向客户端新增同步查询。
+@property(nonatomic, readonly, copy) NSString *activeInputModeApplication;
 /// Vim 模式（共享偏好 `vim_mode_apps`）：这个 bundle id 的前台应用是否把无修饰 Esc 搭车切英文。
 - (BOOL)vimModeEnabledForApplication:(NSString *)identifier;
+/// 仅消费共享设置页写入的跨次空格配置，不在原生回退窗口添加入口。
+@property(nonatomic, readonly, copy) NSDictionary *crossCommitSpacing;
 - (void)lockActiveInputMode;
 - (void)resetRememberedInputModes;
 @property(nonatomic) BOOL inputModeShortcut;
 /// 中日英循环切换（共享偏好 `keybindings.trilingual_cycle`，默认关）：打开后「切换中英文」那一组快捷键按 中 → 日 → 英 → 中 转圈。顺序和「有组字时先上屏原始字母」在共享层，见 `crates/client-core/src/language_cycle.rs`。
 @property(nonatomic) BOOL trilingualCycle;
 @property(nonatomic) BOOL shiftTapShortcut;
+@property(nonatomic, readonly) BOOL shiftTapRequiresEditable;
 @property(nonatomic) BOOL controlTapShortcut;
 /// 单按 Caps Lock 切换中英文（共享偏好 `keybindings.switch_language_caps_lock`），缺省为关。
 @property(nonatomic) BOOL capsLockTapShortcut;
@@ -139,6 +146,8 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic, readonly) msime::mac::ToggleChord englishCandidatesToggleChord;
 @property(nonatomic, readonly) msime::mac::ToggleChord fullWidthToggleChord;
 @property(nonatomic, readonly) msime::mac::ToggleChord punctuationToggleChord;
+/// 自定义语音开始／结束热键；缺省不绑定，固定语音键由原有偏好独立控制。
+@property(nonatomic, readonly) msime::mac::ToggleChord voiceInputToggleChord;
 @property(nonatomic) BOOL traditionalOutput;
 @property(nonatomic) BOOL fullWidthInput;
 @property(nonatomic) BOOL chinesePunctuation;

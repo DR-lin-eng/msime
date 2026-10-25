@@ -1,5 +1,7 @@
+import { candidateSkinSelection } from "../skin/candidate-skin-selection";
 import type { Preferences } from "../core/preferences-model";
 import { ActionButton } from "../core/action-button";
+import { CheckGlyph } from "../core/check-glyph";
 import { deepEqual } from "../core/deep-equal";
 import { FluentIcon } from "../core/fluent-icons";
 import { ScreenKeyboardPreview } from "../keyboard/screen-keyboard-preview";
@@ -12,7 +14,6 @@ import {
   applyCandidateSkin,
   keyboardThemeId,
   removeCandidateSkin,
-  skinSlot,
   themeEntry,
   type BaseGlobalTheme,
   type CustomTheme,
@@ -101,21 +102,9 @@ const aiTile =
 
 function Check() {
   return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      data-skin-check=""
-    >
-      <path d="m5 12.5 4.5 4.5L19 7.5" />
-    </svg>
+    <span className="contents" data-skin-check="">
+      <CheckGlyph size={14} strokeWidth={2.6} />
+    </span>
   );
 }
 
@@ -131,19 +120,17 @@ function skinGridCards({
   keyboardTheme,
   onApply,
 }: SkinGridProps): Card[] {
-  // 皮肤包是自定义主题的一部分，放在浅色或深色槽位里的皮肤包都算正在使用。
-  const skinsInUse =
-    globalTheme === "custom"
-      ? [customTheme?.candidate_skin, customTheme?.candidate_skin_dark].filter((id): id is string =>
-          Boolean(id),
-        )
-      : [];
-  const packageInUse = packages.some((skin) => skinsInUse.includes(skin.id));
-  // 应用皮肤时用目录判断原来那款皮肤属于哪个槽位，见 `applyCandidateSkin`。
-  const slotOf = (id: string) => {
-    const skin = packages.find((entry) => entry.id === id);
-    return skin ? skinSlot(skin.base) : undefined;
-  };
+  const {
+    skinsInUse,
+    packageInUse: packageIndex,
+    slotOf,
+  } = candidateSkinSelection({
+    globalTheme,
+    customTheme,
+    packages,
+    previewTheme: keyboardTheme,
+  });
+  const packageInUse = packageIndex >= 0;
   const storedDesign = customTheme?.keyboard ?? undefined;
   // 正在使用的设计就是皮肤库里的某一款时，选中的是那张有名字的卡片，我的皮肤不再同时打勾。
   const savedInUse =

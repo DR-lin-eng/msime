@@ -21,6 +21,8 @@ HARNESS = r'''
 #include <string_view>
 #include <vector>
 #include "InputSchemeTraits.h"
+#include "WubiCommitOwner.h"
+#include "GroupedPanelKeyLease.h"
 #include "SecondThirdCandidatePolicy.h"
 #include "WubiCandidateSelectionPolicy.h"
 #include "LocalModeKeyPolicy.h"
@@ -36,15 +38,24 @@ using DWORD = unsigned long;
 using ULONGLONG = std::uint64_t;
 using HWND = void *;
 using GUID = int;
+#ifndef _In_
 #define _In_
+#endif
+#ifndef _In_opt_
 #define _In_opt_
+#endif
+#ifndef _Out_
 #define _Out_
+#endif
 [[maybe_unused]] constexpr BOOL TRUE = 1, FALSE = 0;
 constexpr int S_OK = 0;
 constexpr int FANY_IME_NO_REQUEST_ID = 0;
 [[maybe_unused]] constexpr UINT WM_IpcReconnect = 1;
 void PostOwnerMessageWithSyncFallback(void *, UINT) {}
 bool EnsureNamedpipeFocusSessionActivated() { return true; }
+bool SupportsGroupedPanelKeys() { return true; }
+struct CMetasequoiaIME;
+void MarkNamedpipeSessionDirtyForOwner(CMetasequoiaIME *) {}
 template<typename... Args> void DebugTsfKeyLatency(Args...) {}
 constexpr UINT MAX_PINYIN_LENGTH = 256;
 // 生产按键类型与虚拟键码
@@ -74,7 +85,11 @@ std::atomic<PunctuationLock> PunctuationLockMode{PunctuationLock::Normal};
 struct { bool active(ULONGLONG) const { return false; } } DedicatedEnglish;
 std::set<WCHAR> CommitWithHighlightedCandPunc;
 bool IsUiLessMode() { return false; }
+std::atomic_bool TsfDiagnosticLogEnabled{false};
 }
+// 生产代码里的诊断日志在测试里关闭，记录进空实现即可。
+void QueueTsfDiagnosticLog(const std::wstring &) {}
+inline std::wstring BoolFlag(bool value) { return value ? L"1" : L"0"; }
 struct ITfContext { int refs = 1; void AddRef() { ++refs; } void Release() { --refs; } };
 namespace msime::tsf {
 struct KeyCompositionState { std::wstring rawInput; std::size_t caret = 0; bool unicodeMode = false, urlMode = false, phraseActive = false; };
@@ -101,6 +116,7 @@ struct Engine {
 using CCompositionProcessorEngine = Engine;
 // 生产投影规则
 struct CMetasequoiaIME {
+    msime::tsf::WubiCommitOwner _wubiCommitOwner;
     Engine *_pCompositionProcessorEngine = nullptr;
     void *_pThreadMgr = reinterpret_cast<void *>(1);
     int _tfClientId = 1, _candidateMode = CANDIDATE_NONE;
@@ -127,7 +143,10 @@ struct CMetasequoiaIME {
     void _ScheduleDeferredKeyDownDrain() {}
     void _EnsureDeferredKeyProjection();
     void _ApplyDeferredKeyProjection(const _KEYSTROKE_STATE &, WCHAR, UINT);
-    bool _QueueDeferredKeyDown(ITfContext *, WPARAM, LPARAM, WCHAR, UINT, const _KEYSTROKE_STATE &);
+    bool _QueueDeferredKeyDown(ITfContext *, WPARAM, LPARAM, WCHAR, UINT, const _KEYSTROKE_STATE &,
+                               const msime::panel_key::Owner * = nullptr);
+    bool _HasGroupedPanelComposition() const { return false; }
+    bool _IsGroupedPanelReplayCurrent(uint64_t) const { return true; }
     DeferredKeyDown _deferredKeyInFlight;
     bool _hasDeferredKeyInFlight = false, _deferredKeyDrainPosted = false;
     std::uint64_t _deferredKeyReplayToken = 0, _nextDeferredKeyReplayToken = 0;
@@ -140,6 +159,7 @@ struct CMetasequoiaIME {
     bool dispatchRetry = false;
     UINT observedModifiers = 0;
     WCHAR observedCharacter = 0;
+    bool observedGrouped = false;
     // 生产派发类型
     bool _ResolveDeferredKeyClassification(uint64_t);
     void _DrainOneDeferredKeyDown();
@@ -158,6 +178,7 @@ struct CMetasequoiaIME {
     uint64_t _CaptureFocusSessionToken() const { return 11; }
     bool _IsFocusSessionCurrent(uint64_t, ITfContext * = nullptr) const { return true; }
     void _ClearDeferredKeyDowns() {
+        _wubiCommitOwner.clear();
         ++_deferredKeyFocusGeneration;
         for (auto &key : _deferredKeyDowns) key.context->Release();
         _deferredKeyDowns.clear();
@@ -181,6 +202,7 @@ struct CMetasequoiaIME {
     KeyDownDispatchResult _DispatchKeyDown(ITfContext *, WPARAM, LPARAM, BOOL *, const WCHAR *wch, const UINT *modifiers,
                                           const _KEYSTROKE_STATE *state, bool, uint64_t, uint64_t) {
         dispatched.push_back(state->Function); observedModifiers = *modifiers; observedCharacter = *wch;
+        observedGrouped = state->groupedPanelKey;
         return dispatchRetry ? KeyDownDispatchResult::Retry : KeyDownDispatchResult::Complete;
     }
     void _DispatchPreservedKey(ITfContext *, GUID, BOOL *, uint64_t, bool, uint64_t) {}
@@ -222,6 +244,38 @@ struct Fixture {
     }
 };
 int main() {
+    {
+        Fixture f;
+        f.ime._ClearDeferredKeyDowns();
+        f.engine.current = {};
+        _KEYSTROKE_STATE group{CATEGORY_COMPOSING, FUNCTION_INPUT, true};
+        const msime::panel_key::Owner owner{7, 11, 3, 4, 5};
+        check(!f.ime._QueueDeferredKeyDown(&f.context, 'B', 0, L'b', 0, group),
+              "grouped input without captured owner is rejected");
+        check(f.ime._QueueDeferredKeyDown(&f.context, 'B', 0, L'b', 0, group, &owner),
+              "grouped input with captured owner enters the real FIFO");
+        const auto &queued = f.ime._deferredKeyDowns.front();
+        check(queued.keyState.groupedPanelKey && queued.groupedOwner == owner,
+              "FIFO copies source and complete focus owner");
+        f.ime._DrainOneDeferredKeyDown();
+        check(f.ime.observedGrouped && f.ime.observedCharacter == L'b' && f.ime.observedModifiers == 0,
+              "deferred dispatch preserves grouped source and logical letter");
+    }
+    {
+        Fixture f;
+        f.ime._wubiCommitOwner.begin(42, 1);
+        const auto refs = f.context.refs;
+        f.ime._DrainOneDeferredKeyDown();
+        check(f.ime._deferredKeyDowns.size() == 1 && !f.ime._hasDeferredKeyInFlight &&
+              f.context.refs == refs && f.ime.dispatched.empty(),
+              "active Wubi owner preserves the queued key and reference before classification");
+        f.ime._wubiCommitOwner.clear();
+        f.ime._DrainOneDeferredKeyDown();
+        f.ime._DrainOneDeferredKeyDown();
+        check(f.ime._deferredKeyDowns.empty() && f.ime.dispatched.size() == 1 &&
+              f.ime.completions == 1 && f.context.refs == 1,
+              "released Wubi owner permits the queued key to dispatch only once");
+    }
     {
         Fixture f;
         f.finishSelection(L"", false);
@@ -431,7 +485,7 @@ def main() -> int:
     declaration = between(header, "    bool _ClassifyDeferredKeyDown(", "    bool _QueueDeferredKeyDown(")
     queue_type = between(header, "    struct DeferredKeyDown", "    enum class KeyDownDispatchResult")
     shadow = between(sink, "struct DeferredShadowState", "bool IsRecoverableDeferredPrefix(")
-    dispatch_type = between(header, "    enum class KeyDownDispatchResult", "    bool _HasDeferredKeyBarrier")
+    dispatch_type = between(header, "    enum class KeyDownDispatchResult", "    bool _HasGroupedPanelComposition")
     segment = between(sink, "KEYSTROKE_FUNCTION SegmentEditFunction(", "\n}\n") + "\n}\n"
     harness = HARNESS.replace("// 生产分段编辑规则", segment).replace("    // 生产派发类型", dispatch_type).replace("// 生产按键类型与虚拟键码", types + vk).replace(
         "// 生产投影规则", shadow).replace("    // 生产队列类型", queue_type).replace(

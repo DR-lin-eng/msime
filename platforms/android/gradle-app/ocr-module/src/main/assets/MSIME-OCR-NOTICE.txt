@@ -1,0 +1,18 @@
+水杉 OCR 运行库试验模块
+
+本项目适配代码：GPL-3.0-only，源码及许可证全文见 https://github.com/metasequoiaime/msime 。
+
+识别引擎与内置中文/拉丁文字模型：
+com.google.mlkit:text-recognition-chinese:16.0.1
+Google Maven 固定版本来源：
+https://dl.google.com/dl/android/maven2/com/google/mlkit/text-recognition-chinese/16.0.1/
+
+Google ML Kit SDK 与模型适用 Google 的 ML Kit 服务条款，并非本项目 GPL 许可证。
+条款与隐私说明：https://developers.google.com/ml-kit/terms
+Google APIs Terms of Service：https://developers.google.com/terms
+数据披露：https://developers.google.com/ml-kit/android-data-disclosure
+
+识别输入和输出在设备上处理；SDK 可能联网获取更新、兼容信息，并发送性能和使用诊断。
+本模块目前用于独立兼容性探针和原生产品的合成设备验收，不进入基础输入法安装包，
+不作为已完成许可审计的正式资源包发布。正式分发前还需补齐实际解析依赖的
+固定版本、通知全文与再分发检查；参考仓库的 GPL 许可不覆盖 Google 的模型。

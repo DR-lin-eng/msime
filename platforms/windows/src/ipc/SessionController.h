@@ -58,6 +58,8 @@ public:
   bool send_caps_lock(const FocusLease &lease, bool enabled);
   // External maintenance callback. The Engine operation remains queue-owned.
   bool reset_cache();
+  // 外部偏好写入完成后唤醒监视器，让当前会话尽快收到新快照。
+  void wake_preferences();
   // Push the TSF-local settings to every registered TIP. Returns true only
   // when every snapshot ticket accepted the complete frame set.
   bool send_tsf_config(const TsfLocalConfig &config);

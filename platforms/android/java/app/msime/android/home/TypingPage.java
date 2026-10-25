@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import app.msime.android.AppEdition;
+import app.msime.android.AndroidLocalSettings;
 import app.msime.android.CandidateTranslationPolicy;
 import app.msime.android.HttpBodyPolicy;
 import app.msime.android.InputFeatureToggle;
@@ -64,7 +65,7 @@ public final class TypingPage extends ReloadingDetailPage {
 
     /** 一门语言：徽标、名字和它的触屏方案（按面板里的顺序）。 */
     private enum Language {
-        MANDARIN("汉", "普通话", KeyboardScheme.QUANPIN, KeyboardScheme.QUANPIN_FOURTEEN_KEY,
+        MANDARIN("汉", "普通话", KeyboardScheme.QUANPIN, KeyboardScheme.QUANPIN_EIGHTEEN_KEY, KeyboardScheme.QUANPIN_FOURTEEN_KEY,
             KeyboardScheme.QUANPIN_NINE_KEY, KeyboardScheme.XIAOHE,
             KeyboardScheme.ZIRANMA, KeyboardScheme.MICROSOFT, KeyboardScheme.SHOUDAO,
             KeyboardScheme.NINE_KEY_SHUANGPIN, KeyboardScheme.WUBI,
@@ -95,7 +96,7 @@ public final class TypingPage extends ReloadingDetailPage {
      * @param bundledGlosses 随安装包解压在资源目录旁的离线释义覆盖的目标语言（不带离线释义的安装包为空）
      * @param helpcodePacks 用户导入的辅助码表（已安装的 `helpcode` 插件包）；读不出来时为空
      */
-    private record State(JSONObject preferences, String languageDictionaries, Set<String> packs,
+    private record State(JSONObject preferences, AndroidLocalSettings.Snapshot local, String languageDictionaries, Set<String> packs,
             Map<String, ResourcePacks.Pack> resourcePacks, Set<String> bundledGlosses, List<String[]> helpcodeSchemas,
             List<HelpcodeChoicePolicy.Pack> helpcodePacks) {}
 
@@ -157,7 +158,7 @@ public final class TypingPage extends ReloadingDetailPage {
         for (ResourcePacks.Pack pack : resourcePacks.values()) if (pack.installed()) packs.add(pack.id());
         List<String> targets = new ArrayList<>(TARGET_LANGUAGES.length);
         for (String[] entry : TARGET_LANGUAGES) targets.add(entry[0]);
-        return new State(preferences, HostStore.languageDictionaries(context), Set.copyOf(packs),
+        return new State(preferences, AndroidLocalSettings.load(context), HostStore.languageDictionaries(context), Set.copyOf(packs),
             Map.copyOf(resourcePacks), Set.copyOf(CandidateTranslationPolicy.offlineTargets(targets, resources)),
             helpcodeSchemas(), helpcodePacks(context));
     }
@@ -263,6 +264,12 @@ public final class TypingPage extends ReloadingDetailPage {
             languages.addView(KeyboardSheets.badgeNavRow(context, language.badge, language.title, null,
                 shown == null ? null : schemeLabel(shown, preferences),
                 () -> showLanguage(language, offered, applied, preferences, state)));
+            if (language == Language.JAPANESE && offered.contains(KeyboardScheme.JAPANESE_NINE_KEY)) {
+                InputFeatureToggle toggle = InputFeatureToggle.JAPANESE_TOGGLE_INPUT;
+                languages.toggle(toggle.title(), toggle.description(),
+                    preferences.optBoolean(toggle.key(), toggle.enabledByDefault()),
+                    checked -> savePreferences(values -> values.put(toggle.key(), checked)));
+            }
         }
         if (!addable.isEmpty()) {
             languages.addView(KeyboardSheets.actionRow(context, adding ? "✓" : "＋", adding ? "完成" : "添加语言", () -> {
@@ -485,7 +492,7 @@ public final class TypingPage extends ReloadingDetailPage {
 
     private static String schemeLabel(KeyboardScheme scheme, JSONObject preferences) {
         return switch (scheme) {
-            case QUANPIN, QUANPIN_FOURTEEN_KEY, QUANPIN_NINE_KEY -> "全拼";
+            case QUANPIN, QUANPIN_FOURTEEN_KEY, QUANPIN_EIGHTEEN_KEY, QUANPIN_NINE_KEY -> "全拼";
             case CANTONESE -> "粤拼";
             case WUBI -> scheme.title(InputViewValuePolicy.textOr(preferences, "wubi_profile", KeyboardScheme.WUBI_86));
             case JAPANESE -> "26 键";
@@ -499,8 +506,9 @@ public final class TypingPage extends ReloadingDetailPage {
         Context context = requireContext();
         OptionSheet sheet = new OptionSheet(context, language.title, offered.size() > 1 ? "选择输入方案" : null);
         if (language == Language.MANDARIN) {
-            // 全拼的 26 / 14 / 9 键是同一个方案的几种排法，这里只列一项「全拼」，保留正在用的排法；换排法在「键盘 › 中文键盘」里。
+            // 全拼的几种键数属于同一个方案，这里保留当前布局；换排法在「键盘 › 中文键盘」里。
             boolean quanpin = applied == KeyboardScheme.QUANPIN || applied == KeyboardScheme.QUANPIN_FOURTEEN_KEY
+                || applied == KeyboardScheme.QUANPIN_EIGHTEEN_KEY
                 || applied == KeyboardScheme.QUANPIN_NINE_KEY;
             KeyboardScheme quanpinChoice = quanpin ? applied : KeyboardScheme.QUANPIN;
             if (offered.contains(quanpinChoice)) sheet.option("全拼", quanpin, () -> applyScheme(quanpinChoice, null));
@@ -514,6 +522,20 @@ public final class TypingPage extends ReloadingDetailPage {
                     OptionSheet next = new OptionSheet(context, "双拼", "选择双拼方案");
                     for (KeyboardScheme scheme : shuangpin)
                         next.option(shuangpinName(scheme), scheme == applied, () -> applyScheme(scheme, null));
+                    boolean fourteen = "fourteen_key".equals(InputViewValuePolicy.textOr(
+                        preferences, "touch_shuangpin_layout", "twenty_six_key"));
+                    boolean eighteen = "eighteen_key".equals(InputViewValuePolicy.textOr(
+                        preferences, "touch_shuangpin_layout", "twenty_six_key"));
+                    next.submenu("键盘布局（" + (eighteen ? "18 键" : fourteen ? "14 键" : "26 键") + "）", false, () -> {
+                        OptionSheet layouts = new OptionSheet(context, "双拼键盘布局", "保留当前双拼方案");
+                        layouts.option("26 键", !fourteen && !eighteen, () -> savePreferences(
+                            values -> values.put("touch_shuangpin_layout", "twenty_six_key")));
+                        layouts.option("14 键", fourteen, () -> savePreferences(
+                            values -> values.put("touch_shuangpin_layout", "fourteen_key")));
+                        layouts.option("18 键", eighteen, () -> savePreferences(
+                            values -> values.put("touch_shuangpin_layout", "eighteen_key")));
+                        return layouts;
+                    });
                     return next;
                 });
             }

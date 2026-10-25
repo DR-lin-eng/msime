@@ -114,6 +114,8 @@ App「词库」里的个人词典对应 Windows 的用户词编辑：编辑器�
 
 全拼 14 键（`ChineseInputScheme.fourteenKey`，共享文档写 `fourteen_key`，引擎方案是全拼，默认不启用；「中文键盘」设置是 26 键 / 14 键 / 9 键三档，普通话方案列表也按这个顺序排）把 QWERTY 上相邻两个字母合成一键：`QW ER TY UI OP` / `AS DF GH JK L`（不缩进）/ `[符/分词] ZX CV BN M [⌫]`，键表在 `KeyboardExtension/Sources/input/FourteenKeyLayout.swift`，与 Android、HarmonyOS 和引擎 `KeyGrid::FourteenKey` 是同一张表，`scripts/test-fourteen-key-table.py` 核对。键用 `makeKey` 建，不进 `letterButtons` 和滑行的 `glideLetterKeys`，所以没有 Shift、滑行、双拼键位提示、角标和按键气泡；第三排两端键宽同 26 键的 ⇧（手机 44pt，iPad 按 ⇧ 占一排的比例），底行在 iPhone 和 iPad 上都是手机 26 键底行，不画数字行、不分体。点一下经 `gridKey`（`msime_client_grid_key`）送这一组的首字母，桥接层的网格是 `KeyGrid`（none / 九键 / 14 键），重建会话时重放、换方案时复位；切到 14 键之前按下、之后才到的 26 键字母被丢掉。组码不论「行内预编辑」怎么设都不写进输入框，读音行显示 `nine_key_reading`；拼音选择条（`readingSpellingStrip`）挂在读音行右侧横向滚动，显示时至少占半行，不盖住候选栏，内容同九键拼音栏但没有数字那一项；展开候选是九键的三栏面板。第三排左端键组字时是「分词」（送 `'`），空闲时是「符」（打开符号面板），两种状态都记作 `SoftSymbol`。两个字母的键长按弹出这两个字母，选中后先结束组字再上屏，L、M 不弹。英文模式和本地输入画 26 键，切回中文恢复 14 键；123 是 26 键的符号层。账号同步上传 `input.schema=quanpin`、`platform.ios.keyboard_layout=fourteen_key`，同时照旧上传 `platform.ios.nine_key=false`：还不认识 `keyboard_layout` 的旧版本只读后者，在那里落成全拼 26 键。服务端字段表（`/v1/users/me/preferences/schema`，backend v0.54.0 起有这个键）里没有的键不上传，其余照常。「应用云端设置」时有 `keyboard_layout` 就按它切换，没有时退回 `nine_key`，并在云端是全拼、不是九键时保留本机的 14 键。映射、字段表过滤和合并都在 Rust（client-services 的 `account::ios_settings`，经 `msime_client_account_ios_settings_export`、`_apply` 和 `msime_client_cloud_sync`），App 只交出 App Group 里的键盘设置（`IOSCloudSettings.native`）。打字统计的来源是「全拼 14 键」，键位 id 是 `FourteenQW` 到 `FourteenM`。用例在 `KeyboardTests/settings/FourteenKeyKeyboardTests.swift`，设置三档在 `OnboardingUITests.testChineseKeyboardOffersTwentySixFourteenAndNineKeys`。
 
+双拼 14 键（#9190）不新增方案值：在当前小鹤、自然码、微软或首道双拼方案下，设置页的「双拼键盘」选择 26 键或 14 键，写入独立的 `touch_shuangpin_layout`。键盘仍保留 `shuangpin_profile`，14 键按同一张 `FourteenKeyLayout` 键面经 `gridKey` 交给引擎；切换双拼方案、重建会话和回到中文时保留布局，英文、本地模式和不支持组码的输入框回落到 26 键。该字段目前只在本机共享偏好中保存，不改变 iOS 账号同步的全拼布局字段。
+
 九键切到数字层时固定是电话顺序：1 2 3 在第一排、7 8 9 在最后一排，按键输入的和 VoiceOver 读的都是显示的数字，字母层也是 1-2-3 的电话键位。26 键按 123 在手机和 iPad 上都打开 1 到 0 排成一行的 123 页，不借九键的数字层。旧版本写进共享文档的 `touch_number_keypad_order` 和 `touch_twenty_six_key_number_layout` 照常保留和同步，但设置页不再列出，键盘也不再读它们。
 
 「键盘 → 布局」里的「双拼键位提示」对应共享文档的 `touch_shuangpin_key_hints`，缺省为关。打开后双拼 26 键的字母键显示底部的声母/韵母提示，VoiceOver 也会读提示；关闭时字母回到键面正中；全拼、英文和本地模式本来就不画。键盘每次出现时把文档里的值抄进 App Group（`keyboard.shuangpin.keyHints`）并重画键面。
@@ -331,18 +333,13 @@ xcodebuild -workspace platforms/ios/MSIMEClient.xcworkspace -scheme MSIMEClientU
 
 设备须解锁，并已启用水杉系统键盘。用例在独立测试编辑器中只输入合成拼音，不使用设备上的浏览器或备忘录。
 
-**在 iOS 27 模拟器上，键盘能装上但切不过去。** 启用和切换是两件事，要分开看：
+iOS 27 模拟器的系统键盘验收需要启用模拟器 ad-hoc 签名，并在系统「设置 → 通用 → 键盘 → 键盘」中添加水杉、允许完全访问。`addKeyboardInSettingsIfNeeded` 会通过设置界面完成登记与权限确认，再由 `activeSystemKeyboard` 切换到产品扩展；已加载扩展显示共享目录错误时明确失败，不能计作未启用键盘而跳过。只写 `AppleKeyboards`、调用 `pluginkit` 或使用 `App-prefs` 深链均不能替代设置界面的登记流程。模拟器的 App Group 权限由 Xcode 的 `Entitlements-Simulated.plist` 注入可执行文件，不能只看 `codesign` 打印的字典判断；`CODE_SIGNING_ALLOWED=NO` 不适用于这组系统入口验收。
 
-- **启用是成功的。** 往 `.GlobalPreferences` 写 `AppleKeyboards`（加上扩展 bundle id `app.msime.ios.keyboard`）并重启模拟器之后，设置 → 通用 → 键盘 → 键盘 里确实列着「水杉输入法 · 中文」。要确认这一点得走 Settings 把每一层的单元格文案打出来看，只凭「键盘环里没有它」会误判成写入无效。
-- **切换是失败的。** XCUITest 到不了它。`app.buttons["Next keyboard"]` 点下去落在 shift 上（键面在 Q/q 之间来回，始终是同一个 `UIKeyboardLayoutStar`），长按它弹出的是单手键盘的「默认/右手/左手」菜单，里面一个键盘名字都没有——连已启用的简体拼音和英语都没有。`app.keyboards.buttons` 只有 `shift` / `emoji` / `Return` 三个。
+`testFourteenKeyShuangpinProfilesCommitIntoTheSystemEditor` 从原生设置选择双拼 14 键，在独立编辑器内依次切换小鹤、自然码、微软、首道并点按合成组码，选择读音行的 `readingSpelling_ni` 后上屏「你好」，检查既有正文、微软分号读屏和数字页往返，结束恢复原方案和布局。iOS 27 arm64 专用模拟器该项 **1 通过、0 跳过、0 失败**（221 秒），四张方案截图已检查，未在实体设备验收。
 
-把扩展排到 `AppleKeyboards` 数组第一位也不会让它成为默认键盘：新编辑框打开的仍是第一个**系统**键盘（实测是简体拼音），iOS 不会为第三方键盘做默认。所以模拟器上到不了「真实编辑器」这一级，差的就是那一下人手切换。
+原有整套 UI 基线为 **39 执行、2 跳过、0 失败**（917 秒），两项系统键盘用例当时跳过；新增或单项验收的结果单独记录，不据此更新整套 UI 的通过与跳过数量。
 
-另外两条与启用无关，试过也无效，不必再走：`pluginkit -e use -i app.msime.ios.keyboard`（扩展本来就注册为 `com.apple.keyboard-service`，置 `+` 能跨重装保持，但和键盘环无关），以及 `App-prefs:General&path=Keyboard` 深链（命令返回成功，界面停在设置首页不跳转）。
-
-真机上就是正常在 设置 → 键盘 里添加一次，之后这组用例会自己跑起来。
-
-**当前结果为 39 执行、2 跳过、0 失败**（917 秒）。两条跳过是上面那组键盘用例，等键盘在设置里启用后才会真正执行。
+`testCandidatePanelAfterHostSchemeChanges` 于 2026-10-24 在 iOS 27 arm64 模拟器的真实系统扩展入口通过（410.216 秒，1 通过、0 失败、0 跳过）。它保留独立编辑器与未完成组字，经产品设置切换双拼、全拼、九键和十四键，三轮共 12 次；每次展开、收起、再次展开并精确追加选中的候选。24 张展开与上屏截图已查看。此结果不覆盖报告人实体 iPhone 的低概率现场，细节见[候选列表与隐藏布局笔记](../../.agents/notes/implemented/bug-fix/2026-10-19-ios-large-candidate-panel.md)。
 
 写这组用例时踩过三类坑，都不是产品坏了，记在这里因为很容易再踩：
 

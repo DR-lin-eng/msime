@@ -63,6 +63,8 @@ pub enum Command {
 /// 除可选的静态评分证据外，所有 `candidate_*` 向量必须与 `candidates` 等长，运行时才能同步重排。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EngineSnapshot {
+    /// 上屏后的空闲联想，不属于组字。
+    pub prediction: bool,
     pub local_mode: String,
     /// The non-letter characters `character` takes in this state (`SessionSnapshot::spelling_symbols`): send one of these as a character, never as punctuation.
     pub spelling_symbols: String,
@@ -175,6 +177,11 @@ impl Session {
 }
 
 impl Session {
+    /// 隐私输入立即关闭联想，不等待会话按偏好重建。
+    pub fn set_prediction_allowed(&mut self, allowed: bool) {
+        self.inner.set_prediction_allowed(allowed);
+    }
+
     pub fn new(options: &EngineOptions) -> Result<Session> {
         // The C++ ran `options_for` a second time only to read the profile name back (bridge.cpp:430); that rerun recopied the same sidecar, so one mapping is enough.
         let inner = crate::session::Session::new(session_options(options)?)?;
@@ -215,9 +222,7 @@ impl Session {
 
     /// With the annotation rule of bridge.cpp:914-929.
     pub fn snapshot(&self) -> Result<EngineSnapshot> {
-        let value = self
-            .inner
-            .snapshot_with_helpcode_visibility(self.show_helpcode);
+        let value = self.inner.snapshot_for_host(self.show_helpcode);
         let helpcode_scheme = value.scheme.helpcode();
         let uppercase_all = value.scheme == SchemeType::Quanpin;
         // Rows the engine generated in the expression, command and mention modes are not spelled by pinyin; their annotations are the engine's own. 拆字行的注释是字的读音，没有读音的字也不补辅助码。
@@ -238,6 +243,7 @@ impl Session {
             value.normalized_segmentation.clone()
         };
         let mut output = EngineSnapshot {
+            prediction: value.prediction,
             local_mode: value.local_mode.name().to_owned(),
             spelling_symbols: value.spelling_symbols,
             dedicated_english: value.dedicated_english,
@@ -285,7 +291,7 @@ impl Session {
         for (index, candidate) in value.candidates.into_iter().enumerate() {
             let mut annotation = annotations
                 .next()
-                .unwrap_or_else(|| candidate.corrected_from.clone());
+                .unwrap_or_else(|| candidate.corrected_from.to_string());
             if let Some(keymap) = keymap {
                 if self.show_helpcode
                     && annotation.is_empty()
@@ -333,8 +339,8 @@ impl Session {
             output
                 .candidate_static_evidence
                 .push(candidate.static_evidence());
-            output.candidate_codes.push(candidate.pinyin);
-            output.candidates.push(candidate.word);
+            output.candidate_codes.push(candidate.pinyin.into_string());
+            output.candidates.push(candidate.word.into_string());
         }
         Ok(output)
     }

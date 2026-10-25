@@ -32,7 +32,7 @@ Status: implemented
   - `zh-hans-t-essay-bgw-compact.gram`（八股文·词级紧凑，39 MB）：`GramDb::load` 成功，`北京+大学` 打 −0.393、`北京+大雪` 打 −2.676，端到端把词频偏向的「北京大雪」纠正成「北京大学」。
   - `zh-moqi.gram`（白霜/墨奇，7 MB）：`load` 成功，但搭配覆盖稀疏，多数二元组落在未命中惩罚 −6.0 上（`我们+一起` −4.867 是少数命中）。端到端纠正那条按模型能力跳过。
   - 两条真实模型测试用 `option_env!("MSIME_REAL_GRAM")` 注入路径，CI 上没有模型包时打印原因后跳过，不会假绿。
-- 未验证：万象 LTS（390 MB，下载太慢未取）与八股文·词级（197 MB）；九键/全拼候选窗的 Collocation 行外观；新架构 Windows 宿主的原生设置页行。
+- 未验证：万象 LTS（390 MB，下载太慢未取）与八股文·词级（197 MB）；九键/全拼候选窗的 Collocation 行外观。Windows 原生设置页的后续实测见下文。
 
 读取端保留 RIME Developers 的版权声明，完整 BSD-3-Clause 文本经六个平台已有许可渠道分发；模型数据许可与代码移植许可分开记录。
 
@@ -62,6 +62,18 @@ SHA-256 一致。许可声明在 `resources/licenses/rime-baguwen-LGPL-3.0.txt` 
 
 `msime_client_resource_pack_remove` 在公共 `msime_client.h` 声明与 Rust 导出相同的字节缓冲区签名，原生宿主可直接包含头文件调用，响应使用标准 JSON 封装的 `{removed: bool}`。只补充导出而遗漏头文件会使 C/C++ 调用方编译失败；宿主接口一致性回归与 C、C++ 编译检查覆盖这一边界。
 
+## 2026-10-24 补充：Windows 原生设置页模型入口
+
+Windows 原生设置页现在与共享设置页提供同一组能力：桌面神经联想、去重后补充次选、语法模型选择，以及万象 LTS、八股文词级和八股文紧凑模型的按需下载、校验、取消和删除。页面只把 `state_directory()` 作为 `state_root` 交给 `msime_client_resource_packs*`，不复制锁文件、SHA-256 或模型路径规则；下载使用已保存的资源镜像前缀，删除前由 host-api 释放共享映射。白霜仍因许可未确认不列出，默认值不变。
+
+这次没有把旧版任意 `.gram` 文件导入做成入口：共享层只接受锁定资源包，任意导入会绕过许可和内容校验。模型选择只写 `sentence_association.grammar_model`，安装完成后由现有会话在下次聚焦时重新读取，避免设置窗口直接触碰输入线程。
+
+选择模型后沿既有 `change(..., true)` 延迟刷新页面，让当前模型对应的下载或删除入口立即出现；切回「不使用」时移除模型文件行。只保存值而不刷新能保留下拉框实例，但模型文件行由建页时的模型选择决定，会把首次选择模型后的下载入口留空，或者继续显示旧模型的操作，因此不采用。
+
+契约测试同时钉住三个偏好键、资源包查询/安装/删除入口和白霜未列出，避免 Windows 设置页以后只保留静态下拉而失去实际管理能力。原生 `settings_ui.ps1` 增加浅深色、800／1000 宽下的四种模型切换，检查持久化、立即出现的对应下载入口、旧入口移除及导航后重读，并滚到模型设置处截图；不点击下载按钮、不访问模型服务。该专项已在 Windows CI run `40061182130` 的真实 WinUI 中通过，分别输出浅深色通过记录；已查看浅色 1000 宽的万象、深色 800 宽的紧凑模型与不使用截图。证据来自产品修复提交 `2d2155cfe3`；随后 `9834be79f2` 只修复三个原生测试的 MSVC 严格告警，完整 pipe-only 重建和三项 CTest 通过。模型下载与引擎加载不在此 UI 专项的覆盖范围。
+
+独立 Windows 工作区的同源生产 host-api DLL 另已通过真实资源链路验收（DLL SHA-256 `76520af29246332d7c05240f5e18cb9694032a7fc2308a412aaa9c213bcaa666`）：三种包在登记后的首次回调中均可取消；紧凑模型在实际收到下载字节后取消，状态仍为缺失，重试后完成续传、安装和锁定的 40,925,228 字节及 SHA-256 校验。使用同一 DLL、独立合成词库与状态目录建立全拼会话，发送合成拼音并得到候选，同时用 Windows `VirtualQuery`／`GetMappedFileNameW` 确认进程已映射锁定的 `.gram`。销毁会话后经资源包 C ABI 删除，查询回到缺失，文件与映射均消失。此项不覆盖万象和非紧凑八股文的完整下载，也不证明真实编辑器中的模型排序效果；不把 C ABI 调用写成 WinUI 下载／取消／确认删除按钮已被点击。
+
 ## 2026-10-22 补充：octagram 调参系数进偏好（对应 Windows `sentence_collocation_*`）
 
 Windows v0.11.1 出厂模板的 `[association]` 有七个不进设置页的高级调参键：`sentence_collocation_weight`（1.0）、`sentence_collocation_max_length`（6）、`sentence_collocation_min_length`（2）、`sentence_collocation_penalty`（-14.0）、`sentence_collocation_non_penalty`（-6.0）、`sentence_collocation_weak_penalty`（-100.0）、`sentence_collocation_rear_penalty`（-18.0）。新架构的 `GramConfig` 早已是这些参数的结构体，但值是定值，偏好层不可调。本轮把同名七键加进 `SentenceAssociationPreferences`（键名逐字与 Windows 一致），host-api 的 `engine_sentence_association` 逐字段透传进 `collocation_weight` 与 `collocation_grammar`。
@@ -79,3 +91,11 @@ Windows v0.11.1 出厂模板的 `[association]` 有七个不进设置页的高�
 查询端用 `saturating_sub(1)` 保住现有负值退回 `non_collocation_penalty` 的约定；其余值的评分与 8 字上限沿用原逻辑。配置反序列化层拒绝或重置负值能提前排除异常输入，但会改变已允许的手调值，且无法保护直接构造 `GramConfig` 的调用方，因此不采用。关闭溢出检查能避免 panic，却把负值变成有效窗口，也不采用。
 
 `query_bounds_extreme_configured_window_lengths` 使用合成 `.gram`，覆盖最小整数、其相邻值、普通负值、零、1、正常正值及最大整数，分别检查句尾和非句尾查询。修复前在最小整数处复现减法溢出；正常窗口仍需命中已知分值，避免以一律关闭搭配查询来通过边界测试。
+
+## 2026-10-23 补充：人工资源探针绑定模型内容
+
+`real_gram_loads_and_queries` 是显式 `--ignored` 运行的人工资源探针，`GRAM_PROBE_PATH` 必须指向 `resources/grammar-models.lock.json` 里的 `baguwen-compact`。缺少路径时明确失败；对 `GramDb` 已映射的同一份字节先校验大小和 SHA-256，再查询，避免另读一份模型而让校验内容与查询内容分离。普通测试仍忽略这条，不下载或随仓库提交模型。
+
+旧断言假定「一名+医生」总比「一名+一生」强，但锁定八股文紧凑模型实际给出 −4.0443 与 −3.8286，因而在正确加载的模型上失败。独立参考以 [darts-clone 固定提交](https://github.com/s-yata/darts-clone/blob/e40ce4627526985a7767444b6ed6893ab6ff8983/include/darts.h) 的 `exactMatchSearch` 穷举上下文后缀与词前缀，按 `max(频次值 / 10000 - 14)` 和句尾 `词+$` 的 `频次值 / 10000 - 18` 取分；「北京+大学」「北京+大雪」分别为 −0.3926、−2.6763。四个参考值对应资源锁中 SHA-256 为 `d3cb2438c1fdcd6a855dd6ca8f5c1060a29273c6b64c2c2c69af67cd71b6aa7e` 的模型。探针使用默认 `GramConfig` 对照四个分值，`1e-9` 容差只容纳浮点舍入，小于模型 `1/10000` 的分值步长。
+
+只检查搭配排序所需的预期少，也较能容忍模型重训，但模型间没有普适排序，而且两分同时偏移也可能通过；因此采用锁定模型和独立分值。只检查能加载与有限分更适合任意模型的冒烟，却无法发现读到错误模型或错误分值，因此不作为这条探针的验收口径。修复对象是人工探针的模型假设，不改变生产评分。

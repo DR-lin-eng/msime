@@ -674,6 +674,10 @@ bool SessionController::reset_cache() {
   return submitted->get() == InputTaskStatus::Completed &&
          result->load(std::memory_order_acquire);
 }
+void SessionController::wake_preferences() {
+  if (preferences_)
+    preferences_->wake();
+}
 bool SessionController::send_tsf_config(const TsfLocalConfig &config) {
   if (input_.on_worker_thread() || active_controller == this)
     throw std::logic_error("Config push cannot reenter controller callbacks");

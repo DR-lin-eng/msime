@@ -49,10 +49,10 @@ int main(int argc, char **argv) {
         subprocess.run([compiler, "-std=c++17", "-I", str(ROOT), str(source), "-o", str(program)],
                        check=True, timeout=60)
         for identifier, prompt in expected.items():
-            result = subprocess.check_output([str(program), identifier], timeout=10).decode("utf-8")
+            result = subprocess.check_output([str(program), identifier], timeout=10, text=True, encoding="utf-8")
             assert result == prompt, f"C++ 润色正文不同：{identifier}"
         for preset in PRESETS:
-            title = subprocess.check_output([str(program), preset["id"], "title"], timeout=10).decode("utf-8")
+            title = subprocess.check_output([str(program), preset["id"], "title"], timeout=10, text=True, encoding="utf-8")
             assert title == preset["title"], f"C++ 润色名称不同：{preset['id']}"
         source.write_text('''#include "platforms/windows/settings/VoiceSettings.h"
 #include "shared/voice/PolishPromptWideCatalog.h"
@@ -120,11 +120,12 @@ else:
 }
 ''', encoding="utf-8")
         # 保留版本和阶段命令，下一次超时才能区分前端编译与链接；失败也记录实际耗时。
-        print(f"polish prompt catalog: Swift 编译开始（{swiftc}，限时 60 秒）", flush=True)
+        swift_compile_timeout = 120
+        print(f"polish prompt catalog: Swift 编译开始（{swiftc}，限时 {swift_compile_timeout} 秒）", flush=True)
         started = time.monotonic()
         try:
             subprocess.run([swiftc, "-v", str(ROOT / "platforms/ios/App/Services/VoicePolishPresetCatalog.swift"),
-                            str(source), "-o", str(program)], check=True, timeout=60)
+                            str(source), "-o", str(program)], check=True, timeout=swift_compile_timeout)
         finally:
             print(f"polish prompt catalog: Swift 编译用时 {time.monotonic() - started:.3f} 秒", flush=True)
         lines = subprocess.check_output([str(program)], timeout=10).decode("ascii").splitlines()

@@ -11,6 +11,8 @@ import json
 import os
 import pathlib
 import shutil
+import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -88,6 +90,17 @@ def sha256_line(path: pathlib.Path) -> str:
     return f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}"
 
 
+def remove_temporary_repository(path):
+    def make_writable(function, name, error):
+        if os.name != "nt" or not isinstance(error[1], PermissionError):
+            raise error[1]
+        os.chmod(name, stat.S_IWRITE)
+        function(name)
+
+    # Windows Git 的对象只读；只恢复本测试临时仓库中的删除权限。
+    shutil.rmtree(path, onerror=make_writable)
+
+
 class Workspace(unittest.TestCase):
     """一个临时的仓库检出：版本表、edition_windows.py 和 publish-symbols.sh 是仓库里的，dist 里是 publish 任务下载到的合成产物。"""
 
@@ -96,7 +109,7 @@ class Workspace(unittest.TestCase):
             if shutil.which(tool) is None:
                 self.skipTest(f"{tool} is not installed")
         self.work = pathlib.Path(tempfile.mkdtemp(prefix="windows-release-page-"))
-        self.addCleanup(shutil.rmtree, self.work)
+        self.addCleanup(remove_temporary_repository, self.work)
         (self.work / "platforms/windows/scripts").mkdir(parents=True)
         shutil.copy(EDITION_WINDOWS, self.work / "platforms/windows/scripts/edition_windows.py")
         shutil.copy(PUBLISH_SYMBOLS, self.work / "platforms/windows/scripts/publish-symbols.sh")
@@ -116,7 +129,7 @@ class Workspace(unittest.TestCase):
             installer = self.dist / name
             installer.write_bytes(f"synthetic installer {index}".encode())
             # package 任务（PowerShell）写的 .sha256：一行 sha256sum 格式，结尾一个换行。
-            (self.dist / f"{name}.sha256").write_text(sha256_line(installer) + "\n", encoding="utf-8")
+            (self.dist / f"{name}.sha256").write_text(sha256_line(installer) + "\n", encoding="utf-8", newline="\n")
         for index, name in enumerate(symbol_names("1.1.0")):
             (self.dist / name).write_bytes(f"synthetic symbols {index}".encode())
 
@@ -135,8 +148,18 @@ class Workspace(unittest.TestCase):
 
     def run_step(self, name: str, release: str = "1.1.0") -> subprocess.CompletedProcess:
         # publish 任务的步骤写了 shell: bash，GitHub 用 `bash --noprofile --norc -eo pipefail {0}` 运行。
-        return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step_script(name)],
-                              cwd=self.work, env=self.env(release), capture_output=True, text=True)
+        script = f'python3() {{ {shlex.quote(sys.executable)} -X utf8 "$@"; }}\n' + step_script(name)
+        if os.name == "nt":
+            # 发布任务在 Ubuntu 运行；这些合成 ASCII 安装包沿用其文本模式摘要标记。
+            script = '''sha256sum() {
+  for argument; do
+    case "$argument" in -c|--check) command sha256sum "$@"; return ;; esac
+  done
+  command sha256sum --text "$@"
+}
+''' + script
+        return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                              cwd=self.work, env=self.env(release), capture_output=True, text=True, encoding="utf-8")
 
 
 class PublishStepTests(Workspace):
@@ -266,9 +289,9 @@ class SymbolsStepTests(Workspace):
 class DownloadGuideTests(unittest.TestCase):
     def guide(self, editions: str, *extra: str, check: bool = True) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, "-I", str(EDITION_WINDOWS), "download-guide", "--editions", editions, "--version", "1.2.0",
+            [sys.executable, "-I", "-X", "utf8", str(EDITION_WINDOWS), "download-guide", "--editions", editions, "--version", "1.2.0",
              "--download-base", DOWNLOAD + "windows-v1.2.0/", *extra],
-            capture_output=True, text=True, check=check,
+            capture_output=True, text=True, encoding="utf-8", check=check,
         )
 
     def test_full_edition_comes_first_with_names_from_the_edition_table(self):

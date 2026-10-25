@@ -23,7 +23,8 @@ pub mod system_fonts;
 use msime_client_core::preferences::{
     InputScheme, NineKeyShuangpinProfile, Preferences, PreferencesSnapshot, PreferencesStore,
     ShuangpinCustomProfile, ShuangpinProfile, TouchKeyboardLayout, TouchKeyboardScheme,
-    VietnameseInputMethod, VietnamesePreferences, VietnameseToneStyle, WubiProfile,
+    TouchShuangpinLayout, VietnameseInputMethod, VietnamesePreferences, VietnameseToneStyle,
+    WubiProfile,
 };
 use msime_client_core::punctuation::{
     route as punctuation_route, PunctuationContext, PunctuationRoute,
@@ -40,15 +41,17 @@ use msime_client_services::typing_statistics::{
 use msime_engine::host::{
     check_nine_key_shuangpin_table, check_shuangpin_custom_profile,
     nine_key_shuangpin_builtin_table, nine_key_shuangpin_table_key_hints,
-    resolve_nine_key_shuangpin, shuangpin_builtin_table, validate_nine_key_shuangpin_table,
-    validate_shuangpin_custom_profile, CandidateEdge, Command, EngineOptions,
-    NineKeyShuangpinError, NineKeyShuangpinKeyHint, NineKeyShuangpinKind, NineKeyShuangpinTable,
-    Session, ShuangpinCustomProfileError, ShuangpinCustomTable, ShuangpinCustomTablePart,
+    resolve_eighteen_key_shuangpin, resolve_fourteen_key_shuangpin, resolve_nine_key_shuangpin,
+    shuangpin_builtin_table, validate_nine_key_shuangpin_table, validate_shuangpin_custom_profile,
+    CandidateEdge, Command, EngineOptions, NineKeyShuangpinError, NineKeyShuangpinKeyHint,
+    NineKeyShuangpinKind, NineKeyShuangpinTable, Session, ShuangpinCustomProfileError,
+    ShuangpinCustomTable, ShuangpinCustomTablePart,
 };
 use msime_engine::{
     release_japanese_dictionary_cache, SchemeSet, SchemeType, ShuangpinProfileKind,
 };
-use msime_input_runtime::HandwritingQuery;
+#[cfg(unix)]
+use msime_input_runtime::TranslationQuery;
 #[cfg(unix)]
 use msime_input_runtime::UnixSocketProvider;
 use msime_input_runtime::{
@@ -56,8 +59,7 @@ use msime_input_runtime::{
     KeyGrid, NineKeySpellingId, OnlineCandidate, OnlineQuery, Reranker, Runtime, SentenceModel,
     Transition, TranslationService,
 };
-#[cfg(unix)]
-use msime_input_runtime::{EmojiPanelQuery, TranslationQuery};
+use msime_input_runtime::{EmojiPanelQuery, HandwritingQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -733,6 +735,8 @@ impl HostSession {
         options.shuangpin_preedit_uses_raw = preferences.shuangpin_preedit_uses_raw;
         options.single_character_only = preferences.single_character_only;
         options.learning = preferences.learning;
+        options.next_word_prediction =
+            preferences.next_word_prediction && cfg!(target_os = "android");
         options.learn_english_on_enter = preferences.enter_learns_english_word;
         options.autocorrect_transposition = preferences.quanpin.autocorrect_transposition;
         options.autocorrect_neighbor = preferences.quanpin.autocorrect_neighbor;
@@ -779,6 +783,7 @@ impl HostSession {
         options.show_helpcode = helpcode.show_in_candidate_window;
         options.helpcode_schema = helpcode.schema.as_str().into();
         options.helpcode_trigger_key = helpcode.trigger_key.bytes().next();
+        options.shuangpin_helpcode_modes = shuangpin_helpcode_modes(helpcode.modes);
         let plugin_root = self.plugin_roots.installed.as_deref();
         let plugin_tables = plugin_tables::PluginTables::stamp(
             plugin_root,
@@ -811,6 +816,7 @@ impl HostSession {
         apply_punctuation_marks(&mut options, &preferences);
         // 先构建并校验，失败时原会话仍然可用。
         let mut engine = Session::new(&options).map_err(|e| e.to_string())?;
+        engine.set_prediction_allowed(!self.statistics_private);
         // 云候选席位不是 EngineOptions；新引擎默认关闭，每次重建都要恢复当前偏好。
         engine.set_cloud_candidates_enabled(preferences.cloud_candidates);
         engine.set_english_online_candidates_enabled(preferences.english_online_candidates);
@@ -834,15 +840,19 @@ impl HostSession {
                 .set_punctuation_lock(lock)
                 .map_err(|e| e.to_string())?;
         }
-        // 九键双拼换了表也算换了布局：宿主设下的九键双拼网格带着旧表。
+        // 双拼换表也算换布局：宿主设下的组码网格带着旧表，不能继续沿用。
         let layout_changed = preferences.touch_keyboard_layout
             != self.applied.touch_keyboard_layout
+            || preferences.touch_shuangpin_layout != self.applied.touch_shuangpin_layout
+            || preferences.shuangpin_profile != self.applied.shuangpin_profile
+            || preferences.shuangpin_custom_profile != self.applied.shuangpin_custom_profile
             || preferences.nine_key_shuangpin_profile != self.applied.nine_key_shuangpin_profile
             || preferences.nine_key_shuangpin_custom_profile
                 != self.applied.nine_key_shuangpin_custom_profile;
         let scheme = SchemeType::from_u8(options.scheme);
-        // 只有能打九键的方案（全拼、注音）才有网格；14 键只给全拼，`Runtime::set_key_grid` 已经拦下别的组合。
-        let grid_scheme = scheme.is_some_and(SchemeType::nine_key);
+        // 全拼、注音支持九键，双拼还支持派生的 14 键；具体组合由 `Runtime::set_key_grid` 校验。
+        let grid_scheme =
+            scheme.is_some_and(|value| value.nine_key() || value == SchemeType::Shuangpin);
         // 宿主的网格覆盖只对它设下时的那个方案有效：全拼九宫格的开关带进注音，会让没选「注音 9 键」的注音也离开大千键位。
         let scheme_changed = options.scheme != self.options.scheme;
         let next_key_grid_override = if grid_scheme && !layout_changed && !scheme_changed {
@@ -1349,6 +1359,32 @@ fn apply_shuangpin_profile(
     }
 }
 
+/// 按与实体双拼相同的方案和非法表回退派生触屏 14 键。
+fn fourteen_key_shuangpin_grid(preferences: &Preferences) -> KeyGrid {
+    let kind = ShuangpinProfileKind::from_u8(profile_code(preferences.shuangpin_profile))
+        .expect("偏好双拼方案均有对应的引擎方案");
+    let custom = (preferences.shuangpin_profile == ShuangpinProfile::Custom)
+        .then(|| engine_shuangpin_custom_table(&preferences.shuangpin_custom_profile));
+    let table = resolve_fourteen_key_shuangpin(kind, custom.as_ref()).unwrap_or_else(|_| {
+        resolve_fourteen_key_shuangpin(ShuangpinProfileKind::Xiaohe, None)
+            .expect("内置小鹤方案可派生 14 键表")
+    });
+    KeyGrid::FourteenKeyShuangpin(table)
+}
+
+/// 按与实体双拼相同的方案和非法表回退派生触屏 18 键。
+fn eighteen_key_shuangpin_grid(preferences: &Preferences) -> KeyGrid {
+    let kind = ShuangpinProfileKind::from_u8(profile_code(preferences.shuangpin_profile))
+        .expect("偏好双拼方案均有对应的引擎方案");
+    let custom = (preferences.shuangpin_profile == ShuangpinProfile::Custom)
+        .then(|| engine_shuangpin_custom_table(&preferences.shuangpin_custom_profile));
+    let table = resolve_eighteen_key_shuangpin(kind, custom.as_ref()).unwrap_or_else(|_| {
+        resolve_eighteen_key_shuangpin(ShuangpinProfileKind::Xiaohe, None)
+            .expect("内置小鹤方案可派生 18 键表")
+    });
+    KeyGrid::EighteenKeyShuangpin(table)
+}
+
 /// 偏好里的九键双拼方案对应的 Engine 方案。
 pub fn nine_key_shuangpin_kind(profile: NineKeyShuangpinProfile) -> NineKeyShuangpinKind {
     match profile {
@@ -1835,6 +1871,8 @@ fn shuangpin_helpcode_modes(
 ) -> msime_engine::ShuangpinHelpcodeModes {
     let modes = modes.normalized();
     msime_engine::ShuangpinHelpcodeModes {
+        // 目前只有 macOS 宿主把 Tab 送入字符接口；其它宿主保留原触发方式。
+        manual_tab: cfg!(target_os = "macos") && modes.manual_tab,
         direct: modes.direct,
         trigger_backtick: modes.trigger_backtick,
         trigger_semicolon: modes.trigger_semicolon,
@@ -2028,6 +2066,8 @@ impl HostOptions {
             single_character_only: self.preferences.single_character_only,
             learning: self.preferences.learning,
             learn_english_on_enter: self.preferences.enter_learns_english_word,
+            next_word_prediction: self.preferences.next_word_prediction
+                && cfg!(target_os = "android"),
             autocorrect_transposition: self.preferences.quanpin.autocorrect_transposition,
             autocorrect_neighbor: self.preferences.quanpin.autocorrect_neighbor,
             fuzzy_pinyin_rules: self.preferences.fuzzy_pinyin.active_rules(),
@@ -3361,14 +3401,41 @@ const SELECTION_BATCH: u64 = 32;
 #[cfg(test)]
 mod tests;
 
-/// 只看偏好时，运行 `scheme` 的会话以哪种组码网格开始（宿主的 `msime_client_set_key_grid` 和 `msime_client_set_nine_key_mode` 仍可覆盖，但覆盖只对设下它时的方案有效）。全拼看 `touch_keyboard_layout`：九键是九键，14 键是 14 键，九键双拼按 `nine_key_shuangpin_profile` 取表（自定义表不能用时按默认的内置方案）。注音只有九键，还要选了「注音 9 键」触屏方案，这个方案只有 Android 键盘会写：`touch_keyboard_layout` 是所有方案共用的一个字段，桌面宿主为全拼九宫格设它（Linux 的九键开关），那里的注音会话必须留在大千键位，不能继承九宫格。
+/// 只看偏好时，运行 `scheme` 的会话以哪种组码网格开始（宿主的 `msime_client_set_key_grid` 和 `msime_client_set_nine_key_mode` 仍可覆盖，但覆盖只对设下它时的方案有效）。Android 和 iOS 双拼看独立的 `touch_shuangpin_layout`，14 键按当前 26 键方案派生，Android 另支持 18 键；其他宿主保留但忽略这个偏好。全拼看 `touch_keyboard_layout`：九键是九键，14 键是 14 键，九键双拼按 `nine_key_shuangpin_profile` 取表（自定义表不能用时按默认的内置方案）。注音只有九键，还要选了「注音 9 键」触屏方案，这个方案只有 Android 键盘会写：`touch_keyboard_layout` 是所有方案共用的一个字段，桌面宿主为全拼九宫格设它（Linux 的九键开关），那里的注音会话必须留在大千键位，不能继承九宫格。
 pub(crate) fn layout_key_grid(
     scheme: Option<SchemeType>,
     preferences: &Preferences,
 ) -> Option<KeyGrid> {
+    layout_key_grid_for(ffi::host::compiled_platform(), scheme, preferences)
+}
+
+fn layout_key_grid_for(
+    platform: HostPlatform,
+    scheme: Option<SchemeType>,
+    preferences: &Preferences,
+) -> Option<KeyGrid> {
+    if matches!(platform, HostPlatform::Android | HostPlatform::Ios)
+        && scheme == Some(SchemeType::Shuangpin)
+        && preferences.touch_keyboard_layout != TouchKeyboardLayout::Handwriting
+    {
+        match preferences.touch_shuangpin_layout {
+            TouchShuangpinLayout::FourteenKey => {
+                return Some(fourteen_key_shuangpin_grid(preferences))
+            }
+            TouchShuangpinLayout::EighteenKey if platform == HostPlatform::Android => {
+                return Some(eighteen_key_shuangpin_grid(preferences))
+            }
+            TouchShuangpinLayout::TwentySixKey | TouchShuangpinLayout::EighteenKey => {}
+        }
+    }
     match (preferences.touch_keyboard_layout, scheme) {
         (TouchKeyboardLayout::NineKey, Some(SchemeType::Quanpin)) => Some(KeyGrid::NineKey),
         (TouchKeyboardLayout::FourteenKey, Some(SchemeType::Quanpin)) => Some(KeyGrid::FourteenKey),
+        (TouchKeyboardLayout::EighteenKey, Some(SchemeType::Quanpin))
+            if platform == HostPlatform::Android =>
+        {
+            Some(KeyGrid::EighteenKey)
+        }
         (TouchKeyboardLayout::NineKeyShuangpin, Some(SchemeType::Quanpin)) => {
             Some(nine_key_shuangpin_grid(preferences).0)
         }

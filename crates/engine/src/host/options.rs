@@ -69,6 +69,8 @@ pub struct EngineOptions {
     pub learning: bool,
     /// 回车上屏英文拼写时是否学进英文词库（`SessionOptions::learn_english_on_enter`）。参照实现出厂为开。
     pub learn_english_on_enter: bool,
+    /// 上屏后联想；默认关闭，宿主只在支持空闲候选的键盘上启用。
+    pub next_word_prediction: bool,
     pub autocorrect_transposition: bool,
     pub autocorrect_neighbor: bool,
     /// Masked with `fuzzy_rule::ALL`.
@@ -219,6 +221,7 @@ pub fn prepare_options_for(
         single_character_only: false,
         learning: false,
         learn_english_on_enter: true,
+        next_word_prediction: false,
         autocorrect_transposition: false,
         autocorrect_neighbor: false,
         fuzzy_pinyin_rules: 0,
@@ -335,6 +338,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.japanese_dictionary = PathBuf::from(&options.japanese_dictionary);
     session.learning = options.learning;
     session.learn_english_on_enter = options.learn_english_on_enter;
+    session.next_word_prediction = options.next_word_prediction;
     session.autocorrect_types = autocorrect_types;
     session.fuzzy_pinyin = FuzzyPinyinOptions {
         rules: options.fuzzy_pinyin_rules & fuzzy_rule::ALL,

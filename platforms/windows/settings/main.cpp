@@ -72,6 +72,7 @@
 #include "TranslationServiceSettings.h"
 #include "TypingStatisticsModel.h"
 #include "VoiceSettings.h"
+#include "../src/input/ToggleHotkeyChord.h"
 #include "msime_client.h"
 #include "msimeui/AnimatedImage.h"
 
@@ -5247,12 +5248,18 @@ private:
     label.VerticalAlignment(VerticalAlignment::Center);
     Grid::SetColumn(label, 1);
     slider.ValueChanged(
-        [weak_label = make_weak(label), on_slide = std::move(apply), step,
-         format](Inspectable const &,
+        [on_slide = std::move(apply), step,
+         format](Inspectable const &sender,
                  Controls::Primitives::RangeBaseValueChangedEventArgs const &args) {
           const double rounded = std::round(args.NewValue() / step) * step;
-          if (auto block = weak_label.get())
-            block.Text(hstring(format(rounded)));
+          // XAML 视觉树保留控件后，建行时的弱引用仍可能失效；从当前滑块取同一容器里的可见数值。
+          if (auto parent = sender.as<Slider>().Parent().try_as<Grid>()) {
+            auto children = parent.Children();
+            if (children.Size() == 2) {
+              if (auto block = children.GetAt(1).try_as<TextBlock>())
+                block.Text(hstring(format(rounded)));
+            }
+          }
           on_slide(rounded);
         });
     box.Children().Append(slider);
@@ -5994,8 +6001,21 @@ private:
       for (auto const &item : list.GetArray())
         if (item.ValueType() == JsonValueType::String)
           providers.emplace_back(item.GetString().c_str());
+    const auto names_value = object.GetNamedValue(L"providerNames", JsonValue::CreateNullValue());
+    if (names_value.ValueType() != JsonValueType::Object)
+      return false;
+    am::ProviderNames names;
+    for (auto const &entry : names_value.GetObject()) {
+      if (entry.Value().ValueType() != JsonValueType::String || entry.Value().GetString().empty())
+        return false;
+      names.emplace(entry.Key().c_str(), entry.Value().GetString().c_str());
+    }
+    for (auto const &provider : providers)
+      if (names.find(provider) == names.end())
+        return false;
     account_user_ = std::move(user);
     account_providers_linked_ = std::move(providers);
+    account_provider_names_ = std::move(names);
     if (!keep_name)
       account_name_ = account_user_->display_name;
     return true;
@@ -6004,6 +6024,7 @@ private:
   void account_signed_out() {
     account_user_.reset();
     account_providers_linked_.clear();
+    account_provider_names_.clear();
     account_name_.clear();
     reset_settings_sync();
     reset_qq_links();
@@ -6103,6 +6124,8 @@ private:
       return;
     }
     account_name_ = account_user_->display_name;
+    account_providers_linked_.clear();
+    account_provider_names_.clear();
     account_request(account_action(L"profile"), [this](Response const &response) {
       if (!response.ok || !apply_account_profile(response, false)) {
         if (const auto code = account_failure(response); !am::cancelled(code))
@@ -6140,6 +6163,7 @@ private:
     account_user_ = std::move(user);
     account_name_ = account_user_->display_name;
     account_providers_linked_.clear();
+    account_provider_names_.clear();
     account_request(account_action(L"profile"), [this](Response const &profile) {
       if (!profile.ok || !apply_account_profile(profile, false)) {
         account_finish(account_failure(profile));
@@ -7443,7 +7467,7 @@ private:
       if (auto value = weak_providers.get()) {
         std::wstring names;
         for (auto const &provider : account_providers_linked_)
-          names += (names.empty() ? L"" : L"、") + am::provider_name(provider);
+          names += (names.empty() ? L"" : L"、") + am::provider_name(provider, account_provider_names_);
         value.Text(hstring(names.empty() ? L"正在读取" : names));
       }
       if (auto value = weak_joined.get())
@@ -13632,6 +13656,174 @@ private:
     append_row_frame(group, save).Padding(Thickness{row_inset, 10, row_inset, 10});
   }
 
+  // Windows 原生设置页也提供共享设置页中的神经联想和 octagram 语法模型管理。
+  void build_sentence_model_settings(StackPanel const &group) {
+    if (!indexing_ && sentence_pack_statuses_.empty() && !sentence_packs_requested_) {
+      sentence_packs_requested_ = true;
+      refresh_sentence_packs();
+    }
+    const std::wstring model = document_.String(L"sentence_association.grammar_model", L"none");
+    std::vector<Option> choices = {
+        {L"none", L"不使用"},
+        {L"wanxiang", L"万象 LTS（约 380 MB，CC-BY-4.0）"},
+        {L"baguwen_word", L"八股文·词级（约 197 MB，LGPL-3.0）"},
+        {L"baguwen_compact", L"八股文·词级紧凑（约 39 MB，LGPL-3.0）"},
+    };
+    auto selector = select_control(L"语法模型", choices, model, [this](std::wstring const &value) {
+      change([&](PreferencesDocument &doc) {
+        doc.SetString(L"sentence_association.grammar_model", value);
+      }, true);
+    });
+    A11y::SetAutomationId(selector, L"sentence-grammar-model");
+    add_row(group, 0xE8C1, L"语法模型",
+            L"octagram 语法模型给整句候选加分；模型按需下载，不随安装包。选择后切换一次输入框生效。",
+            selector);
+    const auto pack = grammar_pack_for_model(model);
+    if (pack.empty())
+      return;
+    const auto status = sentence_pack_status(pack);
+    const bool installing = sentence_pack_installing_.count(pack) > 0;
+    const bool removing = sentence_pack_removing_.count(pack) > 0;
+    std::wstring subtitle;
+    if (installing)
+      subtitle = L"正在下载和校验模型…";
+    else if (removing)
+      subtitle = L"正在删除模型…";
+    else if (status == L"installed")
+      subtitle = L"已安装；切换一次输入框后生效。";
+    else if (status == L"outdated")
+      subtitle = L"已安装的文件需要更新。";
+    else
+      subtitle = L"模型尚未安装。";
+    StackPanel actions;
+    actions.Orientation(Orientation::Horizontal);
+    actions.Spacing(8);
+    if (status != L"installed" && !installing && !removing) {
+      auto download = button_control(status == L"outdated" ? L"更新" : L"下载",
+                                     [this, pack] { install_sentence_pack(pack); }, loaded_);
+      A11y::SetAutomationId(download, L"sentence-model-download-" + pack);
+      actions.Children().Append(download);
+    }
+    if (status == L"installed" && !installing && !removing)
+      actions.Children().Append(button_control(L"删除", [this, pack] { remove_sentence_pack(pack); },
+                                                loaded_));
+    if (installing)
+      actions.Children().Append(button_control(L"取消", [this, pack] { cancel_sentence_pack(pack); }, true));
+    add_row(group, 0xE8C1, L"模型文件", subtitle, actions);
+  }
+
+  static std::wstring grammar_pack_for_model(std::wstring const &model) {
+    if (model == L"wanxiang") return L"grammar-model-wanxiang";
+    if (model == L"baguwen_word") return L"grammar-model-baguwen";
+    if (model == L"baguwen_compact") return L"grammar-model-baguwen-compact";
+    return {};
+  }
+
+  std::wstring sentence_pack_status(std::wstring const &id) const {
+    for (auto const &status : sentence_pack_statuses_)
+      if (status.first == id)
+        return status.second;
+    return L"missing";
+  }
+
+  void refresh_sentence_packs() {
+    const auto root = state_directory();
+    if (root.empty() || !root.is_absolute())
+      return;
+    JsonObject request;
+    request.SetNamedValue(L"state_root", JsonValue::CreateStringValue(hstring(root.wstring())));
+    run_host(
+        [body = utf8(request.Stringify())] {
+          return take_response(msime_client_resource_packs(
+              reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+        },
+        [this](Response const &response) {
+          if (!response.ok)
+            return;
+          try {
+            auto values = JsonObject::Parse(text(response.text)).GetNamedArray(L"value");
+            sentence_pack_statuses_.clear();
+            for (auto const &item : values) {
+              if (item.ValueType() != JsonValueType::Object)
+                continue;
+              const auto object = item.GetObject();
+              const auto id = named_string(object, L"id");
+              if (id == L"grammar-model-wanxiang" || id == L"grammar-model-baguwen" ||
+                  id == L"grammar-model-baguwen-compact")
+                sentence_pack_statuses_.push_back({id, named_string(object, L"state")});
+            }
+            redraw_input();
+          } catch (...) {
+          }
+        });
+  }
+
+  void redraw_input() {
+    if (!closed_ && current_page_ == "input")
+      render_page(true);
+  }
+
+  static void sentence_pack_progress(void *, const char *, uint64_t, uint64_t) noexcept {
+  }
+
+  void install_sentence_pack(std::wstring const &id) {
+    const auto root = state_directory();
+    if (root.empty() || !root.is_absolute()) return;
+    sentence_pack_installing_.insert(id);
+    redraw_input();
+    JsonObject request;
+    request.SetNamedValue(L"state_root", JsonValue::CreateStringValue(hstring(root.wstring())));
+    request.SetNamedValue(L"pack", JsonValue::CreateStringValue(hstring(id)));
+    const auto mirror = document_.String(L"voice_input.asr_model_mirror", L"");
+    if (!mirror.empty()) {
+      JsonArray sources;
+      sources.Append(JsonValue::CreateStringValue(hstring(mirror)));
+      request.SetNamedValue(L"sources", sources);
+    }
+    run_host(
+        [body = utf8(request.Stringify())] {
+          return take_response(msime_client_resource_pack_install(
+              reinterpret_cast<const uint8_t *>(body.data()), body.size(),
+              &MainWindow::sentence_pack_progress, nullptr));
+        },
+        [this, id](Response const &response) {
+          sentence_pack_installing_.erase(id);
+          if (!response.ok)
+            show_notice(L"模型下载失败，请检查网络或稍后重试。", InfoBarSeverity::Error);
+          refresh_sentence_packs();
+          redraw_input();
+        });
+  }
+
+  void cancel_sentence_pack(std::wstring const &id) {
+    const auto bytes = utf8(hstring(id));
+    msime_client_resource_pack_cancel(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size());
+  }
+
+  fire_and_forget remove_sentence_pack(std::wstring const &id) {
+    if (!co_await confirm(L"删除语法模型", L"删除后切换输入框即可退回无语法模型的候选行为。确定删除？", L"删除"))
+      co_return;
+    const auto root = state_directory();
+    if (root.empty() || !root.is_absolute()) co_return;
+    sentence_pack_removing_.insert(id);
+    redraw_input();
+    JsonObject request;
+    request.SetNamedValue(L"state_root", JsonValue::CreateStringValue(hstring(root.wstring())));
+    request.SetNamedValue(L"pack", JsonValue::CreateStringValue(hstring(id)));
+    run_host(
+        [body = utf8(request.Stringify())] {
+          return take_response(msime_client_resource_pack_remove(
+              reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+        },
+        [this, id](Response const &response) {
+          sentence_pack_removing_.erase(id);
+          if (!response.ok)
+            show_notice(L"模型正在使用或无法删除，请先切换输入框后重试。", InfoBarSeverity::Error);
+          refresh_sentence_packs();
+          redraw_input();
+        });
+  }
+
   // 「候选与联想」「输出设置」「高级选项」三个标签的内容，与共享页 InputSharedSettingsSection 的 candidates、output、advanced 三块相同。
   void build_input_habits(StackPanel const &page, std::wstring const &tab) {
     if (in_tab(tab, L"candidates")) {
@@ -13679,6 +13871,13 @@ private:
       bool_row(candidates_more, 0xE8C1, L"本地整句联想",
                L"把词库组合出的整句加入候选；关闭后仍保留单词候选",
                L"sentence_association.word_lattice", true);
+      bool_row(candidates, 0xE8C1, L"桌面神经联想",
+               L"使用神经模型重排整句候选；没有模型时保持现有候选",
+               L"sentence_association.neural_desktop", false, true);
+      bool_row(candidates, 0xE8C1, L"去重后补充次选",
+               L"某个模型的首选与已有候选重复时，显示该模型排名最高的下一条不同结果",
+               L"sentence_association.show_next_on_duplicate", false);
+      build_sentence_model_settings(candidates);
     }
 
     if (in_tab(tab, L"output")) {
@@ -21526,10 +21725,101 @@ private:
                                  doc.SetBoolean(L"voice_input." + std::wstring(key), on);
                              }, true);
                            }));
+    add_row(shortcuts, 0xEDA7, L"语音输入开始／结束",
+            L"点击后按组合键，Esc 取消，Backspace / Delete 解绑。按一次开始，再按一次结束。",
+            voice_toggle_recorder());
     auto rows = add_fold(
         shortcuts, L"更多选项", voice_hotkeys_more_open_ || focus_row_ == L"Ctrl+F9 切换语音",
         [this](bool expanded) { voice_hotkeys_more_open_ = expanded; });
     bool_row(rows, 0xEDA7, L"Ctrl+F9 切换语音", L"", L"voice_input.hotkey_ctrl_f9", true);
+  }
+
+  // 录键只产生规范主键名；语法、冲突和归一化通过 C ABI 使用共享偏好规则。
+  FrameworkElement voice_toggle_recorder() {
+    auto recording = std::make_shared<bool>(false);
+    auto message = make_text(L"", 12, palette_.text);
+    message.TextWrapping(TextWrapping::Wrap);
+    auto recorder = make_row_button(false);
+    const auto label = [this] {
+      const auto stored = document_.String(L"keybindings.toggle_voice_input", L"");
+      return stored.empty() ? std::wstring(L"未绑定") : stored;
+    };
+    const auto show = [](Button const &button, std::wstring const &value) {
+      button.Content(box_value(hstring(value)));
+      A11y::SetName(button, hstring(L"语音输入开始／结束：" + value));
+    };
+    show(recorder, label());
+    recorder.IsEnabled(loaded_);
+    A11y::SetAutomationId(recorder, L"voice-toggle-recorder");
+    recorder.Click([recording, message, show](Inspectable const &sender, RoutedEventArgs const &) {
+      *recording = true;
+      message.Text(L"");
+      show(sender.as<Button>(), L"请按组合键…");
+    });
+    recorder.LostFocus([recording, label, show](Inspectable const &sender, RoutedEventArgs const &) {
+      *recording = false;
+      show(sender.as<Button>(), label());
+    });
+    recorder.PreviewKeyDown([this, recording, label, message, show](
+        Inspectable const &sender, Input::KeyRoutedEventArgs const &args) {
+      if (!*recording) return;
+      args.Handled(true);
+      const auto key = static_cast<unsigned>(args.Key());
+      if (key == VK_ESCAPE) {
+        *recording = false;
+        message.Text(L"");
+        show(sender.as<Button>(), label());
+        return;
+      }
+      if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU ||
+          key == VK_LWIN || key == VK_RWIN) return;
+      auto chord = msime::windows::toggle_key_name(key);
+      if (key == VK_BACK || key == VK_DELETE) chord.clear();
+      else if (chord.empty()) {
+        message.Text(L"此主键暂不支持，请换一个组合键");
+        return;
+      } else {
+        const auto pressed = [](int modifier) { return (GetKeyState(modifier) & 0x8000) != 0; };
+        std::string prefix;
+        if (pressed(VK_CONTROL)) prefix += "Ctrl+";
+        if (pressed(VK_MENU)) prefix += "Alt+";
+        if (pressed(VK_SHIFT)) prefix += "Shift+";
+        if (pressed(VK_LWIN) || pressed(VK_RWIN)) prefix += "Meta+";
+        chord = prefix + chord;
+      }
+      JsonObject request;
+      request.SetNamedValue(L"field", JsonValue::CreateStringValue(L"toggle_voice_input"));
+      request.SetNamedValue(L"chord", JsonValue::CreateStringValue(text(chord)));
+      const auto keys = document_.Value(L"keybindings");
+      request.SetNamedValue(L"keybindings", keys && keys.ValueType() == JsonValueType::Object
+          ? keys : JsonObject());
+      request.SetNamedValue(L"voice_ctrl_f9", JsonValue::CreateBooleanValue(
+          document_.Boolean(L"voice_input.hotkey_ctrl_f9", true)));
+      const auto bytes = utf8(request.Stringify());
+      const auto response = take_response(msime_client_check_toggle_hotkey(
+          reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
+      try {
+        if (!response.ok) throw std::runtime_error("hotkey check unavailable");
+        const auto checked = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+        if (!checked.GetNamedBoolean(L"ok", false)) {
+          message.Text(checked.GetNamedString(L"kind", L"") == L"conflict"
+              ? L"与现有快捷键冲突，请换一个组合键" : L"无法识别的组合键");
+          return;
+        }
+        const auto normalized = std::wstring(checked.GetNamedString(L"chord"));
+        *recording = false;
+        change([&](PreferencesDocument &doc) {
+          doc.SetString(L"keybindings.toggle_voice_input", normalized);
+        }, true);
+      } catch (...) {
+        message.Text(L"无法检查快捷键，请稍后重试");
+      }
+    });
+    StackPanel field;
+    field.Spacing(4);
+    field.Children().Append(recorder);
+    field.Children().Append(message);
+    return field;
   }
 
   void redraw_voice() {
@@ -24448,6 +24738,11 @@ private:
   bool candidates_more_open_ = false;
   bool local_modes_more_open_ = false;
   bool helpcode_more_open_ = false;
+  // Windows 原生设置页的神经联想与 octagram 语法模型资源包状态。
+  bool sentence_packs_requested_ = false;
+  std::vector<std::pair<std::wstring, std::wstring>> sentence_pack_statuses_;
+  std::set<std::wstring> sentence_pack_installing_;
+  std::set<std::wstring> sentence_pack_removing_;
   // 「输入 › 候选与联想」云候选服务的草稿（共享页 CloudCandidatesSection 的组件状态）和它出自的那份文档配置（序列化后的文字）；文档里的配置变了草稿作废。
   std::optional<JsonObject> cloud_provider_draft_;
   std::wstring cloud_provider_base_;
@@ -24489,6 +24784,7 @@ private:
   std::optional<Response> account_pending_providers_;
   std::optional<AccountUser> account_user_;
   std::vector<std::wstring> account_providers_linked_;
+  am::ProviderNames account_provider_names_;
   bool account_email_ = false;
   bool account_phone_ = false;
   bool account_google_ = false;

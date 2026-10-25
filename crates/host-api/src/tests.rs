@@ -36,6 +36,33 @@ fn touch_character_ffi_validates_before_dispatch_and_keeps_plain_input_working()
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
+#[test]
+fn eighteen_key_quanpin_layout_only_starts_on_android() {
+    let preferences = Preferences {
+        touch_keyboard_layout: TouchKeyboardLayout::EighteenKey,
+        ..Preferences::default()
+    };
+    for platform in [
+        HostPlatform::Android,
+        HostPlatform::Ios,
+        HostPlatform::Harmony,
+        HostPlatform::Linux,
+        HostPlatform::Macos,
+        HostPlatform::Windows,
+    ] {
+        assert_eq!(
+            layout_key_grid_for(platform, Some(SchemeType::Quanpin), &preferences),
+            (platform == HostPlatform::Android).then_some(KeyGrid::EighteenKey),
+            "{platform:?}"
+        );
+        assert_eq!(
+            layout_key_grid_for(platform, Some(SchemeType::Shuangpin), &preferences),
+            None,
+            "全拼布局不能覆盖双拼方案：{platform:?}"
+        );
+    }
+}
+
 // Keep relative-path fixtures on the checkout's volume while allowing /source to be read-only in the Linux container.
 fn relative_fixture_dir(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let current = std::env::current_dir().unwrap();
@@ -298,6 +325,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         single_character_only: false,
         learning: false,
         learn_english_on_enter: true,
+        next_word_prediction: false,
         autocorrect_transposition: false,
         autocorrect_neighbor: false,
         fuzzy_pinyin_rules: 0,
@@ -3166,7 +3194,10 @@ fn fourteen_key_grid_crosses_the_host_boundary() {
     let handle = test_host(dir.path());
     read(msime_client_focus(handle, true));
     assert_eq!(read(msime_client_view(handle))["value"]["key_grid"], "none");
-    assert_eq!(read(msime_client_set_key_grid(handle, 4))["ok"], false);
+    assert_eq!(
+        read(msime_client_set_key_grid(handle, u8::MAX))["ok"],
+        false
+    );
     assert_eq!(read(msime_client_view(handle))["value"]["key_grid"], "none");
     let enabled = read(msime_client_set_key_grid(handle, 2));
     assert_eq!(enabled["value"]["key_grid"], "fourteen_key");
@@ -3257,6 +3288,16 @@ fn creating_a_session_records_the_resources_it_loaded_for_dictionary_updates() {
 /// 三端宿主都开着 `phrase_preedit`。14 键里选了只覆盖前一段的词，退格到只剩一个组码再退格，收回这次选词：组码要回到 14 键网格里，而不是变成全拼 26 键的 `bu`，之后的 14 键照样能打。
 #[test]
 fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
+    check_letter_key_selection_retreat(false, false);
+    check_letter_key_selection_retreat(true, false);
+}
+
+#[test]
+fn eighteen_key_shuangpin_selection_retreat_keeps_composing_on_the_grid() {
+    check_letter_key_selection_retreat(true, true);
+}
+
+fn check_letter_key_selection_retreat(shuangpin: bool, eighteen: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = |name| {
         let path = dir.path().join(name);
@@ -3285,7 +3326,17 @@ fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
             .unwrap();
     }
     let preferences = Preferences {
+        scheme: if shuangpin {
+            InputScheme::Shuangpin
+        } else {
+            InputScheme::Quanpin
+        },
         touch_keyboard_layout: TouchKeyboardLayout::FourteenKey,
+        touch_shuangpin_layout: if eighteen {
+            TouchShuangpinLayout::EighteenKey
+        } else {
+            TouchShuangpinLayout::FourteenKey
+        },
         ..chinese_preferences()
     };
     let options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences": preferences, "phrase_preedit": true }).to_string();
@@ -3293,15 +3344,38 @@ fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
     assert_eq!(created["ok"], true, "{created}");
     let handle = created["value"]["session"].as_u64().unwrap();
     read(msime_client_focus(handle, true));
+    if shuangpin {
+        assert_eq!(
+            read(msime_client_set_key_grid(
+                handle,
+                if eighteen { 5 } else { 2 }
+            ))["ok"],
+            true
+        );
+    }
 
-    // 你好：BN UI GH AS OP。
+    // 全拼「你好」是 BN UI GH AS OP，小鹤双拼是 BN UI GH CV。
+    let codes = if eighteen {
+        "bihx"
+    } else if shuangpin {
+        "bugc"
+    } else {
+        "bugao"
+    };
+    let tail = if eighteen {
+        "hx"
+    } else if shuangpin {
+        "gc"
+    } else {
+        "gao"
+    };
     let mut view = Value::Null;
-    for &letter in b"bugao" {
+    for letter in codes.bytes() {
         let typed = read(msime_client_grid_key(handle, letter));
         assert_eq!(typed["value"]["handled"], true, "{typed}");
         view = typed["value"]["view"].clone();
     }
-    assert_eq!(view["editing_text"], "bugao");
+    assert_eq!(view["editing_text"], codes);
     let ni = view["candidates"]
         .as_array()
         .unwrap()
@@ -3311,19 +3385,31 @@ fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
     let generation = view["generation"].as_u64().unwrap();
     let held = read(msime_client_select(handle, generation, ni));
     assert_eq!(held["value"]["view"]["phrase_prefix"], "你", "{held}");
-    assert_eq!(held["value"]["view"]["editing_text"], "gao", "{held}");
-    for _ in 0..2 {
+    assert_eq!(held["value"]["view"]["editing_text"], tail, "{held}");
+    for _ in 1..tail.len() {
         read(msime_client_command(handle, 0));
     }
     assert_eq!(
         read(msime_client_view(handle))["value"]["editing_text"],
-        "g"
+        if eighteen { "h" } else { "g" }
     );
 
     let restored = read(msime_client_command(handle, 0));
     let view = &restored["value"]["view"];
-    assert_eq!(view["key_grid"], "fourteen_key", "{restored}");
-    assert_eq!(view["editing_text"], "bu", "{restored}");
+    assert_eq!(
+        view["key_grid"],
+        if eighteen {
+            "eighteen_key"
+        } else {
+            "fourteen_key"
+        },
+        "{restored}"
+    );
+    assert_eq!(
+        view["editing_text"],
+        if eighteen { "bi" } else { "bu" },
+        "{restored}"
+    );
     assert!(
         view["phrase_prefix"]
             .as_str()
@@ -3335,13 +3421,258 @@ fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
         !view["nine_key_spellings"].as_array().unwrap().is_empty(),
         "{restored}"
     );
-    let next = read(msime_client_grid_key(handle, b'g'));
+    let next = read(msime_client_grid_key(
+        handle,
+        if eighteen { b'h' } else { b'g' },
+    ));
     assert_eq!(next["value"]["handled"], true, "{next}");
-    assert_eq!(next["value"]["view"]["editing_text"], "bug", "{next}");
+    assert_eq!(
+        next["value"]["view"]["editing_text"],
+        if eighteen { "bih" } else { "bug" },
+        "{next}"
+    );
     read(msime_client_destroy(handle));
 }
 
-/// 偏好里的 14 键布局让全拼会话以 14 键开始，重建后不变；宿主的覆盖只到布局或方案改变为止；别的方案没有 14 键。
+#[test]
+fn eighteen_key_grid_abi_numbers_keep_scheme_and_composition() {
+    for (scheme, accepted, rejected) in
+        [(InputScheme::Quanpin, 4, 5), (InputScheme::Shuangpin, 5, 4)]
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = test_host_with_pinyin_fixture(
+            directory.path(),
+            Preferences {
+                scheme,
+                ..chinese_preferences()
+            },
+        );
+        read(msime_client_focus(handle, true));
+        let initial = read(msime_client_view(handle));
+        assert_eq!(
+            read(msime_client_set_key_grid(handle, rejected))["ok"],
+            false
+        );
+        assert_eq!(read(msime_client_view(handle)), initial);
+        let enabled = read(msime_client_set_key_grid(handle, accepted));
+        assert_eq!(enabled["ok"], true, "{scheme:?}: {enabled}");
+        assert_eq!(enabled["value"]["key_grid"], "eighteen_key");
+        assert_eq!(
+            read(msime_client_grid_key(handle, b'b'))["value"]["handled"],
+            true
+        );
+        let composing = read(msime_client_view(handle));
+        assert_eq!(
+            read(msime_client_set_key_grid(handle, rejected))["ok"],
+            false
+        );
+        assert_eq!(read(msime_client_view(handle)), composing);
+        assert_eq!(read(msime_client_set_key_grid(handle, 0))["ok"], false);
+        assert_eq!(read(msime_client_view(handle)), composing);
+        read(msime_client_destroy(handle));
+    }
+}
+
+#[test]
+fn eighteen_key_shuangpin_preference_is_only_applied_by_android() {
+    let mut document = serde_json::to_value(chinese_preferences()).unwrap();
+    document["scheme"] = "shuangpin".into();
+    document["touch_shuangpin_layout"] = "eighteen_key".into();
+    let preferences: Preferences =
+        serde_json::from_value(document).expect("共享偏好必须接受 18 键双拼布局");
+    for platform in [
+        HostPlatform::Android,
+        HostPlatform::Ios,
+        HostPlatform::Harmony,
+        HostPlatform::Macos,
+        HostPlatform::Windows,
+        HostPlatform::Linux,
+    ] {
+        let grid = layout_key_grid_for(platform, Some(SchemeType::Shuangpin), &preferences);
+        assert_eq!(
+            grid.is_some(),
+            platform == HostPlatform::Android,
+            "{platform:?}"
+        );
+        if let Some(grid) = grid {
+            assert_eq!(grid.code_of(b'e'), Some(b'w'));
+            assert_eq!(grid.code_of(b't'), Some(b'r'));
+            assert_eq!(grid.code_of(b'n'), Some(b'b'));
+            assert_eq!(grid.code_of(b';'), Some(b'l'));
+        }
+    }
+}
+
+#[test]
+fn eighteen_key_shuangpin_grid_commits_without_replacing_hardware_letters() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = Preferences {
+        scheme: InputScheme::Shuangpin,
+        ..chinese_preferences()
+    };
+    let handle = test_host_with_pinyin_fixture(directory.path(), preferences);
+    read(msime_client_focus(handle, true));
+    let enabled = read(msime_client_set_key_grid(handle, 5));
+    assert_eq!(enabled["ok"], true, "18 键网格必须可以显式开启：{enabled}");
+    assert_eq!(enabled["value"]["key_grid"], "eighteen_key");
+    assert_eq!(enabled["value"]["nine_key"], false);
+    let hardware = type_letters(handle, b"nihc");
+    assert_eq!(hardware["editing_text"], "nihc");
+    assert_eq!(
+        read(msime_client_grid_key(handle, b'b'))["value"]["handled"],
+        false
+    );
+    read(msime_client_command(handle, 3));
+    let mut touched = Value::Null;
+    for code in b"bihx" {
+        touched = read(msime_client_grid_key(handle, *code));
+        assert_eq!(touched["value"]["handled"], true, "{touched}");
+    }
+    let view = &touched["value"]["view"];
+    assert_eq!(view["key_grid"], "eighteen_key");
+    assert_eq!(view["editing_text"], "bihx");
+    let index = view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|candidate| candidate["text"] == "本地")
+        .expect("18 键组码必须找到合成词库中的 ni'hao 词条");
+    let selected = read(msime_client_select(
+        handle,
+        view["generation"].as_u64().unwrap(),
+        index,
+    ));
+    assert_eq!(selected["value"]["commit"], "本地", "{selected}");
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn fourteen_key_shuangpin_preference_is_applied_by_touch_hosts() {
+    let preferences = Preferences {
+        scheme: InputScheme::Shuangpin,
+        touch_shuangpin_layout: TouchShuangpinLayout::FourteenKey,
+        ..chinese_preferences()
+    };
+    for platform in [
+        HostPlatform::Android,
+        HostPlatform::Ios,
+        HostPlatform::Harmony,
+        HostPlatform::Macos,
+        HostPlatform::Windows,
+        HostPlatform::Linux,
+    ] {
+        let grid = layout_key_grid_for(platform, Some(SchemeType::Shuangpin), &preferences);
+        assert_eq!(
+            grid.is_some(),
+            matches!(platform, HostPlatform::Android | HostPlatform::Ios),
+            "{platform:?}"
+        );
+    }
+}
+
+/// 双拼布局独立持久化，创建、延迟应用、实体字母和非法自定义表回退使用同一方案。
+#[test]
+fn fourteen_key_shuangpin_layout_tracks_profile_changes_and_preserves_hardware_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Shuangpin,
+        touch_shuangpin_layout: TouchShuangpinLayout::FourteenKey,
+        ..chinese_preferences()
+    };
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let automatic_grid = if matches!(
+        ffi::host::compiled_platform(),
+        HostPlatform::Android | HostPlatform::Ios
+    ) {
+        "fourteen_key"
+    } else {
+        "none"
+    };
+    assert_eq!(
+        read(msime_client_view(handle))["value"]["key_grid"],
+        automatic_grid
+    );
+    assert_eq!(read(msime_client_set_key_grid(handle, 2))["ok"], true);
+    let hardware = type_letters(handle, b"nihc");
+    assert_eq!(hardware["editing_text"], "nihc");
+    assert_eq!(
+        read(msime_client_grid_key(handle, b'b'))["value"]["handled"],
+        false
+    );
+    read(msime_client_command(handle, 3));
+    let mut touched = Value::Null;
+    for code in b"bugc" {
+        touched = read(msime_client_grid_key(handle, *code));
+        assert_eq!(touched["value"]["handled"], true, "{touched}");
+    }
+    assert!(
+        touched["value"]["view"]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["text"] == "本地"),
+        "{touched}"
+    );
+    preferences.shuangpin_profile = ShuangpinProfile::Microsoft;
+    let deferred = update(handle, 1, &preferences);
+    assert_eq!(deferred["value"]["deferred"], true, "{deferred}");
+    read(msime_client_command(handle, 3));
+    assert_eq!(
+        read(msime_client_view(handle))["value"]["shuangpin_profile"],
+        "microsoft"
+    );
+    // 微软的 q;（qing）映射为 QW L；这里只核对候选读音，不依赖产品词库。
+    assert_eq!(read(msime_client_set_key_grid(handle, 2))["ok"], true);
+    read(msime_client_grid_key(handle, b'q'));
+    let qing = read(msime_client_grid_key(handle, b'l'));
+    assert!(
+        qing["value"]["view"]["nine_key_spellings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row == "qing"),
+        "{qing}"
+    );
+    read(msime_client_command(handle, 3));
+    preferences.shuangpin_profile = ShuangpinProfile::Custom;
+    let fallback = update(handle, 2, &preferences);
+    assert_eq!(
+        fallback["value"]["view"]["shuangpin_profile"], "xiaohe",
+        "{fallback}"
+    );
+    assert_eq!(
+        fallback["value"]["view"]["key_grid"], automatic_grid,
+        "{fallback}"
+    );
+    preferences.shuangpin_custom_profile =
+        builtin_shuangpin_custom_profile(ShuangpinProfile::Microsoft).unwrap();
+    let custom = update(handle, 3, &preferences);
+    assert_eq!(
+        custom["value"]["view"]["shuangpin_profile"], "custom",
+        "{custom}"
+    );
+    assert_eq!(read(msime_client_set_key_grid(handle, 2))["ok"], true);
+    read(msime_client_grid_key(handle, b'q'));
+    let qing = read(msime_client_grid_key(handle, b'l'));
+    assert!(
+        qing["value"]["view"]["nine_key_spellings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row == "qing"),
+        "{qing}"
+    );
+    read(msime_client_command(handle, 3));
+    preferences.touch_shuangpin_layout = TouchShuangpinLayout::TwentySixKey;
+    assert_eq!(
+        update(handle, 4, &preferences)["value"]["view"]["key_grid"],
+        "none"
+    );
+    read(msime_client_destroy(handle));
+}
+
+/// 全拼布局不自动打开双拼 14 键；宿主显式开 14 键时根据当前方案选择解码表。
 #[test]
 fn a_fourteen_key_layout_starts_and_keeps_the_fourteen_key_grid() {
     let dir = tempfile::tempdir().unwrap();
@@ -3382,7 +3713,7 @@ fn a_fourteen_key_layout_starts_and_keeps_the_fourteen_key_grid() {
         shuangpin["value"]["view"]["key_grid"], "none",
         "{shuangpin}"
     );
-    assert_eq!(read(msime_client_set_key_grid(handle, 2))["ok"], false);
+    assert_eq!(read(msime_client_set_key_grid(handle, 2))["ok"], true);
     read(msime_client_destroy(handle));
 }
 
@@ -4010,6 +4341,103 @@ fn host_helpcode_fallback_survives_preference_and_plugin_changes() {
 }
 
 #[test]
+fn shuangpin_manual_tab_is_consumed_only_by_supported_hosts() {
+    let modes = msime_client_core::preferences::ShuangpinHelpcodeModes {
+        manual_tab: true,
+        ..Default::default()
+    };
+    let effective = shuangpin_helpcode_modes(modes);
+    assert_eq!(effective.manual_tab, cfg!(target_os = "macos"));
+    assert!(effective.direct && effective.trigger_semicolon);
+    assert!(modes.manual_tab);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn shuangpin_manual_tab_roundtrips_through_host_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = chinese_preferences();
+    preferences.scheme = InputScheme::Shuangpin;
+    preferences.shuangpin_helpcode.modes.manual_tab = true;
+    let handle = test_host_preferences(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let view = type_letters(handle, b"nihc");
+    assert!(
+        view["spelling_symbols"].as_str().unwrap().contains('\t'),
+        "{view}"
+    );
+    let result = read(msime_client_character(handle, b'\t', false));
+    assert_eq!(result["value"]["handled"], true, "{result}");
+    assert_eq!(result["value"]["view"]["editing_text"], "nihc|");
+    type_letters(handle, b"x");
+    read(msime_client_command(handle, 3));
+    preferences.shuangpin_helpcode.modes.manual_tab = false;
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    let view = type_letters(handle, b"nihc");
+    assert!(!view["spelling_symbols"].as_str().unwrap().contains('\t'));
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn shuangpin_manual_tab_survives_held_phrase_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    let fixture = "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+        INSERT INTO tbl_1_n VALUES('ni','n','你',100);
+        CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+        INSERT INTO tbl_1_h VALUES('hao','h','好',100);
+        CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+        INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',1000);";
+    for root in [&resources, &dictionaries] {
+        rusqlite::Connection::open(root.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(fixture)
+            .unwrap();
+    }
+    let mut preferences = chinese_preferences();
+    preferences.scheme = InputScheme::Shuangpin;
+    preferences.shuangpin_helpcode.modes.manual_tab = true;
+    let options = json!({"api_version":1, "resources": resources, "dictionaries":dictionaries,
+        "user_data":path("user"), "cache":path("cache"), "preferences":preferences,
+        "phrase_preedit":true})
+    .to_string();
+    let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
+    assert_eq!(created["ok"], true, "{created}");
+    let handle = created["value"]["session"].as_u64().unwrap();
+    read(msime_client_focus(handle, true));
+    let view = type_letters(handle, b"nihc");
+    let index = view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|candidate| candidate["text"] == "你")
+        .unwrap();
+    let held = read(msime_client_select(
+        handle,
+        view["generation"].as_u64().unwrap(),
+        index,
+    ));
+    let view = &held["value"]["view"];
+    assert_eq!(view["phrase_prefix"], "你");
+    assert_eq!(view["editing_text"], "hc");
+    assert!(
+        view["spelling_symbols"].as_str().unwrap().contains('\t'),
+        "{view}"
+    );
+    let tab = read(msime_client_character(handle, b'\t', false));
+    assert_eq!(tab["value"]["handled"], true, "{tab}");
+    assert_eq!(tab["value"]["view"]["editing_text"], "hc|");
+    read(msime_client_destroy(handle));
+}
+
+#[test]
 fn helpcode_settings_switch_independently_after_composition() {
     use msime_client_core::preferences::{HelpcodePreferences, HelpcodeSchema};
     let dir = tempfile::tempdir().unwrap();
@@ -4531,6 +4959,25 @@ fn restoring_default_preferences_is_a_locked_compare_and_swap() {
     assert_eq!(
         read(unsafe { msime_client_restore_default_preferences(std::ptr::null(), 0, 0) })["ok"],
         false
+    );
+}
+
+#[test]
+fn text_trackpad_options_publish_the_shared_defaults_and_slider_ranges() {
+    let options = read(msime_client_text_trackpad_options());
+    assert_eq!(options["ok"], true);
+    assert_eq!(
+        options["value"]["horizontal_dp"],
+        json!({"minimum": 4, "maximum": 48})
+    );
+    assert_eq!(
+        options["value"]["vertical_dp"],
+        json!({"minimum": 8, "maximum": 96})
+    );
+    assert_eq!(
+        options["value"]["defaults"],
+        serde_json::to_value(msime_client_core::preferences::TextTrackpadPreferences::default())
+            .unwrap()
     );
 }
 
@@ -6360,6 +6807,70 @@ fn mobile_clipboard_uses_structured_actions() {
         read(unsafe { msime_client_mobile_clipboard_history(relative.as_ptr(), relative.len()) })
             ["ok"],
         false
+    );
+}
+
+#[test]
+fn mobile_clipboard_categories_validate_and_preserve_entry_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let call = |action: Value| {
+        let request =
+            serde_json::to_vec(&json!({"directory": directory.path(), "action": action})).unwrap();
+        read(unsafe { msime_client_mobile_clipboard_history(request.as_ptr(), request.len()) })
+    };
+    let limits = call(json!({"operation": "categories"}));
+    assert_eq!(limits["value"]["maxCategories"], 5);
+    assert_eq!(limits["value"]["maxNameCharacters"], 12);
+    for name in ["", "未分类", "带\n换行", "超过十二个字的分类名称不允许保存"]
+    {
+        assert_eq!(
+            call(json!({"operation": "add_category", "name": name}))["ok"],
+            false
+        );
+    }
+    assert_eq!(
+        call(json!({"operation": "add_category", "name": "合成分类"}))["value"]["updated"],
+        true
+    );
+    assert_eq!(
+        call(json!({"operation": "add_category", "name": "合成分类"}))["ok"],
+        false
+    );
+    let category = call(json!({"operation": "categories"}))["value"]["categories"][0].clone();
+    let id = category["id"].as_str().unwrap();
+    call(json!({"operation": "capture", "text": "synthetic category entry"}));
+    assert_eq!(
+        call(json!({"operation": "set_category", "text": "synthetic category entry", "id": id}))
+            ["value"]["updated"],
+        true
+    );
+    assert_eq!(
+        call(json!({"operation": "rename_category", "id": id, "name": "改名"}))["value"]["updated"],
+        true
+    );
+    let snapshot = call(json!({"operation": "load"}));
+    assert_eq!(snapshot["value"]["categories"][0]["name"], "改名");
+    assert_eq!(snapshot["value"]["entries"][0]["categoryId"], id);
+    assert_eq!(
+        call(
+            json!({"operation": "set_category", "text": "synthetic category entry", "id": "absent"})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        call(json!({"operation": "remove_category", "id": id}))["value"]["updated"],
+        true
+    );
+    let snapshot = call(json!({"operation": "load"}));
+    assert_eq!(
+        snapshot["value"]["entries"][0]["text"],
+        "synthetic category entry"
+    );
+    assert!(snapshot["value"]["entries"][0].get("categoryId").is_none());
+    assert_eq!(
+        call(json!({"operation": "set_category", "text": "synthetic category entry"}))["value"]
+            ["updated"],
+        true
     );
 }
 
@@ -10329,7 +10840,6 @@ fn complete_candidate_abi_keeps_view_paged_and_selects_a_later_entry() {
 
 /// 表情目录请求列出插件符号组：不需要 msime-others.db，没传插件目录时为空，相对路径被拒绝。
 #[test]
-#[cfg(unix)]
 fn emoji_catalog_lists_plugin_symbol_groups() {
     let directory = tempfile::tempdir().unwrap();
     let pack = directory.path().join("plugins/symbol_set/arrows");
@@ -10376,7 +10886,6 @@ fn emoji_catalog_lists_plugin_symbol_groups() {
 }
 
 #[test]
-#[cfg(unix)]
 fn emoji_catalog_pagination_preserves_legacy_defaults() {
     let legacy: crate::ffi::EmojiCatalogQuery = serde_json::from_str("{}").unwrap();
     assert!(!legacy.cursor);
@@ -10394,7 +10903,6 @@ fn emoji_catalog_pagination_preserves_legacy_defaults() {
 }
 
 #[test]
-#[cfg(unix)]
 fn emoji_catalog_cursor_advances_over_invalid_rows_and_preserves_duplicates() {
     let directory = tempfile::tempdir().unwrap();
     let db = rusqlite::Connection::open(directory.path().join("msime-others.db")).unwrap();
@@ -10473,7 +10981,6 @@ fn emoji_catalog_cursor_advances_over_invalid_rows_and_preserves_duplicates() {
 }
 
 #[test]
-#[cfg(unix)]
 fn emoji_catalog_cursor_skips_invalid_groups_without_stalling() {
     let directory = tempfile::tempdir().unwrap();
     let db = rusqlite::Connection::open(directory.path().join("msime-others.db")).unwrap();
@@ -10506,7 +11013,6 @@ fn emoji_catalog_cursor_skips_invalid_groups_without_stalling() {
 }
 
 #[test]
-#[cfg(unix)]
 fn emoji_catalog_ffi_reads_beyond_first_page() {
     let directory = tempfile::tempdir().unwrap();
     let db = rusqlite::Connection::open(directory.path().join("msime-others.db")).unwrap();
@@ -10534,7 +11040,7 @@ fn emoji_catalog_ffi_reads_beyond_first_page() {
         .unwrap();
     }
     let resources = directory.path().to_str().unwrap().as_bytes();
-    let request = |category: &str, offset: usize, limit: u8| {
+    let request = |category: &str, offset: u64, limit: u8| {
         let query = serde_json::to_vec(
             &json!({"category":category,"search":"match","offset":offset,"limit":limit}),
         )
@@ -10578,11 +11084,11 @@ fn emoji_catalog_ffi_reads_beyond_first_page() {
         "synthetic-2"
     );
     assert_eq!(request("", 0, 0)["ok"], false);
-    assert_eq!(request("", usize::MAX, 255)["ok"], false);
+    assert_eq!(request("", u64::MAX, 255)["ok"], false);
+    assert_eq!(request("", u64::from(u32::MAX), 255)["ok"], true);
 }
 
 #[test]
-#[cfg(unix)]
 fn emoji_catalog_errors_are_not_empty_results() {
     let directory = tempfile::tempdir().unwrap();
     let resources = directory.path().to_str().unwrap().as_bytes();
@@ -10625,7 +11131,6 @@ fn emoji_catalog_errors_are_not_empty_results() {
 }
 
 #[test]
-#[cfg(unix)]
 fn emoji_groups_preserve_catalog_order_and_filter_before_paging() {
     let directory = tempfile::tempdir().unwrap();
     let db = rusqlite::Connection::open(directory.path().join("msime-others.db")).unwrap();
@@ -15583,6 +16088,71 @@ fn pronunciation_request_reads_the_table_beside_resources() {
 }
 
 #[test]
+fn pronunciation_request_falls_back_to_explicit_bundled_table() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = root.path().join("state/generation");
+    let supplementary = root.path().join("bundle/Contents/Resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    let install = |directory: &std::path::Path, reading: &str| {
+        std::fs::create_dir_all(directory).unwrap();
+        let database = rusqlite::Connection::open(directory.join("en-phonetic.db")).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE en_phonetics(word TEXT PRIMARY KEY, phonetic TEXT NOT NULL) WITHOUT ROWID;
+                 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+                 INSERT INTO meta VALUES('kind', 'en_phonetic');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        database
+            .execute("INSERT INTO en_phonetics VALUES('sky', ?1)", [reading])
+            .unwrap();
+    };
+    install(&supplementary.join("pronunciations"), "skaɪ");
+    let call = |request: Value| {
+        let request = serde_json::to_vec(&request).unwrap();
+        let resources = resources.to_str().unwrap();
+        read(unsafe {
+            msime_client_pronunciation_request(
+                request.as_ptr(),
+                request.len(),
+                resources.as_ptr(),
+                resources.len(),
+            )
+        })
+    };
+    let base = json!({"generation": 9, "items": [{"text": "sky", "language": "en"}]});
+    assert_eq!(call(base.clone())["value"]["pronunciations"], json!([]));
+    let mut request = base.clone();
+    request["supplementary_resources"] = json!(supplementary);
+    let result = call(request.clone());
+    assert_eq!(
+        result["ok"], true,
+        "包内音标表必须能作为旧资源目录的显式回退：{result}"
+    );
+    assert_eq!(
+        result["value"],
+        json!({"generation": 9, "pronunciations": [
+            {"text": "sky", "language": "en", "pronunciation": "/skaɪ/"}
+        ]})
+    );
+    // 活动资源旁的表优先，显式补充目录不能覆盖它。
+    install(&root.path().join("state/pronunciations"), "skaɪ primary");
+    assert_eq!(
+        call(request.clone())["value"]["pronunciations"][0]["pronunciation"],
+        "/skaɪ primary/"
+    );
+    for invalid in [
+        "relative/resources".to_string(),
+        String::new(),
+        "/".repeat(4097),
+    ] {
+        request["supplementary_resources"] = json!(invalid);
+        assert_eq!(call(request.clone())["ok"], false);
+    }
+}
+
+#[test]
 fn english_glosses_fill_single_characters_from_the_character_table() {
     let root = tempfile::tempdir().unwrap();
     let resources = root.path().join("generation");
@@ -15927,8 +16497,21 @@ fn telemetry_abi_runs_a_session_through_a_crash_and_clears_when_turned_off() {
     let next = reporting_call(msime_client_telemetry_begin, request(true));
     assert_eq!(next["value"]["previous_session_crashed"], true);
     assert_eq!(next["value"]["crashes"], 1);
-    let ended = reporting_call(msime_client_telemetry_end, json!({"directory": directory}));
+    // 宿主按 begin 返回的 session_id 结束自己的会话；它和崩溃记录文件名是同一个 id。
+    let session = next["value"]["session_id"].as_str().unwrap().to_owned();
+    let next_record =
+        std::path::PathBuf::from(next["value"]["crash_record_path"].as_str().unwrap());
+    assert_eq!(next_record.file_stem().unwrap().to_str().unwrap(), session);
+    let ended = reporting_call(
+        msime_client_telemetry_end,
+        json!({"directory": directory, "session": session}),
+    );
     assert_eq!(ended["value"], true);
+    let again = reporting_call(
+        msime_client_telemetry_end,
+        json!({"directory": directory, "session": session}),
+    );
+    assert_eq!(again["value"], false);
 
     let store = msime_client_services::telemetry::TelemetryStore::new(&directory);
     let kinds: Vec<_> = store
@@ -17882,6 +18465,7 @@ fn voice_capture_device_export_lists_wasapi_endpoints_on_windows_only() {
 }
 
 mod fuzzy_single;
+mod initial_learning;
 mod lifecycle_traces;
 #[cfg(any(
     target_os = "macos",
@@ -19252,5 +19836,78 @@ fn sentence_collocation_tuning_reaches_engine_options() {
             weak_collocation_penalty: -120.0,
             rear_penalty: -25.0,
         }
+    );
+}
+
+#[test]
+fn keyboard_design_operations_are_explicit_bounded_and_do_not_need_a_state_directory() {
+    let call = |value: serde_json::Value| {
+        let request = serde_json::to_vec(&value).unwrap();
+        read(unsafe { msime_client_keyboard_skin_design(request.as_ptr(), request.len()) })
+    };
+    let catalog = call(serde_json::json!({"operation":"catalog"}));
+    assert_eq!(catalog["ok"], true);
+    assert_eq!(catalog["value"]["templates"].as_array().unwrap().len(), 15);
+    let reset = call(serde_json::json!({"operation":"reset"}));
+    assert_eq!(reset["value"], catalog["value"]["default"]);
+    assert_eq!(
+        call(serde_json::json!({"operation":"template","index":0}))["value"],
+        catalog["value"]["templates"][0]["design"]
+    );
+    for request in [
+        serde_json::json!({"operation":"template","index":99}),
+        serde_json::json!({"operation":"reset","unexpected":true}),
+    ] {
+        assert_eq!(call(request)["ok"], false);
+    }
+    assert_eq!(
+        read(unsafe { msime_client_keyboard_skin_design(std::ptr::null(), 0) })["ok"],
+        false
+    );
+    let byte = 0_u8;
+    assert_eq!(
+        read(unsafe { msime_client_keyboard_skin_design(&byte, 1024 * 1024 + 1) })["ok"],
+        false
+    );
+}
+
+#[test]
+fn world_clock_validates_and_forwards_offline_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let call = |action| {
+        call_android_data(
+            msime_client_world_clock,
+            json!({"directory": directory.path(), "action": action}),
+        )
+    };
+    let catalog = call(json!({"operation": "catalog"}));
+    assert!(catalog["value"].as_array().unwrap().len() > 400);
+    assert_eq!(
+        call(json!({"operation": "add", "id": "Asia/Tokyo"}))["ok"],
+        true
+    );
+    assert_eq!(
+        call(json!({"operation": "load"}))["value"]["cities"],
+        json!(["Asia/Tokyo"])
+    );
+    assert_eq!(
+        call(json!({"operation": "add", "id": "invalid"}))["error"],
+        "world_clock_invalid"
+    );
+    let snapshot = call(
+        json!({"operation": "snapshot", "timestamp": 1792686283_i64, "system_zone": "UTC", "system_offset": 0, "cities": ["Asia/Tokyo"]}),
+    );
+    assert_eq!(snapshot["ok"], true);
+    assert_eq!(snapshot["value"][1]["offset"], "UTC+09:00");
+    assert_eq!(
+        call(json!({"operation": "load", "unexpected": true}))["error"],
+        "world_clock_invalid"
+    );
+    assert_eq!(
+        call_android_data(
+            msime_client_world_clock,
+            json!({"directory": "relative", "action": {"operation": "load"}})
+        )["ok"],
+        false
     );
 }

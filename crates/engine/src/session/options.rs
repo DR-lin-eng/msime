@@ -77,6 +77,8 @@ pub struct SessionOptions {
     pub wubi: WubiInputOptions,
     /// Learn word sequences and pick pairs; also needs `learning`.
     pub personal_context: bool,
+    /// 上屏后联想；独立于整句候选，默认关闭。
+    pub next_word_prediction: bool,
     pub sentence_association: SentenceAssociationOptions,
     /// Committed text the neural sentence models condition on; `Session::set_rescoring_context` updates it live.
     pub rescoring_context: String,
@@ -137,6 +139,7 @@ impl SessionOptions {
             japanese_mixing: false,
             wubi: WubiInputOptions::default(),
             personal_context: true,
+            next_word_prediction: false,
             sentence_association: SentenceAssociationOptions::default(),
             rescoring_context: String::new(),
             command_table: Vec::new(),
@@ -153,6 +156,8 @@ impl SessionOptions {
 /// A value copy of the composition; safe to hand to another thread. `candidate_sources`, `candidate_annotations` and `candidate_answers_key` are aligned with `candidates`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SessionSnapshot {
+    /// 非组字的上屏后联想，只接受显式选择，不由空格、回车或失焦提交。
+    pub prediction: bool,
     pub scheme: SchemeType,
     pub local_mode: LocalInputMode,
     /// The non-letter characters `character` takes in this state: the active local mode's `spelling_symbols` (拆字按光标处列出部件分隔符 `'` 和微软双拼的韵母 `;`), or while nothing is composed the keys that open the `/` and `@` modes. A host or runtime that would send one of these as punctuation sends it as a character instead.

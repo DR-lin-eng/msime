@@ -34,10 +34,11 @@ final class HelpcodeSettingsTests: XCTestCase {
     let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
     XCTAssertFalse(bridge.initializationFailed, bridge.cancel().diagnosticText ?? "运行时初始化失败")
     let plain = compose(bridge, "shi", helpcode: nil)
-    // 自然码 Y is the 讠 radical: 识 试 诗 lead instead of 是.
+    // 自然码 Y 是讠旁：「识」「试」「诗」先于「是」，显示分词用隔音符区分辅助码。
     let narrowed = compose(bridge, "shi", helpcode: "Y")
     XCTAssertEqual(plain.candidates.first, "是")
-    XCTAssertEqual(narrowed.preedit, "shiY")
+    XCTAssertEqual(narrowed.preedit, "shi'Y")
+    XCTAssertEqual(narrowed.editingText, "shiY")
     XCTAssertEqual(narrowed.candidates.first, "识")
 
     update { $0["enabled"] = false }
@@ -66,6 +67,37 @@ final class HelpcodeSettingsTests: XCTestCase {
     // Bracketed the way the Engine appends it on desktop; the strip drops the brackets when it draws.
     XCTAssertTrue(first.hasPrefix("(") && first.hasSuffix(")"), "\(first) is not a bracketed helpcode")
     XCTAssertTrue(first.dropFirst().dropLast().allSatisfy { $0.isLetter }, "\(first) is not a helpcode")
+  }
+
+  /// #9416：小鹤拼音 yh 后输入自然码 m，裸码与 Shift 辅助码都要把「杨」放进当前候选页。
+  func testXiaoheZiranmaYangCandidateAndCommit() async throws {
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    XCTAssertFalse(bridge.initializationFailed, bridge.cancel().diagnosticText ?? "运行时初始化失败")
+    XCTAssertTrue(MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: state) {
+      var helpcode = $0["shuangpin_helpcode"] as? [String: Any] ?? [:]
+      helpcode["enabled"] = true
+      helpcode["schema"] = "ziranma"
+      helpcode["show_in_candidate_window"] = true
+      $0["shuangpin_helpcode"] = helpcode
+    })
+    await reload(bridge)
+    _ = bridge.switch(toShuangpinProfile: "xiaohe")
+
+    for (code, shifted) in [("m", false), ("M", true)] {
+      _ = bridge.cancel()
+      _ = bridge.handleCharacter("y")
+      let plain = bridge.handleCharacter("h")
+      XCTAssertTrue(plain.candidates.contains("阳"), "未输入辅助码时保留原读音候选")
+      let narrowed = bridge.handleCharacter(code, shifted: shifted)
+      XCTAssertNil(narrowed.diagnosticText)
+      XCTAssertTrue(narrowed.candidates.prefix(2).contains("杨"), "辅助码结果前两项应包含「杨」，不依赖上屏学习后的顺序")
+      XCTAssertFalse(narrowed.candidates.contains("阳"), "非木部的高频候选不应挤在辅助码结果中")
+      let index = try XCTUnwrap(narrowed.candidates.firstIndex(of: "杨"))
+      XCTAssertEqual(narrowed.candidateAnnotations[index], "(mY)")
+      let committed = bridge.selectCandidate(at: UInt(index))
+      XCTAssertEqual(committed.commitText, "杨")
+      XCTAssertTrue(committed.preedit.isEmpty)
+    }
   }
 
   /// 在设置 App 里导入的码表（#7176）装进键盘读的插件目录，并选中到发起导入的那一份；已经打开的键盘重读设置后按它缩小候选，删掉后退回内置方案。

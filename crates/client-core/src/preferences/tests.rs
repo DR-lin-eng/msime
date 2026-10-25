@@ -5,6 +5,165 @@
 use super::*;
 
 #[test]
+fn eighteen_key_quanpin_preferences_round_trip_without_changing_defaults() {
+    let defaults = Preferences::default();
+    let mut document = serde_json::to_value(&defaults).unwrap();
+    document["touch_keyboard_layout"] = serde_json::json!("eighteen_key");
+    document["touch_keyboard_schemes"] = serde_json::json!({
+        "enabled": ["eighteen_key"],
+        "selected": "eighteen_key"
+    });
+    let saved: Preferences = serde_json::from_value(document).unwrap();
+    let value = serde_json::to_value(saved).unwrap();
+    assert_eq!(value["touch_keyboard_layout"], "eighteen_key");
+    assert_eq!(value["touch_keyboard_schemes"]["selected"], "eighteen_key");
+    assert_eq!(
+        defaults.touch_keyboard_layout,
+        TouchKeyboardLayout::TwentySixKey
+    );
+    assert!(!serde_json::to_string(&defaults.touch_keyboard_schemes)
+        .unwrap()
+        .contains("eighteen_key"));
+}
+
+#[test]
+fn touch_shuangpin_layout_defaults_persists_and_rejects_unsupported_layouts() {
+    let defaults = Preferences::default();
+    let legacy = serde_json::to_value(&defaults).unwrap();
+    assert!(legacy.get("touch_shuangpin_layout").is_none());
+    assert_eq!(
+        serde_json::from_value::<Preferences>(legacy.clone())
+            .unwrap()
+            .touch_shuangpin_layout,
+        TouchShuangpinLayout::TwentySixKey
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let configured = Preferences {
+        touch_shuangpin_layout: TouchShuangpinLayout::FourteenKey,
+        shuangpin_profile: ShuangpinProfile::Microsoft,
+        touch_keyboard_layout: TouchKeyboardLayout::NineKey,
+        ..defaults
+    };
+    store.save(0, configured.clone()).unwrap();
+    assert_eq!(store.load().unwrap().preferences, configured);
+    let mut invalid = legacy.clone();
+    invalid["touch_shuangpin_layout"] = "nine_key".into();
+    assert!(serde_json::from_value::<Preferences>(invalid).is_err());
+    let mut malformed = legacy;
+    malformed["touch_japanese_toggle_input"] = "false".into();
+    assert!(serde_json::from_value::<Preferences>(malformed).is_err());
+}
+
+#[test]
+fn japanese_toggle_input_persists_disabled() {
+    let mut value = serde_json::to_value(Preferences::default()).unwrap();
+    value["touch_japanese_toggle_input"] = false.into();
+    let disabled: Preferences = serde_json::from_value(value).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let saved = store.save(0, disabled).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved.preferences).unwrap()["touch_japanese_toggle_input"],
+        false
+    );
+    assert_eq!(
+        serde_json::to_value(store.load().unwrap().preferences).unwrap()
+            ["touch_japanese_toggle_input"],
+        false
+    );
+}
+
+#[test]
+fn candidate_translation_font_size_is_optional_bounded_and_round_trips() {
+    let mut json = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(json.get("candidate_translation_font_size").is_none());
+    for size in [12, 21, 32] {
+        json["candidate_translation_font_size"] = serde_json::json!(size);
+        let preferences: Preferences = serde_json::from_value(json.clone()).unwrap();
+        assert!(preferences.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(preferences).unwrap()["candidate_translation_font_size"],
+            size
+        );
+    }
+    for size in [0, 11, 33, 255] {
+        json["candidate_translation_font_size"] = serde_json::json!(size);
+        let preferences: Preferences = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            preferences.validate(),
+            Err(PreferencesError::InvalidCandidateFontSize)
+        ));
+    }
+    json["candidate_translation_font_size"] = serde_json::Value::Null;
+    let preferences: Preferences = serde_json::from_value(json).unwrap();
+    assert!(preferences.validate().is_ok());
+    assert!(serde_json::to_value(preferences)
+        .unwrap()
+        .get("candidate_translation_font_size")
+        .is_none());
+}
+
+#[test]
+fn android_text_trackpad_defaults_and_legacy_documents_agree() {
+    let defaults = serde_json::to_value(Preferences::default()).unwrap();
+    assert_eq!(
+        defaults["android_text_trackpad"],
+        serde_json::json!({
+            "enabled": false, "hold_to_open": false, "horizontal_dp": 12,
+            "vertical_dp": 28, "tap_selection": true, "haptics": true,
+            "trail": true, "magnifier": true
+        })
+    );
+    let mut legacy = defaults.clone();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("android_text_trackpad");
+    let restored: Preferences = serde_json::from_value(legacy).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), defaults);
+}
+
+#[test]
+fn android_text_trackpad_validates_ranges_and_persists_all_options() {
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["android_text_trackpad"] = serde_json::json!({
+        "enabled": true, "hold_to_open": true, "horizontal_dp": 4,
+        "vertical_dp": 96, "tap_selection": false, "haptics": false,
+        "trail": false, "magnifier": false
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let preferences: Preferences = serde_json::from_value(document.clone()).unwrap();
+    let saved = store.save(0, preferences).unwrap();
+    assert_eq!(
+        serde_json::to_value(store.load().unwrap().preferences).unwrap(),
+        document
+    );
+    for (key, invalid) in [
+        ("horizontal_dp", 3),
+        ("horizontal_dp", 49),
+        ("vertical_dp", 7),
+        ("vertical_dp", 97),
+    ] {
+        let mut invalid_document = document.clone();
+        invalid_document["android_text_trackpad"][key] = invalid.into();
+        let invalid_preferences: Preferences = serde_json::from_value(invalid_document).unwrap();
+        assert!(invalid_preferences.validate().is_err(), "{key}: {invalid}");
+    }
+    for invalid in [
+        serde_json::json!("true"),
+        serde_json::json!(0),
+        serde_json::Value::Null,
+    ] {
+        document["android_text_trackpad"]["enabled"] = invalid;
+        assert!(serde_json::from_value::<Preferences>(document.clone()).is_err());
+    }
+    store.restore_defaults(saved.revision).unwrap();
+    assert_eq!(store.load().unwrap().preferences, Preferences::default());
+}
+
+#[test]
 fn backspace_selection_preference_keeps_legacy_default_and_persists_disabled() {
     let defaults = Preferences::default();
     assert!(defaults.backspace_reverts_selection);
@@ -2812,9 +2971,9 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
         store.load().unwrap().preferences.mixed_input,
         MixedInputPreferences {
             enabled: true,
-            first_page_count: 1,
             english: false,
             minimum_prefix: 3,
+            first_page_count: 1,
             emoji: true,
             kaomoji: true,
             japanese: false,
@@ -2828,7 +2987,6 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
         let preferences = Preferences {
             mixed_input: MixedInputPreferences {
                 enabled: true,
-                first_page_count: 1,
                 english: mask & 1 != 0,
                 emoji: mask & 2 != 0,
                 kaomoji: mask & 4 != 0,
@@ -2837,6 +2995,7 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
                 quick_phrase: true,
                 quick_phrase_frequency: true,
                 minimum_prefix: mask % 8 + 1,
+                first_page_count: 1,
             },
             ..Preferences::default()
         };
@@ -3647,9 +3806,10 @@ fn cantonese_zhuyin_and_vietnamese_touch_schemes_are_appended_and_opt_in() {
             TouchKeyboardScheme::ZhuyinNineKey,
             TouchKeyboardScheme::FourteenKey,
             TouchKeyboardScheme::NineKeyShuangpin,
+            TouchKeyboardScheme::EighteenKey,
         ]
     );
-    assert_eq!(TouchKeyboardScheme::ALL.len(), 19);
+    assert_eq!(TouchKeyboardScheme::ALL.len(), 20);
     // 全拼 14 键和九键双拼也不在以前的默认列表里，没存列表的旧文档不会凭空多出它们。
     for scheme in [
         TouchKeyboardScheme::FourteenKey,
@@ -7283,4 +7443,103 @@ fn sentence_collocation_tuning_rejects_non_finite_values() {
             "{key}"
         );
     }
+}
+
+#[test]
+fn cross_commit_spacing_is_independent_and_validates_excluded_apps() {
+    let mut preferences = Preferences::default();
+    let defaults = serde_json::to_value(&preferences).unwrap();
+    assert!(!preferences.cross_commit_spacing);
+    assert!(defaults.get("cross_commit_spacing").is_none());
+    assert!(defaults.get("cross_commit_spacing_excluded_apps").is_none());
+    preferences.cross_commit_spacing = true;
+    preferences.cross_commit_spacing_excluded_apps = vec!["app.example.Editor".into()];
+    assert!(preferences.validate().is_ok());
+    assert!(!preferences.chinese_english_spacing);
+    let written = serde_json::to_value(&preferences).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Preferences>(written).unwrap(),
+        preferences
+    );
+    for invalid in [
+        vec!["".into()],
+        vec![" app.example.Editor".into()],
+        vec!["app/example/Editor".into()],
+        vec!["app.example.Editor".into(), "APP.EXAMPLE.EDITOR".into()],
+        vec!["x".repeat(65)],
+        (0..33)
+            .map(|index| format!("app.example.Editor{index}"))
+            .collect(),
+    ] {
+        preferences.cross_commit_spacing_excluded_apps = invalid;
+        assert!(matches!(
+            preferences.validate(),
+            Err(PreferencesError::InvalidCrossCommitSpacingApps)
+        ));
+    }
+}
+
+#[test]
+fn text_edit_button_order_round_trips_and_restores_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut preferences = store.load().unwrap().preferences;
+    assert_eq!(
+        preferences.touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+    preferences.touch_text_edit_button_order.reverse();
+    let expected = preferences.touch_text_edit_button_order.clone();
+    let saved = store.save(0, preferences).unwrap();
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .preferences
+            .touch_text_edit_button_order,
+        expected
+    );
+    assert_eq!(
+        store
+            .restore_defaults(saved.revision)
+            .unwrap()
+            .preferences
+            .touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+    let mut old_document = serde_json::to_value(Preferences::default()).unwrap();
+    old_document
+        .as_object_mut()
+        .unwrap()
+        .remove("touch_text_edit_button_order");
+    let old: Preferences = serde_json::from_value(old_document).unwrap();
+    assert_eq!(
+        old.touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+}
+
+#[test]
+fn text_edit_button_order_rejects_missing_duplicate_and_unknown_actions() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    for order in [
+        vec![],
+        vec![TextEditButton::Copy; 7],
+        default_text_edit_button_order()[..6].to_vec(),
+    ] {
+        let preferences = Preferences {
+            touch_text_edit_button_order: order,
+            ..Preferences::default()
+        };
+        assert!(matches!(
+            store.save(0, preferences),
+            Err(PreferencesError::InvalidTextEditButtonOrder)
+        ));
+        assert_eq!(store.load().unwrap().revision, 0);
+    }
+    let mut unknown = serde_json::to_value(Preferences::default()).unwrap();
+    unknown["touch_text_edit_button_order"][6] = serde_json::json!("return");
+    let error = serde_json::from_value::<Preferences>(unknown).unwrap_err();
+    assert!(error.to_string().contains("unknown variant `return`"));
 }

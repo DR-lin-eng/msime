@@ -1243,6 +1243,7 @@ final class ImePanels {
         clipboardSelectionMode = false;
         clipboardSelectedTexts.clear();
         endClipboardSegmentation();
+        resetClipboardCategoryPicker();
         // 补读一次：键盘进程没在运行时复制的内容，监听收不到。
         s.captureClipboard(ClipboardCapturePolicy.Trigger.PANEL_OPENED, false);
         renderClipboardHistory();
@@ -1270,6 +1271,7 @@ final class ImePanels {
         clipboardSelectionMode = false;
         clipboardSelectedTexts.clear();
         endClipboardSegmentation();
+        resetClipboardCategoryPicker();
         renderClipboardHistory();
     }
 
@@ -1462,6 +1464,114 @@ final class ImePanels {
     private boolean clipboardSelectionMode;
     private final java.util.Set<String> clipboardSelectedTexts = new java.util.LinkedHashSet<>();
 
+    /** 选择器关闭或重开后，旧移动操作的回调不能覆盖新面板。 */
+    private long clipboardCategoryGeneration;
+
+    void resetClipboardCategoryPicker() {
+        clipboardCategoryGeneration++;
+        clipboardCategoryChoosing = false;
+        clipboardCategoryMovingText = null;
+    }
+
+    /** null 为全部，空串为未分类，其余为共享目录中的稳定 ID。 */
+    private String clipboardCategory;
+    private boolean clipboardCategoryChoosing;
+    private String clipboardCategoryMovingText;
+    private boolean clipboardCategoryBusy;
+
+    Button buildClipboardBackToTop() {
+        Button button = phraseButton(KeyboardKeyRole.KEY, "↑", "返回剪贴板顶部", () -> {
+            if (s.clipboardScroll != null) s.clipboardScroll.scrollTo(0, 0);
+        });
+        button.setContentDescription("返回剪贴板顶部");
+        return button;
+    }
+
+    void updateClipboardBackToTop() {
+        if (s.clipboardBackToTop == null || s.clipboardScroll == null) return;
+        boolean shown = s.clipboardScroll.getScrollY() > s.pixels(8)
+            && clipboardSegments == null && !clipboardCategoryChoosing && clipboardCategoryMovingText == null;
+        if (shown) ViewPolicy.show(s.clipboardBackToTop);
+        else ViewPolicy.hide(s.clipboardBackToTop);
+    }
+
+    private String clipboardCategoryLabel() {
+        if (clipboardCategory == null) return "本机 ▾";
+        if (clipboardCategory.isEmpty()) return "未分类 ▾";
+        for (ClipboardHistoryStore.Category category : s.clipboardHistory.categories())
+            if (category.id().equals(clipboardCategory)) return category.name() + " ▾";
+        clipboardCategory = null;
+        return "本机 ▾";
+    }
+
+    /** 选择器画在原面板内，避免可取焦点的对话框抢走原编辑器。 */
+    private void renderClipboardCategoryPicker() {
+        boolean moving = clipboardCategoryMovingText != null;
+        clipboardNote(moving ? "移动到分类" : "选择本机分类");
+        if (!moving) addClipboardCategoryChoice("全部记录", null);
+        addClipboardCategoryChoice("未分类", "");
+        for (ClipboardHistoryStore.Category category : s.clipboardHistory.categories())
+            addClipboardCategoryChoice(category.name(), category.id());
+        LinearLayout actions = addClipboardItemActionRow();
+        clipboardItemAction(actions, "分类管理", s::openClipboardCategories);
+        clipboardItemAction(actions, "取消", () -> {
+            resetClipboardCategoryPicker();
+            renderClipboardHistory();
+        });
+    }
+
+    private void addClipboardCategoryChoice(String name, String id) {
+        Button button = phraseButton(KeyboardKeyRole.KEY, name, "剪贴板目标分类 " + name, () -> {
+            if (clipboardCategoryBusy) return;
+            if (clipboardCategoryMovingText != null) {
+                moveClipboardCategory(clipboardCategoryMovingText, id == null || id.isEmpty() ? null : id);
+            } else {
+                clipboardCategory = id;
+                clipboardCategoryChoosing = false;
+                clipboardActionText = null;
+                clipboardSwipedText = null;
+                clipboardSelectionMode = false;
+                clipboardSelectedTexts.clear();
+                renderClipboardHistory();
+                s.clipboardScroll.scrollTo(0, 0);
+            }
+        });
+        button.setContentDescription("剪贴板目标分类 " + name);
+        ViewPolicy.setEnabled(button, !clipboardCategoryBusy);
+        s.clipboardPanel.addView(button, LayoutPolicy.matchWidthHeightPx(s.pixels(40)));
+    }
+
+    private void moveClipboardCategory(String text, String id) {
+        clipboardCategoryBusy = true;
+        long request = ++clipboardCategoryGeneration;
+        ClipboardHistoryStore history = s.clipboardHistory;
+        renderClipboardHistory();
+        try {
+            s.preferencesWorker.execute(() -> {
+                boolean changed;
+                try { changed = history.setCategory(text, id); }
+                catch (RuntimeException | LinkageError error) { changed = false; }
+                boolean updated = changed;
+                s.main.post(() -> {
+                    clipboardCategoryBusy = false;
+                    if (request != clipboardCategoryGeneration) {
+                        if (clipboardPanelOpen()) renderClipboardHistory();
+                        return;
+                    }
+                    clipboardCategoryMovingText = null;
+                    if (clipboardPanelOpen()) {
+                        s.notice(updated ? "已移动分类" : "移动失败，记录或分类可能已改变");
+                        renderClipboardHistory();
+                    }
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException error) {
+            clipboardCategoryBusy = false;
+            s.notice("暂时无法移动分类");
+            renderClipboardHistory();
+        }
+    }
+
     void renderClipboardHistory() {
         dismissClipboardPreview();
         if (s.clipboardPanel == null || s.clipboardHistory == null) return;
@@ -1484,6 +1594,15 @@ final class ImePanels {
         if (!cloud && s.clipboardHistoryEnabled) {
             try {
                 items = s.clipboardHistory.load();
+                clipboardCategoryLabel();
+                if (clipboardCategory != null) {
+                    java.util.List<ClipboardHistory.Item> filtered = new java.util.ArrayList<>();
+                    for (ClipboardHistory.Item item : items) {
+                        if (clipboardCategory.isEmpty() ? item.categoryId() == null
+                            : clipboardCategory.equals(item.categoryId())) filtered.add(item);
+                    }
+                    items = filtered;
+                }
             } catch (IllegalStateException error) {
                 items = null;
             }
@@ -1494,9 +1613,20 @@ final class ImePanels {
         boolean confirmingClear = !cloud && s.clipboardHistoryEnabled && clipboardClearPending;
         boolean selecting = !cloud && s.clipboardHistoryEnabled && clipboardSelectionMode;
         // 等待确认清空时顶行整行给问句和两个按钮，分段先让出位置，窄屏上也放得下。
-        if (cloudAllowed && !confirmingClear) {
-            addClipboardTab(header, CloudClipboardPanelPolicy.TAB_LOCAL, CloudClipboardPanelPolicy.Tab.LOCAL);
-            addClipboardTab(header, CloudClipboardPanelPolicy.TAB_CLOUD, CloudClipboardPanelPolicy.Tab.CLOUD);
+        if (!confirmingClear && !selecting) {
+            Button local = clipboardAction(header, clipboardCategoryLabel(), () -> {
+                if (cloud) selectClipboardTab(CloudClipboardPanelPolicy.Tab.LOCAL);
+                boolean choosing = !clipboardCategoryChoosing;
+                resetClipboardCategoryPicker();
+                clipboardCategoryChoosing = choosing;
+                clipboardActionText = null;
+                clipboardSwipedText = null;
+                renderClipboardHistory();
+                s.clipboardScroll.scrollTo(0, 0);
+            });
+            local.setContentDescription("选择本机剪贴板分类");
+            ViewPolicy.setSelected(local, !cloud);
+            if (cloudAllowed) addClipboardTab(header, CloudClipboardPanelPolicy.TAB_CLOUD, CloudClipboardPanelPolicy.Tab.CLOUD);
         }
         if (!confirmingClear && !selecting) {
             // 分段和「清空」之间原来是一块空白，现在居中写「已存条数/上限」（#5905），不另占地方；没有可数的内容时它是空的，布局和原来一样。
@@ -1514,6 +1644,10 @@ final class ImePanels {
             else counter.setContentDescription(description);
             header.addView(counter, LayoutPolicy.weightedMatchParentParams(1));
             notes.add(counter);
+        }
+        if (!cloud && !confirmingClear && !selecting) {
+            Button manage = clipboardAction(header, "分类", s::openClipboardCategories);
+            manage.setContentDescription("管理剪贴板分类");
         }
         if (cloud) {
             Button refresh = clipboardAction(header, "刷新", this::refreshCloudClipboard);
@@ -1555,6 +1689,7 @@ final class ImePanels {
                 export.setContentDescription("导出全部剪贴板历史");
             }
             Button select = clipboardAction(header, "多选", () -> {
+                resetClipboardCategoryPicker();
                 clipboardSelectionMode = true;
                 clipboardSelectedTexts.clear();
                 clipboardActionText = null;
@@ -1563,6 +1698,7 @@ final class ImePanels {
             });
             // 复制会自动记录，不再需要「保存当前」。
             clipboardAction(header, "清空", () -> {
+                resetClipboardCategoryPicker();
                 clipboardClearPending = true;
                 clipboardActionText = null;
                 clipboardSwipedText = null;
@@ -1574,7 +1710,18 @@ final class ImePanels {
                 undo.setContentDescription("撤销刚才删除的剪贴板记录");
             }
         }
-        s.clipboardHeader.addView(header, LayoutPolicy.matchWidthHeightPx(s.pixels(32)));
+        android.widget.HorizontalScrollView headerScroll = new android.widget.HorizontalScrollView(s);
+        headerScroll.setHorizontalScrollBarEnabled(false);
+        headerScroll.setFillViewport(true);
+        headerScroll.addView(header, LayoutPolicy.scrollMatchWidthWrapParams());
+        s.clipboardHeader.addView(headerScroll, LayoutPolicy.matchWidthHeightPx(s.pixels(32)));
+        if (!cloud && s.clipboardHistoryEnabled && items != null
+            && (clipboardCategoryChoosing || clipboardCategoryMovingText != null)) {
+            renderClipboardCategoryPicker();
+            s.imeStyler.applySkin();
+            updateClipboardBackToTop();
+            return;
+        }
         if (cloud) {
             renderCloudClipboard(notes);
         } else if (!s.clipboardHistoryEnabled) {
@@ -1588,9 +1735,11 @@ final class ImePanels {
             params.gravity = Gravity.CENTER_HORIZONTAL;
             s.clipboardPanel.addView(enable, params);
         } else if (items == null) {
-            notes.add(clipboardNote("历史记录无法读取，请清空后重试"));
+            notes.add(clipboardNote("历史记录或分类无法读取，请稍后重试"));
         } else {
-            if (items.isEmpty()) notes.add(clipboardNote("复制的文字会自动出现在这里，点按即可插入\n只保存在本机"));
+            if (items.isEmpty()) notes.add(clipboardNote(clipboardCategory == null
+                ? "复制的文字会自动出现在这里，点按即可插入\n只保存在本机"
+                : "此分类还没有记录，长按记录后可移动分类"));
             long now = System.currentTimeMillis();
             int columns = s.clipboardColumns;
             float reveal = ClipboardSwipePolicy.revealWidth(DimensionPolicy.density(s), clipboardCellWidth(columns));
@@ -1598,7 +1747,10 @@ final class ImePanels {
             ClipboardHistory.Item actionItem = null;
             for (int index = 0; index < items.size(); index++) {
                 ClipboardHistory.Item item = items.get(index);
-                String meta = (item.pinned() ? "已置顶 · " : "") + "本机 · "
+                String categoryName = "本机";
+                for (ClipboardHistoryStore.Category category : s.clipboardHistory.categories())
+                    if (category.id().equals(item.categoryId())) { categoryName = category.name(); break; }
+                String meta = (item.pinned() ? "已置顶 · " : "") + categoryName + " · "
                     + RelativeTimePolicy.timestampAgo(item.timestamp(), now);
                 boolean managed = item.text().equals(clipboardActionText);
                 boolean swiped = item.text().equals(clipboardSwipedText);
@@ -1649,6 +1801,7 @@ final class ImePanels {
         }
         s.imeStyler.applySkin();
         for (TextView note : notes) ViewPolicy.setTextColor(note, ImeStyler.fade(s.skin.keyForeground(), .6));
+        s.clipboardScroll.post(this::updateClipboardBackToTop);
     }
 
     private void exitClipboardSelection() {
@@ -1665,7 +1818,7 @@ final class ImePanels {
      * <p>原来是 `PopupMenu`：弹出菜单是可获得焦点的窗口，打开时编辑器的窗口失去焦点，在 Via 这类用系统 WebView 的浏览器里键盘随即被收起（#5653）。画在面板里的按钮不会碰窗口焦点。
      */
     private void renderClipboardItemActions(ClipboardHistory.Item item, boolean cloudAllowed) {
-        // 操作分两行：一行放不下「添加到常用语」「发到云剪贴板」两个长按钮和其余几个短按钮，挤在一行时每个按钮都被截成省略号。阅读顺序是 固定、删除、编辑、分词、分享、添加到常用语、发到云剪贴板、收起。
+        // 操作分两行：一行放不下「添加到常用语」「发到云剪贴板」两个长按钮和其余几个短按钮，挤在一行时每个按钮都被截成省略号。阅读顺序是 固定、删除、编辑、分词、分享、移动分类、添加到常用语、发到云剪贴板、收起。
         LinearLayout row = addClipboardItemActionRow();
         clipboardItemAction(row, item.pinned() ? "取消固定" : "固定", () -> {
             clipboardActionText = null;
@@ -1685,6 +1838,12 @@ final class ImePanels {
             () -> s.shareClipboardText(item.text()));
         share.setContentDescription("分享这条剪贴板记录");
         LinearLayout more = addClipboardItemActionRow();
+        clipboardItemAction(more, "移动分类", () -> {
+            clipboardActionText = null;
+            clipboardCategoryMovingText = item.text();
+            renderClipboardHistory();
+            s.clipboardScroll.scrollTo(0, 0);
+        });
         clipboardItemAction(more, CommonPhrasesPanelPolicy.ADD_FROM_CLIPBOARD, () -> {
             clipboardActionText = null;
             renderClipboardHistory();
@@ -2030,8 +2189,9 @@ final class ImePanels {
         boolean lastInRow = index == count - 1
             || ClipboardLayoutPolicy.row(index + 1, columns) != ClipboardLayoutPolicy.row(index, columns);
         if (lastInRow) {
+            // Space 按最小内容高度测量，普通 View 会占满 AT_MOST 高度，把操作行挤出视口。
             for (int empty = column + 1; empty < columns; empty++)
-                clipboardCardRow.addView(new View(s), clipboardCellParams(empty));
+                clipboardCardRow.addView(new android.widget.Space(s), clipboardCellParams(empty));
             clipboardCardRow = null;
         }
     }
@@ -2113,6 +2273,7 @@ final class ImePanels {
         private float startOffset;
         private boolean openAtDown;
         private boolean dragging;
+        private boolean cancelledPress;
         private android.view.VelocityTracker velocity;
 
         ClipboardSwipeCell(Button card, View trash, String text, float reveal) {
@@ -2132,6 +2293,7 @@ final class ImePanels {
                     // 不在这里停掉正在进行的收回动画：没有拖起来的轻点要让它照常放完，否则卡片会停在半路。
                     openAtDown = card.getTranslationX() < 0;
                     dragging = false;
+                    cancelledPress = false;
                     recycleVelocity();
                     velocity = android.view.VelocityTracker.obtain();
                     track(event);
@@ -2140,10 +2302,24 @@ final class ImePanels {
                 case android.view.MotionEvent.ACTION_MOVE -> {
                     track(event);
                     float dx = event.getRawX() - downX;
+                    float dy = event.getRawY() - downY;
                     if (!dragging) {
-                        if (!ClipboardSwipePolicy.claims(dx, event.getRawY() - downY, touchSlop,
-                                openAtDown)) return false;
+                        if (!ClipboardSwipePolicy.claims(dx, dy, touchSlop, openAtDown)) {
+                            // 外层列表没有足够内容可滚时不会接手纵向拖动；仍要撤销卡片按压，
+                            // 否则手指始终留在卡片边界内，松手会被 Button 当作点按并插入正文。
+                            if (!cancelledPress
+                                    && Math.max(Math.abs(dx), Math.abs(dy)) > touchSlop) {
+                                cancelledPress = true;
+                                android.view.MotionEvent cancel =
+                                    android.view.MotionEvent.obtain(event);
+                                cancel.setAction(android.view.MotionEvent.ACTION_CANCEL);
+                                card.onTouchEvent(cancel);
+                                cancel.recycle();
+                            }
+                            return false;
+                        }
                         dragging = true;
+                        cancelledPress = true;
                         // 接手时卡片可能还在收回的动画里：停在当前位置，再从这里跟手，不跳。
                         stopSettling();
                         startOffset = card.getTranslationX() - dx;
@@ -2179,6 +2355,7 @@ final class ImePanels {
                         settle(open);
                     }
                     dragging = false;
+                    cancelledPress = false;
                     recycleVelocity();
                     return handled;
                 }
@@ -2288,109 +2465,122 @@ final class ImePanels {
     /** 没有常用语时的提示；它下面跟一个直达应用常用语页的「添加常用语」按钮。 */
     private static final String EMPTY_PHRASES = "还没有常用语";
 
-    /** 工具栏「常用语」：先完成当前组词，在工作线程经 {@link CommonPhrasesStore} 读无编码常用语，全宽列表，点一条上屏并关闭面板。 */
+    private String expandedPhraseCategory = "all";
+
+    /** 工具栏「常用语」：后台读共享文档，每次打开采用保存的默认展开项。 */
     void showCommonPhrases() {
         if (s.phraseScroll == null || s.phrasePanel == null) return;
         s.command(2);
         s.closeCandidatePanel();
         long generation = ++phraseGeneration;
-        renderCommonPhrases(java.util.List.of(), "正在读取常用语…");
+        renderCommonPhrases(CommonPhrasesStore.Document.EMPTY, "正在读取常用语…");
         ViewPolicy.show(s.phraseScroll);
-        Runnable load = () -> {
-            CommonPhrasesStore.Result result;
-            try {
-                result = CommonPhrasesStore.load(s);
-            } catch (RuntimeException | LinkageError error) {
-                result = null;
-            }
-            int phraseCapacity = result != null && result.ok()
-                ? result.document().phrases().size() : 0;
-            java.util.List<CommonPhrasesStore.Phrase> phrases = new java.util.ArrayList<>(phraseCapacity);
-            String message;
-            if (result == null || !result.ok()) {
-                message = result == null || result.failure().isEmpty() ? "常用语读取失败" : result.failure();
-            } else {
-                for (CommonPhrasesStore.Phrase phrase : result.document().phrases())
-                    if (!phrase.text().isEmpty()) phrases.add(phrase);
-                message = phrases.isEmpty() ? EMPTY_PHRASES : null;
-            }
-            final String note = message;
-            s.main.post(() -> {
-                if (generation != phraseGeneration || !ViewPolicy.isVisible(s.phraseScroll)) return;
-                renderCommonPhrases(phrases, note);
-            });
-        };
         try {
-            s.preferencesWorker.execute(load);
+            s.preferencesWorker.execute(() -> {
+                CommonPhrasesStore.Result result;
+                try { result = CommonPhrasesStore.load(s); }
+                catch (RuntimeException | LinkageError error) { result = null; }
+                CommonPhrasesStore.Document document = result != null && result.ok()
+                    ? result.document() : CommonPhrasesStore.Document.EMPTY;
+                String message = result == null ? "常用语读取失败" : result.ok() ? null : result.failure();
+                s.main.post(() -> {
+                    if (generation != phraseGeneration || !ViewPolicy.isVisible(s.phraseScroll)) return;
+                    expandedPhraseCategory = document.expandedCategory();
+                    renderCommonPhrases(document, message);
+                });
+            });
         } catch (RuntimeException error) {
-            renderCommonPhrases(java.util.List.of(), "常用语读取失败");
+            renderCommonPhrases(CommonPhrasesStore.Document.EMPTY, "常用语读取失败");
         }
     }
 
-    private void renderCommonPhrases(java.util.List<CommonPhrasesStore.Phrase> phrases, String message) {
+    private void renderCommonPhrases(CommonPhrasesStore.Document document, String message) {
         LinearLayout panel = s.phrasePanel;
         panel.removeAllViews();
         LayoutPolicy.setPaddingDp(panel, s, 8, 4, 8, 8);
         s.imeStyler.applySkinBackground(panel);
-        TextView note = null;
         if (message != null) {
-            note = centeredNote(message, 14);
-            LayoutPolicy.setPaddingDp(note, s, 12, 24, 12, 24);
-            panel.addView(note, LayoutPolicy.matchWidthWrapParams());
+            panel.addView(centeredNote(message, 14), LayoutPolicy.matchWidthWrapParams());
+            s.imeStyler.applySkin();
+            return;
         }
-        java.util.List<View> lines = new java.util.ArrayList<>(phrases.size());
-        for (CommonPhrasesStore.Phrase phrase : phrases) {
-            String text = phrase.text();
-            Runnable insert = () -> {
-                    if (s.connection == null) return;
-                    s.command(2);
-                    s.commitText(text);
-                    s.closeCommonPhrases();
-                    s.render();
-            };
-            String description = "常用语 " + (text.length() > 20 ? text.substring(0, 20) : text);
-            KeyboardPressButton row = phraseButton(KeyboardKeyRole.PLAIN, text, description, insert);
-            ViewPolicy.setStartCenteredTextSizeSp(row, 15);
-            ViewPolicy.setMaxLinesEllipsized(row, 2);
-            LayoutPolicy.setSymmetricPaddingDp(row, s, 12, 8);
-            LinearLayout entry = LayoutPolicy.column(s);
-            entry.addView(row, LayoutPolicy.matchWidthWrapParams());
-            if (!phrase.note().isEmpty()) {
-                TextView annotation = new TextView(s);
-                annotation.setText("备注：" + phrase.note());
-                annotation.setContentDescription("常用语备注：" + phrase.note());
-                ViewPolicy.setTextSizeSp(annotation, 12);
-                ViewPolicy.setMaxLinesEllipsized(annotation, 2);
-                annotation.setAlpha(.65f);
-                LayoutPolicy.setPaddingDp(annotation, s, 12, 0, 12, 8);
-                // 备注区域也响应插入，但回调只捕获独立的正文。
-                bindFeedbackAction(annotation, insert);
-                entry.addView(annotation, LayoutPolicy.matchWidthWrapParams());
-            }
-            panel.addView(entry, LayoutPolicy.matchWidthWrapParams());
-            View hairline = new View(s);
-            LinearLayout.LayoutParams line = LayoutPolicy.matchWidthHeightPx(
-                DimensionPolicy.atLeastOnePixel(s, 1));
-            LayoutPolicy.setHorizontalMargins(line, s.pixels(12));
-            panel.addView(hairline, line);
-            lines.add(hairline);
-        }
-        if (message == null || EMPTY_PHRASES.equals(message)) {
-            // 列表下面总有一个去处：空的时候是「添加常用语」，有内容时是「管理常用语」，都直接打开应用的常用语页去添加、修改和删除（#5673），而不是让人自己退出键盘去找。键盘里没有可输入的文本框，增删改放在应用里。读取中和读取失败时不放。
-            String label = CommonPhrasesPanelPolicy.entryLabel(phrases.size());
-            KeyboardPressButton manage = phraseButton(KeyboardKeyRole.RETURN, label, label, () -> {
-                s.closeCommonPhrases();
-                s.openHostPage("PHRASES");
-            });
-            LayoutPolicy.setHorizontalPaddingDp(manage, s, 24);
-            LinearLayout.LayoutParams params = LayoutPolicy.wrapParams();
-            params.gravity = Gravity.CENTER_HORIZONTAL;
-            if (!phrases.isEmpty()) params.topMargin = s.pixels(8);
-            panel.addView(manage, params);
+        LinearLayout toolbar = LayoutPolicy.row(s);
+        TextView capacity = centeredNote("常用语 " + document.phrases().size() + " 条（自建 "
+            + document.ownCount() + "/" + CommonPhrasesStore.MAX_OWN_PHRASES + "）", 12);
+        toolbar.addView(capacity, LayoutPolicy.weightedWrapParams(1));
+        String label = CommonPhrasesPanelPolicy.entryLabel(document.phrases().size());
+        toolbar.addView(phraseButton(KeyboardKeyRole.RETURN, label, label, () -> {
+            s.closeCommonPhrases();
+            s.openHostPage("PHRASES");
+        }), LayoutPolicy.wrapParams());
+        panel.addView(toolbar, LayoutPolicy.matchWidthWrapParams());
+        java.util.List<View> lines = new java.util.ArrayList<>();
+        addPhraseCategory(document, "all", "全部", document.phrases(), lines);
+        for (CommonPhrasesStore.Category category : document.categories()) {
+            java.util.List<CommonPhrasesStore.Phrase> phrases = new java.util.ArrayList<>();
+            for (CommonPhrasesStore.Phrase phrase : document.phrases())
+                if (phrase.category().equals(category.id())) phrases.add(phrase);
+            addPhraseCategory(document, category.id(), category.name(), phrases, lines);
         }
         s.imeStyler.applySkin();
         for (View hairline : lines) ViewPolicy.setBackgroundColor(hairline, Color.parseColor(s.skin.hairline()));
-        if (note != null) ViewPolicy.setTextColor(note, ImeStyler.fade(s.skin.keyForeground(), .6));
+        ViewPolicy.setTextColor(capacity, ImeStyler.fade(s.skin.keyForeground(), .6));
+    }
+
+    private void addPhraseCategory(CommonPhrasesStore.Document document, String id, String name,
+            java.util.List<CommonPhrasesStore.Phrase> phrases, java.util.List<View> lines) {
+        boolean expanded = id.equals(expandedPhraseCategory);
+        KeyboardPressButton heading = phraseButton(KeyboardKeyRole.PLAIN,
+            (expanded ? "▾ " : "▸ ") + name + "（" + phrases.size() + "）",
+            "常用语分类 " + name + (expanded ? "，已展开" : "，已收起"), () -> {
+                expandedPhraseCategory = expanded ? "" : id;
+                renderCommonPhrases(document, null);
+            });
+        ViewPolicy.setStartCenteredTextSizeSp(heading, 15);
+        LayoutPolicy.setSymmetricPaddingDp(heading, s, 12, 8);
+        s.phrasePanel.addView(heading, LayoutPolicy.matchWidthWrapParams());
+        if (!expanded) return;
+        if (phrases.isEmpty()) s.phrasePanel.addView(centeredNote(id.equals("all")
+            ? EMPTY_PHRASES : "该分类还没有常用语", 14), LayoutPolicy.matchWidthWrapParams());
+        for (CommonPhrasesStore.Phrase phrase : phrases) addCommonPhrase(phrase, lines);
+    }
+
+    private void addCommonPhrase(CommonPhrasesStore.Phrase phrase, java.util.List<View> lines) {
+        LinearLayout panel = s.phrasePanel;
+        String text = phrase.text();
+        Runnable insert = () -> {
+            if (s.connection == null) return;
+            s.command(2);
+            s.commitText(text);
+            s.closeCommonPhrases();
+            s.render();
+        };
+        String description = "常用语 " + (text.length() > 20 ? text.substring(0, 20) : text);
+        KeyboardPressButton row = phraseButton(KeyboardKeyRole.PLAIN, text, description, insert);
+        ViewPolicy.setStartCenteredTextSizeSp(row, 15);
+        ViewPolicy.setMaxLinesEllipsized(row, 2);
+        LayoutPolicy.setSymmetricPaddingDp(row, s, 12, 8);
+        LinearLayout entry = LayoutPolicy.column(s);
+        entry.addView(row, LayoutPolicy.matchWidthWrapParams());
+        if (!phrase.note().isEmpty()) {
+            TextView annotation = new TextView(s);
+            annotation.setText("备注：" + phrase.note());
+            annotation.setContentDescription("常用语备注：" + phrase.note());
+            ViewPolicy.setTextSizeSp(annotation, 12);
+            ViewPolicy.setMaxLinesEllipsized(annotation, 2);
+            annotation.setAlpha(.65f);
+            LayoutPolicy.setPaddingDp(annotation, s, 12, 0, 12, 8);
+            // 备注区域也响应插入，但回调只捕获独立的正文。
+            bindFeedbackAction(annotation, insert);
+            entry.addView(annotation, LayoutPolicy.matchWidthWrapParams());
+        }
+        panel.addView(entry, LayoutPolicy.matchWidthWrapParams());
+        View hairline = new View(s);
+        LinearLayout.LayoutParams line = LayoutPolicy.matchWidthHeightPx(
+            DimensionPolicy.atLeastOnePixel(s, 1));
+        LayoutPolicy.setHorizontalMargins(line, s.pixels(12));
+        panel.addView(hairline, line);
+        lines.add(hairline);
     }
 
     private KeyboardPressButton phraseButton(KeyboardKeyRole role, String text,

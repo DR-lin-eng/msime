@@ -46,8 +46,9 @@ final class ImeLetterRows {
 
     boolean numberPadDrawn(int layout) {
         if (moreSymbols) return false;
-        // 数字、电话和数字密码输入框没有 Engine 会话，不能等用户再点一次 123；它们进框就直接画同一套九宫格。
-        if (s.keyboardLayer == KeyboardLayout.Layer.SYMBOLS && s.directNumberPad()) return true;
+        // 数字和电话框直接进入九宫格；文字密码框保留字母首页，点 123 时也使用九宫格。
+        if (s.keyboardLayer == KeyboardLayout.Layer.SYMBOLS
+                && (s.directNumberPad() || EditorPolicy.password(s.editorInputType))) return true;
         boolean local = !"none".equals(InputViewValuePolicy.textOr(s.view, "local_mode", "none"));
         return KeyboardLayout.drawsNumberPad(s.keyboardLayer, layout,
             KeyboardLayout.numberPadLanguage(InputViewValuePolicy.scheme(s.view, -1), s.dedicatedEnglish), local);
@@ -67,6 +68,8 @@ final class ImeLetterRows {
     /** 分离式键盘第二行（a–l）的缩进占位；微软双拼的第十个键出现时收起。 */
     private View secondRowLeadingIndent;
     private View secondRowTrailingIndent;
+    private View eighteenRowLeadingIndent;
+    private View eighteenRowTrailingIndent;
     /** 当前键行是不是按分离式键盘建的；与 {@link MSIMEInputService#splitKeyboardDrawn} 不一致时要重建（{@link #splitStale}）。 */
     private boolean builtSplit;
     /** 当前键行有没有画数字行；与 {@link MSIMEInputService#numberRowDrawn} 不一致时要重建（{@link #numberRowStale}）。 */
@@ -89,6 +92,7 @@ final class ImeLetterRows {
         return touchLayout == KeyboardLayout.STANDARD_TOUCH_LAYOUT
             || touchLayout == KeyboardLayout.KOREAN_LAYOUT
             || touchLayout == KeyboardLayout.FOURTEEN_KEY_LAYOUT
+            || touchLayout == KeyboardLayout.EIGHTEEN_KEY_LAYOUT
             || touchLayout == KeyboardLayout.HANDWRITING_LAYOUT
             || touchLayout == KeyboardLayout.STROKE_LAYOUT
             || touchLayout == KeyboardLayout.ZHUYIN_NINE_KEY_LAYOUT;
@@ -96,6 +100,7 @@ final class ImeLetterRows {
 
     /** 14 键第 3 行左端的分词键；键面随组字状态在「符」和「分词」之间换（{@link #updateFourteenKeySeparator}）。不在 14 键字母层时为 null。 */
     private Button fourteenSeparatorKey;
+    private Button fourteenLKey;
     private Button shiftSource;
 
     /** 偏好里的一个布尔触控开关。 */
@@ -725,6 +730,8 @@ final class ImeLetterRows {
         hideKeyPreview();
         secondRowLeadingIndent = null;
         secondRowTrailingIndent = null;
+        eighteenRowLeadingIndent = null;
+        eighteenRowTrailingIndent = null;
         // 数字输入框沿用同一个输入法服务实例时，不能继承上一个文本框停留的 #+= 页。
         if (s.keyboardLayer == KeyboardLayout.Layer.LETTERS || s.directNumberPad()) moreSymbols = false;
         builtNumberPad = numberPadDrawn();
@@ -744,6 +751,7 @@ final class ImeLetterRows {
         s.japaneseSymbolsKey = null;
         s.japaneseVariantsButton = null;
         fourteenSeparatorKey = null;
+        fourteenLKey = null;
         s.keyRows.removeAllViews();
         if (builtSymbolExtraRow) addSymbolExtraRow();
         if (s.displayedTouchLayout(s.view) == MSIMEInputService.JAPANESE_NINE_KEY_LAYOUT) {
@@ -778,9 +786,9 @@ final class ImeLetterRows {
             s.imeStyler.applyKeyboardGeometry();
             return;
         }
-        // 14 键只在字母层画自己的三行，数字层与 26 键复用同一个九宫格。
+        // 字母组网格只在字母层画三行，数字层与二十六键复用同一个九宫格。
         if (s.keyboardLayer == KeyboardLayout.Layer.LETTERS
-            && s.displayedTouchLayout(s.view) == KeyboardLayout.FOURTEEN_KEY_LAYOUT) {
+            && KeyboardLayout.drawsLetterGrid(s.displayedTouchLayout(s.view))) {
             rebuildFourteenKeyRows();
             s.imeStyler.applyKeyboardGeometry();
             return;
@@ -959,14 +967,18 @@ final class ImeLetterRows {
     }
 
     /**
-     * 全拼 14 键的字母层：{@link FourteenKeyLayout} 的三行，和 26 键字母行同样三行等高、按同样的方式分摊键盘高度调整，底行仍是 26 键的功能行，所以键盘总高与 26 键相同。
+     * 全拼和双拼 14 键的字母层：{@link FourteenKeyLayout} 的三行，和 26 键字母行同样三行等高、按同样的方式分摊键盘高度调整，底行仍是 26 键的功能行，所以键盘总高与 26 键相同。
      *
-     * <p>点按经 {@link MSIMEInputService#gridKey} 送这一组的首字母，不走 {@link MSIMEInputService#type}（辅助码、微软双拼 `;`、英文直出都按单个确定的字母处理）。第 2 行不缩进、没有微软双拼的 `;`；第 3 行左端是分词键（组字时送 `'`，空闲时打开符号面板，照搬九键 1 键），右端是 ⌫，两端宽度沿用 26 键 ⇧ ⌫ 的份额。中文 14 键没有 Shift、角标和滑动输入符号。长按两字母键弹出这两个字母，选中后先结束组字再上屏，与九键长按相同。拼音选择与九键共用左侧栏，空闲时显示符号，组字时纵向选择拼音，不挤占读音或候选行。
+     * <p>点按经 {@link MSIMEInputService#gridKey} 送这一组的首字母，不走 {@link MSIMEInputService#type}（辅助码、微软双拼 `;`、英文直出都按单个确定的字母处理）。第 2 行不缩进，双拼的分号并入 L 键；第 3 行左端是分词键（组字时送 `'`，空闲时打开符号面板，照搬九键 1 键），右端是 ⌫，两端宽度沿用 26 键 ⇧ ⌫ 的份额。中文 14 键没有 Shift、角标和滑动输入符号。长按两字母键弹出这两个字母，选中后先结束组字再上屏，与九键长按相同。拼音选择与九键共用左侧栏，空闲时显示符号，组字时纵向选择拼音，不挤占读音或候选行。
      */
     private void rebuildFourteenKeyRows() {
         s.imeLayoutRows.dismissNineKeyHoldOptions();
         boolean composing = s.hasEngineComposition();
-        java.util.List<java.util.List<FourteenKeyLayout.Key>> rows = FourteenKeyLayout.rows();
+        boolean eighteen = s.displayedTouchLayout(s.view) == KeyboardLayout.EIGHTEEN_KEY_LAYOUT;
+        java.util.List<java.util.List<FourteenKeyLayout.Key>> rows = eighteen
+            ? EighteenKeyLayout.rows() : FourteenKeyLayout.rows();
+        float letterWeight = eighteen ? 1f : FourteenKeyLayout.LETTER_WEIGHT;
+        float edgeWeight = eighteen ? 1f : KeyboardActionRow.DESIGN_LETTER_EDGE_WEIGHT;
         LinearLayout container = LayoutPolicy.row(s);
         s.imeStyler.adjustThreeRowBlockHeight(container);
         s.keyRows.addView(container, LayoutPolicy.matchWidthHeightPx(
@@ -981,6 +993,10 @@ final class ImeLetterRows {
                 rows.size(), rowIndex, true));
             letterColumn.addView(row, LayoutPolicy.matchWidthWrapParams());
             boolean last = rowIndex == rows.size() - 1;
+            if (eighteen && rowIndex == 1) {
+                eighteenRowLeadingIndent = new View(s);
+                row.addView(eighteenRowLeadingIndent, LayoutPolicy.weightedMatchParentParams(0.5f));
+            }
             if (last) {
                 Button separator = s.keyId(s.keyboardKey(FourteenKeyLayout.separatorFace(composing),
                     FourteenKeyLayout.separatorDescription(composing), this::fourteenKeySeparator),
@@ -989,14 +1005,17 @@ final class ImeLetterRows {
                 if (separator instanceof KeyboardPressButton press) press.setKeyboardRole(KeyboardKeyRole.ACCENT);
                 fourteenSeparatorKey = separator;
                 row.addView(separator, LayoutPolicy.weightedMatchParentParams(
-                    KeyboardActionRow.DESIGN_LETTER_EDGE_WEIGHT));
+                    edgeWeight));
             }
             for (FourteenKeyLayout.Key key : rows.get(rowIndex)) {
                 Button keyButton = s.keyId(s.keyboardKey(FourteenKeyLayout.face(key),
                     FourteenKeyLayout.description(key), () -> s.gridKey(key.input())),
-                    FourteenKeyLayout.keyId(key));
-                keyButton.setContentDescription(FourteenKeyLayout.accessibilityLabel(key));
-                KeyboardTypographyPolicy.setKeyTextSize(keyButton, 22);
+                    eighteen ? EighteenKeyLayout.keyId(key) : FourteenKeyLayout.keyId(key));
+                keyButton.setText(FourteenKeyLayout.face(key, fourteenShuangpin()));
+                keyButton.setContentDescription(FourteenKeyLayout.accessibilityLabel(key, fourteenShuangpin()));
+                if ("l".equals(key.letters())) fourteenLKey = keyButton;
+                if (eighteen) KeyboardTypographyPolicy.setFittedKeyTextSize(keyButton, 12, 22);
+                else KeyboardTypographyPolicy.setKeyTextSize(keyButton, 22);
                 if (keyButton instanceof KeyboardPressButton press) press.setKeyboardRole(KeyboardKeyRole.KEY);
                 String letters = FourteenKeyLayout.holdLetters(key);
                 if (!letters.isEmpty()) {
@@ -1007,11 +1026,26 @@ final class ImeLetterRows {
                         return true;
                     });
                 }
-                row.addView(keyButton, LayoutPolicy.weightedMatchParentParams(FourteenKeyLayout.LETTER_WEIGHT));
+                row.addView(keyButton, LayoutPolicy.weightedMatchParentParams(letterWeight));
+            }
+            if (eighteen && rowIndex == 1) {
+                eighteenRowTrailingIndent = new View(s);
+                row.addView(eighteenRowTrailingIndent, LayoutPolicy.weightedMatchParentParams(0.5f));
             }
             if (last) addLetterRowEdgeKey(row, s.deleteButton, row.getChildCount(),
-                KeyboardActionRow.DESIGN_LETTER_EDGE_WEIGHT);
+                edgeWeight);
         }
+    }
+
+    /** 两个半键占位合计保留一个键的横向边距，键距就地变化时也与上下排等宽。 */
+    void applyEighteenKeyIndentGeometry(int halfGap) {
+        if (eighteenRowLeadingIndent == null || eighteenRowTrailingIndent == null) return;
+        LinearLayout.LayoutParams leading = (LinearLayout.LayoutParams) eighteenRowLeadingIndent.getLayoutParams();
+        LinearLayout.LayoutParams trailing = (LinearLayout.LayoutParams) eighteenRowTrailingIndent.getLayoutParams();
+        leading.setMargins(halfGap, 0, 0, 0);
+        trailing.setMargins(0, 0, halfGap, 0);
+        eighteenRowLeadingIndent.setLayoutParams(leading);
+        eighteenRowTrailingIndent.setLayoutParams(trailing);
     }
 
     /** 分词键：组字时送 `'`，在已打的组码末尾定一个音节分界；空闲时打开符号面板。 */
@@ -1020,8 +1054,20 @@ final class ImeLetterRows {
         else s.imePanels.showSymbolPanel();
     }
 
-    /** 分词键的键面跟着组字状态在「符」和「分词」之间换，render 时调用。 */
+    private boolean fourteenShuangpin() {
+        return InputViewValuePolicy.scheme(s.view, -1) == InputSchemeTraits.SHUANGPIN;
+    }
+
+    /** 14 键的分词键和分号入口跟着组字状态及方案更新，render 时调用。 */
     void updateFourteenKeySeparator() {
+        if (fourteenLKey != null) {
+            FourteenKeyLayout.Key key = new FourteenKeyLayout.Key("l");
+            String face = FourteenKeyLayout.face(key, fourteenShuangpin());
+            if (!face.contentEquals(fourteenLKey.getText())) {
+                fourteenLKey.setText(face);
+                fourteenLKey.setContentDescription(FourteenKeyLayout.accessibilityLabel(key, fourteenShuangpin()));
+            }
+        }
         if (fourteenSeparatorKey == null) return;
         boolean composing = s.hasEngineComposition();
         String face = FourteenKeyLayout.separatorFace(composing);

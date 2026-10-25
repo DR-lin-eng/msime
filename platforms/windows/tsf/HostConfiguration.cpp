@@ -101,6 +101,10 @@ std::shared_ptr<const HostConfiguration> cached_host_configuration() {
 void refresh_host_configuration() {
   configuration.refresh([](const auto &previous) { return LoadConfiguration(previous, false); }, ScheduleRefresh);
 }
+void invalidate_host_configuration() {
+  configuration.invalidate();
+  refresh_host_configuration();
+}
 std::shared_ptr<const nlohmann::json> load_activation_preferences() {
   if (initialSnapshotPending.exchange(false, std::memory_order_acquire)) {
     if (const auto snapshot = cached_host_configuration();

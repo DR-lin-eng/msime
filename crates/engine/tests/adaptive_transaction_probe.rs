@@ -61,7 +61,7 @@ fn leader(s: &mut Session, context: &str) -> String {
     for b in b"ni" {
         s.character(*b, false);
     }
-    let word = s.snapshot().candidates[0].word.clone();
+    let word = s.snapshot().candidates[0].word.to_string();
     s.command(Command::Cancel);
     word
 }

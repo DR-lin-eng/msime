@@ -18,6 +18,8 @@ struct HostConfiguration {
 void initialize_host_configuration();
 std::shared_ptr<const HostConfiguration> cached_host_configuration();
 void refresh_host_configuration();
+// 已保存方案的通知触发后台重读；不在通知线程读取文件或应用引擎偏好。
+void invalidate_host_configuration();
 // 游戏策略在激活前锁定：逐次读取最新规则，避免停用期间的旧快照忽略排除项。
 std::shared_ptr<const nlohmann::json> load_activation_preferences();
 }

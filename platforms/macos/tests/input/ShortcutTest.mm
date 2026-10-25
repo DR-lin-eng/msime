@@ -5,6 +5,7 @@
 #include <cassert>
 #include <fstream>
 #include <sqlite3.h>
+#include <sys/resource.h>
 #import <objc/runtime.h>
 #import "../settings/TestPreferenceSuite.h"
 #import "../settings/PreferenceViewLookup.h"
@@ -345,6 +346,7 @@ static void CheckMenu(NSMenu *menu, id controller) {
 @property(nonatomic, strong) NSMutableArray<NSString *> *insertions;
 // 对文档的同步读取次数：`selectedRange` 和 `attributedSubstringFromRange:`，每一次都要到应用里来回一趟。
 @property(nonatomic) NSUInteger documentReads;
+@property(nonatomic) NSUInteger attributeReads;
 @end
 
 @interface ModeController : MSIMEInputController
@@ -544,6 +546,7 @@ static void TestKeyLatencyIsLoggedWithoutTheKey() {
 }
 - (NSDictionary *)attributesForCharacterIndex:(NSUInteger)index lineHeightRectangle:(NSRect *)rect {
     (void)index;
+    ++self.attributeReads;
     *rect = self.caret;
     return @{};
 }
@@ -626,6 +629,8 @@ static NSEvent *WithLayoutCharacters(NSEvent *base, NSString *characters) {
     event.layoutCharacters = characters;
     return event;
 }
+
+static NSEvent *TapEvent(NSEventType type, unsigned short key, NSEventModifierFlags flags, double time);
 
 static NSEvent *ModeKey(unsigned short code, NSEventModifierFlags flags, BOOL repeat) {
     // 字母键带上它在美式布局上打出的字母，和真实事件一样：字母快捷键按这个字符认键。
@@ -2232,6 +2237,9 @@ static void TestDedicatedEnglish(MSIMEAppearancePreferences *appearance) {
     assert([controller handleEvent:ModeKey(14, flags, NO) client:client]);
     assert(session.dedicatedEnglish && !appearance.englishMode);
     englishCalls = session.englishCandidateCalls;
+    // 上一组 Ctrl+Shift+E 已经结束；下一次 Shift+空格属于新一轮按下。
+    assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, 0, 1.0) client:client]);
+    assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 1.1) client:client]);
     assert([controller handleEvent:ModeKey(49, NSEventModifierFlagShift, NO) client:client]);
     assert(!session.dedicatedEnglish && appearance.englishMode && session.englishCandidateCalls == englishCalls + 1);
     assert([controller handleEvent:ModeKey(49, NSEventModifierFlagShift, NO) client:client]);
@@ -2972,9 +2980,16 @@ static void TestFloatingToolbarMenuToggle(MSIMEAppearancePreferences *appearance
 
 @interface NestingClient : ShortcutClient
 @property(nonatomic, copy) void (^onMarkedText)(void);
+@property(nonatomic, copy) void (^onInsertText)(void);
 @property(nonatomic) NSUInteger markedWrites;
 @end
 @implementation NestingClient
+- (void)insertText:(id)text replacementRange:(NSRange)range {
+    [super insertText:text replacementRange:range];
+    void (^nested)(void) = self.onInsertText;
+    self.onInsertText = nil;
+    if (nested) nested();
+}
 - (void)setMarkedText:(id)text selectionRange:(NSRange)selection replacementRange:(NSRange)range {
     ++self.markedWrites;
     [super setMarkedText:text selectionRange:selection replacementRange:range];
@@ -3039,6 +3054,74 @@ static void TestNestedApplyKeepsTheNewerView(MSIMEAppearancePreferences *appeara
     [controller apply:@{@"view":older}];
     assert(client.markedWrites >= 1);
     assert([[controller valueForKey:@"view"] isEqual:newer]);
+}
+
+static void TestNestedCommitKeepsTheNewerComposition() {
+    NSString *suite = [@"msime.nested-commit." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    appearance.englishMode = NO;
+    appearance.pairedPunctuation = YES;
+    for (NSDictionary *scenario in @[
+        @{@"commit": @"甲", @"expected": @"ne"},
+        @{@"commit": @"甲", @"remaining": @"tail", @"expected": @"ne"},
+        @{@"commit": @"（", @"expected": @"ne）", @"pendingAfter": @"）"},
+        @{@"commit": @"甲", @"pendingBefore": @"）", @"expected": @"ne"},
+        @{@"commit": @"甲", @"nestedCommit": @"乙", @"expected": @"ne"},
+        @{@"commit": @"甲", @"switchClient": @YES}
+    ]) {
+        @autoreleasepool {
+            ModeController *controller = [ModeController alloc];
+            NestingClient *client = [NestingClient new];
+            [controller setValue:appearance forKey:@"appearance"];
+            [controller setValue:[ShortcutSession new] forKey:@"session"];
+            [controller setValue:client forKey:@"activeClient"];
+            [controller setValue:[[HiddenCandidatePanel alloc] init] forKey:@"panel"];
+            [controller setValue:scenario[@"pendingBefore"] forKey:@"pendingPairedClosing"];
+            NSDictionary *newer = @{@"session": @1, @"generation": @5, @"editing_text": @"ne",
+                                     @"preedit": @"ne", @"caret_position": @2, @"candidates": @[]};
+            __weak ModeController *weakController = controller;
+            ShortcutClient *replacement = [ShortcutClient new];
+            replacement.marked = @"external";
+            client.onInsertText = ^{
+                // 同步回调中的下一键必须已经能读到外层刚上屏的末字。
+                NSString *landed = scenario[@"pendingBefore"] ?: scenario[@"commit"];
+                assert([weakController precedingForSmartPunctuation:client] ==
+                    [landed characterAtIndex:landed.length - 1]);
+                if ([scenario[@"switchClient"] boolValue]) {
+                    [weakController setValue:replacement forKey:@"activeClient"];
+                    [weakController setValue:newer forKey:@"view"];
+                    [weakController invalidateSmartPunctuationShadow];
+                    return;
+                }
+                NSMutableDictionary *nested = [@{@"view": newer} mutableCopy];
+                if (scenario[@"nestedCommit"]) nested[@"commit"] = scenario[@"nestedCommit"];
+                [weakController apply:nested];
+            };
+            NSString *remaining = scenario[@"remaining"] ?: @"";
+            [controller apply:@{@"commit": scenario[@"commit"],
+                @"view": @{@"editing_text": remaining, @"caret_position": @(remaining.length), @"candidates": @[]}}];
+            if ([scenario[@"switchClient"] boolValue]) {
+                assert([replacement.marked isEqual:@"external"] && client.marked == nil);
+            } else {
+                assert([client.marked isEqual:scenario[@"expected"]]);
+            }
+            assert([[controller valueForKey:@"view"] isEqual:newer]);
+            id pending = [controller valueForKey:@"pendingPairedClosing"];
+            assert(scenario[@"pendingAfter"] ? [pending isEqual:scenario[@"pendingAfter"]] : pending == nil);
+            NSString *outerCommit = [scenario[@"commit"] stringByAppendingString:(scenario[@"pendingBefore"] ?: @"")];
+            assert([client.insertions.firstObject isEqual:outerCommit]);
+            assert(client.insertions.count == (scenario[@"nestedCommit"] ? 2u : 1u));
+            if ([scenario[@"switchClient"] boolValue]) {
+                assert([controller precedingForSmartPunctuation:replacement] == 0);
+            } else {
+                NSString *lastCommit = scenario[@"nestedCommit"] ?: outerCommit;
+                assert([controller precedingForSmartPunctuation:client] ==
+                    [lastCommit characterAtIndex:lastCommit.length - 1]);
+            }
+        }
+    }
+    [defaults removePersistentDomainForName:suite];
 }
 
 static void TestCandidatePanelSingleOwner() {
@@ -3426,16 +3509,80 @@ static void TestGlossSenseTraditionalOutput(MSIMEAppearancePreferences *appearan
 @end
 
 static MSIMECandidateButton *ExpandedGridSubview(NSPanel *panel, NSInteger tag) {
-    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
+    for (NSView *view in MSIMECandidateControlSubviews(panel.contentView))
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (MSIMECandidateButton *)view;
     return nil;
 }
 
-static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
+static NSRect ExpandedGridFrame(NSPanel *panel, NSInteger tag) {
+    MSIMECandidateButton *button = ExpandedGridSubview(panel, tag);
+    return [button convertRect:button.bounds toView:MSIMECandidateControlsView(panel.contentView)];
+}
+
+static MSIMEExpandedCandidateScrollView *ExpandedGridScrollView(NSPanel *panel) {
     for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
+        if ([view isKindOfClass:MSIMEExpandedCandidateScrollView.class]) return (id)view;
+    return nil;
+}
+
+static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
+    for (NSView *view in MSIMECandidateControlSubviews(panel.contentView))
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag >= 0 && ((MSIMECandidateButton *)view).candidateHighlighted)
             return (NSUInteger)view.tag;
     return NSNotFound;
+}
+
+static NSEvent *ExpandedGridScrollEvent(NSPanel *panel, CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
+                                        NSEventPhase momentum = NSEventPhaseNone) {
+    CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 1, (int32_t)delta);
+    // 夹具固定窗口、时间和坐标，不借用测试机鼠标此刻恰好停留的位置。
+    CGEventSetFlags(cg, 0);
+    CGEventSetTimestamp(cg, (CGEventTimestamp)(NSProcessInfo.processInfo.systemUptime * NSEC_PER_SEC));
+    CGEventSetIntegerValueField(cg, kCGMouseEventWindowUnderMousePointer, panel.windowNumber);
+    CGEventSetIntegerValueField(cg, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, panel.windowNumber);
+    NSView *viewport = ExpandedGridScrollView(panel);
+    const NSPoint local = [viewport convertPoint:NSMakePoint(NSMidX(viewport.bounds), NSMidY(viewport.bounds)) toView:nil];
+    const NSPoint screen = [panel convertPointToScreen:local];
+    CGEventSetLocation(cg, CGPointMake(screen.x, NSMaxY(NSScreen.screens.firstObject.frame) - screen.y));
+    CGEventSetIntegerValueField(cg, kCGScrollWheelEventIsContinuous, 1);
+    CGEventSetDoubleValueField(cg, kCGScrollWheelEventPointDeltaAxis1, delta);
+    const int64_t scrollPhase = phase == NSEventPhaseBegan ? 1 : phase == NSEventPhaseChanged ? 2 :
+        phase == NSEventPhaseEnded ? 4 : 0;
+    const int64_t momentumPhase = momentum == NSEventPhaseBegan ? 1 : momentum == NSEventPhaseChanged ? 2 :
+        momentum == NSEventPhaseEnded ? 3 : 0;
+    CGEventSetIntegerValueField(cg, kCGScrollWheelEventScrollPhase, scrollPhase);
+    CGEventSetIntegerValueField(cg, kCGScrollWheelEventMomentumPhase, momentumPhase);
+    NSEvent *event = [NSEvent eventWithCGEvent:cg];
+    CFRelease(cg);
+    assert(event.hasPreciseScrollingDeltas && event.scrollingDeltaY == delta);
+    assert(event.phase == phase && event.momentumPhase == momentum);
+    return event;
+}
+
+static void ExpandedGridScroll(NSPanel *panel, CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
+                               NSEventPhase momentum = NSEventPhaseNone) {
+    if (phase == NSEventPhaseBegan) {
+        [panel.contentView layoutSubtreeIfNeeded];
+        [panel displayIfNeeded];
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        assert(panel.isVisible && panel.windowNumber > 0);
+        [panel scrollWheel:ExpandedGridScrollEvent(panel, 0, NSEventPhaseBegan)];
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        phase = NSEventPhaseChanged;
+    }
+    [panel scrollWheel:ExpandedGridScrollEvent(panel, delta, phase, momentum)];
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+}
+
+static void ExpandedGridFinishScroll(NSPanel *panel) {
+    ExpandedGridScroll(panel, 0, NSEventPhaseEnded);
+    NSScrollView *viewport = ExpandedGridScrollView(panel);
+    const CGFloat maximum = MAX(0.0, NSHeight(viewport.documentView.bounds) - NSHeight(viewport.contentView.bounds));
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.5];
+    while (deadline.timeIntervalSinceNow > 0 &&
+        (NSMinY(viewport.contentView.bounds) < -0.01 || NSMinY(viewport.contentView.bounds) > maximum + 0.01))
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    assert(NSMinY(viewport.contentView.bounds) >= -0.01 && NSMinY(viewport.contentView.bounds) <= maximum + 0.01);
 }
 
 // 普通候选把拼音编辑与选择分开，网格、列表和修饰键各走已有的入口。
@@ -3521,11 +3668,15 @@ static void TestExpandedCandidateGrid() {
     session.editing = @"shi";
     ShortcutClient *client = [ShortcutClient new];
     client.caret = NSMakeRect(200, 400, 1, 18);
-    HiddenCandidatePanel *panel = [[HiddenCandidatePanel alloc] init];
+    // NSScrollView 的精确滚动需要真实窗口；仅伪造 isVisible 不能建立 AppKit 的滚动会话。
+    MSIMECandidatePanel *panel = [[MSIMECandidatePanel alloc] init];
     [controller setValue:prefs forKey:@"appearance"];
     [controller setValue:session forKey:@"session"];
     [controller setValue:client forKey:@"activeClient"];
     [controller setValue:panel forKey:@"panel"];
+    MSIMECandidateMotion *motion = [MSIMECandidateMotion new];
+    motion.reduceMotion = YES;
+    [controller setValue:motion forKey:@"candidateMotion"];
     void (^compose)(void) = ^{
         session.generation = 7;
         session.highlighted = 0;
@@ -3633,38 +3784,302 @@ static void TestExpandedCandidateGrid() {
     [controller closeExpandedCandidates];
     session.total = 24;
     session.pageSize = 4;
-    session.tallIndex = 20;
     prefs.pageSize = 4;
     compose();
     assert(press(125) && expanded());
+    const CGFloat firstCandidateY = NSMinY(ExpandedGridFrame(panel, 0));
     const CGFloat viewportHeight = panel.frame.size.height;
-    const CGFloat viewportRowsHeight = NSHeight(((MSIMECandidateChromeView *)panel.contentView).candidateRowsRect);
-    const CGFloat firstCandidateY = NSMinY(ExpandedGridSubview(panel, 0).frame);
-    [controller setValue:@(-8.0) forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    MSIMEExpandedCandidateScrollView *originalScrollView = ExpandedGridScrollView(panel);
+    MSIMECandidateButton *originalFirst = ExpandedGridSubview(panel, 0);
+    NSView *originalContent = panel.contentView;
+    const NSUInteger caretReads = client.attributeReads;
+    ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    if ([[controller valueForKey:@"expandedScrollOffset"] doubleValue] <= 0.0)
+        fprintf(stderr, "expanded_scroll window=%ld visible=%d can_scroll=%d document=%.3f viewport=%.3f origin=%.3f first_row=%lu offset=%.3f\n",
+            (long)panel.windowNumber, panel.isVisible, originalScrollView.canScroll ? originalScrollView.canScroll() : YES,
+            NSHeight(originalScrollView.documentView.bounds), NSHeight(originalScrollView.contentView.bounds),
+            NSMinY(originalScrollView.contentView.bounds), [[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue],
+            [[controller valueForKey:@"expandedScrollOffset"] doubleValue]);
     assert([[controller valueForKey:@"expandedScrollOffset"] doubleValue] > 0.0);
-    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - (firstCandidateY - 8.0)) < 0.01);
-    assert(fabs(panel.frame.size.height - viewportHeight) < 0.01);
-    [controller setValue:@8.0 forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - (firstCandidateY + 8.0)) < 0.01);
+    assert(originalScrollView && ExpandedGridScrollView(panel) == originalScrollView);
+    assert(panel.contentView == originalContent && ExpandedGridSubview(panel, 0) == originalFirst);
+    assert(client.attributeReads == caretReads);
+    assert(ExpandedGridSubview(panel, 20));
+    NSScrollView *viewport = ExpandedGridScrollView(panel);
+    assert(viewport.contentView.clipsToBounds && !viewport.acceptsFirstResponder);
+    assert(viewport.verticalScrollElasticity == NSScrollElasticityAllowed);
+    assert(viewport.horizontalScrollElasticity == NSScrollElasticityNone);
+    const CGFloat scrollerPadding = MSIMEExpandedCandidateScrollerPadding(prefs.candidateScalePercent / 100.0);
+    assert(scrollerPadding >= [NSScroller scrollerWidthForControlSize:NSControlSizeRegular
+        scrollerStyle:NSScrollerStyleOverlay] + 4 * prefs.candidateScalePercent / 100.0);
+    const auto rightClearance = [&](NSUInteger tag) {
+        MSIMECandidateButton *button = ExpandedGridSubview(panel, tag);
+        NSScrollView *scrollView = ExpandedGridScrollView(panel);
+        assert(button && scrollView);
+        const NSRect cell = [button convertRect:button.bounds toView:scrollView];
+        assert(NSMaxX(cell) <= NSWidth(scrollView.bounds) - scrollerPadding + 0.01);
+        const NSRect scroller = [scrollView.verticalScroller convertRect:scrollView.verticalScroller.bounds toView:scrollView];
+        if (!NSIsEmptyRect(scroller)) assert(NSMaxX(cell) <= NSMinX(scroller) - 4 * prefs.candidateScalePercent / 100.0 + 0.01);
+    };
+    rightClearance(3);
+    NSView *controls = MSIMECandidateControlsView(panel.contentView);
+    MSIMECandidateButton *top = ExpandedGridSubview(panel, 0);
+    const NSRect topRect = [top convertRect:top.bounds toView:controls];
+    const NSRect viewportRect = [viewport convertRect:viewport.bounds toView:controls];
+    assert(NSMaxY(topRect) > NSMaxY(viewportRect));
+    const NSPoint clippedPoint = NSMakePoint(NSMidX(topRect), NSMaxY(viewportRect) + 1);
+    assert([controls hitTest:[controls convertPoint:clippedPoint toView:controls.superview]] != top);
+    ExpandedGridScroll(panel, 8);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
-    assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - firstCandidateY) < 0.01);
-    [controller setValue:@(-10000.0) forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - firstCandidateY) < 0.01);
+    ExpandedGridScroll(panel, -10000);
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
-    assert(fabs(panel.frame.size.height - viewportHeight) < 0.01);
-    [controller setValue:@10000.0 forKey:@"expandedPendingScrollDelta"];
+    rightClearance(23);
+    assert(panel.frame.size.height == viewportHeight);
+    ExpandedGridFinishScroll(panel);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    // 停在末尾后新开的向下手势仍交给 AppKit，不能按 hasNextPage 拦截。
+    MSIMEExpandedCandidateScrollView *bottomViewport = ExpandedGridScrollView(panel);
+    void (^manualScroll)(void) = bottomViewport.manualScrollBegan;
+    __block NSUInteger bottomEvents = 0;
+    bottomViewport.manualScrollBegan = ^{
+        ++bottomEvents;
+        manualScroll();
+    };
+    ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    assert(bottomEvents >= 2 && ExpandedGridScrollView(panel) == bottomViewport);
+    assert(NSMinY(bottomViewport.contentView.bounds) < 0);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(!panel.hasNextPage && panel.frame.size.height == viewportHeight);
+    ExpandedGridFinishScroll(panel);
+    bottomViewport.manualScrollBegan = manualScroll;
     [controller renderCandidates];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    ExpandedGridScroll(panel, 0, NSEventPhaseNone, NSEventPhaseEnded);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    ExpandedGridScroll(panel, 10000);
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+    ExpandedGridScroll(panel, 10000);
+    ExpandedGridFinishScroll(panel);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - firstCandidateY) < 0.01);
+
+    const auto lineScroll = [&](BOOL backwards) {
+        CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitLine, 1, backwards ? 1 : -1);
+        NSEvent *event = [NSEvent eventWithCGEvent:cg];
+        CFRelease(cg);
+        [panel scrollWheel:event];
+    };
+    // 到底后的无效普通滚轮不能丢掉手动视口，之后重画也不能拉回旧高亮。
+    ExpandedGridScroll(panel, -10000, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
+    assert(cursor() == 0 && [[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    const CGFloat bottomY = NSMinY(ExpandedGridFrame(panel, 20));
+    MSIMEExpandedCandidateScrollView *bottomScroll = ExpandedGridScrollView(panel);
+    lineScroll(NO);
+    assert(ExpandedGridScrollView(panel) == bottomScroll);
+    assert([[controller valueForKey:@"expandedScrollsViewport"] boolValue]);
+    [controller renderCandidates];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - bottomY) < 0.01);
+
+    // 末行特别高时，旧可见行数会误报到底；普通滚轮按真实行高继续，且不改变视口高度。
+    [controller closeExpandedCandidates];
+    session.tallIndex = 20;
+    compose();
+    assert(press(125) && expanded());
+    NSMutableArray<NSDictionary *> *tallLastRows = [[controller valueForKey:@"expandedCandidates"] mutableCopy];
+    NSMutableDictionary *tallLast = [tallLastRows[20] mutableCopy];
+    tallLast[@"text"] = [@"合成" stringByPaddingToLength:400 withString:@"合成" startingAtIndex:0];
+    tallLastRows[20] = tallLast;
+    [controller setValue:tallLastRows forKey:@"expandedCandidates"];
+    [controller renderCandidates];
+    const CGFloat fixedHeight = panel.frame.size.height;
+    const CGFloat firstHeight = NSMinY(ExpandedGridFrame(panel, 0)) - NSMinY(ExpandedGridFrame(panel, 4));
+    ExpandedGridScroll(panel, -firstHeight, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1 && panel.hasNextPage);
+    lineScroll(NO);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 2);
+    assert(cursor() >= 8 && panel.frame.size.height == fixedHeight);
+    const CGFloat secondRowY = NSMinY(ExpandedGridFrame(panel, 8));
+    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 8)) - secondRowY) < 0.01);
+    for (NSUInteger step = 0; step < 10 && panel.hasNextPage; ++step) lineScroll(NO);
+    assert(!panel.hasNextPage && panel.frame.size.height == fixedHeight);
+    const CGFloat lastBottomY = NSMinY(ExpandedGridFrame(panel, 20));
+    lineScroll(NO);
+    [controller renderCandidates];
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - lastBottomY) < 0.01);
+    lineScroll(YES);
+    assert(panel.hasNextPage && panel.frame.size.height == fixedHeight);
+    assert(press(116) && cursor() == 0);
+    session.tallIndex = 0;
+
+    // 跨行前后同一候选的位置连续；反向滚动沿用同一像素视口。
+    [controller closeExpandedCandidates];
+    session.total = 40;
+    compose();
+    assert(press(125) && expanded());
+    const CGFloat rowHeight = NSMinY(ExpandedGridFrame(panel, 0)) - NSMinY(ExpandedGridFrame(panel, 4));
+    ExpandedGridScroll(panel, -(rowHeight - 1), NSEventPhaseBegan);
+    const CGFloat beforeCrossing = NSMinY(ExpandedGridFrame(panel, 4));
+    MSIMECandidateButton *reused = ExpandedGridSubview(panel, 4);
+    ExpandedGridScroll(panel, -2);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(ExpandedGridSubview(panel, 4) == reused);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 4)) - beforeCrossing - 2) < 0.01);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue] - 1) < 0.01);
+    ExpandedGridScroll(panel, 2);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 4)) - beforeCrossing) < 0.01);
+    assert(panel.frame.size.height == viewportHeight);
+    assert(!ExpandedGridSubview(panel, 24));
+    assert(press(125) && cursor() == 4);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+
+    // 首行折行后高于其它行，跨行仍使用该行真实高度，不假设等高。
+    [controller closeExpandedCandidates];
+    session.total = 200;
+    compose();
+    assert(press(125) && expanded());
+    NSMutableArray<NSDictionary *> *uneven = [[controller valueForKey:@"expandedCandidates"] mutableCopy];
+    NSMutableDictionary *tall = [uneven[0] mutableCopy];
+    tall[@"text"] = [@"合成" stringByPaddingToLength:400 withString:@"合成" startingAtIndex:0];
+    uneven[0] = tall;
+    [controller setValue:uneven forKey:@"expandedCandidates"];
+    [controller renderCandidates];
+    const CGFloat tallHeight = NSMaxY(ExpandedGridFrame(panel, 0)) - NSMaxY(ExpandedGridFrame(panel, 4));
+    const CGFloat normalHeight = NSMaxY(ExpandedGridFrame(panel, 4)) - NSMaxY(ExpandedGridFrame(panel, 8));
+    assert(tallHeight > normalHeight);
+    assert(ExpandedGridSubview(panel, 0).itemLayout.textWrapped);
+    for (NSUInteger slot = 0; slot < 4; ++slot)
+        assert(NSMaxX(ExpandedGridFrame(panel, slot)) <= NSWidth(ExpandedGridScrollView(panel).bounds) + 0.01);
+    assert(panel.frame.size.width <= NSScreen.mainScreen.visibleFrame.size.width);
+    assert(ExpandedGridScrollView(panel).documentView.subviews.count < session.total);
+    ExpandedGridScroll(panel, -(tallHeight - 1), NSEventPhaseBegan);
+    const CGFloat beforeUnevenCrossing = NSMinY(ExpandedGridFrame(panel, 4));
+    ExpandedGridScroll(panel, -2);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 4)) - beforeUnevenCrossing - 2) < 0.01);
+    ExpandedGridScroll(panel, 2);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 4)) - beforeUnevenCrossing) < 0.01);
+
+    // 每列跨所有行取共享宽度；最长候选可以在尚未进入视口的行，短末行仍沿用列边界。
+    [controller closeExpandedCandidates];
+    session.total = 39;
+    compose();
+    assert(press(125) && expanded());
+    NSMutableArray<NSDictionary *> *aligned = [[controller valueForKey:@"expandedCandidates"] mutableCopy];
+    for (NSUInteger index = 0; index < aligned.count; ++index) {
+        NSMutableDictionary *entry = [aligned[index] mutableCopy];
+        entry[@"text"] = [@"合成" stringByPaddingToLength:(index == 29 ? 20 : 2 + index % 5)
+            withString:@"合成" startingAtIndex:0];
+        aligned[index] = entry;
+    }
+    [controller setValue:aligned forKey:@"expandedCandidates"];
+    [controller renderCandidates];
+    std::vector<NSRect> columns;
+    for (NSUInteger slot = 0; slot < 4; ++slot) {
+        columns.push_back(ExpandedGridFrame(panel, slot));
+        for (NSUInteger row = 1; row < 3; ++row) {
+            const NSRect cell = ExpandedGridFrame(panel, row * 4 + slot);
+            assert(fabs(NSMinX(cell) - NSMinX(columns[slot])) < 0.01);
+            assert(fabs(NSWidth(cell) - NSWidth(columns[slot])) < 0.01);
+            assert(fabs(ExpandedGridSubview(panel, row * 4 + slot).contentLeft -
+                ExpandedGridSubview(panel, slot).contentLeft) < 0.01);
+            assert(NSMaxX(cell) <= NSWidth(ExpandedGridScrollView(panel).bounds) + 0.01);
+        }
+    }
+    assert(NSWidth(columns[1]) > NSWidth(columns[0]));
+    const CGFloat alignedWidth = panel.frame.size.width;
+    ExpandedGridScroll(panel, -10000, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
+    for (NSUInteger slot = 0; slot < 3; ++slot) {
+        const NSRect cell = ExpandedGridFrame(panel, 36 + slot);
+        assert(ExpandedGridSubview(panel, 36 + slot));
+        assert(fabs(NSMinX(cell) - NSMinX(columns[slot])) < 0.01);
+        assert(fabs(NSWidth(cell) - NSWidth(columns[slot])) < 0.01);
+    }
+    assert(panel.frame.size.width == alignedWidth && !ExpandedGridSubview(panel, 39));
+    rightClearance(35);
+    assert(fabs(ExpandedGridSubview(panel, 36).contentLeft - ExpandedGridSubview(panel, 32).contentLeft) < 0.01);
+
+    // 从触控板切换到普通滚轮仍按行移动，回到顶部时也清掉剩余像素。
+    [controller closeExpandedCandidates];
+    session.total = 24;
+    compose();
+    assert(press(125) && expanded());
+    ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    CGEventRef lineCG = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitLine, 1, 1);
+    NSEvent *lineEvent = [NSEvent eventWithCGEvent:lineCG];
+    CFRelease(lineCG);
+    assert(!lineEvent.hasPreciseScrollingDeltas);
+    [panel scrollWheel:lineEvent];
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - firstCandidateY) < 0.01);
+
+    // 从短末页打开也固定当前像素高度，回滚八点不能把窗口扩高一整行。
+    [controller closeExpandedCandidates];
+    session.total = 24;
+    session.highlighted = 20;
+    [controller setValue:[session gridView] forKey:@"view"];
+    [controller renderCandidates];
+    assert(press(125) && expanded());
+    const CGFloat shortHeight = panel.frame.size.height;
+    const CGFloat lastY = NSMinY(ExpandedGridFrame(panel, 20));
+    ExpandedGridScroll(panel, 8, NSEventPhaseBegan);
+    assert(fabs(panel.frame.size.height - shortHeight) < 0.01);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - lastY + 8) < 0.01);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 4);
+    ExpandedGridScroll(panel, 0, NSEventPhaseEnded);
+    assert([[controller valueForKey:@"expandedVisibleRows"] unsignedIntegerValue] == 1);
+    ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 5);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 20)) - lastY) < 0.01);
+    MSIMECandidateButton *stale = ExpandedGridSubview(panel, 20);
+    [controller renderCandidates];
+    const NSUInteger selectedBeforeStale = session.selectAnyCalls;
+    [controller selectExpandedCandidate:stale];
+    assert(session.selectAnyCalls == selectedBeforeStale && expanded());
+    [controller closeExpandedCandidates];
+    session.total = 20;
+    compose();
+    assert(press(125) && expanded());
+    const CGFloat nonScrollingY = NSMinY(ExpandedGridFrame(panel, 0));
+    ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    assert(!panel.hasPreviousPage && !panel.hasNextPage);
+    ExpandedGridFinishScroll(panel);
+    assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - nonScrollingY) < 0.01);
+    [controller closeExpandedCandidates];
+    // 原生滚动条同样经裁剪视口定位，重画不能又跳回高亮行。
+    session.total = 40;
+    compose();
+    assert(press(125) && expanded());
+    assert(![[controller valueForKey:@"expandedScrollsViewport"] boolValue]);
+    MSIMEExpandedCandidateScrollView *scroller = ExpandedGridScrollView(panel);
+    NSPoint origin = scroller.contentView.bounds.origin;
+    origin.y -= 8;
+    [scroller.contentView scrollToPoint:origin];
+    [scroller reflectScrolledClipView:scroller.contentView];
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    assert([[controller valueForKey:@"expandedScrollsViewport"] boolValue]);
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue] - 8) < 0.01);
+    [controller renderCandidates];
+    assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue] - 8) < 0.01);
     // 字号变更开启新的布局预算，后续像素滚动仍保持这个新高度。
+    ExpandedGridFinishScroll(panel);
+    const CGFloat viewportRowsHeight = NSHeight(((MSIMECandidateChromeView *)panel.contentView).candidateRowsRect);
     prefs.candidateScalePercent = 150;
     [controller appearanceChanged:nil];
     const CGFloat scaledViewportHeight = panel.frame.size.height;
     assert(NSHeight(((MSIMECandidateChromeView *)panel.contentView).candidateRowsRect) > viewportRowsHeight * 1.4);
-    [controller setValue:@(-8.0) forKey:@"expandedPendingScrollDelta"];
-    [controller renderCandidates];
+    ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    ExpandedGridFinishScroll(panel);
     assert(fabs(panel.frame.size.height - scaledViewportHeight) < 0.01);
     prefs.candidateScalePercent = 100;
     [controller appearanceChanged:nil];
@@ -3672,6 +4087,7 @@ static void TestExpandedCandidateGrid() {
     session.total = 23;
     session.pageSize = 5;
     prefs.pageSize = 5;
+    session.lastCommand = UINT32_MAX;
     compose();
     assert(press(125) && expanded());
 
@@ -5727,6 +6143,128 @@ static void TestModifierTapSurvivesALostRelease() {
     gHeldKeys.clear();
 }
 
+static void TestShiftChordRecoversWithoutFlagsChanged() {
+    for (const auto type : {NSEventTypeKeyDown, NSEventTypeKeyUp}) {
+        MSIMEModifierTap tap;
+        gHeldKeys.clear();
+        tap.setKeyHeldProbe(&SyntheticKeyHeld);
+        assert(!tap.observe(TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 1.0), true, true));
+        assert(!tap.observe(TapEvent(NSEventTypeKeyDown, 0, NSEventModifierFlagShift, 1.1), true, true));
+        assert(tap.shiftChordInterrupted());
+        // 双侧 Shift 中只松开一侧，同一轮的取消状态仍保留。
+        assert(!tap.observe(TapEvent(NSEventTypeFlagsChanged, 60, NSEventModifierFlagShift, 1.2), true, true));
+        assert(!tap.observe(TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 1.3), true, true));
+        assert(tap.shiftChordInterrupted());
+        // 最后一侧释放通知丢失，但普通按键已经报告 Shift 不再按住。
+        assert(!tap.observe(TapEvent(type, 0, 0, 1.4), true, true));
+        assert(!tap.shiftChordInterrupted());
+        assert(!tap.observe(TapEvent(NSEventTypeFlagsChanged, 60, NSEventModifierFlagShift, 2.0), true, true));
+        assert(!tap.observe(TapEvent(NSEventTypeKeyDown, 49, NSEventModifierFlagShift, 2.1), true, true));
+        assert(!tap.shiftChordInterrupted());
+        assert(!tap.observe(TapEvent(NSEventTypeKeyDown, 49, NSEventModifierFlagShift, 2.2), true, true));
+        assert(!tap.shiftChordInterrupted());
+        assert(!tap.observe(TapEvent(NSEventTypeKeyDown, 0, NSEventModifierFlagShift, 2.3), true, true));
+        assert(tap.shiftChordInterrupted());
+        tap.reset();
+        assert(!tap.shiftChordInterrupted());
+    }
+}
+
+// 焦点和鼠标监视器是系统边界，用替身驱动真实控制器，CI 无需辅助功能授权。
+@interface EditableShiftController : ModeController
+@property(nonatomic, strong) id focusIdentity;
+@property(nonatomic) pid_t focusPID;
+@property(nonatomic) NSUInteger focusCaptures;
+@property(nonatomic) NSUInteger modeSwitchCalls;
+@property(nonatomic) NSUInteger monitorStarts;
+@property(nonatomic) BOOL monitoring;
+@property(nonatomic) BOOL allowMonitoring;
+@end
+@implementation EditableShiftController
+- (msime::mac::EditableShiftFocus)editableShiftFocusForClient:(id)sender {
+    (void)sender;
+    ++self.focusCaptures;
+    return {self.focusPID, self.focusIdentity};
+}
+- (BOOL)startEditableShiftMouseMonitoring {
+    ++self.monitorStarts;
+    self.monitoring = self.allowMonitoring;
+    return self.allowMonitoring;
+}
+- (void)stopEditableShiftMouseMonitoring { self.monitoring = NO; }
+- (void)toggleInputModeFromModifierTap {
+    ++self.modeSwitchCalls;
+    [super toggleInputModeFromModifierTap];
+}
+@end
+
+static void TestEditableShiftController() {
+    NSString *suite = [@"msime.editable-shift." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    assert(!prefs.shiftTapRequiresEditable);
+    NSDictionary *restricted = @{@"keybindings":@{@"switch_language_shift_requires_editable":@YES}};
+    [prefs applySharedInputPreferences:restricted];
+    assert(prefs.shiftTapRequiresEditable);
+    assert([[prefs sharedPreferencesByMerging:restricted][@"keybindings"][@"switch_language_shift_requires_editable"] boolValue]);
+    for (NSDictionary *removed : @[@{}, @{@"keybindings":@{}}, @{@"keybindings":NSNull.null},
+                                   @{@"keybindings":@{@"switch_language_shift_requires_editable":@"true"}}]) {
+        [prefs applySharedInputPreferences:removed];
+        assert(!prefs.shiftTapRequiresEditable);
+        [prefs applySharedInputPreferences:restricted];
+    }
+    MSIMEAppearancePreferences *reopened = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    [reopened applySharedInputPreferences:restricted];
+    assert(reopened.shiftTapRequiresEditable);
+    EditableShiftController *controller = [EditableShiftController alloc];
+    ShortcutClient *client = [ShortcutClient new];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    controller.allowMonitoring = YES;
+    controller.focusPID = 1;
+    controller.focusIdentity = @"synthetic-empty-field";
+    prefs.englishMode = NO;
+    auto down = TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 1.0);
+    auto up = TapEvent(NSEventTypeFlagsChanged, 56, 0, 1.1);
+    assert(![controller handleEvent:down client:client]);
+    assert(controller.monitoring);
+    assert([controller handleEvent:up client:client]);
+    assert(prefs.englishMode && controller.modeSwitchCalls == 1 && !controller.monitoring);
+    for (int failure = 0; failure < 6; ++failure) {
+        [controller resetModifierTap];
+        controller.focusPID = 1;
+        controller.focusIdentity = failure == 0 ? nil : @"synthetic-empty-field";
+        controller.allowMonitoring = failure != 5;
+        assert(![controller handleEvent:down client:client]);
+        if (failure == 1) controller.focusIdentity = nil; // 权限撤回或焦点未知。
+        if (failure == 2) controller.focusIdentity = @"other-field";
+        if (failure == 3) controller.focusPID = 2;
+        if (failure == 4) [controller cancelEditableShiftTap]; // 鼠标事件原样放行，但取消本轮。
+        assert(![controller handleEvent:up client:client]);
+        assert(prefs.englishMode && controller.modeSwitchCalls == 1 && !controller.monitoring);
+    }
+    // 焦点无法确认不会进入模式切换，自然也不会走切换 HUD。
+    controller.focusIdentity = nil;
+    controller.allowMonitoring = YES;
+    const NSUInteger captures = controller.focusCaptures;
+    [prefs applySharedInputPreferences:@{}];
+    assert(![controller handleEvent:down client:client]);
+    assert([controller handleEvent:up client:client]);
+    assert(!prefs.englishMode && controller.modeSwitchCalls == 2);
+    assert(controller.focusCaptures == captures && !controller.monitoring);
+    [prefs applySharedInputPreferences:restricted];
+    prefs.controlTapShortcut = YES;
+    assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 59, NSEventModifierFlagControl, 2.0) client:client]);
+    assert([controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 59, 0, 2.1) client:client]);
+    assert(prefs.englishMode && controller.modeSwitchCalls == 3);
+    controller.focusIdentity = @"synthetic-empty-field";
+    assert(![controller handleEvent:down client:client]);
+    [controller resetModifierTap];
+    assert(!controller.monitoring && ![controller handleEvent:up client:client]);
+    assert(controller.modeSwitchCalls == 3);
+    [defaults removePersistentDomainForName:suite];
+}
+
 static void TestModifierTaps() {
     for (NSNumber *key in @[@56, @60, @59, @62]) {
         const auto code = key.unsignedShortValue;
@@ -5787,6 +6325,17 @@ static void TestModifierTaps() {
         assert(!tap.observe(TapEvent(NSEventTypeFlagsChanged, otherSide, flag, 1.02), true, true));
         assert(!tap.observe(TapEvent(NSEventTypeFlagsChanged, code, flag, 1.04), true, true));
         assert(tap.observe(TapEvent(NSEventTypeFlagsChanged, otherSide, 0, 1.1), true, true));
+        if (flag == NSEventModifierFlagShift) {
+            tap.reset();
+            assert(!tap.observe(down, true, true));
+            assert(!tap.observe(TapEvent(NSEventTypeKeyDown, 0, flag, 1.02), true, true));
+            assert(tap.shiftChordInterrupted());
+            // 空格本身不应改变状态，控制器随后会把它交给正常输入路径。
+            assert(!tap.observe(TapEvent(NSEventTypeKeyDown, 49, flag, 1.03), true, true));
+            assert(tap.shiftChordInterrupted());
+            assert(!tap.observe(up, true, true));
+            assert(!tap.shiftChordInterrupted());
+        }
     }
 
     NSString *suite = [@"msime.modifier-taps." stringByAppendingString:NSUUID.UUID.UUIDString];
@@ -5893,6 +6442,36 @@ static void TestModifierTaps() {
     assert(![controller handleEvent:down client:other]);
     assert(![controller handleEvent:up client:nil]);
     assert(![controller handleEvent:up client:other] && prefs.englishMode);
+
+    // Shift+字符后仍按住 Shift 按空格：这次空格必须走英文正常输入，不能再次切换中英文。
+    for (const BOOL shiftTap : {NO, YES}) {
+        NSString *spaceSuite = [@"msime.shift-space-chord." stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSUserDefaults *spaceDefaults = [[NSUserDefaults alloc] initWithSuiteName:spaceSuite];
+        MSIMEAppearancePreferences *spacePrefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:spaceDefaults];
+        spacePrefs.inputModeShortcut = YES;
+        spacePrefs.shiftTapShortcut = shiftTap;
+        spacePrefs.englishMode = YES;
+        ModeController *spaceController = [ModeController alloc];
+        ShortcutClient *spaceClient = [ShortcutClient new];
+        ShortcutSession *spaceSession = [ShortcutSession new];
+        [spaceController setValue:spacePrefs forKey:@"appearance"];
+        [spaceController setValue:spaceClient forKey:@"activeClient"];
+        [spaceController setValue:spaceSession forKey:@"session"];
+        [spaceController setValue:@{ @"editing_text": @"", @"candidates": @[] } forKey:@"view"];
+        assert(![spaceController handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 5.0) client:spaceClient]);
+        (void)[spaceController handleEvent:ModeKey(0, NSEventModifierFlagShift, NO) client:spaceClient];
+        assert(![spaceController handleEvent:TapEvent(NSEventTypeKeyUp, 0, NSEventModifierFlagShift, 5.1) client:spaceClient]);
+        assert(![spaceController handleEvent:ModeKey(49, NSEventModifierFlagShift, NO) client:spaceClient]);
+        assert(spacePrefs.englishMode);
+        // 漏掉 Shift 释放通知后，字符的 KeyUp 已确认松开；新一轮快捷键仍要切换一次。
+        assert(![spaceController handleEvent:TapEvent(NSEventTypeKeyUp, 0, 0, 5.2) client:spaceClient]);
+        assert(![spaceController handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 5.3) client:spaceClient]);
+        assert([spaceController handleEvent:ModeKey(49, NSEventModifierFlagShift, NO) client:spaceClient]);
+        assert(!spacePrefs.englishMode);
+        assert(![spaceController handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, 0, 5.4) client:spaceClient]);
+        assert(!spacePrefs.englishMode);
+        MSIMERemoveTestPreferenceSuite(spaceDefaults, spaceSuite);
+    }
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
@@ -6004,9 +6583,15 @@ static void TestInputModeStatusItem() {
 // 单按 Caps Lock 切换中英文。合成的时钟、按键状态和撤回大写锁定：单测不能动跑测试那台机器的真实大写锁定。
 static std::int64_t gCapsNow = 0;
 static bool gCapsHeld = false;
+static bool gCapsHIDKnown = false;
+static bool gCapsHIDHeld = false;
 static bool gCapsReleaseWorks = true;
 static NSUInteger gCapsReleases = 0;
 static std::int64_t SyntheticCapsNow() { return gCapsNow; }
+static bool SyntheticCapsHID(bool *known) {
+    if (known) *known = gCapsHIDKnown;
+    return gCapsHIDHeld;
+}
 static CGEventFlags SyntheticCapsFlags(CGEventSourceStateID state) {
     assert(state == kCGEventSourceStateHIDSystemState);
     // 松手后逻辑锁定位仍为真，只有实体按住位清除；不能把锁定当成长按。
@@ -6016,13 +6601,21 @@ static bool SyntheticCapsRelease() { ++gCapsReleases; return gCapsReleaseWorks; 
 
 static void TestCapsLockTap() {
     const auto realRelease = MSIMECapsLockRelease;
-    const auto realFlags = MSIMECapsLockFlagsState;
+    const auto realHID = MSIMECapsLockHIDState;
+    const auto realFlags = MSIMEPhysicalModifierFlagsState;
     const auto realNow = MSIMECapsLockNow;
     MSIMECapsLockRelease = &SyntheticCapsRelease;
-    MSIMECapsLockFlagsState = &SyntheticCapsFlags;
+    MSIMECapsLockHIDState = &SyntheticCapsHID;
+    MSIMEPhysicalModifierFlagsState = &SyntheticCapsFlags;
     MSIMECapsLockNow = &SyntheticCapsNow;
     gCapsReleases = 0;
     gCapsReleaseWorks = true;
+    gCapsHIDKnown = true;
+    gCapsHIDHeld = true;
+    assert(MSIMECapsLockPhysicallyHeld());
+    gCapsHIDHeld = false;
+    assert(!MSIMECapsLockPhysicallyHeld());
+    gCapsHIDKnown = false;
 
     NSString *suite = [@"msime.caps-lock-tap." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
@@ -6158,9 +6751,12 @@ static void TestCapsLockTap() {
         gCapsNow = 10000; gCapsHeld = true;
         assert(![controller handleEvent:capsOn(10.0) client:client]);
         gCapsNow = 10050; gCapsHeld = false;
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.0];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
         while (gCapsReleases == releasesBefore && deadline.timeIntervalSinceNow > 0)
-            [NSRunLoop.mainRunLoop runMode:mode beforeDate:deadline];
+            [NSRunLoop.mainRunLoop runMode:mode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        if (!(gCapsReleases == releasesBefore + 1 && prefs.englishMode && !session.capsLock))
+            fprintf(stderr, "caps_lock_mode=%s releases=%lu expected=%lu english=%d caps=%d\n",
+                mode.UTF8String, (unsigned long)gCapsReleases, (unsigned long)(releasesBefore + 1), prefs.englishMode, session.capsLock);
         assert(gCapsReleases == releasesBefore + 1 && prefs.englishMode && !session.capsLock);
 
         // 同一运行模式下超过阈值仍保留大写锁定，不能为了让轻点响应而把长按也切换掉。
@@ -6168,9 +6764,9 @@ static void TestCapsLockTap() {
         gCapsNow = 11000; gCapsHeld = true;
         assert(![controller handleEvent:capsOn(11.0) client:client]);
         gCapsNow = 11301;
-        deadline = [NSDate dateWithTimeIntervalSinceNow:1.0];
+        deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
         while (!session.capsLock && deadline.timeIntervalSinceNow > 0)
-            [NSRunLoop.mainRunLoop runMode:mode beforeDate:deadline];
+            [NSRunLoop.mainRunLoop runMode:mode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         assert(session.capsLock && prefs.englishMode && gCapsReleases == releasesBefore + 1);
         gCapsHeld = false;
     }
@@ -6198,7 +6794,8 @@ static void TestCapsLockTap() {
     assert(session.capsLock && !prefs.englishMode && gCapsReleases == releasesBefore);
 
     MSIMECapsLockRelease = realRelease;
-    MSIMECapsLockFlagsState = realFlags;
+    MSIMECapsLockHIDState = realHID;
+    MSIMEPhysicalModifierFlagsState = realFlags;
     MSIMECapsLockNow = realNow;
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
@@ -6385,6 +6982,132 @@ static void TestTemporaryJapaneseLongVowelThroughRealSession(BOOL paging) {
         MSIMERemoveTestPreferenceSuite(defaults, suite);
         assert([NSFileManager.defaultManager removeItemAtPath:root error:&error] && !error);
     }
+}
+
+// 用真实 NSEvent、控制器和 Rust 会话检查调频，客户端仅记录合成上屏。
+static void TestInitialLearningThroughRealKeys(BOOL numeric, BOOL priorContext) {
+    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSError *error = nil;
+    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:[root stringByAppendingPathComponent:@"preferences"] error:&error];
+    assert(snapshot && !error);
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    preferences[@"scheme"] = @"shuangpin";
+    preferences[@"shuangpin_profile"] = @"xiaohe";
+    preferences[@"default_ime_mode"] = @"chinese";
+    preferences[@"learning"] = @YES;
+    preferences[@"cloud_candidates"] = @NO;
+    preferences[@"frequency"] = @{@"mode": @"promote", @"trigger_count": @1, @"linear_step": @1};
+    NSMutableDictionary *options = [@{@"api_version": @1, @"preferences": preferences,
+        @"quick_phrase_candidates": @YES, @"phrase_preedit": @YES} mutableCopy];
+    for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
+        NSString *path = [root stringByAppendingPathComponent:name];
+        assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
+        options[name] = path;
+    }
+    for (NSString *name in @[@"resources", @"dictionaries"]) {
+        sqlite3 *database = nullptr;
+        NSString *path = [options[name] stringByAppendingPathComponent:@"msime-pinyin.db"];
+        assert(sqlite3_open(path.fileSystemRepresentation, &database) == SQLITE_OK);
+        assert(sqlite3_exec(database,
+            "CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+            "INSERT INTO tbl_1_l VALUES('lai','l','甲',14837007),('li','l','丁',7329328),"
+            "('lao','l','戊',3762961),('la','l','己',3655999),('le','l','乙',3481243),"
+            "('liang','l','庚',3302466),('li','l','辛',3298612),('liao','l','乙',999);"
+            "CREATE TABLE tbl_2_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+            "CREATE TABLE tbl_1_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+            "INSERT INTO tbl_1_w VALUES('wan','w','丙',100);"
+            "CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);", nullptr, nullptr, nullptr) == SQLITE_OK);
+        assert(sqlite3_close(database) == SQLITE_OK);
+    }
+    auto query = [&](NSString *path, const char *sql) -> sqlite3_int64 {
+        sqlite3 *database = nullptr;
+        assert(sqlite3_open_v2(path.fileSystemRepresentation, &database, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK);
+        sqlite3_stmt *statement = nullptr;
+        assert(sqlite3_prepare_v2(database, sql, -1, &statement, nullptr) == SQLITE_OK);
+        assert(sqlite3_step(statement) == SQLITE_ROW);
+        sqlite3_int64 result = sqlite3_column_int64(statement, 0);
+        assert(sqlite3_finalize(statement) == SQLITE_OK);
+        assert(sqlite3_close(database) == SQLITE_OK);
+        return result;
+    };
+    NSString *working = [options[@"dictionaries"] stringByAppendingPathComponent:@"msime-pinyin.db"];
+    NSString *journal = [options[@"user_data"] stringByAppendingPathComponent:@"msime_user.db"];
+    if (priorContext) {
+        // 首次创建真实会话前预置合成历史，检验旧上下文不能推翻全局调频首选。
+        sqlite3 *database = nullptr;
+        assert(sqlite3_open(journal.fileSystemRepresentation, &database) == SQLITE_OK);
+        assert(sqlite3_exec(database,
+            "CREATE TABLE personal_bigram(previous TEXT NOT NULL,word TEXT NOT NULL,count INTEGER NOT NULL CHECK(count>0),PRIMARY KEY(previous,word)) WITHOUT ROWID;"
+            "CREATE TABLE personal_trigram(earlier TEXT NOT NULL,previous TEXT NOT NULL,word TEXT NOT NULL,count INTEGER NOT NULL CHECK(count>0),PRIMARY KEY(earlier,previous,word)) WITHOUT ROWID;"
+            "INSERT INTO personal_bigram VALUES('丙','甲',10);", nullptr, nullptr, nullptr) == SQLITE_OK);
+        assert(sqlite3_close(database) == SQLITE_OK);
+    }
+    const char *weightSQL = "SELECT weight FROM tbl_1_l WHERE key='le' AND value='乙'";
+    MSIMEClientSession *session = [[MSIMEClientSession alloc] initWithOptions:options error:&error];
+    assert(session && !error);
+    NSDictionary *view = [session setFocused:YES error:&error][@"view"];
+    assert(view && !error);
+    NSString *suite = [@"msime.initial-learning." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:[NSURL fileURLWithPath:root]];
+    [prefs applySharedInputPreferences:preferences];
+    prefs.englishMode = NO;
+    prefs.expandCandidates = NO;
+    ShortcutClient *client = [ShortcutClient new];
+    client.document = @"";
+    client.selection = NSMakeRange(0, 0);
+    client.caret = NSMakeRect(100, 100, 1, 16);
+    ModeController *controller = [ModeController alloc];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:view forKey:@"view"];
+    [controller setValue:[[HiddenCandidatePanel alloc] init] forKey:@"panel"];
+    BOOL displayedBeforeGlobal = NO;
+    for (NSUInteger round = 0; round < 5; ++round) {
+        assert([controller handleEvent:KeypadKey(37, @"l", 0, NO) client:client]);
+        NSArray *rows = [controller valueForKey:@"view"][@"candidates"];
+        NSUInteger index = [rows indexOfObjectPassingTest:^BOOL(NSDictionary *row, NSUInteger offset, BOOL *stop) {
+            (void)offset; (void)stop;
+            return [row[@"text"] isEqual:@"乙"];
+        }];
+        assert(index != NSNotFound && index < 6);
+        sqlite3_int64 before = query(working, weightSQL);
+        if (index == 0 && before < 14837007) displayedBeforeGlobal = YES;
+        if (numeric) {
+            static const unsigned short codes[] = {18, 19, 20, 21, 23, 22};
+            NSString *digit = [NSString stringWithFormat:@"%lu", (unsigned long)index + 1];
+            assert([controller handleEvent:KeypadKey(codes[index], digit, 0, NO) client:client]);
+        } else {
+            // 双拼的左右键编辑音节，使用向下键逐项选择候选。
+            for (NSUInteger move = 0; move < index; ++move)
+                assert([controller handleEvent:ModeKey(125, 0, NO) client:client]);
+            NSArray *highlighted = [controller valueForKey:@"view"][@"candidates"];
+            assert([highlighted[index][@"highlighted"] boolValue]);
+            assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
+        }
+        assert([client.committed isEqual:@"乙"] && client.insertions.count == round + 1);
+        sqlite3_int64 after = query(working, weightSQL);
+        if (before < 14837007) assert(after > before);
+        assert(query(journal, "SELECT weight FROM user_dictionary_operations WHERE dictionary='pinyin' AND key='le' AND value='乙' AND operation='upsert'") == after);
+    }
+    assert(displayedBeforeGlobal && query(working, weightSQL) > 14837007);
+    assert([controller handleEvent:KeypadKey(13, @"w", 0, NO) client:client]);
+    assert([controller handleEvent:KeypadKey(38, @"j", 0, NO) client:client]);
+    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
+    assert([client.committed isEqual:@"丙"]);
+    assert([controller handleEvent:KeypadKey(37, @"l", 0, NO) client:client]);
+    assert([[controller valueForKey:@"view"][@"candidates"][0][@"text"] isEqual:@"乙"]);
+    assert([session closeWithError:&error] && !error);
+    MSIMEClientSession *reopened = [[MSIMEClientSession alloc] initWithOptions:options error:&error];
+    assert(reopened && !error);
+    assert([reopened setFocused:YES error:&error] && !error);
+    NSDictionary *result = [reopened typeASCII:'l' shift:NO error:&error];
+    assert(result && !error && [result[@"view"][@"candidates"][0][@"text"] isEqual:@"乙"]);
+    assert([reopened closeWithError:&error] && !error);
+    assert(query([options[@"resources"] stringByAppendingPathComponent:@"msime-pinyin.db"], weightSQL) == 3481243);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    assert([NSFileManager.defaultManager removeItemAtPath:root error:&error] && !error);
 }
 
 // 只注入一次命令失败，其余按键、快照、偏好保存和方案切换均走真实引擎。
@@ -7806,6 +8529,79 @@ static MSIMECandidateButton *PageButton(NSView *content, NSInteger tag) {
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (id)view;
     }
     return nil;
+}
+
+@interface TranslationFontSession : ExpandedGridSession
+@end
+@implementation TranslationFontSession
+- (NSDictionary *)gridCandidate:(NSUInteger)index highlighted:(BOOL)highlighted {
+    NSMutableDictionary *candidate = [[super gridCandidate:index highlighted:highlighted] mutableCopy];
+    candidate[@"translation"] = @"synthetic glossary";
+    return candidate;
+}
+@end
+
+static void TestCandidateTranslationFontSize() {
+    NSString *suite = [@"msime.translation-font." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    prefs.englishMode = NO;
+    prefs.candidateTranslations = YES;
+    prefs.expandCandidates = YES;
+    prefs.pageSize = 5;
+    ModeController *controller = [ModeController alloc];
+    TranslationFontSession *session = [TranslationFontSession new];
+    session.generation = 7;
+    session.total = 23;
+    session.pageSize = 5;
+    session.prefix = @"词";
+    session.editing = @"shi";
+    ShortcutClient *client = [ShortcutClient new];
+    client.caret = NSMakeRect(200, 400, 1, 18);
+    HiddenCandidatePanel *panel = [[HiddenCandidatePanel alloc] init];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:panel forKey:@"panel"];
+    [controller setValue:[session gridView] forKey:@"view"];
+    NSMutableDictionary *preferences = [[prefs sharedPreferencesByMerging:@{}] mutableCopy];
+    for (NSNumber *vertical in @[@NO, @YES]) {
+        preferences[@"candidate_layout"] = vertical.boolValue ? @"vertical" : @"horizontal";
+        for (NSNumber *scale in @[@100, @150]) {
+            for (id size in @[@12, @21, @32, NSNull.null]) {
+                preferences[@"candidate_translation_font_size"] = size;
+                preferences[@"candidate_scale_percent"] = scale;
+                [prefs applySharedCandidatePreferences:preferences];
+                [controller renderCandidates];
+                MSIMECandidateButton *button = PageButton(panel.contentView, 0);
+                CGFloat expected = (size == NSNull.null ? MSIMECandidateTranslationPointSize : [size doubleValue]) * scale.doubleValue / 100;
+                assert(button && [button.translation isEqual:@"synthetic glossary"]);
+                assert(button.translationBelow == !vertical.boolValue);
+                assert(fabs(button.translationFont.pointSize - expected) < 0.01);
+                assert(button.frame.size.height >= MSIMETranslationTextSize(button.translation, button.translationFont).height);
+                NSBitmapImageRep *bitmap = [button bitmapImageRepForCachingDisplayInRect:button.bounds];
+                assert(bitmap);
+                [button cacheDisplayInRect:button.bounds toBitmapImageRep:bitmap];
+            }
+        }
+    }
+    preferences[@"candidate_layout"] = @"horizontal";
+    [prefs applySharedCandidatePreferences:preferences];
+    [controller renderCandidates];
+    assert([controller handleEvent:ModeKey(125, 0, NO) client:client]);
+    assert([controller valueForKey:@"expandedCandidates"]);
+    for (id size in @[@21, @32, NSNull.null]) {
+        preferences[@"candidate_translation_font_size"] = size;
+        [prefs applySharedCandidatePreferences:preferences];
+        [controller renderCandidates];
+        MSIMECandidateButton *button = ExpandedGridSubview(panel, 0);
+        CGFloat expected = (size == NSNull.null ? MSIMECandidateTranslationPointSize : [size doubleValue]) * 1.5;
+        assert(button && [button.translation isEqual:@"synthetic glossary"]);
+        assert(fabs(button.translationFont.pointSize - expected) < 0.01);
+        assert(button.frame.size.height >= MSIMETranslationTextSize(button.translation, button.translationFont).height);
+    }
+    [controller closeExpandedCandidates];
+    [defaults removePersistentDomainForName:suite];
 }
 
 static void TestExternalSkin(MSIMEInputController *controller, HiddenCandidatePanel *panel, NSUserDefaults *defaults) {
@@ -11196,6 +11992,301 @@ static void TestSessionUnavailableIsReported() {
     // The repeat says nothing new; without this every focus while the dictionary is missing writes a line.
     assert([log componentsSeparatedByString:@"reason=no usable runtime options"].count - 1 == 1);
     assert([log componentsSeparatedByString:@"reason=session refused the runtime options"].count - 1 == 1);
+
+    for (NSString *category in @[@"dictionary access unavailable", @"dictionary maintenance busy", @"invalid options document"]) {
+        NSError *error = [NSError errorWithDomain:@"synthetic" code:1 userInfo:@{NSLocalizedDescriptionKey:category}];
+        assert([MSIMESessionUnavailableReason(@{}, error) isEqual:category]);
+    }
+    NSError *privateError = [NSError errorWithDomain:@"synthetic" code:1
+        userInfo:@{NSLocalizedDescriptionKey:@"/synthetic/private-path synthetic-secret"}];
+    assert([MSIMESessionUnavailableReason(@{}, privateError) isEqual:@"session refused the runtime options"]);
+}
+
+@interface SessionRecoveryController : MSIMEInputController
+@property(strong) NSDictionary *testOptions;
+@property NSUInteger optionReads;
+@property NSUInteger creations;
+@property NSUInteger failures;
+@property BOOL missingFirstOptions;
+@end
+@implementation SessionRecoveryController
+- (NSDictionary *)runtimeOptions {
+    ++self.optionReads;
+    return self.missingFirstOptions && self.optionReads == 1 ? nil : self.testOptions;
+}
+- (MSIMEClientSession *)createSessionWithOptions:(NSDictionary *)options error:(NSError **)error {
+    ++self.creations;
+    if (self.creations <= self.failures) {
+        if (error) *error = [NSError errorWithDomain:@"synthetic" code:1
+            userInfo:@{NSLocalizedDescriptionKey:@"dictionary access unavailable"}];
+        return nil;
+    }
+    return [super createSessionWithOptions:options error:error];
+}
+// 本专项只验证原生控制器与真实 Rust 会话的生命周期，不启动后台偏好轮询或联网授权。
+- (void)startPreferencesMonitoring {}
+- (void)resolveCloudCandidatesConsentWithOptions:(NSDictionary *)options { (void)options; }
+- (void)confirmFieldTraitsBeforeFocus {}
+- (void)refreshTypingEffectSettings {}
+@end
+
+@interface SessionRecoveryNoticeController : SessionRecoveryController
+@property BOOL secureInput;
+@property NSUInteger restartRequests;
+@property NSUInteger terminations;
+@property(copy) void (^restartCompletion)(BOOL);
+@end
+@implementation SessionRecoveryNoticeController
+- (BOOL)secureEventInputActive { return self.secureInput; }
+- (void)launchInputMethodRestart:(void (^)(BOOL))completion {
+    ++self.restartRequests;
+    self.restartCompletion = completion;
+}
+- (void)terminateCurrentInputMethod { ++self.terminations; }
+@end
+
+static void TestSessionRecoveryNotice(NSDictionary *options) {
+    MSIMEInputController *previousFocus = MSIMEFocusedController;
+    MSIMESessionRecoveryLastNotice = 0;
+    [MSIMEInputSessionRecoveryPanel dismissForDelegate:nil];
+    NSString *suite = [@"msime.session-recovery-notice." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults
+        skinsRoot:[NSURL fileURLWithPath:options[@"resources"]]];
+    appearance.englishMode = NO;
+    auto makeController = ^SessionRecoveryNoticeController * {
+        SessionRecoveryNoticeController *controller = [SessionRecoveryNoticeController alloc];
+        controller.testOptions = options;
+        controller.failures = NSUIntegerMax;
+        [controller setValue:appearance forKey:@"appearance"];
+        [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
+        return controller;
+    };
+    SessionRecoveryNoticeController *controller = makeController();
+    MSIMEFocusedController = controller;
+    NSWindow *previousKey = NSApp.keyWindow;
+    [controller prepareSession];
+    assert(!MSIMESessionRecoveryPanel.isVisible);
+    DrainMainQueue();
+    MSIMEInputSessionRecoveryPanel *panel = MSIMESessionRecoveryPanel;
+    assert(panel.isVisible && panel.recoveryDelegate == controller);
+    assert(!panel.canBecomeKeyWindow && !panel.canBecomeMainWindow && !panel.isKeyWindow);
+    assert(NSApp.keyWindow == previousKey);
+    assert((panel.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0);
+    assert([panel.message.stringValue containsString:@"直接输入字母"]);
+    assert(panel.retryButton.keyEquivalent.length == 0 && panel.restartButton.keyEquivalent.length == 0);
+    uint64_t shown = MSIMESessionRecoveryLastNotice;
+    [controller prepareSession];
+    DrainMainQueue();
+    assert(MSIMESessionRecoveryLastNotice == shown);
+    [panel.laterButton performClick:nil];
+    assert(!panel.isVisible && !panel.recoveryDelegate);
+    [controller prepareSession];
+    DrainMainQueue();
+    assert(!panel.isVisible && MSIMESessionRecoveryLastNotice == shown);
+    NSMenu *menu = [controller menu];
+    assert([menu itemWithTitle:@"重试中文输入"].action == @selector(retryUnavailableSession:));
+    assert([menu itemWithTitle:@"重启输入法…"].action == @selector(restartUnavailableInputMethod:));
+
+    // 菜单先显示重启影响，提示中的明确点击才启动；失败后仍保留当前进程和可重试按钮。
+    [controller restartUnavailableInputMethod:nil];
+    assert(panel.isVisible && controller.restartRequests == 0);
+    [controller restartUnavailableInputMethod:[menu itemWithTitle:@"重启输入法…"]];
+    assert(panel.isVisible && controller.restartRequests == 0);
+    [panel.retryButton performClick:nil];
+    assert([panel.message.stringValue containsString:@"重试后仍无法恢复"]);
+    [panel.restartButton performClick:nil];
+    assert(controller.restartRequests == 1 && !panel.retryButton.enabled && !panel.restartButton.enabled);
+    [controller restartUnavailableInputMethod:nil];
+    assert(controller.restartRequests == 1);
+    SessionRecoveryNoticeController *peer = makeController();
+    MSIMEFocusedController = peer;
+    [peer prepareSession];
+    [peer restartUnavailableInputMethod:nil];
+    assert(peer.restartRequests == 0);
+    MSIMEFocusedController = controller;
+    controller.restartCompletion(NO);
+    assert(controller.terminations == 0 && panel.retryButton.enabled && panel.restartButton.enabled);
+    assert([panel.message.stringValue containsString:@"未能启动"]);
+
+    controller.failures = 0;
+    [panel.retryButton performClick:nil];
+    assert([controller valueForKey:@"session"] && ![controller valueForKey:@"sessionUnavailableReason"]);
+    assert(!panel.isVisible && !panel.recoveryDelegate);
+    assert(![[controller menu] itemWithTitle:@"重试中文输入"]);
+    [controller releaseDictionarySession];
+    controller.failures = NSUIntegerMax;
+
+    // 排队期间失焦、恢复或进入安全输入时，过时提示不能显示。
+    MSIMESessionRecoveryLastNotice = 0;
+    [controller prepareSession];
+    assert(MSIMESessionRecoveryNoticeScheduled);
+    [controller setValue:nil forKey:@"activeClient"];
+    DrainMainQueue();
+    assert(!panel.isVisible);
+    [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
+    controller.secureInput = YES;
+    [controller prepareSession];
+    DrainMainQueue();
+    assert(!panel.isVisible);
+    controller.secureInput = NO;
+    appearance.englishMode = YES;
+    [controller prepareSession];
+    DrainMainQueue();
+    assert(!panel.isVisible);
+    appearance.englishMode = NO;
+    [controller prepareSession];
+    controller.failures = 0;
+    [controller prepareSession];
+    DrainMainQueue();
+    assert(!panel.isVisible && [controller valueForKey:@"session"]);
+    [controller releaseDictionarySession];
+    controller.failures = NSUIntegerMax;
+    [controller prepareSession];
+    DrainMainQueue();
+    assert(panel.isVisible);
+    controller.secureInput = YES;
+    [controller syncFieldTraits];
+    assert(!panel.isVisible);
+    controller.secureInput = NO;
+
+    // 提醒频率按进程限制；另一个控制器不能因切换输入框而立即再弹。
+    SessionRecoveryNoticeController *other = makeController();
+    MSIMEFocusedController = other;
+    [other prepareSession];
+    DrainMainQueue();
+    assert(!panel.isVisible);
+    MSIMESessionRecoveryLastNotice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - MSIMESessionRecoveryNoticeInterval - 1;
+    [other prepareSession];
+    DrainMainQueue();
+    assert(panel.isVisible && panel.recoveryDelegate == other);
+    NSUInteger creations = controller.creations;
+    [controller retryUnavailableSession:nil];
+    assert(controller.creations == creations && panel.recoveryDelegate == other);
+    Method base = class_getInstanceMethod(IMKInputController.class, @selector(deactivateServer:));
+    IMP original = method_setImplementation(base, (IMP)RecordBaseDeactivation);
+    [other deactivateServer:[other valueForKey:@"activeClient"]];
+    method_setImplementation(base, original);
+    assert(!panel.isVisible && !panel.recoveryDelegate);
+
+    MSIMEFocusedController = controller;
+    [controller restartUnavailableInputMethod:nil];
+    [panel.restartButton performClick:nil];
+    assert(controller.restartRequests == 2);
+    controller.restartCompletion(YES);
+    assert(controller.terminations == 1 && !panel.isVisible);
+    controller.restartCompletion = nil;
+    [controller setValue:nil forKey:@"activeClient"];
+    MSIMEFocusedController = previousFocus;
+    MSIMESessionRecoveryLastNotice = 0;
+    DrainMainQueue();
+    [defaults removePersistentDomainForName:suite];
+}
+
+static void TestIdleSessionRecovery() {
+    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSError *error = nil;
+    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
+    assert(snapshot && !error);
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    preferences[@"scheme"] = @"wubi";
+    preferences[@"learning"] = @NO;
+    preferences[@"wubi_mixed_pinyin"] = @NO;
+    NSMutableDictionary *options = [@{@"api_version":@1, @"preferences":preferences} mutableCopy];
+    for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
+        NSString *path = [root stringByAppendingPathComponent:name];
+        assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
+        options[name] = path;
+    }
+    for (NSString *path in @[[options[@"resources"] stringByAppendingPathComponent:@"msime-wubi.db"],
+                             [options[@"dictionaries"] stringByAppendingPathComponent:@"msime-pinyin.db"]]) {
+        sqlite3 *database = nullptr;
+        assert(sqlite3_open(path.fileSystemRepresentation, &database) == SQLITE_OK);
+        assert(sqlite3_exec(database,
+            "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);"
+            "CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);"
+            "INSERT INTO wubi86 VALUES('wq','你',10);", nullptr, nullptr, nullptr) == SQLITE_OK);
+        assert(sqlite3_close(database) == SQLITE_OK);
+    }
+    auto makeController = ^SessionRecoveryController * {
+        SessionRecoveryController *controller = [SessionRecoveryController alloc];
+        controller.testOptions = options;
+        [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
+        return controller;
+    };
+    auto sessionOf = ^MSIMEClientSession *(SessionRecoveryController *controller) {
+        return [controller valueForKey:@"session"];
+    };
+    struct rlimit previous = {};
+    assert(getrlimit(RLIMIT_NOFILE, &previous) == 0);
+    struct rlimit limited = previous;
+    limited.rlim_cur = MIN(previous.rlim_cur, (rlim_t)256);
+    assert(setrlimit(RLIMIT_NOFILE, &limited) == 0);
+    SessionRecoveryController *active = makeController();
+    [active prepareSession];
+    MSIMEClientSession *activeSession = sessionOf(active);
+    assert(activeSession);
+    [activeSession typeASCII:'w' shift:NO error:&error];
+    [activeSession typeASCII:'q' shift:NO error:&error];
+    assert(!error);
+    SessionRecoveryController *english = makeController();
+    [english prepareSession];
+    [english setValue:[sessionOf(english) setDedicatedEnglishEnabled:YES error:&error] forKey:@"view"];
+    assert(!error);
+    [english setValue:nil forKey:@"activeClient"];
+    NSMutableArray<SessionRecoveryController *> *controllers = [NSMutableArray arrayWithObject:english];
+    Method base = class_getInstanceMethod(IMKInputController.class, @selector(deactivateServer:));
+    IMP original = method_setImplementation(base, (IMP)RecordBaseDeactivation);
+    for (NSUInteger index = 0; index < 64; ++index) {
+        @autoreleasepool {
+            SessionRecoveryController *controller = makeController();
+            [controllers addObject:controller];
+            [controller prepareSession];
+            MSIMEClientSession *session = sessionOf(controller);
+            assert(session && controller.creations == 1);
+            [session typeASCII:'w' shift:NO error:&error];
+            NSDictionary *typed = [session typeASCII:'q' shift:NO error:&error];
+            assert(!error && [typed[@"view"][@"scheme"] isEqual:@2]);
+            assert([typed[@"view"][@"candidates"][0][@"text"] isEqual:@"你"]);
+            [controller apply:[session command:MSIME_CANCEL error:&error]];
+            [controller deactivateServer:[controller valueForKey:@"activeClient"]];
+            NSUInteger idle = 0;
+            for (SessionRecoveryController *retained in controllers) if (sessionOf(retained)) ++idle;
+            assert(idle <= MSIMEIdleDictionarySessionLimit);
+            assert(sessionOf(active) == activeSession);
+            assert([[activeSession viewWithError:&error][@"editing_text"] isEqual:@"wq"] && !error);
+        }
+    }
+    method_setImplementation(base, original);
+    assert(!sessionOf(english) && [[english valueForKey:@"resumeDedicatedEnglish"] boolValue]);
+    [english setValue:[ShortcutClient new] forKey:@"activeClient"];
+    [english prepareSession];
+    assert([sessionOf(english) viewWithError:&error][@"dedicated_english"] == (__bridge id)kCFBooleanTrue && !error);
+    [english setValue:nil forKey:@"activeClient"];
+    [MSIMEInputController releaseIdleDictionarySessionsKeeping:0];
+
+    for (NSUInteger scenario = 0; scenario < 3; ++scenario) {
+        SessionRecoveryController *idle = makeController();
+        [idle prepareSession];
+        assert(sessionOf(idle));
+        [idle setValue:nil forKey:@"activeClient"];
+        SessionRecoveryController *retry = makeController();
+        retry.failures = scenario == 0 ? 1 : (scenario == 1 ? 2 : 0);
+        retry.missingFirstOptions = scenario == 2;
+        [retry prepareSession];
+        assert(!sessionOf(idle));
+        assert(retry.optionReads == 2 && retry.creations == (scenario == 2 ? 1 : 2));
+        assert((sessionOf(retry) != nil) == (scenario != 1));
+        if (scenario == 1) assert([[retry valueForKey:@"sessionUnavailableReason"] isEqual:@"dictionary access unavailable"]);
+        [retry setValue:nil forKey:@"activeClient"];
+        [MSIMEInputController releaseIdleDictionarySessionsKeeping:0];
+    }
+    [active setValue:nil forKey:@"activeClient"];
+    [MSIMEInputController releaseIdleDictionarySessionsKeeping:0];
+    assert([MSIMEInputController dictionarySessionHolders].count == 0);
+    assert(setrlimit(RLIMIT_NOFILE, &previous) == 0);
+    TestSessionRecoveryNotice(options);
+    assert([NSFileManager.defaultManager removeItemAtPath:root error:&error] && !error);
 }
 
 // Every preference object built here without an explicit skins root reads msime::mac::DefaultSkinsRoot(), which is otherwise the user's real skins folder: an external skin installed there adds a card to the skin page and breaks the counts below. The whole run gets an empty folder of its own, removed when main returns.
@@ -11243,6 +12334,254 @@ struct IsolatedUserHome {
     }
 };
 
+@interface SpacingQueryShortcutClient : ApplicationShortcutClient
+@property(nonatomic, copy) void (^duringContextRead)(void);
+@property(nonatomic, copy) void (^duringBundleRead)(void);
+@property(nonatomic, copy) void (^afterInsert)(void);
+@property(nonatomic, copy) void (^duringReplacement)(void);
+@end
+@implementation SpacingQueryShortcutClient
+- (void)insertText:(id)text replacementRange:(NSRange)range {
+    [super insertText:text replacementRange:range];
+    void (^callback)(void) = self.afterInsert;
+    self.afterInsert = nil;
+    if (callback) callback();
+    if (range.location != NSNotFound) {
+        void (^replacement)(void) = self.duringReplacement;
+        self.duringReplacement = nil;
+        if (replacement) replacement();
+    }
+}
+- (NSRange)selectedRange {
+    void (^callback)(void) = self.duringContextRead;
+    self.duringContextRead = nil;
+    if (callback) callback();
+    return [super selectedRange];
+}
+- (NSString *)bundleIdentifier {
+    void (^callback)(void) = self.duringBundleRead;
+    self.duringBundleRead = nil;
+    if (callback) callback();
+    return [super bundleIdentifier];
+}
+@end
+
+static void TestCrossCommitSpacingReentrancy() {
+    NSString *suite = [@"msime.cross-commit-spacing-reentrant." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    [prefs activateInputModeForApplication:@"com.example.Writer"];
+    [prefs applySharedInputPreferences:@{@"cross_commit_spacing":@YES, @"cross_commit_spacing_excluded_apps":@[]}];
+    prefs.inputScheme = @"quanpin";
+    prefs.englishMode = YES;
+    prefs.fullWidthInput = NO;
+    SpacingQueryShortcutClient *client = [SpacingQueryShortcutClient new];
+    client.bundleIdentifier = @"com.example.Writer";
+    client.document = @"用";
+    client.selection = NSMakeRange(1, 0);
+    ModeController *controller = [ModeController alloc];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    __weak SpacingQueryShortcutClient *weakClient = client;
+    // 查询发生在原字落地后；新事件无需排队或重放。
+    client.duringContextRead = ^{
+        SpacingQueryShortcutClient *client = weakClient;
+        assert([client.document isEqual:@"用R"]);
+        assert([controller handleEvent:LayoutKey(32, @"u", 0) client:client]);
+        assert(![controller handleEvent:LayoutKey(49, @" ", 0) client:client]);
+        [client insertText:@" " replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+    };
+    assert([controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert([client.document isEqual:@"用Ru "]);
+    // 原始写入本身重入，也不能让外层事后改写较新的文字。
+    client.document = @"用";
+    client.selection = NSMakeRange(1, 0);
+    client.afterInsert = ^{
+        SpacingQueryShortcutClient *client = weakClient;
+        assert([controller handleEvent:LayoutKey(32, @"u", 0) client:client]);
+        assert([controller handleEvent:LayoutKey(1, @"s", 0) client:client]);
+    };
+    assert([controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert([client.document isEqual:@"用Rus"]);
+    // 退格和导航维持原来的 NO；查询过期后不补写被删掉的 R。
+    client.document = @"用";
+    client.selection = NSMakeRange(1, 0);
+    client.duringContextRead = ^{
+        SpacingQueryShortcutClient *client = weakClient;
+        assert(![controller handleEvent:LayoutKey(51, @"\x7f", 0) client:client]);
+        [client insertText:@"" replacementRange:NSMakeRange(client.selection.location - 1, 1)];
+        assert(![controller handleEvent:LayoutKey(123, @"\uf702", 0) client:client]);
+        client.selection = NSMakeRange(0, 0);
+    };
+    assert([controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert([client.document isEqual:@"用"] && client.selection.location == 0);
+    // 普通上屏查询里重入新组字，不让旧上屏清掉它的标记或视图。
+    client.document = @"Rust";
+    client.selection = NSMakeRange(4, 0);
+    prefs.englishMode = NO;
+    NSDictionary *nextView = @{@"scheme":@0, @"editing_text":@"n", @"preedit":@"n", @"candidates":@[]};
+    client.duringContextRead = ^{ [controller apply:@{@"view":nextView}]; };
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"},
+                        @"view":@{@"editing_text":@"", @"candidates":@[]}}];
+    assert([client.document isEqual:@"Rust写"] && [client.marked isEqual:@"n"]);
+    assert([[controller valueForKey:@"view"] isEqual:nextView]);
+    // 最后的显式替换同样可能重入；替换完成后不能再画旧空标记。
+    client.document = @"Rust";
+    client.selection = NSMakeRange(4, 0);
+    client.duringReplacement = ^{ [controller apply:@{@"view":nextView}]; };
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"},
+                        @"view":@{@"editing_text":@"", @"candidates":@[]}}];
+    assert([client.document isEqual:@"Rust 写"] && [client.marked isEqual:@"n"]);
+    assert([[controller valueForKey:@"view"] isEqual:nextView]);
+    // 无副作用的抬键只取消格式化，不能阻止已完成上屏清理旧候选。
+    NSDictionary *idleAfterCommit = @{@"scheme":@0, @"editing_text":@"", @"candidates":@[]};
+    [controller setValue:nextView forKey:@"view"];
+    client.afterInsert = ^{
+        SpacingQueryShortcutClient *client = weakClient;
+        NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp location:NSZeroPoint modifierFlags:0 timestamp:0
+            windowNumber:0 context:nil characters:@"r" charactersIgnoringModifiers:@"r" isARepeat:NO keyCode:15];
+        [controller handleEvent:up client:client];
+    };
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idleAfterCommit}];
+    assert([[controller valueForKey:@"view"] isEqual:idleAfterCommit]);
+    assert([client.marked isEqual:@""]);
+    // 查询回调里变更开关也取消剩余读取及格式化。
+    client.document = @"Rust";
+    client.selection = NSMakeRange(4, 0);
+    client.duringContextRead = ^{ [prefs applySharedInputPreferences:@{}]; };
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idleAfterCommit}];
+    assert([client.document isEqual:@"Rust写"]);
+    [prefs applySharedInputPreferences:@{@"cross_commit_spacing":@YES, @"cross_commit_spacing_excluded_apps":@[]}];
+    // 安全或焦点变化只取消格式化，已经落地的原文保留。
+    client.document = @"Rust";
+    client.selection = NSMakeRange(4, 0);
+    prefs.englishMode = NO;
+    client.duringContextRead = ^{ controller.secureInput = YES; };
+    NSDictionary *idle = @{@"editing_text":@"", @"candidates":@[]};
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.document isEqual:@"Rust写"]);
+    controller.secureInput = NO;
+    prefs.englishMode = YES;
+    ShortcutClient *other = [ShortcutClient new];
+    client.duringBundleRead = ^{ [controller setValue:other forKey:@"activeClient"]; };
+    assert([controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert([client.document isEqual:@"Rust写R"]);
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:nil forKey:@"view"];
+    prefs.inputScheme = @"japanese";
+    NSUInteger reads = client.documentReads;
+    assert(![controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert(client.documentReads == reads);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
+@interface SpacingTextView : NSTextView <MSIMETextClient>
+@end
+@implementation SpacingTextView
+- (void)setMarkedText:(id)text selectionRange:(NSRange)selection replacementRange:(NSRange)replacement {
+    [self setMarkedText:text selectedRange:selection replacementRange:replacement];
+}
+- (NSString *)bundleIdentifier { return @"com.example.Writer"; }
+- (NSAttributedString *)attributedSubstringFromRange:(NSRange)range {
+    return [self attributedSubstringForProposedRange:range actualRange:NULL];
+}
+@end
+
+static void TestCrossCommitSpacingInTextView() {
+    NSString *suite = [@"msime.cross-commit-spacing-appkit." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    [prefs activateInputModeForApplication:@"com.example.Writer"];
+    [prefs applySharedInputPreferences:@{@"cross_commit_spacing":@YES, @"cross_commit_spacing_excluded_apps":@[]}];
+    prefs.inputScheme = @"quanpin";
+    prefs.englishMode = YES;
+    prefs.fullWidthInput = NO;
+    SpacingTextView *textView = [[SpacingTextView alloc] initWithFrame:NSMakeRect(0, 0, 300, 100)];
+    textView.string = @"用";
+    textView.selectedRange = NSMakeRange(1, 0);
+    ModeController *controller = [ModeController alloc];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:textView forKey:@"activeClient"];
+    for (NSString *letter in @[@"R", @"u", @"s", @"t"])
+        assert([controller handleEvent:LayoutKey(32, letter, 0) client:textView]);
+    prefs.englishMode = NO;
+    NSDictionary *idle = @{@"scheme":@0, @"editing_text":@"", @"candidates":@[]};
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([textView.string isEqual:@"用 Rust 写"] && textView.selectedRange.location == textView.string.length);
+    // 真实 marked text 被替换后读取刚上屏部分，既不读拼音，也不改右侧文本。
+    textView.string = @"Rust右";
+    textView.selectedRange = NSMakeRange(4, 0);
+    [textView setMarkedText:@"xie" selectionRange:NSMakeRange(3, 0) replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+    [controller setValue:@YES forKey:@"clientHasMarkedText"];
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([textView.string isEqual:@"Rust 写右"] && textView.selectedRange.location == 6);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
+static void TestCrossCommitSpacing() {
+    NSString *suite = [@"msime.cross-commit-spacing." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    [prefs activateInputModeForApplication:@"com.example.Writer"];
+    [prefs applySharedInputPreferences:@{@"cross_commit_spacing":@YES, @"cross_commit_spacing_excluded_apps":@[]}];
+    prefs.englishMode = YES;
+    prefs.fullWidthInput = NO;
+    ApplicationShortcutClient *client = [ApplicationShortcutClient new];
+    client.bundleIdentifier = @"com.example.Writer";
+    client.document = @"用";
+    client.selection = NSMakeRange(1, 0);
+    ModeController *controller = [ModeController alloc];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    NSDictionary *idle = @{@"scheme":@0, @"editing_text":@"", @"candidates":@[]};
+    [controller setValue:idle forKey:@"view"];
+    assert([controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert([client.document isEqual:@"用 R"]);
+    assert(![controller valueForKey:@"session"]);
+    for (NSString *letter in @[@"u", @"s", @"t"]) {
+        assert([controller handleEvent:LayoutKey(32, letter, 0) client:client]);
+    }
+    prefs.englishMode = NO;
+    [controller apply:@{@"commit":@"写", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.document isEqual:@"用 Rust 写"]);
+    [controller apply:@{@"commit":@"Rust", @"commit_context":@{@"scheme":@0, @"local_mode":@"temporary_english"}, @"view":idle}];
+    assert([client.document isEqual:@"用 Rust 写 Rust"]);
+    [prefs applySharedInputPreferences:@{@"cross_commit_spacing":@YES, @"cross_commit_spacing_excluded_apps":@[@"COM.EXAMPLE.WRITER"]}];
+    NSUInteger reads = client.documentReads;
+    [controller apply:@{@"commit":@"字", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.document hasSuffix:@"Rust字"] && client.documentReads == reads);
+    prefs.englishMode = YES;
+    assert(![controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert(client.documentReads == reads);
+    prefs.englishMode = NO;
+    [prefs applySharedInputPreferences:@{@"cross_commit_spacing":@YES, @"cross_commit_spacing_excluded_apps":@[]}];
+    for (NSString *mode in @[@"url", @"date_time", @"calculator", @"temporary_japanese"]) {
+        reads = client.documentReads;
+        [controller apply:@{@"commit":@"A", @"commit_context":@{@"scheme":@0, @"local_mode":mode}, @"view":idle}];
+        assert([client.committed isEqual:@"A"] && client.documentReads == reads);
+    }
+    controller.secureInput = YES;
+    reads = client.documentReads;
+    [controller apply:@{@"commit":@"字", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.committed isEqual:@"字"] && client.documentReads == reads);
+    controller.secureInput = NO;
+    prefs.fullWidthInput = YES;
+    reads = client.documentReads;
+    [controller apply:@{@"commit":@"A", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.committed isEqual:@"A"] && client.documentReads == reads);
+    prefs.fullWidthInput = NO;
+    // 鼠标选择替换已有文字，使用替换起点之前的实时前文，不使用上次上屏的影子。
+    client.document = @"Rust旧";
+    client.selection = NSMakeRange(4, 1);
+    [controller apply:@{@"commit":@"新", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.document isEqual:@"Rust 新"]);
+    [prefs applySharedInputPreferences:@{}];
+    reads = client.documentReads;
+    [controller apply:@{@"commit":@"A", @"commit_context":@{@"scheme":@0, @"local_mode":@"none"}, @"view":idle}];
+    assert([client.committed isEqual:@"A"] && client.documentReads == reads);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
 int main(int argc, char **argv) {
     const IsolatedUserHome userHome;
     const IsolatedDefaultSkinsRoot skinsRoot;
@@ -11252,6 +12591,22 @@ int main(int argc, char **argv) {
     assert(MSIMEShouldRegisterInputSource(2, registerArguments));
     @autoreleasepool {
         [NSApplication sharedApplication];
+        if (argc == 2 && std::string(argv[1]) == "--cross-commit-spacing") {
+            TestCrossCommitSpacing();
+            TestCrossCommitSpacingReentrancy();
+            TestCrossCommitSpacingInTextView();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--expanded-scroll") {
+            TestExpandedCandidateGrid();
+            TestExpandedCandidateGridGeneration();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--session-recovery") {
+            TestSessionUnavailableIsReported();
+            TestIdleSessionRecovery();
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--english-punctuation") {
             @autoreleasepool { TestPerApplicationPunctuationAndWidth(); }
             @autoreleasepool { TestEnglishModePunctuationAndWidthOutput(); }
@@ -11276,6 +12631,10 @@ int main(int argc, char **argv) {
             return 0;
         }
         // 可重绑切换热键的重绑路径单独可跑：全量 suite 里皮肤颜色断言在无图形会话的机器上先于它中止。
+        if (argc == 2 && std::string(argv[1]) == "--editable-shift") {
+            TestEditableShiftController();
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--toggle-hotkeys") {
             TestToggleHotkeyRebinding();
             return 0;
@@ -11294,6 +12653,14 @@ int main(int argc, char **argv) {
         }
         if (argc == 2 && std::string(argv[1]) == "--english-online") {
             TestEnglishOnlineCandidatesThroughRealSession();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--nested-commit") {
+            TestNestedCommitKeepsTheNewerComposition();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--translation-font-size") {
+            TestCandidateTranslationFontSize();
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--translations") {
@@ -11331,6 +12698,7 @@ int main(int argc, char **argv) {
         NSUserDefaults *standardDefaults = NSUserDefaults.standardUserDefaults;
         NSDictionary *previousVoiceHoldKeys = MSIMEDisableVoiceHoldKeys(standardDefaults);
         @autoreleasepool { TestSessionUnavailableIsReported(); }
+        @autoreleasepool { TestIdleSessionRecovery(); }
         @autoreleasepool { TestCloudCandidateScheduling(); }
         @autoreleasepool { TestCloudCandidateRetryAfterRejectedResponse(); }
         @autoreleasepool { TestCloudCandidateEngineDelivery(); }
@@ -12917,6 +14285,20 @@ int main(int argc, char **argv) {
         layoutPanel.requestedVisible = YES;
         NSEvent *reverseTab = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagShift timestamp:0 windowNumber:0 context:nil characters:@"\t" charactersIgnoringModifiers:@"\t" isARepeat:NO keyCode:48];
         assert([controller handleEvent:reverseTab client:client] && session.lastCommand == MSIME_PREVIOUS_PAGE);
+        // 引擎声明 Tab 是辅助码触发键时，普通 Tab 先送字符；Shift+Tab 仍翻上一页。
+        NSMutableDictionary *manualHelpcodeView = [pageView mutableCopy];
+        manualHelpcodeView[@"scheme"] = @1;
+        manualHelpcodeView[@"spelling_symbols"] = @"\t";
+        [controller setValue:manualHelpcodeView forKey:@"view"];
+        session.nextTransition = @{@"handled": @YES, @"view": manualHelpcodeView};
+        session.lastCommand = UINT32_MAX;
+        session.asciiCalls = 0;
+        NSEvent *manualTab = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"\t" charactersIgnoringModifiers:@"\t" isARepeat:NO keyCode:48];
+        assert([controller handleEvent:manualTab client:client]);
+        assert(session.asciiCalls == 1 && session.lastASCII == '\t' && session.lastCommand == UINT32_MAX);
+        assert([controller handleEvent:reverseTab client:client] && session.lastCommand == MSIME_PREVIOUS_PAGE);
+        session.nextTransition = nil;
+        [controller setValue:pageView forKey:@"view"];
         // 文档里存着 Tab 和 Page Up / Page Down 翻页为关时，它们照样翻页：macOS 固定开启这两组键。
         [appearance applySharedCandidatePreferences:@{@"navigation": @{@"tab": @NO, @"page_up_down": @NO}}];
         for (NSArray *entry in @[@[@"\t", @48, @0, @(MSIME_NEXT_PAGE)],
@@ -12965,6 +14347,27 @@ int main(int argc, char **argv) {
             }
             assert(session.commandCalls == commandsBeforeGloss);
         }
+        // 从独立释义页按 Tab 返回时沿用释义列循环，不顺便触发手动辅助码。
+        NSMutableDictionary *manualGlossView = [glossView mutableCopy];
+        manualGlossView[@"scheme"] = @1;
+        manualGlossView[@"candidates"] = @[@{@"text": @"你好", @"translation": @"1. hello; 2. hola", @"highlighted": @YES, @"id": @{@"session": @75, @"generation": @76, @"index": @0}}];
+        manualGlossView[@"spelling_symbols"] = @"\t";
+        [controller setValue:manualGlossView forKey:@"view"];
+        [controller setValue:@0 forKey:@"armedGlossColumn"];
+        appearance.candidateTranslations = YES;
+        layoutPanel.requestedVisible = YES;
+        NSEvent *openSenses = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagControl timestamp:0 windowNumber:0 context:nil characters:@"\r" charactersIgnoringModifiers:@"\r" isARepeat:NO keyCode:36];
+        assert([controller handleEvent:openSenses client:client]);
+        assert([[controller valueForKey:@"glossSenses"] count] > 1);
+        session.nextTransition = @{@"handled": @YES, @"view": manualGlossView};
+        session.asciiCalls = 0;
+        session.lastCommand = UINT32_MAX;
+        assert([controller handleEvent:plainTab client:client]);
+        assert(session.asciiCalls == 0 && session.lastCommand == UINT32_MAX);
+        assert([[controller valueForKey:@"glossSenses"] count] == 0);
+        assert([[controller valueForKey:@"armedGlossColumn"] integerValue] == 1);
+        session.nextTransition = nil;
+        [controller setValue:@0 forKey:@"armedGlossColumn"];
         [appearance applySharedCandidatePreferences:@{@"navigation": @{@"tab": @YES}}];
         NSMutableDictionary *unglossedView = [glossView mutableCopy];
         unglossedView[@"candidates"] = @[@{@"text": @"你好", @"highlighted": @YES, @"id": @{@"session": @75, @"generation": @76, @"index": @0}}];
@@ -13176,8 +14579,14 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestRealSessionComposition(); }
         @autoreleasepool { TestEnglishOnlineCandidatesThroughRealSession(); }
         @autoreleasepool { TestRealTrilingualCycle(); }
+        @autoreleasepool { TestInitialLearningThroughRealKeys(YES, NO); }
+        @autoreleasepool { TestInitialLearningThroughRealKeys(YES, YES); }
+        @autoreleasepool { TestInitialLearningThroughRealKeys(NO, NO); }
+        @autoreleasepool { TestInitialLearningThroughRealKeys(NO, YES); }
         @autoreleasepool { TestSmartPunctuationVersionNumberThroughRealSession(); }
+        @autoreleasepool { TestEditableShiftController(); }
         @autoreleasepool { TestModifierTaps(); }
+        @autoreleasepool { TestShiftChordRecoversWithoutFlagsChanged(); }
         @autoreleasepool { TestInputModeStatusItem(); }
         @autoreleasepool { TestModifierTapSurvivesALostRelease(); }
         @autoreleasepool { TestCapsLockTap(); }

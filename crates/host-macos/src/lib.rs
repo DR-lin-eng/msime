@@ -803,6 +803,7 @@ mod tests {
                 win: true,
             },
             include_sticky_modifiers: true,
+            grouped_letter: None,
         }
     }
 

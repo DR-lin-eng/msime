@@ -60,6 +60,7 @@
 #include "InputControllerPhysicalKeys.h"
 #include "InputSchemeTraits.h"
 #include "../core/ModifierTap.h"
+#include "../core/EditableShiftFocus.h"
 #include "../core/VimMode.h"
 #import "../settings/ShuangpinKeymapPanel.h"
 #import "../core/FloatingToolbarPanel.h"
@@ -91,9 +92,12 @@
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <IOKit/hidsystem/IOHIDParameter.h>
+#import <IOKit/hid/IOHIDKeys.h>
+#import <IOKit/hid/IOHIDManager.h>
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 
 // Implemented by the Swift backend dylib loaded by input_method_main.mm. The account provider
 // keeps credentials and transport on the Swift side; this process receives only bounded glosses.
@@ -491,6 +495,8 @@ static NSString *CandidateAnnotationRun(NSDictionary *candidate, BOOL traditiona
 // One page of candidate rows laid out at the card width they get: what the panel draws, what its buttons answer clicks in, and what the keymap panel keeps clear of.
 struct MSIMECandidatePageGeometry {
     std::vector<msime::candidate::CandidateRowLayout> rows;
+    std::vector<double> naturalColumns;
+    CGFloat columnGap = 0;
     NSArray<NSString *> *texts = @[];
     NSArray<NSString *> *annotations = @[];
     NSArray<NSString *> *displays = @[];
@@ -893,7 +899,7 @@ static void MSIMEReleaseControllerOnMain(__strong id *controller) {
 // word than the one the user sees.
 static NSDictionary *MSIMERenderedCandidateIdentity(NSPanel *panel, NSInteger slot) {
     if (!panel || ![panel.contentView isKindOfClass:NSView.class]) return nil;
-    for (NSView *subview in MSIMECandidateControlsView(panel.contentView).subviews) {
+    for (NSView *subview in MSIMECandidateControlSubviews(panel.contentView)) {
         if (![subview isKindOfClass:MSIMECandidateButton.class] || subview.tag != slot) continue;
         NSDictionary *identity = ((MSIMECandidateButton *)subview).candidateID;
         return [identity isKindOfClass:NSDictionary.class] ? identity : nil;
@@ -903,7 +909,7 @@ static NSDictionary *MSIMERenderedCandidateIdentity(NSPanel *panel, NSInteger sl
 
 static NSDictionary *MSIMERenderedHighlightedCandidateIdentity(NSPanel *panel) {
     if (!panel || ![panel.contentView isKindOfClass:NSView.class]) return nil;
-    for (NSView *subview in MSIMECandidateControlsView(panel.contentView).subviews) {
+    for (NSView *subview in MSIMECandidateControlSubviews(panel.contentView)) {
         if (![subview isKindOfClass:MSIMECandidateButton.class] || subview.tag < 0) continue;
         MSIMECandidateButton *button = (MSIMECandidateButton *)subview;
         if (!button.candidateHighlighted) continue;
@@ -1028,10 +1034,123 @@ static bool MSIMEReleaseSystemCapsLock() {
     return released;
 }
 // 在原生查询边界替换合成状态，回归必须经过生产的实体按住判定。
-static CGEventFlags (*MSIMECapsLockFlagsState)(CGEventSourceStateID) = &CGEventSourceFlagsState;
+static CGEventFlags (*MSIMEPhysicalModifierFlagsState)(CGEventSourceStateID) = &CGEventSourceFlagsState;
+// 外接键盘有时不把实体按住状态送进 Quartz 的 stateless 位；先从 HID 输入值读取，失败再退回系统位。
+static std::unordered_map<IOHIDDeviceRef, bool> MSIMECapsLockHIDDevices;
+static std::atomic<bool> MSIMECapsLockHIDStateKnown{false};
+static std::atomic<bool> MSIMECapsLockHIDStateHeld{false};
+
+static bool MSIMECapsLockHIDUsage(uint32_t usage) {
+    return usage == kHIDUsage_KeyboardCapsLock || usage == kHIDUsage_KeyboardLockingCapsLock;
+}
+
+static void MSIMERecomputeCapsLockHIDState() {
+    bool held = false;
+    for (const auto &entry : MSIMECapsLockHIDDevices) held = held || entry.second;
+    MSIMECapsLockHIDStateKnown.store(!MSIMECapsLockHIDDevices.empty(), std::memory_order_release);
+    MSIMECapsLockHIDStateHeld.store(held, std::memory_order_release);
+}
+
+static void MSIMERecordCapsLockHIDValue(IOHIDValueRef value) {
+    if (!value) return;
+    IOHIDElementRef element = IOHIDValueGetElement(value);
+    if (!element || IOHIDElementGetUsagePage(element) != kHIDPage_KeyboardOrKeypad ||
+        !MSIMECapsLockHIDUsage(IOHIDElementGetUsage(element))) return;
+    IOHIDDeviceRef device = IOHIDElementGetDevice(element);
+    if (!device) return;
+    MSIMECapsLockHIDDevices[device] = IOHIDValueGetIntegerValue(value) != 0;
+    MSIMERecomputeCapsLockHIDState();
+}
+
+static void MSIMECapsLockHIDInputValue(void *, IOReturn result, void *, IOHIDValueRef value) {
+    if (result == kIOReturnSuccess) MSIMERecordCapsLockHIDValue(value);
+}
+
+static void MSIMECapsLockHIDDeviceRemoved(void *, IOReturn, void *, IOHIDDeviceRef device) {
+    if (!device) return;
+    MSIMECapsLockHIDDevices.erase(device);
+    MSIMERecomputeCapsLockHIDState();
+}
+
+static void MSIMECapsLockHIDDeviceMatched(void *, IOReturn result, void *, IOHIDDeviceRef device) {
+    if (result != kIOReturnSuccess || !device) return;
+    CFArrayRef elements = IOHIDDeviceCopyMatchingElements(device, nullptr, kIOHIDOptionsTypeNone);
+    if (!elements) return;
+    bool found = false;
+    bool held = false;
+    for (CFIndex index = 0; index < CFArrayGetCount(elements); ++index) {
+        IOHIDElementRef element = static_cast<IOHIDElementRef>(const_cast<void *>(CFArrayGetValueAtIndex(elements, index)));
+        if (!element || IOHIDElementGetUsagePage(element) != kHIDPage_KeyboardOrKeypad ||
+            !MSIMECapsLockHIDUsage(IOHIDElementGetUsage(element))) continue;
+        IOHIDValueRef value = nullptr;
+        if (IOHIDDeviceGetValue(device, element, &value) == kIOReturnSuccess && value) {
+            found = true;
+            held = held || IOHIDValueGetIntegerValue(value) != 0;
+        }
+    }
+    CFRelease(elements);
+    if (found) {
+        MSIMECapsLockHIDDevices[device] = held;
+        MSIMERecomputeCapsLockHIDState();
+    }
+}
+
+static CFMutableDictionaryRef MSIMECapsLockHIDMatching(uint32_t usage) {
+    CFMutableDictionaryRef matching = CFDictionaryCreateMutable(kCFAllocatorDefault, 2,
+                                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                                  &kCFTypeDictionaryValueCallBacks);
+    int32_t pageValue = kHIDPage_KeyboardOrKeypad;
+    int32_t usageValue = static_cast<int32_t>(usage);
+    CFNumberRef page = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pageValue);
+    CFNumberRef usageNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &usageValue);
+    CFDictionarySetValue(matching, CFSTR(kIOHIDElementUsagePageKey), page);
+    CFDictionarySetValue(matching, CFSTR(kIOHIDElementUsageKey), usageNumber);
+    CFRelease(page);
+    CFRelease(usageNumber);
+    return matching;
+}
+
+static void MSIMEEnsureCapsLockHIDTracking() {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+        if (!manager) return;
+        CFMutableDictionaryRef capsLock = MSIMECapsLockHIDMatching(kHIDUsage_KeyboardCapsLock);
+        CFMutableDictionaryRef lockingCapsLock = MSIMECapsLockHIDMatching(kHIDUsage_KeyboardLockingCapsLock);
+        const void *matches[] = {capsLock, lockingCapsLock};
+        CFArrayRef matching = CFArrayCreate(kCFAllocatorDefault, matches, 2, &kCFTypeArrayCallBacks);
+        IOHIDManagerSetInputValueMatchingMultiple(manager, matching);
+        CFRelease(matching);
+        CFRelease(capsLock);
+        CFRelease(lockingCapsLock);
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, &MSIMECapsLockHIDDeviceMatched, nullptr);
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, &MSIMECapsLockHIDDeviceRemoved, nullptr);
+        IOHIDManagerRegisterInputValueCallback(manager, &MSIMECapsLockHIDInputValue, nullptr);
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+        if (IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone) != kIOReturnSuccess) {
+            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+            IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+            CFRelease(manager);
+            return;
+        }
+    });
+}
+
+static bool MSIMEReadCapsLockHIDState(bool *known) {
+    MSIMEEnsureCapsLockHIDTracking();
+    const bool stateKnown = MSIMECapsLockHIDStateKnown.load(std::memory_order_acquire);
+    if (known) *known = stateKnown;
+    return MSIMECapsLockHIDStateHeld.load(std::memory_order_acquire);
+}
+static bool (*MSIMECapsLockHIDState)(bool *known) = &MSIMEReadCapsLockHIDState;
+
 // 键码 0x39 的查询跟随大写锁定，松手后仍可能为真；只读 stateless 位区分实体按住与逻辑锁定。
 static bool MSIMECapsLockPhysicallyHeld() {
-    return (MSIMECapsLockFlagsState(kCGEventSourceStateHIDSystemState) & NX_ALPHASHIFT_STATELESS_MASK) != 0;
+    bool hidStateKnown = false;
+    if (MSIMECapsLockHIDState && MSIMECapsLockHIDState(&hidStateKnown) && hidStateKnown) return true;
+    if (hidStateKnown) return false;
+    return (MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) & NX_ALPHASHIFT_STATELESS_MASK) != 0;
 }
 // 和 NSEvent.timestamp 同一个开机后时钟，单位毫秒。
 static std::int64_t MSIMEUptimeMilliseconds() {
@@ -1317,7 +1436,94 @@ static CGFloat MSIMEPreeditSlotWidth(void *) { return MSIMEPreeditCaretGap; }
 - (void)disable:(id)sender { (void)sender; if (self.handler) self.handler(NO); }
 @end
 
-@interface MSIMEInputController : IMKInputController <MSIMEFloatingToolbarDelegate>
+@protocol MSIMEInputSessionRecoveryDelegate <NSObject>
+- (void)retryUnavailableSession:(id)sender;
+- (void)restartUnavailableInputMethod:(id)sender;
+- (void)dismissSessionRecoveryNotice:(id)sender;
+@end
+
+// 故障提示不能进入模态循环或取得键盘焦点，否则会阻塞其他客户端输入。
+@interface MSIMEInputSessionRecoveryPanel : NSPanel
+@property(nonatomic, weak) id<MSIMEInputSessionRecoveryDelegate> recoveryDelegate;
+@property(nonatomic, readonly) NSTextField *message;
+@property(nonatomic, readonly) NSButton *retryButton;
+@property(nonatomic, readonly) NSButton *restartButton;
+@property(nonatomic, readonly) NSButton *laterButton;
++ (instancetype)sharedPanel;
++ (void)dismissForDelegate:(id<MSIMEInputSessionRecoveryDelegate>)delegate;
+- (void)showForDelegate:(id<MSIMEInputSessionRecoveryDelegate>)delegate;
+- (void)setRestartPending:(BOOL)pending;
+@end
+
+static MSIMEInputSessionRecoveryPanel *MSIMESessionRecoveryPanel;
+static BOOL MSIMESessionRecoveryNoticeScheduled = NO;
+static BOOL MSIMESessionRecoveryRestartPending = NO;
+static uint64_t MSIMESessionRecoveryLastNotice = 0;
+static constexpr uint64_t MSIMESessionRecoveryNoticeInterval = 60 * NSEC_PER_SEC;
+
+@implementation MSIMEInputSessionRecoveryPanel
++ (instancetype)sharedPanel {
+    if (!MSIMESessionRecoveryPanel) MSIMESessionRecoveryPanel = [[self alloc] init];
+    return MSIMESessionRecoveryPanel;
+}
++ (void)dismissForDelegate:(id<MSIMEInputSessionRecoveryDelegate>)delegate {
+    if (delegate && MSIMESessionRecoveryPanel.recoveryDelegate && MSIMESessionRecoveryPanel.recoveryDelegate != delegate) return;
+    [MSIMESessionRecoveryPanel orderOut:nil];
+    MSIMESessionRecoveryPanel.recoveryDelegate = nil;
+}
+- (instancetype)init {
+    self = [super initWithContentRect:NSMakeRect(0, 0, 430, 210)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:YES];
+    if (!self) return nil;
+    self.title = MSIMEEditionDisplayName();
+    self.identifier = @"msime-session-recovery";
+    self.level = MSIMECandidateWindowLevel();
+    self.hidesOnDeactivate = NO;
+    self.becomesKeyOnlyIfNeeded = YES;
+    self.releasedWhenClosed = NO;
+    self.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle;
+    NSTextField *title = [NSTextField labelWithString:@"中文输入暂不可用"];
+    title.font = [NSFont boldSystemFontOfSize:17];
+    title.frame = NSMakeRect(18, 166, 394, 28);
+    [self.contentView addSubview:title];
+    _message = [NSTextField wrappingLabelWithString:@""];
+    _message.frame = NSMakeRect(18, 64, 394, 94);
+    [self.contentView addSubview:_message];
+    _laterButton = [NSButton buttonWithTitle:@"稍后" target:self action:@selector(later:)];
+    _retryButton = [NSButton buttonWithTitle:@"重试" target:self action:@selector(retry:)];
+    _restartButton = [NSButton buttonWithTitle:@"重启输入法" target:self action:@selector(restart:)];
+    _laterButton.frame = NSMakeRect(18, 18, 68, 30);
+    _retryButton.frame = NSMakeRect(212, 18, 84, 30);
+    _restartButton.frame = NSMakeRect(304, 18, 108, 30);
+    for (NSButton *button in @[_laterButton, _retryButton, _restartButton]) {
+        button.keyEquivalent = @"";
+        [self.contentView addSubview:button];
+    }
+    return self;
+}
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+- (void)showForDelegate:(id<MSIMEInputSessionRecoveryDelegate>)delegate {
+    self.recoveryDelegate = delegate;
+    _message.stringValue = @"按键暂时会直接输入字母。请先重试；仍无法恢复时，可重启输入法，或切换系统中文输入法继续输入。\n\n重启会结束其他窗口中未完成的输入。";
+    [self setRestartPending:MSIMESessionRecoveryRestartPending];
+    [self center];
+    [self orderFrontRegardless];
+    NSAccessibilityPostNotificationWithUserInfo(self, NSAccessibilityAnnouncementRequestedNotification,
+        @{NSAccessibilityAnnouncementKey:@"中文输入暂不可用，可以重试或重启输入法。"});
+}
+- (void)setRestartPending:(BOOL)pending {
+    _retryButton.enabled = !pending;
+    _restartButton.enabled = !pending;
+    if (pending) _message.stringValue = @"正在重新启动输入法…";
+}
+- (void)retry:(id)sender { [self.recoveryDelegate retryUnavailableSession:sender]; }
+- (void)restart:(id)sender { [self.recoveryDelegate restartUnavailableInputMethod:sender]; }
+- (void)later:(id)sender { [self.recoveryDelegate dismissSessionRecoveryNotice:sender]; }
+@end
+
+@interface MSIMEInputController : IMKInputController <MSIMEFloatingToolbarDelegate, MSIMEInputSessionRecoveryDelegate>
 - (MSIMECustomTranslationBatch *)aiBatchForItems:(NSArray<NSDictionary *> *)items
                                        completion:(void (^)(NSArray<NSDictionary *> *))completion;
 - (NSDictionary *)recoverPreferencesInDirectory:(NSString *)directory error:(NSError **)error;
@@ -1326,6 +1532,11 @@ static CGFloat MSIMEPreeditSlotWidth(void *) { return MSIMEPreeditCaretGap; }
 - (void)invalidateServiceSnapshots;
 - (void)showCandidatePanel;
 @end
+
+// 只在主线程记录最后实际提交账号等待页的控制器，不延长输入框的生命周期。
+static __weak MSIMEInputController *MSIMEAccountGlossQueueOwner;
+// 当前持有焦点客户端的控制器。每个控制器都观察同一份外观设置，改动由最先注册的那个保存，而它往往是早已失去焦点的控制器；所以保存之后，要把文档载入会话的是这一个。
+static __weak MSIMEInputController *MSIMEFocusedController;
 
 // The full-colour brand mark the floating toolbar and the mode HUD lead with, loaded once. Nil when the bundle has no icon, and the top row then carries no mark.
 static NSImage *MSIMECandidateLogoImage() {
@@ -1341,6 +1552,7 @@ static NSImage *MSIMECandidateLogoImage() {
 @implementation MSIMEInputController {
     MSIMEClientSession *_session;
     MSIMEInputAssistance *_inputAssistance;
+    uint64_t _dictionarySessionLastUse;
     // Stands in for TISEnableInputSource when set, so a test can see which opt-in mode a scheme change enables.
     OSStatus (^_optInInputModeEnabler)(NSString *identifier);
     // 设置后代替菜单栏状态项，测试由此看到状态项被摆成哪个模式（nil 表示隐藏），不在测试进程里真的建 NSStatusItem。
@@ -1395,6 +1607,8 @@ static NSImage *MSIMECandidateLogoImage() {
     NSString *_announcedCandidate;
     // Bumped by every apply:. Writing marked text is a synchronous call into the client, and IMK services the next key inside it, so an apply: can finish after a newer one that ran nested in it.
     uint64_t _applySequence;
+    // 每个输入事件与焦点生命周期推进代次，只让可选的上屏格式化过期。
+    uint64_t _spacingInputSequence;
     // Bumped when a gloss arrival replaces the view, which can also happen inside an apply:'s marked-text write.
     uint64_t _glossViewSequence;
     // Whether the client may still hold marked text this controller's compositions wrote; see MSIMEApplyTransitionTrackingMarkedText. Wrongly YES costs one redundant clear, wrongly NO leaves a composition stranded in the document, so anything that might mark text sets it.
@@ -1472,9 +1686,9 @@ static NSImage *MSIMECandidateLogoImage() {
     NSUInteger _expandedFirstRow;
     NSUInteger _expandedVisibleRows;
     CGFloat _expandedScrollOffset;
-    CGFloat _expandedPendingScrollDelta;
-    // 视口高度在一次展开会话内固定，避免不同候选行的自然高度让窗口随滚动上下抖动。
-    CGFloat _expandedViewportRowsHeight;
+    CGFloat _expandedViewportHeight;
+    BOOL _expandedScrollsViewport;
+    MSIMEExpandedCandidateScrollView *_expandedScrollView;
     BOOL _focusPending;
     // Dedicated English lives in the Engine session, so a session released for dictionary maintenance takes it along; the reopen puts it back.
     BOOL _resumeDedicatedEnglish;
@@ -1521,6 +1735,10 @@ static NSImage *MSIMECandidateLogoImage() {
     // The ASCII punctuation key behind the transition about to be applied, or 0. Set only on the punctuation-key routes and consumed by the next apply:, so pairing can read the last mark of a commit that finished a composition (`nihao(` gives `你好（`) without ever rewriting a candidate that merely ends in a mark.
     unichar _punctuationKeyInFlight;
     MSIMEModifierTap _modifierTap;
+    msime::mac::EditableShiftGate _editableShiftGate;
+    id _editableShiftLocalMouseMonitor;
+    id _editableShiftGlobalMouseMonitor;
+    NSTimer *_editableShiftMouseTimer;
     // 单按 Caps Lock 切换中英文：大写锁定打开的那一刻布防，轮询到松开时认定是轻点还是长按。
     msime::input::CapsLockTap _capsLockTap;
     NSTimer *_capsLockTapTimer;
@@ -2278,8 +2496,9 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedCursor = 0;
     _expandedFirstRow = 0;
     _expandedScrollOffset = 0;
-    _expandedPendingScrollDelta = 0;
-    _expandedViewportRowsHeight = 0;
+    _expandedViewportHeight = 0;
+    _expandedScrollsViewport = NO;
+    _expandedScrollView = nil;
 }
 
 // 收起网格时把高亮交回普通候选窗；只导航，不选词或提交组字。
@@ -2341,8 +2560,9 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedSourceView = _view;
     _expandedCursor = cursor;
     _expandedScrollOffset = 0;
-    _expandedPendingScrollDelta = 0;
-    _expandedViewportRowsHeight = 0;
+    _expandedViewportHeight = 0;
+    _expandedScrollsViewport = NO;
+    _expandedScrollView = nil;
     // 当前高亮所在页是网格的第一行，末页减少显示行数，不向前补行。
     _expandedFirstRow = cursor / columns;
     _expandedVisibleRows = msime::candidate::kExpandedGridVisibleRows;
@@ -2371,8 +2591,9 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedSourceView = _view;
     _expandedCursor = cursor;
     _expandedScrollOffset = 0;
-    _expandedPendingScrollDelta = 0;
-    _expandedViewportRowsHeight = 0;
+    _expandedViewportHeight = 0;
+    _expandedScrollsViewport = NO;
+    _expandedScrollView = nil;
     return YES;
 }
 
@@ -2392,22 +2613,16 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     else [self renderCandidates];
 }
 
-// 滚轮在网格上保留触控板的像素距离；跨过完整行时推进虚拟窗口。键盘滚动仍按行走。
+// 普通滚轮保留按行定位；触控板与惯性由 NSScrollView 处理。
 - (void)scrollExpandedCandidatesBackwards:(BOOL)backwards {
     const NSUInteger count = _expandedCandidates.count;
     const NSUInteger columns = MAX((NSUInteger)1, (NSUInteger)_appearance.pageSize);
-    const NSUInteger rows = msime::candidate::ExpandedGridRows(count, columns);
-    const NSUInteger visibleRows = MIN(rows, MAX((NSUInteger)1, _expandedVisibleRows));
-    if (!count || rows <= visibleRows) return;
-    _expandedScrollOffset = 0;
-    _expandedPendingScrollDelta = 0;
-    if (backwards && _expandedFirstRow > 0) --_expandedFirstRow;
-    else if (!backwards && _expandedFirstRow + visibleRows < rows) ++_expandedFirstRow;
-    else return;
+    if (!count || ![_expandedScrollView scrollByRowBackwards:backwards]) return;
+    const NSRange visible = _expandedScrollView.visibleRowRange;
+    _expandedScrollsViewport = YES;
     const NSUInteger row = _expandedCursor / columns;
     const NSUInteger column = _expandedCursor % columns;
-    const NSUInteger target = row < _expandedFirstRow ? _expandedFirstRow
-                            : row >= _expandedFirstRow + visibleRows ? _expandedFirstRow + visibleRows - 1 : row;
+    const NSUInteger target = std::clamp(row, visible.location, NSMaxRange(visible) - 1);
     _expandedCursor = MIN(target * columns + column, count - 1);
     [self renderCandidates];
 }
@@ -2483,7 +2698,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
         return YES;
     }
     _expandedScrollOffset = 0;
-    _expandedPendingScrollDelta = 0;
+    _expandedScrollsViewport = NO;
     _expandedCursor = step.cursor;
     [self renderCandidates];
     return YES;
@@ -2838,7 +3053,10 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
 }
 
 - (void)cancelQueuedAccountGlosses {
-    // weak_import, like the fetch: a process without the backend dylib binds this to null.
+    // 迟到的控制器不能删除别人的等待页；当前焦点退出时仍须清理尚未交接的旧页。
+    if (MSIMEAccountGlossQueueOwner != self && MSIMEFocusedController != self) return;
+    MSIMEAccountGlossQueueOwner = nil;
+    // 未加载后端 dylib 时，weak_import 入口为空。
     if (MSIMECancelAccountCandidateGlosses != nullptr) MSIMECancelAccountCandidateGlosses();
 }
 
@@ -2961,10 +3179,13 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
 
 - (void)fetchAccountGlosses:(NSArray<NSString *> *)words primary:(NSString *)primary secondary:(NSString *)secondary
                  generation:(uint64_t)generation {
+    // IMK 的旧输入框可能尚未收到失焦回调，迟到的计时器不能替换当前输入框的等待页。
+    if (MSIMEFocusedController != self) return;
     // weak_import: the Swift backend supplies this, and a process without the dylib binds it to null. Calling through that is a jump to address zero, which is what the settings window's three call sites have always guarded against and these two did not.
     if (MSIMEFetchAccountCandidateGlosses == nullptr) return;
     NSData *payload = [NSJSONSerialization dataWithJSONObject:words options:0 error:nil];
     if (!payload) return;
+    MSIMEAccountGlossQueueOwner = self;
     MSIMEFetchAccountCandidateGlosses([[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding].UTF8String,
                                       primary.UTF8String, secondary.UTF8String, generation);
 }
@@ -3051,6 +3272,8 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
 }
 
 - (void)fetchOnDeviceGlosses:(NSArray<NSString *> *)words targets:(NSArray<NSString *> *)targets {
+    // 旧输入框的离线词典回调可能晚于焦点交接，不能覆盖当前输入框的系统翻译等待页。
+    if (MSIMEFocusedController != self) return;
     if (MSIMEFetchOnDeviceCandidateGlosses == nullptr) return;
     NSData *wordsJSON = [NSJSONSerialization dataWithJSONObject:words options:0 error:nil];
     NSData *targetsJSON = [NSJSONSerialization dataWithJSONObject:targets options:0 error:nil];
@@ -3766,14 +3989,24 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
 - (void (^)(NSEvent *))globalVoiceHotkeyHandler {
     __weak MSIMEInputController *weakSelf = self;
     return ^(NSEvent *event) {
-        if (event.keyCode != 101 || event.isARepeat || (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagCommand)) != NSEventModifierFlagControl) return;
         MSIMEInputController *controller = weakSelf;
-        if (!controller || !controller->_activeClient || !MSIMEVoiceInputEnabled(NSUserDefaults.standardUserDefaults) || ([NSUserDefaults.standardUserDefaults objectForKey:@"MSIMEClientVoiceHotkeyCtrlF9"] != nil && ![NSUserDefaults.standardUserDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlF9"])) return;
+        if (!controller || !controller->_activeClient || event.isARepeat ||
+            !MSIMEVoiceInputEnabled(NSUserDefaults.standardUserDefaults) ||
+            ![controller matchesVoiceToggleHotkey:event]) return;
         // AppKit delivers event-monitor handlers on the main thread. Handle
         // this gesture now: another main-queue hop could toggle a new client
         // or recording after focus or voice state has changed.
         [controller toggleVoiceInput:nil];
     };
+}
+- (BOOL)matchesVoiceToggleHotkey:(NSEvent *)event {
+    if (MSIMEToggleChordMatches(_appearance.voiceInputToggleChord, event)) return YES;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    const BOOL fixedEnabled = [defaults objectForKey:@"MSIMEClientVoiceHotkeyCtrlF9"] == nil ||
+        [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlF9"];
+    return fixedEnabled && event.keyCode == 101 &&
+        (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagShift |
+            NSEventModifierFlagOption | NSEventModifierFlagCommand)) == NSEventModifierFlagControl;
 }
 - (void)resetCandidateAnchor {
     _candidateAnchorCaret = NSZeroRect;
@@ -3839,7 +4072,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         traditionalChineseOutputEnabled:_appearance.traditionalOutput];
 }
 - (void)appearanceChanged:(NSNotification *)notification {
-    _expandedViewportRowsHeight = 0;
+    _expandedViewportHeight = 0;
     _preferenceLoadState.reset(); // Local edits invalidate older disk reads.
     if (!_appearance.cloudCandidatesEnabled) [self cancelCloudCandidates];
     if (_appearance) _glossEnabled = @(_appearance.candidateTranslations);
@@ -3880,8 +4113,6 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
 static MSIMEPreferenceSaveState MSIMESharedPreferenceSaveState;
 // The controller behind the queued save, which runs it when the one in flight finishes, whether or not the controller that started that one is still alive.
 static __weak MSIMEInputController *MSIMEQueuedPreferenceSaver;
-// 当前持有焦点客户端的控制器。每个控制器都观察同一份外观设置，改动由最先注册的那个保存，而它往往是早已失去焦点的控制器；所以保存之后，要把文档载入会话的是这一个。
-static __weak MSIMEInputController *MSIMEFocusedController;
 // 方案只能经由共享偏好文档到达 Engine，而外观改动触发的保存在主线程之外进行，所以从 한 切到 中 之后紧接着敲的键仍按韩文组字，未完成的音节又会把新方案一直挡到它结束。因此切换时在这里、在下一个按键之前于主线程写入文档，并把写入的内容原样交给持有焦点的会话。切换方案前已经结束了组字，会话处于空闲状态，会立即应用新方案。外观改动另外触发的那次保存会再写一遍相同的偏好，会话视为没有变化。Fcitx5 切换方案时同样等待保存完成；这里保存失败时，切换交由那次后台保存完成。
 - (void)applyPreferencesToSessionNow {
     if (!_session || !_activeClient || !_preferencesDirectory || !_appearance) return;
@@ -4181,6 +4412,15 @@ static __weak MSIMEInputController *MSIMEFocusedController;
     NSMenu *menu = [[NSMenu alloc] initWithTitle:MSIMEEditionDisplayName()];
     menu.autoenablesItems = NO;
     ApplyMetasequoiaMenuTheme(menu, [self resolvedMenuThemePreferences]);
+    if (_sessionUnavailableReason && !_session) {
+        NSMenuItem *retry = [[NSMenuItem alloc] initWithTitle:@"重试中文输入" action:@selector(retryUnavailableSession:) keyEquivalent:@""];
+        retry.target = self;
+        [menu addItem:retry];
+        NSMenuItem *restart = [[NSMenuItem alloc] initWithTitle:@"重启输入法…" action:@selector(restartUnavailableInputMethod:) keyEquivalent:@""];
+        restart.target = self;
+        [menu addItem:restart];
+        [menu addItem:NSMenuItem.separatorItem];
+    }
     for (NSUInteger mode = 0; mode < 2; ++mode) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:mode ? @"英文输入" : @"中文输入" action:mode ? @selector(selectEnglishMode:) : @selector(selectChineseMode:) keyEquivalent:@""];
         item.target = self;
@@ -4539,6 +4779,7 @@ static __weak MSIMEInputController *MSIMEFocusedController;
 
 - (void)setEnglishInputMode:(BOOL)enabled {
     [self ensureAppearance];
+    if (enabled) [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     const BOOL changed = _appearance.englishMode != enabled;
     if (changed && _managedEnglishComposition && ![self setManagedEnglishEnabled:NO]) return;
     // Read before the cancel below, whose reply need not repeat the flag.
@@ -4786,6 +5027,8 @@ static __weak MSIMEInputController *MSIMEFocusedController;
 }
 - (void)dealloc {
     [_inputAssistance stop];
+    [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
+    [self stopEditableShiftMouseMonitoring];
     [self stopSettledScoring];
     [_capsLockTapTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -5439,7 +5682,26 @@ static __weak MSIMEInputController *MSIMEFocusedController;
     return holders;
 }
 + (void)holdDictionarySession:(MSIMEInputController *)controller {
+    controller->_dictionarySessionLastUse = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     [[self dictionarySessionHolders] addObject:controller];
+}
+// IMK 会保留多个客户端控制器；闲置会话继续持有词库文件和目录句柄，不能随客户端数量无限增长。
+static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
++ (NSUInteger)releaseIdleDictionarySessionsKeeping:(NSUInteger)limit {
+    NSUInteger kept = 0;
+    NSUInteger released = 0;
+    NSArray<MSIMEInputController *> *holders = [[self dictionarySessionHolders].allObjects
+        sortedArrayUsingComparator:^NSComparisonResult(MSIMEInputController *left, MSIMEInputController *right) {
+            if (left->_dictionarySessionLastUse == right->_dictionarySessionLastUse) return NSOrderedSame;
+            return left->_dictionarySessionLastUse > right->_dictionarySessionLastUse ? NSOrderedAscending : NSOrderedDescending;
+        }];
+    for (MSIMEInputController *controller in holders) {
+        if (controller->_activeClient || !controller->_session) continue;
+        if (kept++ < limit) continue;
+        [controller releaseDictionarySession];
+        ++released;
+    }
+    return released;
 }
 + (void)dictionaryMaintenanceWillBegin:(NSNotification *)notification {
     (void)notification;
@@ -5449,9 +5711,13 @@ static __weak MSIMEInputController *MSIMEFocusedController;
     for (MSIMEInputController *controller in [self dictionarySessionHolders].allObjects)
         [controller releaseDictionarySessionIfQuiesced];
 }
-// Let go of the session, and with it the shared dictionary lock, while the settings window holds the maintenance lease. What was being typed is committed first, and work bound to the session is cancelled the way a focus change cancels it; the next key after the lease is gone opens a new session (prepareSession).
+// 设置窗口持有维护租约时关闭会话并释放词库锁；活动组字先上屏，下一次按键通过 prepareSession 重建。
 - (void)releaseDictionarySessionIfQuiesced {
     if (!_session || !MSIMEDictionaryQuiesced(_session.hostOptions)) return;
+    [self releaseDictionarySession];
+}
+- (void)releaseDictionarySession {
+    if (!_session) return;
     [self cancelLiveVoiceInput];
     [self cancelDoubaoVoiceInput];
     [self cancelHTTPVoiceInput];
@@ -5459,12 +5725,12 @@ static __weak MSIMEInputController *MSIMEFocusedController;
         MSIMEVoiceProviderSocket(), _voiceGeneration);
     [self cancelCandidateTranslations];
     [self cancelCloudCandidates];
-    _modifierTap.reset();
+    [self resetModifierTap];
     [self abandonCapsLockTap];
     _preferenceLoadState.reset();
     if (_activeClient) {
         if (![self commitManagedEnglishRaw]) return;
-        // 会话即将为词库维护关闭，不是用户结束组字：按失焦上屏处理，不出声不画。
+        // 关闭活动会话时按失焦上屏处理，不出声不画。
         NSDictionary *finished = [_session command:MSIME_FINISH_ON_FOCUS_LOSS error:nil];
         if (finished) [self apply:finished];
         else MSIMEApplyTransition(@{@"view": @{@"editing_text": @"", @"preedit": @"", @"caret_position": @0}}, (id<MSIMETextClient>)_activeClient);
@@ -5485,7 +5751,9 @@ static __weak MSIMEInputController *MSIMEFocusedController;
 }
 
 - (void)activateServer:(id)sender {
+    ++_spacingInputSequence;
     if (_activeClient && _activeClient != sender && ![self commitManagedEnglishRaw]) return;
+    [MSIMEInputSessionRecoveryPanel dismissForDelegate:nil];
     // A newly activated IME session may target a different document/client.
     // Never carry host-owned closings across that boundary - including one this host still owed
     // the previous document, which cannot be written into this one.
@@ -5504,7 +5772,7 @@ static __weak MSIMEInputController *MSIMEFocusedController;
     [self cancelCloudCandidates];
     [self resetCandidateAnchor];
     [self claimCandidatePanel];
-    _modifierTap.reset();
+    [self resetModifierTap];
     [self abandonCapsLockTap];
     [super activateServer:sender];
     [self ensureAppearance];
@@ -5700,7 +5968,7 @@ static __weak MSIMEInputController *MSIMEMusicOwner;
     [self resetCandidateAnchor];
     [self cancelCandidateTranslations];
     [self cancelCloudCandidates];
-    _modifierTap.reset();
+    [self resetModifierTap];
     [self abandonCapsLockTap];
     _requestedPageSize = 0;
     _preferenceLoadState.reset();
@@ -5788,12 +6056,15 @@ static NSString *MSIMEBundleSoundPacks(NSBundle *bundle) {
         ? directory : nil;
 }
 
-// The two reasons a session can be missing, as its own function for the reason MSIMESessionOptions is: what
-// it decides is reachable in a test, while the branch it is decided in needs a whole Engine to enter.
-// Nothing prepared the dictionary, or something did and the Engine would not take it - a different next step
-// each, which is the whole point of saying which one it was.
-static NSString *MSIMESessionUnavailableReason(NSDictionary *options) {
-    return options ? @"session refused the runtime options" : @"no usable runtime options";
+// 区分运行时配置不可用与引擎拒绝创建，并用可独立测试的固定错误类别说明失败原因。
+static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *error = nil) {
+    if (!options) return @"no usable runtime options";
+    // 只允许固定类别进入日志；引擎的其他错误可能包含私人路径或配置值。
+    NSString *message = error.localizedDescription;
+    for (NSString *category in @[@"dictionary access unavailable", @"dictionary maintenance busy",
+                                 @"invalid options document", @"unsupported host API version"])
+        if ([message isEqualToString:category]) return category;
+    return @"session refused the runtime options";
 }
 
 // Why there is no session, said once per reason.
@@ -5802,10 +6073,66 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options) {
 //
 // A category rather than the underlying error, because the Host API's errors can name private directories (see the note on MSIMERefreshRuntimeOptionsWith) and this goes to the unified log, which leaves the machine in a sysdiagnose. NSLog rather than the diagnostic log for the same reason the diagnostic log cannot carry it: it is configured from the preferences directory, which arrives in the very runtime options that are missing here.
 - (void)reportSessionUnavailable:(NSString *)reason {
-    if ([_sessionUnavailableReason isEqualToString:reason]) return;
-    _sessionUnavailableReason = [reason copy];
-    NSLog(@"MSIME has no input session (%@); keys pass through to the application until one opens", reason);
-    msime_macos_diagnostic_writef("session_unavailable reason=%s", reason.UTF8String);
+    if (![_sessionUnavailableReason isEqualToString:reason]) {
+        _sessionUnavailableReason = [reason copy];
+        NSLog(@"MSIME has no input session (%@); keys pass through to the application until one opens", reason);
+        msime_macos_diagnostic_writef("session_unavailable reason=%s", reason.UTF8String);
+    }
+    [self requestSessionRecoveryNotice];
+}
+
+- (BOOL)canPresentSessionRecovery {
+    return !_session && _sessionUnavailableReason && _activeClient && MSIMEFocusedController == self &&
+        !_appearance.englishMode && !_resumeDedicatedEnglish && !MSIMEStrictBoolean(_view[@"dedicated_english"]) &&
+        ![self secureEventInputActive];
+}
+
+- (void)requestSessionRecoveryNotice {
+    if (![self canPresentSessionRecovery] || MSIMESessionRecoveryRestartPending || MSIMESessionRecoveryNoticeScheduled || MSIMESessionRecoveryPanel.isVisible) return;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (MSIMESessionRecoveryLastNotice && now - MSIMESessionRecoveryLastNotice < MSIMESessionRecoveryNoticeInterval) return;
+    MSIMESessionRecoveryNoticeScheduled = YES;
+    __weak MSIMEInputController *weakSelf = self;
+    // 离开激活和按键栈后再画界面；队列送达前可能已经恢复、失焦或进入安全输入。
+    dispatch_async(dispatch_get_main_queue(), ^{
+        MSIMESessionRecoveryNoticeScheduled = NO;
+        MSIMEInputController *owner = weakSelf;
+        if (![owner canPresentSessionRecovery] || MSIMESessionRecoveryRestartPending || MSIMESessionRecoveryPanel.isVisible) return;
+        const uint64_t delivered = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (MSIMESessionRecoveryLastNotice && delivered - MSIMESessionRecoveryLastNotice < MSIMESessionRecoveryNoticeInterval) return;
+        MSIMESessionRecoveryLastNotice = delivered;
+        [[MSIMEInputSessionRecoveryPanel sharedPanel] showForDelegate:owner];
+    });
+}
+
+- (void)dismissSessionRecoveryNotice:(id)sender {
+    (void)sender;
+    [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
+}
+
+- (void)retryUnavailableSession:(id)sender {
+    (void)sender;
+    if (![self canPresentSessionRecovery] || MSIMESessionRecoveryRestartPending) return;
+    [MSIMEInputController releaseIdleDictionarySessionsKeeping:0];
+    [self prepareSession];
+    if ([self canPresentSessionRecovery]) {
+        MSIMESessionRecoveryLastNotice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        [[MSIMEInputSessionRecoveryPanel sharedPanel] showForDelegate:self];
+        MSIMESessionRecoveryPanel.message.stringValue = @"重试后仍无法恢复中文输入。可以重启输入法，或切换系统中文输入法继续输入。\n\n重启会结束其他窗口中未完成的输入。";
+    }
+}
+
+- (void)restartUnavailableInputMethod:(id)sender {
+    if (![self canPresentSessionRecovery] || MSIMESessionRecoveryRestartPending) return;
+    // 菜单入口也先展示影响说明，第二次明确点击提示中的按钮才重启。
+    MSIMEInputSessionRecoveryPanel *panel = [MSIMEInputSessionRecoveryPanel sharedPanel];
+    if (sender != panel.restartButton || !panel.isVisible || panel.recoveryDelegate != self) {
+        MSIMESessionRecoveryLastNotice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        [panel showForDelegate:self];
+        return;
+    }
+    [panel setRestartPending:YES];
+    [self restartCurrentInputMethod];
 }
 
 - (void)prepareSession {
@@ -5814,18 +6141,28 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options) {
     BOOL reopened = NO;
     BOOL created = NO;
     if (!_session) {
-        NSDictionary *options = MSIMESessionOptions([self runtimeOptions], MSIMEBundleSoundPacks(NSBundle.mainBundle),
-                                                   NSBundle.mainBundle.resourcePath);
-        // Dictionary maintenance is running: open nothing, so keys pass through to the application until the lease is gone. The preferences timer keeps running, so settings still apply meanwhile.
-        if (options && MSIMEDictionaryQuiesced(options)) {
-            if (!_preferencesTimer) [self startPreferencesMonitoring];
-            return;
+        [MSIMEInputController releaseIdleDictionarySessionsKeeping:MSIMEIdleDictionarySessionLimit];
+        NSDictionary *options = nil;
+        NSError *sessionError = nil;
+        for (NSUInteger attempt = 0; attempt < 2; ++attempt) {
+            options = MSIMESessionOptions([self runtimeOptions], MSIMEBundleSoundPacks(NSBundle.mainBundle),
+                                         NSBundle.mainBundle.resourcePath);
+            // 词库维护持有租约时保持等待，不能用回收重试绕过它。
+            if (options && MSIMEDictionaryQuiesced(options)) {
+                if (!_preferencesTimer) [self startPreferencesMonitoring];
+                return;
+            }
+            [self resolveCloudCandidatesConsentWithOptions:options];
+            sessionError = nil;
+            if (options) {
+                MSIMEConfigureDiagnosticLogBeforeSession(options);
+                _session = [self createSessionWithOptions:options error:&sessionError];
+            }
+            if (_session || attempt != 0 || [MSIMEInputController releaseIdleDictionarySessionsKeeping:0] == 0) break;
+            // 文件句柄耗尽也会让配置读取失败；释放闲置会话后重新读取，最多重试一次。
+            msime_macos_diagnostic_write("session_retry_after_idle_release");
         }
-        // Before the session exists, so nothing this process writes can be mistaken for an earlier install.
-        [self resolveCloudCandidatesConsentWithOptions:options];
         if (options) {
-            MSIMEConfigureDiagnosticLogBeforeSession(options);
-            _session = [[MSIMEClientSession alloc] initWithOptions:options error:nil];
             _requestedPageSize = 0;
             id directory = options[@"preferences_directory"];
             if ([directory isKindOfClass:NSString.class] && [directory isAbsolutePath]) _preferencesDirectory = [directory copy];
@@ -5838,8 +6175,10 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options) {
                 _resumeDedicatedEnglish = NO;
             }
         }
-        if (_session) _sessionUnavailableReason = nil;
-        else [self reportSessionUnavailable:MSIMESessionUnavailableReason(options)];
+        if (_session) {
+            _sessionUnavailableReason = nil;
+            [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
+        } else [self reportSessionUnavailable:MSIMESessionUnavailableReason(options, sessionError)];
     }
     [self syncPageSize];
     if (_session) {
@@ -5860,6 +6199,10 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options) {
         if (created && MSIMEMusicOwner == self) [self claimBackgroundMusic];
     }
     [self startPreferencesMonitoring];
+}
+
+- (MSIMEClientSession *)createSessionWithOptions:(NSDictionary *)options error:(NSError **)error {
+    return [[MSIMEClientSession alloc] initWithOptions:options error:error];
 }
 
 - (void)startPreferencesMonitoring {
@@ -5969,7 +6312,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 // 选中的皮肤包被同名替换（MCP 的 `create_candidate_skin` 带 replace、皮肤编辑器、图库重装）时选择没变，偏好文档的 revision 也不变，-completePreferenceLoad: 不会重新应用，旧的配色和装饰图会一直画到进程重启。这里问外观设置包是否换过（几次 stat），换过就让工具栏取新的调色板；候选窗的皮肤和装饰图在下一次绘制时从外观设置读。
 - (BOOL)applyReplacedSkinPackages {
     if (!_appearance || ![_appearance reloadReplacedSkinPackages]) return NO;
-    _expandedViewportRowsHeight = 0;
+    _expandedViewportHeight = 0;
     [_toolbar reloadToolbarImages];
     [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
     [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
@@ -6189,12 +6532,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 
 - (void)deactivateServer:(id)sender {
+    ++_spacingInputSequence;
     [[MSIMEInputModeHUDPanel sharedPanel] orderOut:nil];
     [[MSIMETypingEffectPanel sharedPanel] settle];
     // Every focus loss writes the key heatmap counts, including a late one for a previous client: they are this controller's presses either way.
     [self flushKeyPresses];
     // 上一个客户端迟到的回调不能拆掉当前客户端的组字、面板、监视和尚未松开的修饰键。成对标点也一样：activateServer: 已丢掉上一个客户端欠着的闭合符，此刻待补的闭合符和跳过记录都属于当前客户端，替它补上会把这一对提前合上、把组字中的 marked text 整段替换掉，所以迟到判断必须先于补闭合符。
     if (!sender || sender != _activeClient) return;
+    [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     if (![self commitManagedEnglishRaw]) return;
     [self flushPendingPairedClosing];
     _pairedPunctuation.clear();
@@ -6214,7 +6559,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self cancelCloudCandidates];
     [self discardGlossSensePage];
     [self discardExpandedCandidates];
-    _modifierTap.reset();
+    [self resetModifierTap];
     [self abandonCapsLockTap];
     MSIMESetBackendSelectionObservation([NSNotificationCenter defaultCenter], self, @selector(handwritingCandidateSelected:), NO);
     _preferenceLoadState.reset();
@@ -6230,6 +6575,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     _inputAssistance=nil;
     _activeClient = nil;
     if (MSIMEFocusedController == self) MSIMEFocusedController = nil;
+    _dictionarySessionLastUse = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    [MSIMEInputController releaseIdleDictionarySessionsKeeping:MSIMEIdleDictionarySessionLimit];
     [super deactivateServer:sender];
 }
 
@@ -6338,17 +6685,29 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 
 - (void)restartCurrentInputMethod {
+    if (MSIMESessionRecoveryRestartPending) return;
+    MSIMESessionRecoveryRestartPending = YES;
     // 完成块也被 NSWorkspace 并发队列上的回调持有，那边可能最后才释放它：只捕获弱引用，理由同 showCloudClipboard:。
     __weak MSIMEInputController *weakSelf = self;
-    MSIMELaunchInputSourceReregistration(NSBundle.mainBundle.bundleURL, NSWorkspace.sharedWorkspace,
-        ^(BOOL launched) {
-            if (!launched) {
-                NSBeep();
-                return;
+    [self launchInputMethodRestart:^(BOOL launched) {
+        MSIMEInputController *owner = weakSelf;
+        MSIMESessionRecoveryRestartPending = NO;
+        if (!launched) {
+            if (owner && MSIMESessionRecoveryPanel.recoveryDelegate == owner) {
+                [MSIMESessionRecoveryPanel setRestartPending:NO];
+                MSIMESessionRecoveryPanel.message.stringValue = @"未能启动输入法重启。请先切换系统中文输入法继续输入，并检查水杉输入法是否安装完整。";
             }
-            [weakSelf flushKeyPressesWaitingUntilWritten:YES];
-            [NSApp terminate:nil];
-        });
+            NSBeep();
+            return;
+        }
+        [MSIMEInputSessionRecoveryPanel dismissForDelegate:nil];
+        if (owner) [owner terminateCurrentInputMethod];
+        else [NSApp terminate:nil];
+    }];
+}
+
+- (void)launchInputMethodRestart:(void (^)(BOOL launched))completion {
+    MSIMELaunchInputSourceReregistration(NSBundle.mainBundle.bundleURL, NSWorkspace.sharedWorkspace, completion);
 }
 
 - (void)terminateCurrentInputMethod {
@@ -6418,9 +6777,61 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [_session setLifecycleActive:NO];
 }
 
+- (NSDictionary *)directEnglishSpacingContext {
+    const int scheme = msime::mac::cycle::LastChineseSchemeCode(_appearance.inputScheme.UTF8String);
+    return @{@"scheme":@(scheme < 0 ? 255 : scheme), @"local_mode":@"direct_english"};
+}
+
+// 先让原文落地再读上下文，避免同步查询中的下一键越过尚未上屏的文字。
+- (void)formatCrossCommitText:(NSString *)text context:(NSDictionary *)context
+                       client:(id<MSIMETextClient>)client isCurrent:(BOOL (^)(void))isCurrent {
+    NSDictionary *config = _appearance.crossCommitSpacing;
+    if (!text.length || text.length > 4096 || ![config[@"enabled"] isEqual:@YES] ||
+        _appearance.runtimeFullWidthInput || ![context isKindOfClass:NSDictionary.class]) return;
+    BOOL (^canFormat)(void) = ^BOOL {
+        return isCurrent() && ![self secureEventInputActive] && !self->_appearance.runtimeFullWidthInput &&
+            [config isEqual:self->_appearance.crossCommitSpacing];
+    };
+    if (!canFormat()) return;
+    @try {
+        NSString *application = [client respondsToSelector:@selector(bundleIdentifier)] ? [(id)client bundleIdentifier] : nil;
+        if (!canFormat()) return;
+        NSMutableDictionary *request = [@{@"config":config, @"application":application ?: @"", @"context":context} mutableCopy];
+        if (![[MSIMEClientSession crossCommitSpacingRequest:request][@"enabled"] isEqual:@YES]) return;
+        uint32_t preceding = 0;
+        NSRange committed = MSIMETextClientCommittedRange(client, text, &preceding, canFormat);
+        if (!canFormat() || committed.location == NSNotFound || !preceding) return;
+        request[@"preceding"] = @(preceding);
+        request[@"text"] = text;
+        NSString *spaced = [MSIMEClientSession crossCommitSpacingRequest:request][@"text"];
+        if (canFormat() && [spaced isKindOfClass:NSString.class] && ![spaced isEqualToString:text])
+            [client insertText:spaced replacementRange:committed];
+    } @catch (NSException *exception) {
+        // 客户端可拒绝文档范围；原文已上屏，格式化失败不重试、不记录输入内容。
+        (void)exception;
+    }
+}
+
+- (void)writeDirectEnglishText:(NSString *)text client:(id<MSIMETextClient>)client {
+    if ((id)client != _activeClient) return;
+    const uint64_t sequence = _applySequence;
+    const uint64_t inputSequence = _spacingInputSequence;
+    BOOL (^isCurrent)(void) = ^BOOL {
+        return (id)client == self->_activeClient && sequence == self->_applySequence &&
+            inputSequence == self->_spacingInputSequence;
+    };
+    [client insertText:text replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+    if (isCurrent())
+        [self formatCrossCommitText:text context:[self directEnglishSpacingContext] client:client isCurrent:isCurrent];
+    // 格式化替换不重复计数，统计只记本次原始上屏。
+    MSIMERecordTypingStatistics(_preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"], text,
+                                msime::mac::TypingSource::English);
+}
+
 // 把字段属性报告给生命周期核心：安全输入是 SECURE，英文模式是 HOST_ENGLISH，macOS 两项都读得到，所以带 KNOWN。只在变了时调用，按契约先于这个键的 msime_client_key。核心按 SECURE 关掉声音、特效和音乐，所以安全输入的开关不必再由这里去开关音乐。
 - (void)syncFieldTraits {
     _secureEventInput = [self secureEventInputActive];
+    if (_secureEventInput) [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     const uint32_t traits = MSIME_TRAIT_KNOWN | (_secureEventInput ? MSIME_TRAIT_SECURE : 0) |
         (_appearance.englishMode ? MSIME_TRAIT_HOST_ENGLISH : 0);
     if (!_session || traits == _fieldTraits) return;
@@ -6514,8 +6925,9 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [panel presentEffect:packed commit:commit caretRect:caret candidateView:card cardRect:cardRect cornerRadius:card.cornerRadius];
 }
 
-// Every key down leaves through here, so the smart punctuation shadow sees each one exactly once, after it has been handled and with what became of it. Events this host posted itself (the voice sendinput route and the smart punctuation rewrite) are skipped: whoever posted them has already recorded what they carry.
+// 每个按键按下都会从这里离开，因此智能标点影子只在按键处理完、结果确定后看到一次。宿主自己派发的事件（语音 sendinput 路径和智能标点重写）会跳过：派发者已经记录了它们携带的内容。
 - (BOOL)handleEvent:(NSEvent *)event client:(id)sender {
+    ++_spacingInputSequence;
     const bool timed = msime_macos_diagnostic_enabled();
     const uint64_t started = timed ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
     const NSEventType type = event.type;
@@ -6617,6 +7029,64 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         MSIMERecordKeyPresses([self keyPressStatisticsDirectory], std::move(*flush), wait);
 }
 
+- (void)stopEditableShiftMouseMonitoring {
+    [_editableShiftMouseTimer invalidate];
+    _editableShiftMouseTimer = nil;
+    if (_editableShiftLocalMouseMonitor) [NSEvent removeMonitor:_editableShiftLocalMouseMonitor];
+    if (_editableShiftGlobalMouseMonitor) [NSEvent removeMonitor:_editableShiftGlobalMouseMonitor];
+    _editableShiftLocalMouseMonitor = nil;
+    _editableShiftGlobalMouseMonitor = nil;
+}
+- (void)cancelEditableShiftTap {
+    _editableShiftGate.cancel();
+    [self stopEditableShiftMouseMonitoring];
+}
+- (void)resetModifierTap {
+    _modifierTap.reset();
+    _editableShiftGate.reset();
+    [self stopEditableShiftMouseMonitoring];
+}
+- (BOOL)startEditableShiftMouseMonitoring {
+    const NSEventMask mask = NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown |
+        NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp | NSEventMaskOtherMouseUp |
+        NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged | NSEventMaskScrollWheel;
+    __weak MSIMEInputController *weakSelf = self;
+    _editableShiftLocalMouseMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent *(NSEvent *event) {
+        [weakSelf cancelEditableShiftTap];
+        return event;
+    }];
+    _editableShiftGlobalMouseMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask handler:^(NSEvent *event) {
+        (void)event;
+        [weakSelf cancelEditableShiftTap];
+    }];
+    // 轻点上限为半秒；丢失松键通知也不能让监视器一直挂着。
+    _editableShiftMouseTimer = [NSTimer timerWithTimeInterval:0.5 repeats:NO block:^(NSTimer *timer) {
+        (void)timer;
+        [weakSelf cancelEditableShiftTap];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:_editableShiftMouseTimer forMode:NSRunLoopCommonModes];
+    return _editableShiftLocalMouseMonitor != nil && _editableShiftGlobalMouseMonitor != nil;
+}
+- (msime::mac::EditableShiftFocus)editableShiftFocusForClient:(id)sender {
+    if ([self secureEventInputActive]) return {};
+    NSString *bundle = [sender respondsToSelector:@selector(bundleIdentifier)] ? [sender bundleIdentifier] : nil;
+    return msime::mac::CaptureEditableShiftFocus(bundle);
+}
+- (BOOL)observeModifierTap:(NSEvent *)event client:(id)sender {
+    const BOOL restricted = _appearance.shiftTapRequiresEditable && _appearance.shiftTapShortcut;
+    const bool wasArmed = _editableShiftGate.armed();
+    const bool allowed = _editableShiftGate.observe(event, restricted, [self, sender] {
+        return [self editableShiftFocusForClient:sender];
+    });
+    if (_editableShiftGate.armed() && !wasArmed && ![self startEditableShiftMouseMonitoring])
+        [self cancelEditableShiftTap];
+    if (!_editableShiftGate.armed()) [self stopEditableShiftMouseMonitoring];
+    const bool tap = _modifierTap.observe(event, _appearance.shiftTapShortcut, _appearance.controlTapShortcut);
+    const bool shift = event.type == NSEventTypeFlagsChanged && (event.keyCode == 56 || event.keyCode == 60);
+    // Control 轻点和其他切换快捷键不受可编辑焦点限制。
+    return tap && (!shift || allowed);
+}
+
 - (BOOL)handleKeyEvent:(NSEvent *)event client:(id)sender {
     CGEventRef nativeEvent = event.CGEvent;
     if (nativeEvent && CGEventGetIntegerValueField(nativeEvent, kCGEventSourceUserData) == MSIMEVoiceCommitEventTag) return NO;
@@ -6637,7 +7107,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (!sender) {
         _voicePermissionToken = nil;
         [_voiceOverlay dismissFailure];
-        _modifierTap.reset();
+        [self resetModifierTap];
         [self abandonCapsLockTap];
         _voiceHoldShortcut.reset();
         _backspaceHoldArmed = NO;
@@ -6658,7 +7128,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         [self cancelCandidateTranslations];
         [self cancelCloudCandidates];
         [self resetCandidateAnchor];
-        _modifierTap.reset();
+        [self resetModifierTap];
         _preferenceLoadState.reset();
         [self flushPendingPairedClosing];
         _pairedPunctuation.clear();
@@ -6668,6 +7138,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         _backspaceHoldArmed = NO;
         // Clear the previous client's marked text before accepting the new focus.
         [self apply:[_session setFocused:NO error:nil]];
+        [MSIMEInputSessionRecoveryPanel dismissForDelegate:nil];
         _activeClient = sender;
         MSIMEFocusedController = self;
         // Whatever the previous client was last given says nothing about this one.
@@ -6692,18 +7163,20 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     NSUserDefaults *voiceDefaults = NSUserDefaults.standardUserDefaults;
     if (event.type == NSEventTypeKeyDown && event.keyCode == 53) [_voiceOverlay dismissFailure];
     if (_voicePermissionToken && event.type == NSEventTypeKeyDown && event.keyCode == 53) {
-        _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _modifierTap.reset(); return YES;
+        _voicePermissionToken = nil; _voiceHoldShortcut.reset(); [self resetModifierTap]; return YES;
     }
     const BOOL voiceEnabled = MSIMEVoiceInputEnabled(voiceDefaults);
     if (!voiceEnabled) _voiceHoldShortcut.reset();
+    const NSEventModifierFlags physicalModifierFlags = voiceEnabled && event.type == NSEventTypeFlagsChanged
+        ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0;
     const auto voiceShortcut = voiceEnabled ? _voiceHoldShortcut.observe(event, {
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyRightAlt"] != NO,
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlCommand"] != NO,
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
         // 空格锁定固定为开：空格只在按住录音组合键期间才被拦下，平常打字不受影响。设置页不再给这个开关（`voice_space_lock_switch`），存下的 false 也不再读。
         true
-    }, _voiceService.active) : MSIMEVoiceHoldShortcut::Result{};
-    if (voiceShortcut.consumed || voiceShortcut.action != MSIMEVoiceHoldShortcut::Action::None) _modifierTap.reset();
+    }, _voiceService.active, physicalModifierFlags) : MSIMEVoiceHoldShortcut::Result{};
+    if (voiceShortcut.consumed || voiceShortcut.action != MSIMEVoiceHoldShortcut::Action::None) [self resetModifierTap];
     // MSIME-Windows shows the overlay's cancel and confirm buttons once the hold is locked (ControlCommand::Lock).
     if (voiceShortcut.consumed && _voiceHoldShortcut.locked() && _voiceService.active) [_voiceOverlay setRecordingLocked:YES];
     if (voiceShortcut.action == MSIMEVoiceHoldShortcut::Action::Toggle) {
@@ -6716,7 +7189,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     }
     if (voiceShortcut.consumed) return YES;
-    if (_modifierTap.observe(event, _appearance.shiftTapShortcut, _appearance.controlTapShortcut)) {
+    if ([self observeModifierTap:event client:sender]) {
         [self toggleInputModeFromModifierTap];
         return YES;
     }
@@ -6749,9 +7222,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
                [event.characters characterAtIndex:0] != _lastSmartPunctuation) {
         [self resetSmartPunctuationState];
     }
-    if (voiceEnabled && !event.isARepeat && event.keyCode == 101 &&
-        (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagCommand)) == NSEventModifierFlagControl &&
-        ([NSUserDefaults.standardUserDefaults objectForKey:@"MSIMEClientVoiceHotkeyCtrlF9"] == nil || [NSUserDefaults.standardUserDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlF9"])) {
+    if (voiceEnabled && !event.isARepeat && [self matchesVoiceToggleHotkey:event]) {
         [self toggleVoiceInput:nil];
         return YES;
     }
@@ -6765,7 +7236,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (!event.isARepeat) [self toggleChineseEnglishMode];
         return YES;
     }
-    if (_appearance.inputModeShortcut && event.keyCode == 49 && (event.modifierFlags & NSEventModifierFlagShift) && !(event.modifierFlags & competing)) {
+    if (_appearance.inputModeShortcut && event.keyCode == 49 && (event.modifierFlags & NSEventModifierFlagShift) &&
+        !(event.modifierFlags & competing) && !_modifierTap.shiftChordInterrupted()) {
         if (!event.isARepeat) [self toggleChineseEnglishMode];
         return YES;
     }
@@ -6865,16 +7337,21 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             if (!output.empty()) {
                 NSString *text = [[NSString alloc] initWithBytes:output.data() length:output.size()
                                                          encoding:NSUTF8StringEncoding];
-                [(id<MSIMETextClient>)sender insertText:text replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
-                MSIMERecordTypingStatistics(_preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"], text,
-                                            msime::mac::TypingSource::English);
+                [self writeDirectEnglishText:text client:(id<MSIMETextClient>)sender];
                 return YES;
             }
-            if (_capsLockTapReleased && character >= 'a' && character <= 'z') {
-                NSString *text = [NSString stringWithCharacters:&character length:1];
-                [(id<MSIMETextClient>)sender insertText:text replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
-                MSIMERecordTypingStatistics(_preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"], text,
-                                            msime::mac::TypingSource::English);
+            // 使用激活时已有的应用标识判定接管；排除应用仍把原键交回，不在落字前查客户端。
+            const BOOL spacingEnabled = !_appearance.runtimeFullWidthInput && ![self secureEventInputActive] &&
+                [_appearance.crossCommitSpacing[@"enabled"] isEqual:@YES] &&
+                [[MSIMEClientSession crossCommitSpacingRequest:@{
+                    @"config":_appearance.crossCommitSpacing,
+                    @"application":_appearance.activeInputModeApplication ?: @"",
+                    @"context":[self directEnglishSpacingContext]}][@"enabled"] isEqual:@YES];
+            const BOOL asciiLetterOrDigit = (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9');
+            if ((spacingEnabled && asciiLetterOrDigit) || (_capsLockTapReleased && character >= 'a' && character <= 'z')) {
+                [self writeDirectEnglishText:[NSString stringWithCharacters:&character length:1]
+                                      client:(id<MSIMETextClient>)sender];
                 return YES;
             }
         }
@@ -6988,8 +7465,9 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if ([self revertSmartPunctuationSpace:event client:(id<MSIMETextClient>)sender]) return YES;
     if ([self convertSmartPunctuationSpace:event client:(id<MSIMETextClient>)sender]) return YES;
     if ([self handleSmartPunctuation:event client:(id<MSIMETextClient>)sender]) return YES;
-    // The sense page owns the keyboard while it is up, and hands back anything it does not claim.
-    if ([self glossSensePageActive] && [self handleGlossSenseEvent:event client:sender]) return YES;
+    // 释义页先处理按键；退出释义页的同一枚 Tab 继续沿用原有的列循环或翻页。
+    const BOOL glossSensePageWasActive = [self glossSensePageActive];
+    if (glossSensePageWasActive && [self handleGlossSenseEvent:event client:sender]) return YES;
     // Ctrl+Enter offers the highlighted candidate's gloss: one sense commits, several open the page
     // above. The reference and both Linux hosts do the same; here the chord used to fall through to
     // the rule below and commit the composition instead.
@@ -7048,6 +7526,15 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     uint32_t command = UINT32_MAX;
     [self ensureAppearance];
+    // 引擎只在完整双拼后公布 Tab；显式辅助码优先于普通候选翻页和释义列循环。
+    if (!glossSensePageWasActive && event.keyCode == 48 && !(event.modifierFlags & NSEventModifierFlagShift) &&
+        MSIMESpellingSymbolString(_view, @"\t")) {
+        NSDictionary *transition = [_session typeASCII:'\t' shift:NO error:nil];
+        if (MSIMEStrictBoolean(transition[@"handled"])) {
+            [self apply:transition];
+            return YES;
+        }
+    }
     if (_panel.isVisible && event.keyCode == 48 &&
         !(event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand))) {
         if ([self cycleArmedGlossColumnBackwards:(event.modifierFlags & NSEventModifierFlagShift) != 0]) {
@@ -7438,6 +7925,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 
 - (void)apply:(NSDictionary *)transition {
+    ++_applySequence;
     if (!transition || !_activeClient) return;
     // An Engine answer replaces the view the sense page was drawn over, so the page goes with it.
     [self discardGlossSensePage];
@@ -7544,30 +8032,43 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         converted[@"commit"] = MSIMEChineseOutputString(transition[@"commit"], YES);
         displayTransition = converted;
     }
-    const uint64_t applySequence = ++_applySequence;
+    const uint64_t applySequence = _applySequence;
+    const uint64_t inputSequence = _spacingInputSequence;
     const uint64_t glossViewSequence = _glossViewSequence;
     NSString *pendingClosing = _pendingPairedClosing;
     // A Korean, Zhuyin or Vietnamese composition is always drawn inline, whatever the preedit display preference says: until Option+Return opens a candidate list there is no candidate window to show it in, and hidden it would be text the user cannot see being written.
     const MSIMEInlinePreeditStyle preeditStyle = MSIMESchemeTrait(displayTransition[@"view"], msime::mac::scheme::AlwaysInlinePreedit)
         ? MSIMEInlinePreeditStylePinyin : _appearance.inlinePreeditStyle;
-    MSIMEApplyTransitionTrackingMarkedText(displayTransition, (id<MSIMETextClient>)_activeClient, preeditStyle, pendingClosing, &_clientHasMarkedText);
-    // What a commit leaves left of the caret is known for certain, even in a host that never reads it back (Windows sets the shadow after every commit it makes). A pending closing mark goes in behind the commit, so it is the character the caret follows.
+    // 沿用 #9405 的写后保护：同步回调读到新标点状态，外层不再覆盖较新的标记。
+
+    if (pendingClosing && [displayTransition[@"commit"] isKindOfClass:NSString.class]) {
+        _pairedPunctuation.push(pendingClosing.UTF8String);
+        _pendingPairedClosing = nil;
+    }
+    if (openedClosing) _pendingPairedClosing = openedClosing;
+
     if ([displayTransition[@"commit"] isKindOfClass:NSString.class]) {
         NSString *landed = pendingClosing.length ? pendingClosing : displayTransition[@"commit"];
         if (landed.length) [self noteSmartPunctuationShadow:[landed characterAtIndex:landed.length - 1]];
     }
-    if (pendingClosing && [displayTransition[@"commit"] isKindOfClass:NSString.class]) {
-        // The commit took the closing mark with it, so the pair is done and a later duplicate of
-        // that mark should be skipped rather than typed twice.
-        _pairedPunctuation.push(pendingClosing.UTF8String);
-        _pendingPairedClosing = nil;
-    }
-    if (openedClosing) {
-        _pendingPairedClosing = openedClosing;
+    id<MSIMETextClient> textClient = (id<MSIMETextClient>)_activeClient;
+    BOOL (^isCurrent)(void) = ^BOOL {
+        return applySequence == self->_applySequence &&
+            textClient == (id<MSIMETextClient>)self->_activeClient;
+    };
+    MSIMEApplyTransitionWithCommitObserver(displayTransition, textClient, preeditStyle, pendingClosing,
+        &_clientHasMarkedText, isCurrent, ^(NSString *text) {
+            BOOL (^canFormat)(void) = ^BOOL {
+                return isCurrent() && inputSequence == self->_spacingInputSequence;
+            };
+            if (sourceOverride == msime::mac::TypingSource::Unknown)
+                [self formatCrossCommitText:text context:transition[@"commit_context"] client:textClient isCurrent:canFormat];
+        });
+    if (isCurrent() && openedClosing) {
         _clientHasMarkedText = YES;
-        [(id<MSIMETextClient>)_activeClient setMarkedText:openedClosing
-                                          selectionRange:NSMakeRange(0, 0)
-                                        replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+        [textClient setMarkedText:openedClosing selectionRange:NSMakeRange(0, 0)
+                replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+
     }
     if ([displayTransition[@"commit"] isKindOfClass:NSString.class] && [displayTransition[@"commit"] length]) {
         const auto source = sourceOverride == msime::mac::TypingSource::Unknown
@@ -7582,8 +8083,9 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (feedback && MSIMEStrictUnsignedInteger(feedback[@"typing_effect"], &effect) && effect != 0 && effect <= UINT32_MAX)
             [self drawTypingEffect:static_cast<uint32_t>(effect) commit:YES];
     }
-    // A key handled while this transition's text was being written has already put the newer view on screen; this one is older and must not replace it.
-    if (applySequence != _applySequence) return;
+    // 新派发或焦点已接管客户端，不能再发布旧视图。
+
+    if (!isCurrent()) return;
     // A gloss that arrived during the write was merged into this same page, and the transition's copy of the page predates it.
     if (glossViewSequence == _glossViewSequence || ![_view[@"session"] isEqual:transition[@"view"][@"session"]] ||
         ![_view[@"generation"] isEqual:transition[@"view"][@"generation"]])
@@ -7669,7 +8171,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     NSMutableArray *items = [NSMutableArray arrayWithCapacity:missing.count];
     for (NSString *text in missing) [items addObject:@{@"text": text, @"language": @"en"}];
-    NSDictionary *request = @{@"generation": _view[@"generation"] ?: @0, @"items": items};
+    NSMutableDictionary *request = [@{@"generation": _view[@"generation"] ?: @0, @"items": items} mutableCopy];
+    // 旧配置的活动词库可能位于用户目录，音标表仍随输入法 bundle 分发。
+    NSString *supplementary = NSBundle.mainBundle.resourcePath;
+    if (supplementary.isAbsolutePath) request[@"supplementary_resources"] = supplementary;
     NSArray<NSString *> *asked = missing.array;
     __weak MSIMEInputController *weakSelf = self;
     [_pronunciationQueue addOperationWithBlock:^{
@@ -7715,8 +8220,19 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
                                      showSelectedBar:(BOOL)showSelectedBar inset:(CGFloat)inset paging:(BOOL)paging
                                              visible:(NSRect)visible preeditWidth:(CGFloat)preeditWidth
                                         minimumWidth:(CGFloat)minimumWidth reservesGloss:(BOOL)reservesGloss pagerWidth:(CGFloat)pagerWidth {
+    return [self candidatePageGeometry:candidates font:font glossFont:glossFont showSelectedBar:showSelectedBar inset:inset
+        paging:paging visible:visible preeditWidth:preeditWidth minimumWidth:minimumWidth reservesGloss:reservesGloss
+        pagerWidth:pagerWidth expandedColumns:0 sharedColumns:nullptr];
+}
+
+- (MSIMECandidatePageGeometry)candidatePageGeometry:(NSArray *)candidates font:(NSFont *)font glossFont:(NSFont *)glossFont
+                                     showSelectedBar:(BOOL)showSelectedBar inset:(CGFloat)inset paging:(BOOL)paging
+                                             visible:(NSRect)visible preeditWidth:(CGFloat)preeditWidth
+                                        minimumWidth:(CGFloat)minimumWidth reservesGloss:(BOOL)reservesGloss pagerWidth:(CGFloat)pagerWidth
+                                     expandedColumns:(NSUInteger)columnCount
+                                       sharedColumns:(const std::vector<double> *)sharedColumns {
     MSIMECandidatePageGeometry geometry;
-    const BOOL vertical = _appearance.vertical;
+    const BOOL vertical = _appearance.vertical && columnCount == 0;
     const BOOL traditional = _appearance.traditionalOutput && MSIMEScriptConversionApplies(_view);
     // The fonts arrive at the window's scale already; the row's own paddings follow them.
     const CGFloat scale = MSIMECandidateScale(_appearance);
@@ -7788,6 +8304,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     geometry.readings = readings;
     geometry.scriptAnnotations = scriptAnnotations;
     geometry.tooltips = tooltips;
+    if (columnCount && !geometry.hidesNumber) {
+        NSString *number = [NSString stringWithFormat:@"%lu", (unsigned long)columnCount];
+        numberWidth = MAX(numberWidth, [number sizeWithAttributes:@{NSFontAttributeName:numberFont}].width);
+    }
     const CGFloat textLeft = userStyle.itemPaddingHorizontal ? *userStyle.itemPaddingHorizontal * scale
         : layout && layout->numberInset ? MAX(5.0 * scale, MSIMESkinLengthValue(layout->numberInset, font.pointSize, scale))
                                        : MSIMECandidateTextLeft(showSelectedBar, scale);
@@ -7811,12 +8331,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     if (userStyle.itemPaddingVertical) metrics.paddingVertical = *userStyle.itemPaddingVertical * scale;
     if (userStyle.itemSpacing) metrics.itemGap = metrics.columnGap = *userStyle.itemSpacing * scale;
+    geometry.columnGap = metrics.columnGap > 0 ? metrics.columnGap : metrics.itemGap;
     std::vector<msime::candidate::CandidateItemWidths> items;
     items.reserve(candidates.count);
     CGFloat natural = 0;
     for (NSUInteger i = 0; i < texts.count; ++i) {
         items.push_back(MSIMECandidateItemWidths(texts[i], annotations[i], translations[i], font, glossFont, scale));
         const CGFloat itemWidth = ceil(msime::candidate::CandidateItemNaturalWidth(items.back(), metrics, !vertical));
+        geometry.naturalColumns.push_back(itemWidth);
         natural = vertical ? MAX(natural, itemWidth) : natural + itemWidth;
     }
     if (!vertical && items.size() > 1) natural += metrics.columnGap * static_cast<CGFloat>(items.size() - 1);
@@ -7842,7 +8364,27 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     };
     // Horizontal rows keep the height a gloss will need even before it arrives, so the card does not grow under the user seconds after the composition started.
     const CGFloat minimumHeight = vertical || !reservesGloss ? 0 : candidateRow + 2 * metrics.paddingVertical + [self reservedGlossHeightForFont:glossFont];
-    geometry.rows = msime::candidate::LayoutCandidatePage(items, geometry.lineWidth, metrics, !vertical, measure, minimumHeight);
+    if (sharedColumns) {
+        NSParameterAssert(!vertical && items.size() <= sharedColumns->size());
+        double x = 0, tallest = minimumHeight;
+        geometry.lineWidth = 0;
+        for (double column : *sharedColumns) geometry.lineWidth += column;
+        geometry.lineWidth += geometry.columnGap * (sharedColumns->size() - 1);
+        geometry.width = geometry.lineWidth + 2 * inset + pagerWidth;
+        for (NSUInteger index = 0; index < items.size(); ++index) {
+            msime::candidate::CandidateRowLayout row;
+            row.x = x;
+            row.width = (*sharedColumns)[index];
+            row.item = msime::candidate::LayoutCandidateItem(items[index], row.width - metrics.chrome, metrics, true,
+                [&, index](msime::candidate::CandidateRun run, double runWidth) { return measure(index, run, runWidth); });
+            tallest = MAX(tallest, row.item.height);
+            geometry.rows.push_back(row);
+            x += row.width + geometry.columnGap;
+        }
+        for (auto &row : geometry.rows) row.height = tallest;
+    } else {
+        geometry.rows = msime::candidate::LayoutCandidatePage(items, geometry.lineWidth, metrics, !vertical, measure, minimumHeight);
+    }
     for (auto &row : geometry.rows) {
         // Whole points keep neighbouring buttons touching and their text on the pixel grid.
         const double left = round(row.x), right = round(row.x + row.width);
@@ -7914,7 +8456,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         // The same rows the candidate panel lays out, so a card that wraps a long candidate onto several lines is kept clear of in full.
         NSScreen *screen = MSIMECandidateScreen(cursor);
         NSFont *font = [_appearance candidateFontOfSize:_appearance.fontSize * scale englishFirst:YES];
-        NSFont *glossFont = [_appearance candidateFontOfSize:MSIMECandidateTranslationPointSize * scale englishFirst:YES];
+        NSFont *glossFont = [_appearance candidateFontOfSize:_appearance.translationFontSize * scale englishFirst:YES];
         // 键位图先于候选窗更新，必须自行读取本次皮肤，不能使用上一次重绘留下的几何。
         NSAppearance *current = _keymapPanel.appearance ?: _panel.effectiveAppearance ?: NSApp.effectiveAppearance;
         NSString *theme = [current bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
@@ -8015,7 +8557,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     if (!_candidateMotion) _candidateMotion = [MSIMECandidateMotion new];
     NSMutableArray<NSView *> *rows = [NSMutableArray array];
     MSIMECandidateDecorationView *decoration = nil;
-    for (NSView *subview in MSIMECandidateControlsView(_panel.contentView).subviews) {
+    for (NSView *subview in MSIMECandidateControlSubviews(_panel.contentView)) {
         if ([subview isKindOfClass:MSIMECandidateButton.class] && subview.tag >= 0) [rows addObject:subview];
     }
     for (NSView *subview in _panel.contentView.subviews)
@@ -8042,7 +8584,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 // 高亮在同一个输入串的同一页里换了格位时（方向键、Tab、网格里移动），按皮肤的选中预设装饰新高亮行；高亮本身已经随这一帧同步画好。打字或翻页时 Engine 把高亮放回第一格，那不是选中，不播，与 CandidatePanel 只在 selectCandidateWithIdentifier: 时装饰一致。
 - (void)decorateCandidateSelection:(BOOL)panelWasVisible {
     MSIMECandidateButton *highlighted = nil;
-    for (NSView *subview in MSIMECandidateControlsView(_panel.contentView).subviews)
+    for (NSView *subview in MSIMECandidateControlSubviews(_panel.contentView))
         if ([subview isKindOfClass:MSIMECandidateButton.class] && subview.tag >= 0 && ((MSIMECandidateButton *)subview).candidateHighlighted) {
             highlighted = (MSIMECandidateButton *)subview;
             break;
@@ -8293,8 +8835,17 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         const BOOL listControl = [child isKindOfClass:MSIMECandidatePagerButton.class] ||
             [child isKindOfClass:MSIMECandidateExpandToggleButton.class] ||
             [child.identifier isEqual:@"candidate-pager-divider"];
-        if (!listControl && (![child isKindOfClass:MSIMECandidateButton.class] || child.tag < 0)) frame.origin.y += gap;
+        if (!listControl && ![child.identifier isEqual:@"candidate-expanded-viewport"] &&
+            (![child isKindOfClass:MSIMECandidateButton.class] || child.tag < 0)) frame.origin.y += gap;
+        if ([child isKindOfClass:MSIMEExpandedCandidateScrollView.class])
+            frame.size.width = MAX(0.0, frame.size.width + padding.right - inset);
         child.frame = frame;
+        if ([child isKindOfClass:MSIMEExpandedCandidateScrollView.class]) {
+            NSScrollView *viewport = (NSScrollView *)child;
+            [viewport layoutSubtreeIfNeeded];
+            [viewport.documentView setFrameSize:NSMakeSize(NSWidth(viewport.contentView.bounds),
+                NSHeight(viewport.documentView.frame))];
+        }
     }
     // 旧装饰带仍相对卡片顶部；自由挂件则相对新的卡片矩形定位。
     for (NSView *child in content.subviews) if ([child isKindOfClass:MSIMECandidateDecorationView.class]) {
@@ -8314,7 +8865,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     if (skin.canvas) [content configureCanvas:canvas assets:assets];
 }
 
-// 画展开的候选网格，见「展开的候选网格」一节。皮肤、字体、首行和装饰与普通候选窗一致，每一行按普通候选窗排一页的方式排（candidatePageGeometry:），行与行上下叠起来。光标位置无效、找不到屏幕时返回 NO，由调用方收起网格。
+// 展开网格共用各列宽度，行内按单元格实宽折行；皮肤、字体和选词契约沿用普通候选窗。
 - (BOOL)renderExpandedCandidates {
     const bool timed = msime_macos_diagnostic_enabled();
     const uint64_t buildStarted = timed ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
@@ -8331,15 +8882,8 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     __weak MSIMEInputController *weakSelf = self;
     candidatePanel.scrollHandler = ^(NSEvent *event) {
         MSIMEInputController *controller = weakSelf;
-        if (!controller || !controller->_expandedCandidates || !controller->_panel.isVisible ||
-            !controller->_activeClient || !controller->_session) return;
-        if (!event.hasPreciseScrollingDeltas) {
-            if (event.scrollingDeltaY != 0)
-                [controller scrollExpandedCandidatesBackwards:event.scrollingDeltaY > 0];
-            return;
-        }
-        controller->_expandedPendingScrollDelta += event.scrollingDeltaY;
-        [controller renderCandidates];
+        MSIMEExpandedCandidateScrollView *scrollView = controller ? controller->_expandedScrollView : nil;
+        [scrollView scrollWheel:event];
     };
     NSAppearance *currentAppearance = candidateAppearance ?: _panel.effectiveAppearance ?: NSApp.effectiveAppearance;
     NSString *currentTheme = [currentAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
@@ -8367,7 +8911,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         ? static_cast<CGFloat>(std::clamp(*skin.layout->numberScale, 0.0, 2.0))
         : MSIMECandidateNumberScale;
     NSFont *numberFont = MSIMECandidateNumberFont(font, numberScale);
-    NSFont *glossFont = [_appearance candidateFontOfSize:MSIMECandidateTranslationPointSize * scale englishFirst:YES];
+    NSFont *glossFont = [_appearance candidateFontOfSize:_appearance.translationFontSize * scale englishFirst:YES];
     id preeditValue = _view[@"preedit"];
     if (![preeditValue isKindOfClass:NSString.class]) preeditValue = _view[@"editing_text"];
     NSString *preedit = _appearance.showsCandidatePreedit && [preeditValue isKindOfClass:NSString.class] ? preeditValue : @"";
@@ -8390,8 +8934,9 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const NSUInteger cursorRow = _expandedCursor / columns;
     // 来源的 expand_rows 只数首行之后的网格；原生网格把当前页也计入视口。
     const NSUInteger windowRows = MIN(rows, skin.expandRows ? 1 + *skin.expandRows : msime::candidate::kExpandedGridVisibleRows);
-    if (_expandedPendingScrollDelta == 0 && _expandedScrollOffset == 0)
+    if (!_expandedScrollsViewport)
         _expandedFirstRow = msime::candidate::ExpandedGridFirstRow(_expandedFirstRow, cursorRow, rows, windowRows);
+    _expandedFirstRow = MIN(_expandedFirstRow, rows - 1);
 
     // 共享卷轴的收起入口留在候选右侧；原生主题保留首行行号及其开关。
     const BOOL skinToggle = skin.expandPanel.value_or(false) && _appearance.showsCandidateExpandButton;
@@ -8408,71 +8953,63 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const CGFloat headerHeight = headerContentHeight + preeditMargin.top + preeditMargin.bottom;
     const CGFloat preeditWidth = preedit.length ? ceil([preedit sizeWithAttributes:@{NSFontAttributeName:preeditFont}].width) + 4 * scale + MSIMEPreeditCaretGap + preeditMargin.left + preeditMargin.right : 0;
     const CGFloat headerWidth = 2 * inset + logoWidth + preeditWidth + (preedit.length && pageControls ? indicatorGap : 0) + controlsWidth;
+    const CGFloat scrollerPadding = MSIMEExpandedCandidateScrollerPadding(scale);
 
     NSRect rowVisible = visible;
     const CGFloat canvasExtra = skin.canvas ? msime::mac::CanvasExtraWidth(*skin.canvas, inset) : 0;
     const auto shadowInsets = msime::mac::CandidateShadowExtraInsets([self candidateShadowForSkin:skin dark:skinDark],
         skin.canvas ? skin.canvas->outer : msime::mac::SkinInsets{}, decorationImage ? skin.decorationTopDip : 0);
     rowVisible.size.width = MAX(0.0, rowVisible.size.width - canvasExtra - 2 * (shadowInsets.left + shadowInsets.right));
-    auto geometryForRow = [&](NSUInteger row) {
+    auto geometryForRow = [&](NSUInteger row, const std::vector<double> *sharedColumns = nullptr) {
         const NSUInteger start = row * columns;
         NSArray<NSDictionary *> *slice = [_expandedCandidates subarrayWithRange:NSMakeRange(start, MIN(columns, count - start))];
         return [self candidatePageGeometry:slice font:font glossFont:glossFont showSelectedBar:tokens.showSelectedBar
                                       inset:inset paging:NO visible:rowVisible preeditWidth:0
                                minimumWidth:MAX(0.0, MAX(skin.minWidthDip, skin.decorationWidthDip) - canvasExtra)
-                               reservesGloss:NO pagerWidth:toggle.column()];
+                               reservesGloss:NO pagerWidth:toggle.column() expandedColumns:columns sharedColumns:sharedColumns];
     };
-    // 精确滚动的正 delta 是向上回滚，负 delta 是向下滚动。偏移只在当前首行内保留，跨过行高后推进虚拟窗口。
-    const CGFloat pendingDelta = _expandedPendingScrollDelta;
-    _expandedPendingScrollDelta = 0;
-    if (pendingDelta != 0) {
-        _expandedScrollOffset += -pendingDelta;
-        while (_expandedScrollOffset >= 0 && _expandedFirstRow + windowRows < rows) {
-            const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight + rowGap;
-            if (!(rowHeight > 0) || _expandedScrollOffset < rowHeight) break;
-            _expandedScrollOffset -= rowHeight;
-            ++_expandedFirstRow;
-        }
-        while (_expandedScrollOffset < 0 && _expandedFirstRow > 0) {
-            --_expandedFirstRow;
-            const CGFloat rowHeight = geometryForRow(_expandedFirstRow).rowsHeight + rowGap;
-            _expandedScrollOffset += rowHeight > 0 ? rowHeight : 0;
-        }
-        if (_expandedFirstRow + windowRows >= rows && _expandedScrollOffset > 0)
-            _expandedScrollOffset = 0;
-        if (_expandedScrollOffset < 0) _expandedScrollOffset = 0;
-    }
-    const NSUInteger visibleRows = MIN(windowRows, rows - _expandedFirstRow);
-    _expandedVisibleRows = visibleRows;
-    std::vector<MSIMECandidatePageGeometry> layouts;
-    const BOOL paintsTrailingRow = _expandedScrollOffset > 0 && _expandedFirstRow + visibleRows < rows;
-    const NSUInteger paintedRows = visibleRows + (paintsTrailingRow ? 1 : 0);
-    NSMutableArray<NSArray<NSDictionary *> *> *rowCandidates = [NSMutableArray arrayWithCapacity:paintedRows];
+    auto layouts = std::make_shared<std::vector<MSIMECandidatePageGeometry>>();
+    layouts->reserve(rows);
+    std::vector<CGFloat> rowOffsets{0};
+    rowOffsets.reserve(rows + 1);
     CGFloat width = headerWidth;
-    CGFloat measuredRowsHeight = 0;
-    for (NSUInteger row = _expandedFirstRow; row < _expandedFirstRow + paintedRows; ++row) {
-        const NSUInteger start = row * columns;
-        NSArray<NSDictionary *> *slice = [_expandedCandidates subarrayWithRange:NSMakeRange(start, MIN(columns, count - start))];
-        layouts.push_back(geometryForRow(row));
-        [rowCandidates addObject:slice];
-        width = MAX(width, layouts.back().width);
-        if (row < _expandedFirstRow + visibleRows) measuredRowsHeight += layouts.back().rowsHeight;
+    std::vector<double> sharedColumns(columns, 0);
+    for (NSUInteger row = 0; row < rows; ++row) {
+        layouts->push_back(geometryForRow(row));
+        width = MAX(width, layouts->back().width + scrollerPadding);
+        for (NSUInteger slot = 0; slot < layouts->back().naturalColumns.size(); ++slot)
+            sharedColumns[slot] = MAX(sharedColumns[slot], layouts->back().naturalColumns[slot]);
+    }
+    const CGFloat columnGap = layouts->front().columnGap;
+    const CGFloat available = MAX((CGFloat)columns, floor(rowVisible.size.width - 2 * MSIMECandidateScreenMargin -
+        2 * inset - toggle.column() - scrollerPadding - columnGap * (columns - 1)));
+    // 保留短列自然宽度，只收窄超长列；整张网格共用同一组列边界，末页不拉伸。
+    auto sorted = sharedColumns;
+    std::sort(sorted.begin(), sorted.end());
+    CGFloat remaining = available, cap = available;
+    for (NSUInteger slot = 0; slot < sorted.size(); ++slot) {
+        cap = remaining / (sorted.size() - slot);
+        if (sorted[slot] >= cap) break;
+        remaining -= sorted[slot];
+    }
+    for (double &column : sharedColumns) column = MIN(column, cap);
+    for (NSUInteger row = 0; row < rows; ++row) {
+        (*layouts)[row] = geometryForRow(row, &sharedColumns);
+        width = MAX(width, (*layouts)[row].width + scrollerPadding);
+        rowOffsets.push_back(rowOffsets.back() + (*layouts)[row].rowsHeight + (row + 1 < rows ? rowGap : 0));
     }
     width = ceil(width);
-    if (visibleRows > 1) measuredRowsHeight += (visibleRows - 1) * rowGap;
-    // 滚动期间固定候选区域的高度。不同候选行可能因字形回退、换行或释义高度而不同；
-    // 每帧按当前几行重算会让面板大小和锚点一起跳动，像是滚动被打断。一次展开会话
-    // 以首次布局的视口高度为准，候选按钮仍在内容视图内按各自的实际行高排布并裁切。
-    if (_expandedViewportRowsHeight <= 0) {
-        _expandedViewportRowsHeight = measuredRowsHeight;
-    }
-    const CGFloat rowsHeight = _expandedViewportRowsHeight;
+    const NSUInteger visibleRows = MIN(windowRows, rows - _expandedFirstRow);
+    if (!_expandedScrollsViewport) _expandedVisibleRows = visibleRows;
+    if (!_expandedScrollsViewport || _expandedViewportHeight <= 0)
+        _expandedViewportHeight = rowOffsets[_expandedFirstRow + visibleRows] - rowOffsets[_expandedFirstRow] -
+            (_expandedFirstRow + visibleRows < rows ? rowGap : 0);
+    const CGFloat rowsHeight = _expandedViewportHeight;
+    const CGFloat initialScrollTop = rowOffsets[_expandedFirstRow] + _expandedScrollOffset;
 
     if (!candidatePanel.wheelPaging) [candidatePanel resetWheelAccumulator];
-    // 网格滚轮由 scrollHandler 保留像素偏移，与「滚轮翻页」开关无关；该开关仍只管普通候选窗。
+    // 面板空白处的滚动也转交同一个原生视口，普通候选窗的滚轮开关不变。
     candidatePanel.mouseWheelEnabled = YES;
-    candidatePanel.hasPreviousPage = _expandedFirstRow > 0;
-    candidatePanel.hasNextPage = _expandedFirstRow + visibleRows < rows;
     _panel.opaque = NO;
     _panel.backgroundColor = NSColor.clearColor;
     const CGFloat decorationHeight = decorationImage ? MAX(0.0, skin.decorationTopDip) : 0.0;
@@ -8481,28 +9018,64 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     [_panel setContentSize:NSMakeSize(width, height)];
     MSIMECandidateChromeView *content = [self candidateChromeWithFrame:NSMakeRect(0, 0, width, height) skin:skin];
     content.candidateContentView.clipsToBounds = YES;
-    content.candidateRowsRect = NSMakeRect(inset, verticalInset, MAX(0.0, width - 2 * inset - toggle.column()), rowsHeight);
+    content.candidateRowsRect = NSMakeRect(inset, verticalInset,
+        MAX(0.0, width - 2 * inset - toggle.column() - scrollerPadding), rowsHeight);
     content.candidateRowsTouchTop = headerHeight == 0 && bodyRowGap == 0;
-    CGFloat rowTop = headerBottom - bodyRowGap;
-    for (NSUInteger offset = 0; offset < layouts.size(); ++offset) {
-        const MSIMECandidatePageGeometry &geometry = layouts[offset];
-        NSArray<NSDictionary *> *slice = rowCandidates[offset];
-        const NSUInteger row = _expandedFirstRow + offset;
-        for (NSUInteger slot = 0; slot < slice.count; ++slot) {
-            const NSUInteger index = row * columns + slot;
+    MSIMEExpandedCandidateScrollView *viewport = [[MSIMEExpandedCandidateScrollView alloc]
+        initWithFrame:NSMakeRect(0, verticalInset, MAX(0.0, width - toggle.column()), rowsHeight)];
+    viewport.clipsToBounds = YES;
+    [viewport configureRowOffsets:rowOffsets width:NSWidth(viewport.frame)];
+    _expandedScrollView = viewport;
+    NSArray<NSDictionary *> *entries = _expandedCandidates;
+    viewport.makeRow = ^NSArray<NSView *> *(NSUInteger row, CGFloat top, CGFloat documentHeight) {
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_expandedCandidates != entries) return @[];
+        const MSIMECandidatePageGeometry &geometry = (*layouts)[row];
+        const NSUInteger start = row * columns;
+        NSMutableArray<NSView *> *buttons = [NSMutableArray array];
+        for (NSUInteger slot = 0; slot < MIN(columns, count - start); ++slot) {
+            const NSUInteger index = start + slot;
             const msime::candidate::CandidateRowLayout &cell = geometry.rows[slot];
             NSString *number = row == cursorRow ? [NSString stringWithFormat:@"%lu", (unsigned long)(slot + 1)] : @"";
-            MSIMECandidateButton *button = [self candidateButtonFor:slice[slot] geometry:geometry slot:slot number:number
-                                                                font:font numberFont:numberFont glossFont:glossFont scale:scale
-                                                            vertical:NO action:@selector(selectExpandedCandidate:)];
-            // 网格的标签是它在网格里的位置，高亮跟网格的光标走，不跟 Engine 那一页的高亮。网格里的候选不挂右键菜单：置顶、删除和固定排位只认当前这一页的候选。
+            MSIMECandidateButton *button = [controller candidateButtonFor:entries[index] geometry:geometry slot:slot number:number
+                font:font numberFont:numberFont glossFont:glossFont scale:scale vertical:NO action:@selector(selectExpandedCandidate:)];
             button.tag = (NSInteger)index;
-            button.candidateHighlighted = index == _expandedCursor;
-            button.frame = NSMakeRect(inset + cell.x, rowTop - _expandedScrollOffset - cell.y - cell.height, cell.width, cell.height);
-            [content.candidateContentView addSubview:button];
+            button.candidateHighlighted = index == controller->_expandedCursor;
+            button.frame = NSMakeRect(inset + cell.x, documentHeight - top - cell.y - cell.height, cell.width, cell.height);
+            [buttons addObject:button];
         }
-        rowTop -= geometry.rowsHeight + rowGap;
-    }
+        return buttons;
+    };
+    __weak MSIMEExpandedCandidateScrollView *weakViewport = viewport;
+    __weak MSIMECandidatePanel *weakPanel = candidatePanel;
+    viewport.canScroll = ^BOOL {
+        MSIMEInputController *controller = weakSelf;
+        return controller && controller->_expandedScrollView == weakViewport && controller->_expandedCandidates == entries &&
+            controller->_activeClient && controller->_session && controller->_panel.isVisible;
+    };
+    viewport.manualScrollBegan = ^{
+        MSIMEInputController *controller = weakSelf;
+        if (controller) controller->_expandedScrollsViewport = YES;
+    };
+    viewport.lineScrollHandler = ^(BOOL previous) {
+        [weakSelf scrollExpandedCandidatesBackwards:previous];
+    };
+    viewport.positionChanged = ^(NSUInteger first, CGFloat offset, BOOL previous, BOOL next) {
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_expandedScrollView != weakViewport) return;
+        controller->_expandedFirstRow = first;
+        controller->_expandedScrollOffset = offset;
+        weakPanel.hasPreviousPage = previous;
+        weakPanel.hasNextPage = next;
+    };
+    viewport.visibleRowsChanged = ^{
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_expandedScrollView != weakViewport ||
+            ![weakViewport isDescendantOf:MSIMECandidateControlsView(controller->_panel.contentView)]) return;
+        [controller->_candidateMotion endSelection];
+        [controller refreshCandidateSkin];
+    };
+    [content.candidateContentView addSubview:viewport];
     const CGFloat controlsBottom = headerBottom + preeditMargin.bottom + floor((headerContentHeight - headerRow) / 2);
     const CGFloat collapseLeft = width - inset - arrowWidth;
     if (skinToggle) {
@@ -8550,6 +9123,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     }
     [self configureCanvasForContent:content skin:skin dark:skinDark inset:inset preeditVisible:preedit.length > 0];
     if (_panel.contentView != content) _panel.contentView = content;
+    [viewport scrollToTopOffset:initialScrollTop];
     // 网格不是 Engine 的一页：清掉记下的那一页，收起后第一次重画走完整的重建，而不是在网格的按钮上原地改释义。
     _renderedCandidateView = nil;
     content.appearanceTarget = self;
@@ -8587,7 +9161,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         [self discardExpandedCandidates];
     }
     // 普通候选页结束上一轮展开布局，不能把旧字号或皮肤的视口带到下一次展开。
-    _expandedViewportRowsHeight = 0;
+    _expandedViewportHeight = 0;
     if (_appearance.englishMode && !_managedEnglishComposition) { _renderedCandidateView = nil; [self resetCandidateAnchor]; [self hideCandidatePanel:"english_mode"]; return; }
     NSArray *candidates = MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view));
     if (![candidates isKindOfClass:NSArray.class] || candidates.count == 0) {
@@ -8676,7 +9250,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         ? static_cast<CGFloat>(std::clamp(*skin.layout->numberScale, 0.0, 2.0))
         : MSIMECandidateNumberScale;
     NSFont *numberFont = MSIMECandidateNumberFont(font, numberScale);
-    NSFont *glossFont = [_appearance candidateFontOfSize:MSIMECandidateTranslationPointSize * scale englishFirst:YES];
+    NSFont *glossFont = [_appearance candidateFontOfSize:_appearance.translationFontSize * scale englishFirst:YES];
     const CGFloat preeditWidth = preedit.length ? ceil([preedit sizeWithAttributes:@{NSFontAttributeName:preeditFont}].width) + 4 * scale + MSIMEPreeditCaretGap + preeditMargin.left + preeditMargin.right : 0;
     // 首行在拼音之后接一段输入状态（竖线隔开），右侧在翻页控件之前放云候选预览和一枝小装饰；三样都只在显示拼音时出现。
     NSString *statusText = preedit.length ? MSIMECandidateStatusText([self schemeTitleForScheme:[self viewSchemeName]], _view,
@@ -9007,7 +9581,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 - (void)announceHighlightedCandidate:(BOOL)panelWasVisible {
     if (!panelWasVisible) _announcedCandidate = nil;
     NSString *announcement = nil;
-    for (NSView *subview in MSIMECandidateControlsView(_panel.contentView).subviews)
+    for (NSView *subview in MSIMECandidateControlSubviews(_panel.contentView))
         if ([subview isKindOfClass:MSIMECandidateButton.class] && subview.isAccessibilitySelected) {
             announcement = subview.accessibilityLabel;
             break;
@@ -9049,12 +9623,12 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const auto previousExtra = content.shadowOuterInsets;
     const BOOL shadowGeometryChanged = extra.top != previousExtra.top || extra.right != previousExtra.right ||
         extra.bottom != previousExtra.bottom || extra.left != previousExtra.left;
-    if (tokens.showSelectedBar != _skinShowsSelectedBar) { _expandedViewportRowsHeight = 0; [self renderCandidates]; return; }
+    if (tokens.showSelectedBar != _skinShowsSelectedBar) { _expandedViewportHeight = 0; [self renderCandidates]; return; }
     // 明暗切换后画的是另一个槽位的包（或者这种明暗不画包）：装饰、最小宽度和圆角都跟着变，只换颜色不够，整页重排一次。重排结束时还会回到这里，那时包已经对上，不会再重排。面板没在屏幕上时不重排：重排会把它重新显示出来，下一次显示候选时本来就按当时的明暗排版。
     if ((skin.candidateSkin != _renderedCandidateSkin || shadowGeometryChanged) &&
         _panel.isVisible && !_rerenderingForCandidateSkin) {
         _rerenderingForCandidateSkin = YES;
-        _expandedViewportRowsHeight = 0;
+        _expandedViewportHeight = 0;
         [self renderCandidates];
         _rerenderingForCandidateSkin = NO;
         return;
@@ -9083,7 +9657,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     // 九宫格与共享档位由内容绘制，不再叠系统窗口阴影；原生主题保留原有窗口阴影。
     _panel.hasShadow = content.nativeWindowShadowEnabled;
     if (content.liquidGlassActive) msime::mac::ApplyNativeGlassCandidateContrast(tokens, dark);
-    NSArray<MSIMECandidateButton *> *candidateButtons = [content.candidateContentView.subviews filteredArrayUsingPredicate:
+    NSArray<MSIMECandidateButton *> *candidateButtons = [MSIMECandidateControlSubviews(content) filteredArrayUsingPredicate:
         [NSPredicate predicateWithBlock:^BOOL(NSView *view, NSDictionary *_) {
             return ([view isKindOfClass:MSIMECandidateButton.class] ||
                     [view isKindOfClass:MSIMECandidatePreeditField.class]) &&
@@ -9162,7 +9736,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
         button.cornerRadius = msime::mac::CandidateRowRadius(tokens, button.candidateHighlighted);
         button.hasCornerRadii = !tokens.explicitItemRadius && skin.layout && skin.layout->itemCornersFollowCard.value_or(false);
         if (button.hasCornerRadii) {
-            const NSRect row = button.frame, area = content.candidateRowsRect;
+            const NSRect row = [button.superview convertRect:button.frame toView:content.candidateContentView], area = content.candidateRowsRect;
             button.cornerRadii = msime::mac::CandidateRowCornerRadii(
                 {NSMinX(row), -NSMaxY(row), NSWidth(row), NSHeight(row)},
                 {NSMinX(area), -NSMaxY(area), NSWidth(area), NSHeight(area)}, content.candidateRowsTouchTop,
@@ -9188,7 +9762,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 
 // 鼠标点网格里的候选。按钮可能是上一次重画留下的，所以它记着的身份要和网格此刻同一位置上的候选一致。
 - (void)selectExpandedCandidate:(MSIMECandidateButton *)button {
-    if (!_activeClient || !_session || !_panel.isVisible || !button.enabled || button.superview != MSIMECandidateControlsView(_panel.contentView) ||
+    if (!_activeClient || !_session || !_panel.isVisible || !button.enabled || ![button isDescendantOf:MSIMECandidateControlsView(_panel.contentView)] ||
         !_expandedCandidates || button.tag < 0 || (NSUInteger)button.tag >= _expandedCandidates.count ||
         ![button.candidateID isEqual:_expandedCandidates[(NSUInteger)button.tag][@"id"]]) return;
     [self selectExpandedCandidateAtIndex:(NSUInteger)button.tag pointer:YES];

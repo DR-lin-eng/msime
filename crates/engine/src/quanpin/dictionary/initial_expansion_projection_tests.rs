@@ -40,7 +40,7 @@ impl QuanpinDictionary {
             return false;
         }
         for item in &mut expanded {
-            item.canonical_pinyin = std::mem::replace(&mut item.pinyin, code.to_string());
+            item.canonical_pinyin = std::mem::replace(&mut item.pinyin, code.into());
         }
 
         let mut merged = Vec::with_capacity(candidates.len() - limited_count + expanded.len());
@@ -56,7 +56,7 @@ impl QuanpinDictionary {
             merged.push(item);
         }
         *candidates = merged;
-        self.cache.insert(code.to_string(), expanded);
+        self.cache.insert(code.to_string(), expanded.into());
         let segments = self.resolve_segments(raw, segmentation);
         let resolution = self.resolution(raw, segmentation, &segments, autocorrect_types);
         let key = self.series_slot(&series_cache_key(
@@ -107,9 +107,9 @@ fn successful_expansion_saves_one_discarded_key_per_row() {
         assert_eq!(actual, expected);
         assert_eq!(actual.capacity(), expected.capacity());
         println!("首字母展开 {rows} 行：申请 {old_count}→{new_count}");
-        // 行投影每行省一个完整键；解析投影省两次复制，延迟音节另省列表与字符串两次申请。
+        // 行投影每行省一个完整键（字符串加 `SharedString` 的 `Arc`）；解析投影省两次复制，延迟音节另省列表与字符串两次申请。
         assert_eq!(
-            new_count + rows + 4,
+            new_count + 2 * rows + 4,
             old_count,
             "每行省一个完整键，解析投影与延迟音节再各省两次申请"
         );
@@ -155,7 +155,7 @@ fn expansion_preserves_foreign_rows_slots_order_and_owned_fields() {
                 WordItem::new("n", "合成云候选", -13, CandidateSource::AiSuggestion, "nu");
             marker.fuzzy = true;
             marker.fixed_position = 3;
-            marker.corrected_from = "合成来源".to_owned();
+            marker.corrected_from = "合成来源".into();
             marker.sentence_words = vec!["合成片段".to_owned()];
             expected.insert(0, marker.clone());
             expected.insert(
@@ -192,7 +192,10 @@ fn expansion_preserves_foreign_rows_slots_order_and_owned_fields() {
             assert_eq!(after.series_cache.get_ref_by(&slot), Some(&actual));
             assert_eq!(before.series_cache.get_ref_by(&slot), Some(&expected));
             actual[1].word.push_str("修改副本");
-            assert_ne!(after.cache.get_ref_by("n").unwrap()[0].word, actual[1].word);
+            assert_ne!(
+                after.cache.get_ref_by("n").unwrap().copy_rows("n")[0].word,
+                actual[1].word
+            );
             after.reset_cache();
             drop(after);
             assert!(actual[1].word.ends_with("修改副本"));

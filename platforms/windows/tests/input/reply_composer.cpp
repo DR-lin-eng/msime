@@ -1,5 +1,6 @@
 #include "ReplyComposer.h"
 #include "CandidateTranslationPolicy.h"
+#include "KeyEvent.h"
 #include "../core/TestHostOptions.h"
 #include <chrono>
 #include <filesystem>
@@ -126,9 +127,83 @@ void home_end_route_tests() {
   for (const uint32_t code : {0x23u, 0x24u})
     require(uiless_page(press(code, 0, FanyImePipeFlags::UiLess)) && session.view() == view);
 }
+
+// 真实 Server 会话保留回车观测校验：错观测不能先清组字，正确观测提交后下一轮输入立即可用。
+void local_commit_route_tests() {
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("msime-reply-enter-" +
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directory(root);
+  struct Cleanup {
+    std::filesystem::path root;
+    ~Cleanup() {
+      std::error_code ec;
+      std::filesystem::remove_all(root, ec);
+    }
+  } cleanup{root};
+  for (const auto *scheme : {"wubi", "quanpin"}) {
+    auto options = test_host_options(root / scheme);
+    options["preferences"]["scheme"] = scheme;
+    ServerSession session(42, options.dump());
+    session.activate(1);
+    ReplyComposer composer(42, 1);
+    uint64_t request = 0;
+    const auto bindings = preference_navigation(Json::object());
+    const auto packet_for = [&](uint32_t code, char16_t text) {
+      FanyImeNamedpipeData packet{};
+      packet.client_id = 42;
+      packet.event_type = FanyImePipeEventType::KeyEvent;
+      packet.request_id = ++request;
+      packet.keycode = code;
+      packet.wch = text;
+      return packet;
+    };
+    for (int cycle = 0; cycle < 4; ++cycle) {
+      const auto require_stage = [&](bool value, const char *stage) {
+        if (!value)
+          throw std::runtime_error(std::string("Enter route: ") + scheme +
+                                   " cycle=" + std::to_string(cycle) + " " + stage);
+      };
+      for (const auto ch : {u'a', u'b'}) {
+        const auto packet = packet_for(static_cast<uint32_t>(ch - u'a' + 'A'), ch);
+        const auto reply = composer.configured_key(session, packet, 1, TsfPreeditStyle::Local, bindings);
+        require_stage(reply.has_value(), "character reply");
+        composer.confirm_delivery(42, 1, packet.request_id);
+      }
+      const auto before = session.view();
+      require_stage(before.at("scheme") == (std::string(scheme) == "wubi" ? 2 : 0),
+                    "requested scheme is active");
+      require_stage(before.at("editing_text") == "ab", "composing ab");
+      auto enter = packet_for(0x0D, 0);
+      bool rejected_observation = false;
+      try {
+        composer.configured_key(session, enter, 1, TsfPreeditStyle::Local, bindings, std::string{});
+      } catch (const std::invalid_argument &) {
+        rejected_observation = true;
+      }
+      require_stage(rejected_observation, "empty observation is rejected");
+      require_stage(session.view() == before, "rejected observation preserves view");
+      enter.pinyin_length = 2;
+      enter.pinyin_string[0] = u'a';
+      enter.pinyin_string[1] = u'b';
+      const auto observed = local_commit_observation(enter);
+      require_stage(observed && *observed == "ab", "packet observation");
+      const auto reply = composer.configured_key(session, enter, 1, TsfPreeditStyle::Local, bindings, observed);
+      require_stage(reply && !reply->encoded && reply->committed_text == "ab", "raw commit reply");
+      composer.confirm_delivery(42, 1, enter.request_id);
+      require_stage(session.view().at("editing_text") == "" && composer.selected_prefix().empty(),
+                    "confirmed commit clears composition");
+    }
+  }
+}
 } // namespace
-int main() {
+int main(int argc, char *argv[]) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--enter-route") {
+      local_commit_route_tests();
+      std::cout << "Windows Enter route: Wubi and Quanpin repeated commits passed\n";
+      return 0;
+    }
     require(first_translation_sense(" apple ; fruit") == "apple");
     require(first_translation_sense("苹果；水果") == "苹果");
     require(first_translation_sense(" ; \t").empty());

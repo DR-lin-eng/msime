@@ -244,8 +244,10 @@ pub(super) fn build_quanpin_autocorrect_display<'a>(request: &'a QueryRequest) -
         request.enable_quanpin_autocorrect_neighbor,
     );
     let letters_rewritten = !folded_letters_equal(base, cased);
-    // The scheme kept the typed letters and no correction can apply, so there are no other separators to draw.
-    if !letters_rewritten && (types == 0 || is_complete_pinyin_input(&request.raw_input)) {
+    // 完整拼音保留已有切分，尾部隔音符不参与完整性判定，避免被纠错重新切开。
+    if !letters_rewritten
+        && (types == 0 || is_complete_pinyin_input(request.raw_input.trim_end_matches('\'')))
+    {
         return Cow::Borrowed(base);
     }
     // A legal syllable plus one trailing letter is jianpin, never a typo, as in the dictionary's own guard; without this the deletion table would re-separate `zheg`.
@@ -292,7 +294,7 @@ impl InputSession {
             && !selected.canonical_pinyin.is_empty()
             && !selected.pinyin.contains('\'')
             && consumed > selected.canonical_pinyin.split('\'').count() * 2
-            && request.raw_input.starts_with(&selected.pinyin))
+            && request.raw_input.starts_with(selected.pinyin.as_str()))
         .then_some(consumed)
     }
 
@@ -377,7 +379,7 @@ impl InputSession {
         selected: &WordItem,
     ) -> SelectionTransition {
         let mut transition = SelectionTransition {
-            selected_canonical_pinyin: selected.canonical_pinyin.clone(),
+            selected_canonical_pinyin: selected.canonical_pinyin.to_string(),
             wubi_native: selected.scheme == SchemeType::Wubi,
             ..SelectionTransition::default()
         };
@@ -615,7 +617,9 @@ impl InputSession {
                 },
                 request,
             ),
-            SchemeType::Quanpin => build_quanpin_autocorrect_display(request),
+            SchemeType::Quanpin => {
+                with_trailing_separator(build_quanpin_autocorrect_display(request), request)
+            }
             SchemeType::Shuangpin => with_trailing_separator(
                 Cow::Owned(crate::shuangpin::mid_sentence::decorate_segmentation(
                     &self.pinyin_segmentation(),
@@ -764,7 +768,7 @@ impl InputSession {
                     _ => String::new(),
                 };
                 if helpcode.is_empty() || hide_helpcode {
-                    item.corrected_from.clone()
+                    item.corrected_from.to_string()
                 } else {
                     helpcode
                 }

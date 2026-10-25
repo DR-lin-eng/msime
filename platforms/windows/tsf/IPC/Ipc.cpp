@@ -540,7 +540,7 @@ bool WritePipeHello(HANDLE hPipeHandle, UINT pipeRole)
                                    FanyImeProtocol::Capabilities | FanyImeProtocol::CharacterSetShortcut |
                                        FanyImeProtocol::CandidateContinuation |
                                        FanyImeProtocol::UiLessCandidates |
-                      FanyImeProtocol::HostOnlineCandidates |
+                      FanyImeProtocol::HostOnlineCandidates | FanyImeProtocol::GroupedPanelKeys |
                                        FanyImeProtocol::KeyboardCompositionCancel |
                                        FanyImeProtocol::GameHostCandidate | FanyImeProtocol::FieldTraits |
                                        FanyImeProtocol::JapaneseToggleShortcut);
@@ -921,6 +921,12 @@ bool SupportsCharacterSetShortcut()
 {
     return hPipe && hPipe != INVALID_HANDLE_VALUE &&
            (negotiatedServerCapabilities & FanyImeProtocol::CharacterSetShortcut) != 0;
+}
+
+bool SupportsGroupedPanelKeys()
+{
+    return hPipe && hPipe != INVALID_HANDLE_VALUE &&
+           (negotiatedServerCapabilities & FanyImeProtocol::GroupedPanelKeys) != 0;
 }
 
 bool SupportsJapaneseToggleShortcut()

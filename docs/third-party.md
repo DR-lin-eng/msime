@@ -4,6 +4,12 @@
 
 清单不替代许可证审计。它记录已知的来源与条款，并明确标出尚未记录的部分——后者同样重要，因为一份看起来完整、实则有空白的清单比承认空白更危险。
 
+## 离线世界时钟
+
+`client-core::world_clock` 使用 `chrono` 0.4.45、Jiff 0.2.35（`jiff-tzdb` 0.1.8，内嵌 IANA 2026c）和 `sunrise` 3.0.0；代码使用其 MIT 许可，时区数据库为公共领域。版本及 crate 归档校验由 `Cargo.lock` 固定，未修改上游源码。城市坐标原样来自 IANA `tzdata2026a/zone.tab`（公共领域），归档来源、SHA-256 与原始许可见 [目录说明](../crates/client-core/src/world_clock/README.md)。北京是本项目新增的目录条目。
+
+[world-clock-NOTICE.txt](../resources/licenses/world-clock-NOTICE.txt) 包含这些 crate 原始许可全文和来源，随 Android 原生通知、macOS 许可目录、iOS 资源、HarmonyOS 许可目录及 Windows 通知分发；Linux 的 Cargo 通知收集器自动收录相应 crate。运行时完全离线，不请求定位权限。日出日落是指定参考城市的近似值。
+
 ## 本项目
 
 源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。例外是 `docs/script-plugin-template/`（脚本插件的模板与 SDK）、`plugins/script/`（[脚本插件合集](#脚本插件合集pluginsscript)）的代码和 `plugins/phrase_table/`（官方短语表）的数据，用 MIT，全文在这三个目录各自的 `LICENSE`；它们不属于 Rust workspace。其中 `plugins/official-packs.json` 登记的官方包（脚本插件 uuid、短语表 latex-symbols）随桌面安装包分发，每个包带着自己的 `LICENSE.txt`；其余只在源码里，由用户构建后导入。
@@ -366,6 +372,7 @@ macOS 发布包可以不内置运行库，改为资源包 `voice-runtime-macos` 
 | 平台 | 组件 | 许可 |
 | --- | --- | --- |
 | Android | `com.google.mlkit:digital-ink-recognition:19.0.0` | **Google 的 ML Kit 服务条款，不是开源许可证** |
+| Android OCR 可选模块（未正式提供，不进入基础包） | `com.google.mlkit:text-recognition-chinese:16.0.1`（含中文及拉丁文字模型） | **Google 的 ML Kit 服务条款，不是开源许可证**；探针与原生产品合成验收的范围、通知在 `platforms/android/gradle-app/ocr-module/src/main/assets/MSIME-OCR-NOTICE.txt`，正式资源包的依赖通知与分发检查尚未完成 |
 | Android | AndroidX、`com.google.android.material` | Apache-2.0 |
 | Android | `io.noties.markwon:core:4.6.2`（“设置”页公告正文的 Markdown）及其依赖 `com.atlassian.commonmark:commonmark:0.13.0` | Markwon 为 Apache-2.0，commonmark-java 为 BSD-2-Clause |
 | Android | vcpkg 提供的 nlohmann/json（原生库，清单在 `platforms/android/vcpkg.json`） | MIT |

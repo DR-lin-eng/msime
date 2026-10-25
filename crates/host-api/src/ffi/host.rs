@@ -350,6 +350,19 @@ pub extern "C" fn msime_client_default_preferences() -> *mut c_char {
     })
 }
 
+/// 触控板设置控件的默认值和范围，宿主只负责展示；结果用 `msime_client_string_free` 释放。
+#[no_mangle]
+pub extern "C" fn msime_client_text_trackpad_options() -> *mut c_char {
+    use msime_client_core::preferences::TextTrackpadPreferences as Trackpad;
+    response(|| {
+        Ok(json!({
+            "defaults": Trackpad::default(),
+            "horizontal_dp": {"minimum": Trackpad::HORIZONTAL_MIN_DP, "maximum": Trackpad::HORIZONTAL_MAX_DP},
+            "vertical_dp": {"minimum": Trackpad::VERTICAL_MIN_DP, "maximum": Trackpad::VERTICAL_MAX_DP},
+        }))
+    })
+}
+
 /// The transcription provider and the optional rewrite, resolved from a preferences directory.
 ///
 /// The Android keyboard has its own voice entry and never goes through the desktop shell, so the
@@ -835,8 +848,8 @@ pub unsafe extern "C" fn msime_client_load_preferences(
     })
 }
 
-/// 三个可重绑切换热键（`keybindings.toggle_english_candidates`、`toggle_full_width`、
-/// `toggle_punctuation`）按共享 `KeyChord` 契约解码：每个键给出 `null`（不绑定）或
+/// 可重绑切换热键（`keybindings.toggle_english_candidates`、`toggle_full_width`、
+/// `toggle_punctuation`、`toggle_voice_input`）按共享 `KeyChord` 契约解码：每个键给出 `null`（不绑定）或
 /// `{"key": 主键规范名, "ctrl", "alt", "shift", "meta"}`，宿主按规范名认键，
 /// 写法解析只在 Rust 一侧。keybindings 缺键或值为 null 时按出厂值。
 /// # Safety
@@ -871,7 +884,52 @@ pub unsafe extern "C" fn msime_client_toggle_hotkey_chords(
             "english_candidates": toggle_hotkey_chord(keys.english_candidates_chord()),
             "full_width": toggle_hotkey_chord(keys.full_width_chord()),
             "punctuation": toggle_hotkey_chord(keys.punctuation_chord()),
+            "voice_input": toggle_hotkey_chord(keys.toggle_voice_input.parse().ok()),
         }))
+    })
+}
+
+/// 原生设置录键的试写检查：复用共享偏好的语法、规范化和冲突表，不写入配置。
+/// # Safety
+/// `request` 指向不超过 64 KiB 的有效 JSON；返回字符串交由 `msime_client_string_free` 释放。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_check_toggle_hotkey(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    use msime_client_core::preferences::{
+        KeybindingPreferences, ToggleHotkeyRejection, ToggleHotkeySlot,
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        field: ToggleHotkeySlot,
+        chord: String,
+        #[serde(default)]
+        keybindings: KeybindingPreferences,
+        voice_ctrl_f9: bool,
+    }
+    response(|| {
+        if request.is_null() || length > 64 * 1024 {
+            return Err("invalid toggle hotkey request buffer".into());
+        }
+        // SAFETY: 调用方保证缓冲区可读，上方已检查长度上限。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: Request = serde_json::from_slice(bytes)
+            .map_err(|_| "invalid toggle hotkey request".to_owned())?;
+        Ok(
+            match request.keybindings.check_toggle_hotkey(
+                request.field,
+                &request.chord,
+                request.voice_ctrl_f9,
+            ) {
+                Ok(chord) => json!({"ok": true, "chord": chord}),
+                Err(ToggleHotkeyRejection::Invalid(_)) => json!({"ok": false, "kind": "invalid"}),
+                Err(ToggleHotkeyRejection::Conflict { owner, .. }) => json!({
+                    "ok": false, "kind": "conflict", "owner": owner.id(),
+                }),
+            },
+        )
     })
 }
 
@@ -1578,6 +1636,32 @@ pub unsafe extern "C" fn msime_client_custom_skin_library(
     })
 }
 
+/// 读取共用键盘皮肤目录，或显式重置、选择模板／背景及优化对比度；不写设置或命名库。
+/// # Safety
+/// `request` 指向 `length` 个可读的 UTF-8 JSON 字节；空指针和超过 1 MiB 的请求被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_keyboard_skin_design(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        // SAFETY: 调用方保证指针有效，公共边界先检查长度和空指针。
+        unsafe {
+            with_bounded_bytes(
+                request,
+                length,
+                1024 * 1024,
+                "keyboard_skin_invalid",
+                |bytes| {
+                    let action = serde_json::from_slice(bytes)
+                        .map_err(|_| "keyboard_skin_invalid".to_owned())?;
+                    msime_client_core::keyboard_skin::edit(action).map_err(str::to_owned)
+                },
+            )
+        }
+    })
+}
+
 /// The codes the shared community pages already have a sentence for. A host that
 /// forwarded the `Display` text instead would put an English sentence written
 /// for a log into a Chinese dialog.
@@ -2035,6 +2119,21 @@ struct MobileClipboardRequest {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum MobileClipboardAction {
     Load,
+    Categories,
+    AddCategory {
+        name: String,
+    },
+    RenameCategory {
+        id: String,
+        name: String,
+    },
+    RemoveCategory {
+        id: String,
+    },
+    SetCategory {
+        text: String,
+        id: Option<String>,
+    },
     ExportText,
     Capture {
         text: String,
@@ -2085,6 +2184,48 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
             clipboard_history_limit(root),
         );
         match request.action {
+            MobileClipboardAction::Categories => {
+                let categories = history
+                    .categories()
+                    .map_err(|_| "mobile clipboard categories unavailable")?;
+                Ok(
+                    json!({"categories": categories, "maxCategories": msime_client_core::clipboard::MAX_CATEGORIES,
+                    "maxNameCharacters": msime_client_core::clipboard::MAX_CATEGORY_NAME_CHARACTERS}),
+                )
+            }
+            MobileClipboardAction::AddCategory { name } => {
+                history.add_category(&name).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::InvalidInput {
+                        "invalid clipboard category name or category limit reached"
+                    } else {
+                        "mobile clipboard categories unavailable"
+                    }
+                })?;
+                Ok(json!({"updated": true}))
+            }
+            MobileClipboardAction::RenameCategory { id, name } => {
+                let updated = history
+                    .rename_category(&id, &name)
+                    .map_err(|_| "mobile clipboard category rename failed")?;
+                Ok(json!({"updated": updated}))
+            }
+            MobileClipboardAction::RemoveCategory { id } => {
+                let updated = history
+                    .remove_category(&id)
+                    .map_err(|_| "mobile clipboard category removal failed")?;
+                Ok(json!({"updated": updated}))
+            }
+            MobileClipboardAction::SetCategory { text, id } => {
+                if text.is_empty()
+                    || text.len() > msime_client_core::clipboard::MAX_MOBILE_TEXT_BYTES
+                {
+                    return Err("invalid mobile clipboard entry".into());
+                }
+                let updated = history
+                    .set_category(&text, id.as_deref())
+                    .map_err(|_| "mobile clipboard category update failed")?;
+                Ok(json!({"updated": updated}))
+            }
             MobileClipboardAction::ExportText => {
                 history
                     .load()
@@ -2097,7 +2238,10 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
                 history
                     .load()
                     .map_err(|_| "mobile clipboard history unavailable")?;
-                Ok(json!({"entries": history.entries(), "limit": history.limit()}))
+                Ok(
+                    json!({"entries": history.entries(), "limit": history.limit(),
+                    "categories": history.categories().map_err(|_| "mobile clipboard categories unavailable")?}),
+                )
             }
             MobileClipboardAction::Capture { text } => {
                 if msime_client_core::input_assistance::verification_code(&text).is_some() {

@@ -1,6 +1,7 @@
 #include "SessionPump.h"
 #include "InternalEventFlags.h"
 #include "ipc_negotiation.h"
+#include "PipeMetadata.h"
 
 namespace msime::windows {
 SessionPump::SessionPump(MainTransport &transport, InputQueue &input,
@@ -56,6 +57,13 @@ PumpResult SessionPump::run(const PipeTicket &ticket) {
       // prepare/send/confirm transaction with externally requested selections.
       std::lock_guard transaction(*transactions_);
       if (!valid_main_frame(*packet, ticket.client))
+        return PumpResult::DispatchFailed;
+      if (packet->event_type == FanyImePipeEventType::KeyEvent &&
+          (packet->modifiers_down & PipeMetadata::GroupedPanelKey) &&
+          (!(ticket.capabilities & FanyImeProtocol::GroupedPanelKeys) ||
+           PipeMetadata::key_modifiers(packet->modifiers_down) != 0 ||
+           packet->wch < 'a' || packet->wch > 'z' ||
+           packet->keycode != static_cast<std::uint32_t>(packet->wch - 'a' + 'A')))
         return PumpResult::DispatchFailed;
       FocusRoute route;
       if (!enqueue([&, ticket, packet = *packet](InputState &state) {

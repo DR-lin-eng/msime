@@ -3532,9 +3532,18 @@ static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
     return NSNotFound;
 }
 
-static NSEvent *ExpandedGridScrollEvent(CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
+static NSEvent *ExpandedGridScrollEvent(NSPanel *panel, CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
                                         NSEventPhase momentum = NSEventPhaseNone) {
     CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 1, (int32_t)delta);
+    // 夹具固定窗口、时间和坐标，不借用测试机鼠标此刻恰好停留的位置。
+    CGEventSetFlags(cg, 0);
+    CGEventSetTimestamp(cg, (CGEventTimestamp)(NSProcessInfo.processInfo.systemUptime * NSEC_PER_SEC));
+    CGEventSetIntegerValueField(cg, kCGMouseEventWindowUnderMousePointer, panel.windowNumber);
+    CGEventSetIntegerValueField(cg, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, panel.windowNumber);
+    NSView *viewport = ExpandedGridScrollView(panel);
+    const NSPoint local = [viewport convertPoint:NSMakePoint(NSMidX(viewport.bounds), NSMidY(viewport.bounds)) toView:nil];
+    const NSPoint screen = [panel convertPointToScreen:local];
+    CGEventSetLocation(cg, CGPointMake(screen.x, NSMaxY(NSScreen.screens.firstObject.frame) - screen.y));
     CGEventSetIntegerValueField(cg, kCGScrollWheelEventIsContinuous, 1);
     CGEventSetDoubleValueField(cg, kCGScrollWheelEventPointDeltaAxis1, delta);
     const int64_t scrollPhase = phase == NSEventPhaseBegan ? 1 : phase == NSEventPhaseChanged ? 2 :
@@ -3553,11 +3562,15 @@ static NSEvent *ExpandedGridScrollEvent(CGFloat delta, NSEventPhase phase = NSEv
 static void ExpandedGridScroll(NSPanel *panel, CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
                                NSEventPhase momentum = NSEventPhaseNone) {
     if (phase == NSEventPhaseBegan) {
-        [panel scrollWheel:ExpandedGridScrollEvent(0, NSEventPhaseBegan)];
+        [panel.contentView layoutSubtreeIfNeeded];
+        [panel displayIfNeeded];
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        assert(panel.isVisible && panel.windowNumber > 0);
+        [panel scrollWheel:ExpandedGridScrollEvent(panel, 0, NSEventPhaseBegan)];
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
         phase = NSEventPhaseChanged;
     }
-    [panel scrollWheel:ExpandedGridScrollEvent(delta, phase, momentum)];
+    [panel scrollWheel:ExpandedGridScrollEvent(panel, delta, phase, momentum)];
     [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 }
 
@@ -3661,6 +3674,9 @@ static void TestExpandedCandidateGrid() {
     [controller setValue:session forKey:@"session"];
     [controller setValue:client forKey:@"activeClient"];
     [controller setValue:panel forKey:@"panel"];
+    MSIMECandidateMotion *motion = [MSIMECandidateMotion new];
+    motion.reduceMotion = YES;
+    [controller setValue:motion forKey:@"candidateMotion"];
     void (^compose)(void) = ^{
         session.generation = 7;
         session.highlighted = 0;
@@ -3778,6 +3794,12 @@ static void TestExpandedCandidateGrid() {
     NSView *originalContent = panel.contentView;
     const NSUInteger caretReads = client.attributeReads;
     ExpandedGridScroll(panel, -8, NSEventPhaseBegan);
+    if ([[controller valueForKey:@"expandedScrollOffset"] doubleValue] <= 0.0)
+        fprintf(stderr, "expanded_scroll window=%ld visible=%d can_scroll=%d document=%.3f viewport=%.3f origin=%.3f first_row=%lu offset=%.3f\n",
+            (long)panel.windowNumber, panel.isVisible, originalScrollView.canScroll ? originalScrollView.canScroll() : YES,
+            NSHeight(originalScrollView.documentView.bounds), NSHeight(originalScrollView.contentView.bounds),
+            NSMinY(originalScrollView.contentView.bounds), [[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue],
+            [[controller valueForKey:@"expandedScrollOffset"] doubleValue]);
     assert([[controller valueForKey:@"expandedScrollOffset"] doubleValue] > 0.0);
     assert(fabs(NSMinY(ExpandedGridFrame(panel, 0)) - (firstCandidateY + 8.0)) < 0.01);
     assert(originalScrollView && ExpandedGridScrollView(panel) == originalScrollView);

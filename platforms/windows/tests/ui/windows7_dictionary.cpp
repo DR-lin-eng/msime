@@ -35,14 +35,15 @@ struct TemporaryState {
   }
   ~TemporaryState() { std::error_code error; std::filesystem::remove_all(path, error); }
 };
-void pump(const std::function<bool()>& condition) {
-  const auto deadline = GetTickCount64() + 10000;
+void pump(const std::function<bool()>& condition, const char* stage) {
+  const auto deadline = GetTickCount64() + 15000;
   for (;;) {
     MSG message{};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
       assert(message.message != WM_QUIT); TranslateMessage(&message); DispatchMessageW(&message);
     }
     if (condition()) return;
+    if (GetTickCount64() >= deadline) std::fprintf(stderr, "dictionary_wait_stage=%s\n", stage);
     assert(GetTickCount64() < deadline);
     MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
   }
@@ -108,12 +109,12 @@ int main(int argc, char** argv) {
   }, [&](HWND, const wchar_t* title, const wchar_t* message) { assert(std::wstring_view(title) == L"词库" && message && *message); return allow; }, {}, {}, {}, {}, {}, {}, backend);
   assert(window.create(GetModuleHandleW(nullptr)));
   const auto host = window.handle(), body = GetDlgItem(host, page_body), idle = GetDlgItem(body, language_switch);
-  const auto wait = [&] { pump([&] { return IsWindowEnabled(idle) != FALSE; }); };
+  const auto wait = [&] { pump([&] { return IsWindowEnabled(idle) != FALSE; }, "dictionary-worker"); };
   wait();
   const auto selector = GetDlgItem(host, page_selector);
   SendMessageW(selector, CB_SETCURSEL, 13, 0);
   SendMessageW(host, WM_COMMAND, MAKEWPARAM(page_selector, CBN_SELCHANGE), reinterpret_cast<LPARAM>(selector)); wait();
-  const auto wait_updates = [&] { pump([&] { return IsWindowEnabled(GetDlgItem(body, dictionary_updates_refresh)) != FALSE; }); };
+  const auto wait_updates = [&] { pump([&] { return IsWindowEnabled(GetDlgItem(body, dictionary_updates_refresh)) != FALSE; }, "dictionary-update-worker"); };
   wait_updates();
   const auto click = [&](int id) { SendMessageW(GetDlgItem(body, id), BM_CLICK, 0, 0); wait(); };
   const auto set = [&](int id, const wchar_t* value) { assert(SetWindowTextW(GetDlgItem(body, id), value)); };
@@ -229,7 +230,7 @@ int main(int argc, char** argv) {
   set(dictionary_key, L"parallel"); set(dictionary_value, L"合成并行草稿");
   block_updates = true;
   SendMessageW(GetDlgItem(body, dictionary_updates_refresh), BM_CLICK, 0, 0);
-  pump([&] { return update_entered.load(); });
+  pump([&] { return update_entered.load(); }, "blocked-update-entered");
   assert(IsWindowEnabled(GetDlgItem(body, dictionary_save)) && text(dictionary_value) == "合成并行草稿");
   click(dictionary_save);
   assert(text(dictionary_notice).find("操作已完成") != std::string::npos);

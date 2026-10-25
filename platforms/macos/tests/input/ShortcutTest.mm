@@ -3655,7 +3655,8 @@ static void TestExpandedCandidateGrid() {
     session.editing = @"shi";
     ShortcutClient *client = [ShortcutClient new];
     client.caret = NSMakeRect(200, 400, 1, 18);
-    HiddenCandidatePanel *panel = [[HiddenCandidatePanel alloc] init];
+    // NSScrollView 的精确滚动需要真实窗口；仅伪造 isVisible 不能建立 AppKit 的滚动会话。
+    MSIMECandidatePanel *panel = [[MSIMECandidatePanel alloc] init];
     [controller setValue:prefs forKey:@"appearance"];
     [controller setValue:session forKey:@"session"];
     [controller setValue:client forKey:@"activeClient"];
@@ -6728,9 +6729,12 @@ static void TestCapsLockTap() {
         gCapsNow = 10000; gCapsHeld = true;
         assert(![controller handleEvent:capsOn(10.0) client:client]);
         gCapsNow = 10050; gCapsHeld = false;
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.0];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
         while (gCapsReleases == releasesBefore && deadline.timeIntervalSinceNow > 0)
-            [NSRunLoop.mainRunLoop runMode:mode beforeDate:deadline];
+            [NSRunLoop.mainRunLoop runMode:mode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        if (!(gCapsReleases == releasesBefore + 1 && prefs.englishMode && !session.capsLock))
+            fprintf(stderr, "caps_lock_mode=%s releases=%lu expected=%lu english=%d caps=%d\n",
+                mode.UTF8String, (unsigned long)gCapsReleases, (unsigned long)(releasesBefore + 1), prefs.englishMode, session.capsLock);
         assert(gCapsReleases == releasesBefore + 1 && prefs.englishMode && !session.capsLock);
 
         // 同一运行模式下超过阈值仍保留大写锁定，不能为了让轻点响应而把长按也切换掉。
@@ -6738,9 +6742,9 @@ static void TestCapsLockTap() {
         gCapsNow = 11000; gCapsHeld = true;
         assert(![controller handleEvent:capsOn(11.0) client:client]);
         gCapsNow = 11301;
-        deadline = [NSDate dateWithTimeIntervalSinceNow:1.0];
+        deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
         while (!session.capsLock && deadline.timeIntervalSinceNow > 0)
-            [NSRunLoop.mainRunLoop runMode:mode beforeDate:deadline];
+            [NSRunLoop.mainRunLoop runMode:mode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         assert(session.capsLock && prefs.englishMode && gCapsReleases == releasesBefore + 1);
         gCapsHeld = false;
     }

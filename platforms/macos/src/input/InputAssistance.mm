@@ -54,7 +54,7 @@ static NSDictionary *MSIMEAssistanceRequest(NSDictionary *request, BOOL dictiona
     if (!enabled || !_isCurrent || !_isCurrent()) {
         _sequence=_pasteboard.changeCount; [self clearCode]; return;
     }
-    if (_pendingCode && (now<_received || now-_received>=300)) [self clearCode];
+    if (_pendingCode && (now<_received || now>=_received+300)) [self clearCode];
     NSInteger sequence=_pasteboard.changeCount;
     if (sequence==_sequence) return;
     _sequence=sequence;
@@ -88,7 +88,7 @@ static NSDictionary *MSIMEAssistanceRequest(NSDictionary *request, BOOL dictiona
     NSString *code=_pendingCode;
     NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
     NSDictionary *preferences=_preferences ? _preferences() : nil;
-    BOOL live=code && now>=_received && now-_received<300 && _isCurrent && _isCurrent()
+    BOOL live=code && now>=_received && now<_received+300 && _isCurrent && _isCurrent()
         && [preferences[@"clipboard_history"] isEqual:@YES] && ![preferences[@"verification_code_suggestions"] isEqual:@NO];
     [self clearCode];
     if (live && _insert) _insert(code);

@@ -935,6 +935,35 @@ mod tests {
         );
     }
 
+    /// 发布的版本与上次相同，但它正是排着的那个请求激活出来的一代时，请求照样标成已应用并写盘。
+    #[test]
+    fn an_unchanged_local_version_still_marks_its_activation_applied() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("queue");
+        let source = parent.path().join("snapshot.ndjson");
+        fs::write(&source, b"synthetic snapshot\n").unwrap();
+        let digest = hex::encode(Sha256::digest(fs::read(&source).unwrap()));
+        let initial = version("legacy", 'a');
+        let queue = DictionarySnapshotQueue::new(root).unwrap();
+        queue.publish_local_version(&initial).unwrap();
+        let id = queue
+            .enqueue(&source, "fixture", 1, &initial, &digest)
+            .unwrap();
+        let activated = version(&id.to_string(), 'b');
+        queue
+            .update(|_, state| {
+                state.local_version = Some(activated.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        queue.publish_local_version(&activated).unwrap();
+        assert_eq!(
+            queue.read().unwrap().request.unwrap().status,
+            SnapshotRequestStatus::Applied
+        );
+    }
+
     #[cfg(unix)]
     fn assert_replaced_queue_rejects_old_worker(
         action: impl FnOnce(

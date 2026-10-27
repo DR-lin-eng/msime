@@ -83,6 +83,9 @@ enum SnapshotQueueAction {
         options: HostOptions,
         #[serde(default)]
         acknowledge: bool,
+        /// 队列里没有排队或准备中的请求时只读状态返回：不扫用户词库算本机版本，也不发布它（不重写、不 fsync `state.json`）。鸿蒙键盘每次显示后在 UI 线程上查一次队列，而那里没有任何东西往键盘的队列里排请求，发布出去的本机版本没人读；真有请求时，重建会话的 `process` 会在认领前先发布。不给时与原来相同，每次都发布。
+        #[serde(default)]
+        skip_when_idle: bool,
     },
     Enqueue {
         directory: String,
@@ -101,6 +104,9 @@ enum SnapshotQueueAction {
         staging_root: String,
         options: HostOptions,
         account_id: Option<String>,
+        /// 队列里没有排队或准备中的请求时什么也不做，直接返回状态：不扫用户词库算本机版本，也不发布它。鸿蒙键盘每次构建会话都处理一次队列，而队列几乎总是空的；它随后的队列查询（`state`）也带这个开关，所以空队列上本机版本不发布，真有请求时这里在认领前发布。不给时与原来相同，先发布本机版本再认领。
+        #[serde(default)]
+        skip_when_idle: bool,
     },
     /// Android 旧版 Java 队列的 `state.bin` 就地转成 `state.json`（迁移计划 P13）。
     ImportAndroidV1 { directory: String },
@@ -1736,12 +1742,15 @@ fn snapshot_queue_state(
     queue: &DictionarySnapshotQueue,
     options: HostOptions,
     acknowledge: bool,
+    skip_when_idle: bool,
 ) -> Result<Value, String> {
     let options = validate_options(options).map_err(str::to_owned)?;
-    let current = preview_local_version(&options).map_err(str::to_owned)?;
-    queue
-        .publish_local_version(&current)
-        .map_err(snapshot_queue_error)?;
+    if !(skip_when_idle && queue_is_idle(queue)?) {
+        let current = preview_local_version(&options).map_err(str::to_owned)?;
+        queue
+            .publish_local_version(&current)
+            .map_err(snapshot_queue_error)?;
+    }
     let state = if acknowledge {
         queue.take_state()
     } else {
@@ -1751,13 +1760,28 @@ fn snapshot_queue_state(
     serde_json::to_value(state).map_err(|_| "snapshot_unavailable".to_owned())
 }
 
+/// 队列里没有排队或准备中的请求。`skip_when_idle` 的 `state` 和 `process` 在这时只读状态返回，不算本机版本、不发布、不建队列目录。
+fn queue_is_idle(queue: &DictionarySnapshotQueue) -> Result<bool, String> {
+    Ok(!queue
+        .read()
+        .map_err(snapshot_queue_error)?
+        .request
+        .as_ref()
+        .is_some_and(|request| request.status.active()))
+}
+
 fn snapshot_queue_process(
     queue: &DictionarySnapshotQueue,
     staging_root: String,
     options: HostOptions,
     account_id: Option<String>,
+    skip_when_idle: bool,
 ) -> Result<Value, String> {
     let engine_options = validate_options(options.clone()).map_err(str::to_owned)?;
+    if skip_when_idle && queue_is_idle(queue)? {
+        return serde_json::to_value(queue.read().map_err(snapshot_queue_error)?)
+            .map_err(|_| "snapshot_unavailable".to_owned());
+    }
     // 每次失焦都走这里，绝大多数时候队列里什么也没有：先用不重扫日志的预览版本发布，真认领到请求后再精确算一遍，后面的比对、冲突判定都用精确值。
     let published = preview_local_version(&engine_options).map_err(str::to_owned)?;
     queue
@@ -1864,7 +1888,13 @@ fn run_snapshot_queue(action: SnapshotQueueAction) -> Result<Value, String> {
             directory,
             options,
             acknowledge,
-        } => snapshot_queue_state(&snapshot_queue(&directory)?, options, acknowledge),
+            skip_when_idle,
+        } => snapshot_queue_state(
+            &snapshot_queue(&directory)?,
+            options,
+            acknowledge,
+            skip_when_idle,
+        ),
         SnapshotQueueAction::Enqueue {
             directory,
             source,
@@ -1900,11 +1930,13 @@ fn run_snapshot_queue(action: SnapshotQueueAction) -> Result<Value, String> {
             staging_root,
             options,
             account_id,
+            skip_when_idle,
         } => snapshot_queue_process(
             &snapshot_queue(&directory)?,
             staging_root,
             options,
             account_id,
+            skip_when_idle,
         ),
         SnapshotQueueAction::ImportAndroidV1 { directory } => {
             let queue = snapshot_queue(&directory)?;

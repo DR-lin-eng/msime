@@ -4709,6 +4709,62 @@ fn repeated_dedicated_english_preserves_real_grid_candidates() {
     }
 }
 
+/// 键位几何由 runtime 持有：宿主空闲时重建引擎（`replace_engine`）之后新引擎照样拿到它，带触点的按键照样进请求。代次不符、坐标不是有限数或清除几何之后，这一键不带触点。
+#[test]
+fn key_geometry_survives_an_engine_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.scheme = 1;
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 5).unwrap();
+    runtime.focus(true).unwrap();
+    let mut keys = [[0.0f32; 4]; 26];
+    for (index, key) in keys.iter_mut().enumerate() {
+        *key = [index as f32 * 10.0, 0.0, 10.0, 10.0];
+    }
+    runtime.set_key_geometry(Some(
+        msime_engine::touch::KeyGeometry::new(9, &keys, None, &[]).unwrap(),
+    ));
+    assert_eq!(runtime.key_geometry_id(), Some(9));
+    let n = 130.0;
+    assert_eq!(runtime.key_touch(b'n', 8, n, 0.0), None);
+    assert_eq!(runtime.key_touch(b'n', 9, f32::NAN, 0.0), None);
+
+    runtime
+        .replace_engine(msime_engine::host::Session::new(&options).unwrap(), 5)
+        .unwrap();
+    let touch = runtime.key_touch(b'n', 9, n + 1.0, 2.0);
+    assert_eq!(
+        touch,
+        Some(msime_engine::touch::KeyTouch {
+            dx: 2,
+            dy: 4,
+            copy: 0
+        })
+    );
+    runtime.set_key_touch(touch);
+    runtime
+        .dispatch(Action::Character {
+            value: b'n',
+            shift: false,
+        })
+        .unwrap();
+    runtime.set_key_touch(None);
+    assert!(runtime.cached.touch_corrections);
+
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    runtime.set_key_geometry(None);
+    assert_eq!(runtime.key_geometry_id(), None);
+    assert_eq!(runtime.key_touch(b'n', 9, n, 0.0), None);
+    runtime
+        .dispatch(Action::Character {
+            value: b'n',
+            shift: false,
+        })
+        .unwrap();
+    assert!(!runtime.cached.touch_corrections);
+}
+
 #[test]
 fn dedicated_english_caret_does_not_turn_rejected_keys_into_candidate_picks() {
     for value in *b"1! " {

@@ -437,6 +437,17 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     scheme: u8,
     rows: &R,
 ) -> Option<Vec<usize>> {
+    runner_up_order_with(scheme, rows, false)
+}
+
+/// [`runner_up_order`]，`touch_corrections` 为真时纠错行不算整句读法、留在引擎给的座位上。
+///
+/// 26 键双拼带着触点查出的表里，纠错整句是按落点计过价的改正，不是同一串按键的又一种读法；把它当次选读法挪到表尾，它就几乎从不出现在第一页（双拼触点评测里能找到原句的纠错整句有九成排在表尾）。没有触点的表（桌面、实体键盘）照旧，结果逐字节不变。
+pub fn runner_up_order_with<'a, R: OrderRowSource<'a> + ?Sized>(
+    scheme: u8,
+    rows: &R,
+    touch_corrections: bool,
+) -> Option<Vec<usize>> {
     // The lattice runs from two syllables (a single syllable is never decoded), so a shorter candidate reached the list some other way and is not a reading of the same sentence. Japanese kana are the case that proves it: あ and ア are both Generated and both one character. Two rather than three because two-syllable keys are where the lattice's runner-up readings otherwise fill the first page ahead of dictionary words: on quanpin-words-v1 this moves two-syllable top5 from 0.883 to 0.924 with top1 unchanged.
     const SENTENCE_SYLLABLES: usize = 2;
     // From this many characters a reading is a sentence rather than a word, and the page keeps `SENTENCE_READINGS` of them.
@@ -451,9 +462,11 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     if count < 2 {
         return None;
     }
+    let lattice =
+        |row: &OrderRow<'_>| row.source == LATTICE_SOURCE && !(touch_corrections && row.corrected);
     let width = (0..rows.len())
         .map(|index| rows.get(index))
-        .find(|row| row.source == LATTICE_SOURCE)
+        .find(lattice)
         .map(|row| row.text.chars().count())?;
     if width < SENTENCE_SYLLABLES {
         return None;
@@ -466,7 +479,7 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     // Every lattice reading of the full key, in list order. The first stays where it is, the next `keep - 1` are seated right behind it, and the rest go to the back in their existing order. `keep` is at most three, so rescanning the rows costs less than allocating separate reading and membership arrays.
     let is_reading = |index: usize| {
         let row = rows.get(index);
-        row.source == LATTICE_SOURCE && row.text.chars().count() == width
+        lattice(&row) && row.text.chars().count() == width
     };
     // 先只扫描输出顺序，常见的整句候选已经连续时直接返回，避免为最终排列分配缓冲。
     let mut output = 0;
@@ -842,6 +855,53 @@ mod tests {
             row("你", 0),
         ];
         assert_eq!(runner_up_order(0, &rows), Some(vec![0, 2, 1]));
+    }
+
+    /// 带触点查出的双拼表里，纠错整句不算整句读法：前三条字面读法照旧留在前面、其余挪到表尾，纠错行留在引擎给的座位上。没有触点时它和别的读法一样被挪走。
+    #[test]
+    fn touch_priced_corrections_keep_their_engine_seat() {
+        let shuangpin = SchemeType::Shuangpin as u8;
+        let corrected = OrderRow {
+            corrected: true,
+            ..row("没关系", LATTICE_SOURCE)
+        };
+        let rows = [
+            row("没跟系", LATTICE_SOURCE),
+            row("美跟系", LATTICE_SOURCE),
+            row("没根系", LATTICE_SOURCE),
+            row("美根系", LATTICE_SOURCE),
+            corrected,
+            row("没跟", 0),
+            row("没", 0),
+        ];
+        assert_eq!(
+            runner_up_order_with(shuangpin, &rows, true),
+            Some(vec![0, 1, 2, 4, 5, 6, 3])
+        );
+        assert_eq!(
+            runner_up_order_with(shuangpin, &rows, false),
+            Some(vec![0, 1, 2, 5, 6, 3, 4])
+        );
+        assert_eq!(
+            runner_up_order_with(shuangpin, &rows, false),
+            runner_up_order(shuangpin, &rows)
+        );
+        // 纠错行挤在前三条读法里时，没有触点它占掉一个名额；有触点时让出名额，第三条字面读法坐到前两条后面，纠错行跟在它后面。
+        let crowded = [
+            row("没跟系", LATTICE_SOURCE),
+            row("美跟系", LATTICE_SOURCE),
+            corrected,
+            row("没根系", LATTICE_SOURCE),
+            row("没", 0),
+        ];
+        assert_eq!(
+            runner_up_order_with(shuangpin, &crowded, false),
+            Some(vec![0, 1, 2, 4, 3])
+        );
+        assert_eq!(
+            runner_up_order_with(shuangpin, &crowded, true),
+            Some(vec![0, 1, 3, 2, 4])
+        );
     }
 
     #[test]

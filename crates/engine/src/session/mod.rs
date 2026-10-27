@@ -28,6 +28,7 @@ use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::nine_key::{KeyGrid, NineKeySession};
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
+use crate::touch::{KeyGeometry, KeyTouch, TouchTuning};
 use crate::types::{
     CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery, KeyResult,
     LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery, QuickPhraseEntry,
@@ -106,9 +107,10 @@ impl Session {
         self.input.clock = clock;
     }
 
-    /// One ASCII character; `shift_only` is a bare Shift+letter (local mode entry). 全拼下九键开启且没有别的组字时，数字 2-9 交给九宫格会话；九键双拼交的是方案用到的数字（可以有 1 和 0）；注音九键的数字由注音编辑器自己处理。
+    /// One ASCII character; `shift_only` is a bare Shift+letter (local mode entry). 全拼下九键开启且没有别的组字时，数字 2-9 交给九宫格会话；九键双拼交的是方案用到的数字（可以有 1 和 0）；注音九键的数字由注音编辑器自己处理。待用的触点（[`Self::set_key_touch`]）只交给 26 键组字，九宫格的数字用不到它，一律在这一键后作废。
     pub fn character(&mut self, value: u8, shift_only: bool) -> KeyResult {
         self.prediction.clear();
+        let touch = self.input.pending_touch.take();
         // English is a mode rather than a scheme, so the grid stays available in it: the same digits spell words instead of syllables. A local mode still takes the keys, and the scheme underneath must be quanpin: 拼音九宫格只认得全拼音节，注音九键走注音编辑器。九键双拼没有英文九键，专用英文里数字照常是数字。
         let grid_digit = match self.key_grid {
             Some(KeyGrid::NineKey) => (b'2'..=b'9').contains(&value),
@@ -133,12 +135,29 @@ impl Session {
             }
             return KeyResult::unhandled();
         }
+        self.input.pending_touch = touch;
         self.input.handle_character(value, shift_only)
+    }
+
+    /// 下一次 `character` 的按下点（触屏宿主经 `msime_client_touch_character` 送来）。只有那一键是 26 键双拼的小写字母或 `;` 时才交给方案；其余入口（命令、选词、网格键、滑行、标点）一开头就丢掉它，所以改道到别处的按键不会把触点留给后面的字母。
+    pub fn set_key_touch(&mut self, touch: Option<KeyTouch>) {
+        self.input.pending_touch = touch;
+    }
+
+    /// 宿主注册或清除的键位几何，见 [`crate::touch::KeyGeometry`]。
+    pub fn set_key_geometry(&mut self, geometry: Option<Arc<KeyGeometry>>) {
+        self.input.engine.set_key_geometry(geometry);
+    }
+
+    /// 按触点计价的参数；只有 Rust 侧（评测示例）调用，不经 FFI。
+    pub fn set_touch_tuning(&mut self, tuning: TouchTuning) {
+        self.input.engine.set_touch_tuning(tuning);
     }
 
     /// 滑过字母键的一笔：它最可能拼出的全拼字母写到光标处，与已有组字之间用 `'` 隔开。不是全拼、在本地模式或专用英文里、九键数字正在组字，以及没有串跟得上这一笔时，不处理。
     pub fn glide(&mut self, keyboard: &GlideKeyboard, points: &[GlidePoint]) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if self.nine_key.active() {
             return KeyResult::unhandled();
         }
@@ -173,6 +192,7 @@ impl Session {
     /// 字母网格的一键：小写字母由 `KeyGrid::code_of` 归成整组，十八键双拼另收大写 ASCII 标记精确字母。标记保留在组码里，不复用硬件键盘的 `character`。全拼和双拼分别使用自己的分组表，五笔在 14 键下按组展开码表（`wubi::grid`）；本地模式、专用英文或已有 26 键组字时不处理，状态不变。
     pub fn grid_key(&mut self, letter: u8) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         let Some(
             grid @ (KeyGrid::FourteenKey
             | KeyGrid::EighteenKey
@@ -245,6 +265,7 @@ impl Session {
     }
 
     pub fn command(&mut self, command: Command) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             self.prediction.clear();
             return if command == Command::Cancel {
@@ -298,6 +319,7 @@ impl Session {
     /// Finishes the composition and appends the Chinese mark; unhandled when Chinese punctuation is off or locked to ASCII, or the key has no mark.
     pub fn punctuation(&mut self, value: u8) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if !self.nine_key.active() {
             return self.input.handle_punctuation(value);
         }
@@ -345,6 +367,7 @@ impl Session {
     }
 
     pub fn select(&mut self, index: usize) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             let Some((row, word, pinyin)) = self.prediction.selected(index) else {
                 return KeyResult::unhandled();
@@ -725,6 +748,7 @@ impl Session {
                 .map_or((0, 0), |edit| edit.focus_span()),
             caret_edit_suffix,
             caret_edit_prefix,
+            touch_corrections: input.touch_corrections(),
             candidates,
         }
     }

@@ -17,6 +17,7 @@ use crate::local::database::LocalDatabaseLease;
 use crate::nine_key::KeyGrid;
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::pinyin::segment::is_complete_pinyin_input;
+use crate::touch::{KeyGeometry, KeyTouch, TouchTuning};
 use crate::types::{
     CandidateEdge, CandidateSource, CommandTableEntry, CommandTranslationQuery, FirstPageRows,
     KeyResult, LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery,
@@ -126,6 +127,8 @@ pub struct EngineSnapshot {
     pub caret_edit_suffix: bool,
     /// 首选前面固定的那段文字（`SessionSnapshot::caret_edit_prefix`），首选显示为它接上 `candidates[0]`；模式不生效时为空。
     pub caret_edit_prefix: String,
+    /// 26 键双拼的这张表带着触点查出，纠错行按落点计过价（`SessionSnapshot::touch_corrections`）；runtime 不把它当作次选读法挪到表尾。
+    pub touch_corrections: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -312,6 +315,7 @@ impl Session {
             conversion_focus_end: value.conversion_focus.1,
             caret_edit_suffix: value.caret_edit_suffix,
             caret_edit_prefix: value.caret_edit_prefix,
+            touch_corrections: value.touch_corrections,
         };
         let mut annotations = value.candidate_annotations.into_iter();
         for (index, candidate) in value.candidates.into_iter().enumerate() {
@@ -607,6 +611,21 @@ impl Session {
     pub fn character(&mut self, value: u8, shift: bool) -> Result<EngineResult> {
         require_ascii(value, diagnostics::CHARACTER_MUST_BE_ASCII)?;
         Ok(result_for(self.inner.character(value, shift)))
+    }
+
+    /// 下一次 `character` 的按下点，见 [`crate::Session::set_key_touch`]。
+    pub fn set_key_touch(&mut self, touch: Option<KeyTouch>) {
+        self.inner.set_key_touch(touch);
+    }
+
+    /// 宿主注册或清除的键位几何，见 [`crate::Session::set_key_geometry`]。
+    pub fn set_key_geometry(&mut self, geometry: Option<Arc<KeyGeometry>>) {
+        self.inner.set_key_geometry(geometry);
+    }
+
+    /// 按触点计价的参数，只给 Rust 侧的评测调参用，不经 FFI；见 [`crate::touch::TouchTuning`]。
+    pub fn set_touch_tuning(&mut self, tuning: TouchTuning) {
+        self.inner.set_touch_tuning(tuning);
     }
 
     pub fn expand_initial_candidates(&mut self) -> Result<bool> {

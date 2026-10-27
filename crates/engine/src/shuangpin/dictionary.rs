@@ -10,7 +10,9 @@ use super::query::{
     raw_length_for_effective_prefix, remove_manual_delimiters,
     trim_trailing_letters_preserve_delimiters,
 };
-use super::typo_edges::{collect_shuangpin_typo_edges, SHUANGPIN_TYPO_TYPES};
+use super::typo_edges::{
+    collect_priced_shuangpin_typo_edges, collect_shuangpin_typo_edges, SHUANGPIN_TYPO_TYPES,
+};
 use super::utils::{convert_seg_shuangpin_to_seg_complete_pinyin, pinyin_segmentation};
 use super::ShuangpinProfile;
 use crate::assets;
@@ -42,6 +44,7 @@ use crate::quanpin::dictionary::{
 };
 use crate::quanpin::series::fold_reading;
 use crate::text::last_characters;
+use crate::touch::{KeyGeometry, KeyTouch, TouchTuning};
 use crate::types::{
     CandidateSource, SentenceAssociationOptions, ShuangpinProfileKind, SyllableHelpcode, WordItem,
 };
@@ -116,6 +119,12 @@ pub struct ShuangpinDictionary {
     /// （`set_syllable_helpcodes`）。
     pub(super) syllable_helpcodes: Vec<SyllableHelpcode>,
     syllable_helpcodes_signature: String,
+    /// 当前请求每个按键的触点，与 `touch_input` 逐字节对齐（`set_key_touches`）；没有触点时为空，一切照旧。答案只对 `touch_input` 的前缀用得上触点，前缀的触点签名进缓存键（`touch_signature`）。
+    key_touches: Vec<Option<KeyTouch>>,
+    touch_input: String,
+    key_geometry: Option<Arc<KeyGeometry>>,
+    /// 按触点计价的参数。改变时清掉整句答案，它们按另一组参数计过价。
+    touch_tuning: TouchTuning,
 }
 
 impl ShuangpinDictionary {
@@ -156,7 +165,59 @@ impl ShuangpinDictionary {
             autocorrect_types: 0,
             syllable_helpcodes: Vec::new(),
             syllable_helpcodes_signature: String::new(),
+            key_touches: Vec::new(),
+            touch_input: String::new(),
+            key_geometry: None,
+            touch_tuning: TouchTuning::default(),
         }
+    }
+
+    /// 请求的触点跟着请求走（`ShuangpinEngine::query` 在查询之前交来）。`touches` 为空时清掉，之后的答案和缓存键与没有触点时完全相同。
+    pub fn set_key_touches(
+        &mut self,
+        touches: &[Option<KeyTouch>],
+        input: &str,
+        geometry: Option<&Arc<KeyGeometry>>,
+        tuning: TouchTuning,
+    ) {
+        if self.touch_tuning != tuning {
+            self.touch_tuning = tuning;
+            self.series_cache.clear();
+            self.single_helpcode_cache.clear();
+            self.reversed_single_helpcode_cache.clear();
+            self.double_helpcode_cache.clear();
+            self.personal_scored_keys.clear();
+        }
+        self.key_touches.clear();
+        self.touch_input.clear();
+        self.key_geometry = None;
+        let Some(geometry) = geometry.filter(|_| touches.len() == input.len()) else {
+            return;
+        };
+        self.key_touches.extend_from_slice(touches);
+        self.touch_input.push_str(input);
+        self.key_geometry = Some(Arc::clone(geometry));
+    }
+
+    /// `touched` 这段输入的触点签名：几何代次加上每个位置量化后的触点。`touched` 不是带触点的那串输入的前缀（模糊音替换过的拼写、直接辅助码去掉辅码的串）或这一段一个触点都没有时为空，缓存键和没有触点时一样。
+    fn touch_signature(&self, touched: &str) -> Option<String> {
+        let touches = touch_slice(&self.key_touches, &self.touch_input, touched)?;
+        let geometry = self.key_geometry.as_ref()?;
+        let mut signature = String::with_capacity(12 + touches.len() * 4);
+        signature.push('\u{2}');
+        signature.push_str(&geometry.id().to_string());
+        for touch in touches {
+            match touch {
+                Some(touch) => {
+                    signature.push('\u{4}');
+                    for byte in [touch.dx as u8, touch.dy as u8, touch.copy] {
+                        signature.push(char::from(byte));
+                    }
+                }
+                None => signature.push('\u{3}'),
+            }
+        }
+        Some(signature)
     }
 
     /// 逐音节辅助码约束跟着请求走；签名拼在系列/辅助码缓存键后面，同一串拼音带不同约束不共用答案。
@@ -168,10 +229,20 @@ impl ShuangpinDictionary {
     /// `rows_key + signature`：签名为空时直接借用原键，不为一次空拼接多分配。
     /// 返回值只借 `rows_key`，不会把 `self` 钉在不可变借用上。
     fn signed_rows_key<'a>(&self, rows_key: &'a str) -> std::borrow::Cow<'a, str> {
-        if self.syllable_helpcodes_signature.is_empty() {
-            std::borrow::Cow::Borrowed(rows_key)
+        self.signed_key(rows_key, rows_key)
+    }
+
+    /// `key` 接上逐音节辅助码约束的签名，再接上 `touched` 那段输入的触点签名（[`Self::touch_signature`]）。两者都为空时借用原键。
+    fn signed_key<'a>(&self, key: &'a str, touched: &str) -> std::borrow::Cow<'a, str> {
+        let touch = self.touch_signature(touched);
+        if self.syllable_helpcodes_signature.is_empty() && touch.is_none() {
+            std::borrow::Cow::Borrowed(key)
         } else {
-            std::borrow::Cow::Owned(format!("{rows_key}{}", self.syllable_helpcodes_signature))
+            std::borrow::Cow::Owned(format!(
+                "{key}{}{}",
+                self.syllable_helpcodes_signature,
+                touch.unwrap_or_default()
+            ))
         }
     }
 
@@ -528,9 +599,25 @@ impl ShuangpinDictionary {
         let codes = typo_codes(self.autocorrect_types, segments, segmentation, rows_key);
         let types = self.autocorrect_types;
         let profile = self.profile;
+        // 第 i 个两键码就是 `rows_key` 的第 2i、2i+1 字节（`typo_codes` 不收带 `'` 的输入），所以这段输入的触点按位置对得上。没有触点时走平面表，与桌面逐字节相同。
+        let touched = touch_slice(&self.key_touches, &self.touch_input, rows_key)
+            .zip(self.key_geometry.as_deref());
+        let tuning = self.touch_tuning;
         let span_cache = &mut self.typo_span_cache;
-        let mut typo_edges = |literal_best: &SentencePath| {
-            collect_shuangpin_typo_edges(
+        let mut typo_edges = |literal_best: &SentencePath| match touched {
+            Some((touches, geometry)) => collect_priced_shuangpin_typo_edges(
+                database,
+                span_cache,
+                profile,
+                codes.as_slice(),
+                touches,
+                geometry,
+                &tuning,
+                segments,
+                literal_best,
+                types,
+            ),
+            None => collect_shuangpin_typo_edges(
                 database,
                 span_cache,
                 profile,
@@ -538,7 +625,7 @@ impl ShuangpinDictionary {
                 segments,
                 literal_best,
                 types,
-            )
+            ),
         };
         let typo_source: Option<&mut TypoEdgeSource<'_>> = if codes.is_empty() {
             None
@@ -624,8 +711,8 @@ impl ShuangpinDictionary {
             2 => self.sentence_cache_key(&double_helpcode_cache_key(raw, help_codes)),
             _ => String::new(),
         };
-        // 末尾辅码的答案同样受逐音节约束影响，约束签名拼到缓存键尾。
-        let cache_key = self.signed_rows_key(&cache_key).into_owned();
+        // 末尾辅码的答案同样受逐音节约束影响，约束签名拼到缓存键尾；底下的整句答案按触点计价，`raw` 的触点签名也拼上。
+        let cache_key = self.signed_key(&cache_key, raw).into_owned();
         if !cache_key.is_empty()
             && self
                 .helpcode_cache(help_codes.len(), reversed)
@@ -758,11 +845,17 @@ impl ShuangpinDictionary {
             };
             replace_cached_online_candidate_batch(list, raw, words, source)
         };
+        // 键与 `generate_with_helpcodes` 一致：约束签名和 `raw` 的触点签名；两者都为空时原键不复制。
+        let touch = self.touch_signature(raw);
         let sign = |key: String| {
-            if self.syllable_helpcodes_signature.is_empty() {
+            if self.syllable_helpcodes_signature.is_empty() && touch.is_none() {
                 key
             } else {
-                format!("{key}{}", self.syllable_helpcodes_signature)
+                format!(
+                    "{key}{}{}",
+                    self.syllable_helpcodes_signature,
+                    touch.as_deref().unwrap_or_default()
+                )
             }
         };
         if !help_codes.is_empty() {
@@ -982,6 +1075,19 @@ fn typo_codes<'a>(
         },
         None => TypoCodes::empty(),
     }
+}
+
+/// `touched` 是带触点的那串输入 `input` 的前缀、且这一段至少有一个触点时，返回这一段的触点。
+fn touch_slice<'a>(
+    touches: &'a [Option<KeyTouch>],
+    input: &str,
+    touched: &str,
+) -> Option<&'a [Option<KeyTouch>]> {
+    if touches.is_empty() || !input.starts_with(touched) {
+        return None;
+    }
+    let touches = &touches[..touched.len()];
+    touches.iter().any(Option::is_some).then_some(touches)
 }
 
 fn prefix_group_count(segmentation: &str) -> usize {

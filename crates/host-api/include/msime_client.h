@@ -576,8 +576,10 @@ char *msime_client_update_preferences(uint64_t session, const uint8_t *snapshot,
 char *msime_client_focus(uint64_t session, bool focused);
 /* Clear the current session's Engine candidate cache and refresh its view. */
 char *msime_client_reset_cache(uint64_t session);
-/* Release process-level model caches without a session handle (memory pressure). */
+/* Release process-level model caches without a session handle (memory pressure): the Japanese dictionary, personal context models no session uses, and the plugin tables kept for the next session. Also releases the calling thread's candidate-gloss caches, as msime_client_release_gloss_caches does. */
 void msime_client_release_process_cache(void);
+/* 关掉调用线程缓存的候选释义词库连接（发布词库、学到的释义库、离线释义库），丢掉读好的自定义译文；下一次查询重新打开，结果不变。不动日文词典这类重新加载很贵的模型，宿主可以在每次键盘收起时调用。只清调用线程自己的那份，要在查询释义的那个线程上调。 */
+void msime_client_release_gloss_caches(void);
 /* 语音设置服务目录。纯函数，无文件、网络或设备访问；响应 value 为 {asr:[preset],polish:[preset],doubao_stream_endpoints:[{id,label,title,endpoint}]}。
  * preset 为 {id,title,endpoint,model,models:[string],documentation}，仅含公开预设。
  * 数组顺序即设置页顺序；不含平台特有的 system/local，宿主按能力追加。

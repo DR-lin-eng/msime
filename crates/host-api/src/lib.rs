@@ -42,7 +42,7 @@ use msime_client_services::typing_statistics::{
 };
 use msime_engine::host::{
     check_nine_key_shuangpin_table, check_shuangpin_custom_profile,
-    nine_key_shuangpin_builtin_table, nine_key_shuangpin_table_key_hints,
+    nine_key_shuangpin_builtin_table, nine_key_shuangpin_table_key_hints, release_gloss_caches,
     resolve_eighteen_key_shuangpin, resolve_fourteen_key_shuangpin, resolve_nine_key_shuangpin,
     shuangpin_builtin_table, validate_nine_key_shuangpin_table, validate_shuangpin_custom_profile,
     CandidateEdge, Command, EngineOptions, NineKeyShuangpinError, NineKeyShuangpinKeyHint,

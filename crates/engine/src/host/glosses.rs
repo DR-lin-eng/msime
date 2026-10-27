@@ -77,6 +77,14 @@ thread_local! {
     static TARGET_GLOSS_CONNECTIONS: RefCell<Vec<(PathBuf, FileIdentity, Connection)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// 关掉调用线程留着的释义词库连接，丢掉读好的自定义译文（发布词库、学到的释义库、自定义译文、离线释义库四份缓存）。缓存跟着查询线程活着，在鸿蒙上就是 ArkTS 的 UI 线程，等于整个进程的寿命；键盘收起、关掉释义以后它们本来一直留着。宿主在键盘收起、内存吃紧时调用，下一次查询照常重新打开，结果不变。只清调用线程自己的那份。
+pub fn release_gloss_caches() {
+    PACKAGED_GLOSS_DICTIONARY.with_borrow_mut(|slot| *slot = None);
+    LEARNED_GLOSS_DICTIONARY.with_borrow_mut(|slot| *slot = None);
+    CUSTOM_TRANSLATIONS.with_borrow_mut(|slot| *slot = None);
+    TARGET_GLOSS_CONNECTIONS.with_borrow_mut(Vec::clear);
+}
+
 /// 手机英文始终以原始按键为第一行，仅在需要时附加唯一纠错；不创建或改变输入会话。
 pub fn english_corrections(resources: &str, raw: &str) -> Result<Vec<String>> {
     if raw.is_empty()

@@ -287,6 +287,13 @@ pub extern "C" fn msime_client_release_process_cache() {
     release_japanese_dictionary_cache();
     release_idle_personal_models();
     crate::plugin_tables::release_cached_tables();
+    release_gloss_caches();
+}
+
+/// 关掉调用线程缓存的候选释义词库连接和读好的自定义译文，见 `msime_engine::host::release_gloss_caches`。日文词典这类重新加载很贵的模型不动，所以宿主可以在每次键盘收起时调用。
+#[no_mangle]
+pub extern "C" fn msime_client_release_gloss_caches() {
+    release_gloss_caches();
 }
 
 #[no_mangle]

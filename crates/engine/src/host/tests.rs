@@ -488,6 +488,40 @@ fn cached_offline_target_glosses_follow_replaced_and_removed_files() {
     assert!(!path.exists(), "a read-only open must not create the file");
 }
 
+/// 键盘收起、内存吃紧时宿主释放调用线程的释义缓存；之后的查询重新打开词库、重新读自定义译文，结果与释放前相同，没打开过任何缓存时释放也不出错。
+#[test]
+fn released_gloss_caches_reopen_on_the_next_query() {
+    release_gloss_caches();
+    let resources = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    Connection::open(resources.path().join("msime-english.db"))
+        .unwrap()
+        .execute_batch(&format!(
+            "{ENGLISH_SCHEMA} INSERT INTO zh_en_glosses VALUES('测试','packaged gloss');"
+        ))
+        .unwrap();
+    std::fs::write(
+        user.path().join("custom_translations.txt"),
+        "你好\thand written gloss\n",
+    )
+    .unwrap();
+    let target = resources.path().join("zh-fr.db");
+    offline_gloss_database(&target, "fr", 1);
+    let resources_path = resources.path().to_str().unwrap();
+    let user_path = user.path().to_str().unwrap();
+    let candidates = vec![("测试".into(), 0), ("你好".into(), 0)];
+    let glosses = || candidate_glosses_with_user(resources_path, user_path, &candidates).unwrap();
+    let target_candidates = vec![("猫".into(), 0)];
+    let target_glosses =
+        || candidate_target_glosses(target.to_str().unwrap(), "fr", &target_candidates).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss", "hand written gloss"]);
+    assert_eq!(target_glosses(), vec!["chat, chatte; félin"]);
+
+    release_gloss_caches();
+    assert_eq!(glosses(), vec!["packaged gloss", "hand written gloss"]);
+    assert_eq!(target_glosses(), vec!["chat, chatte; félin"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn learned_glosses_reject_a_symlinked_database() {

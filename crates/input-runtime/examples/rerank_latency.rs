@@ -26,7 +26,7 @@
 //! it checks is therefore a ceiling on this crate's share of a frame, not a guarantee about what a
 //! user perceives.
 //!
-//! `--scheme shuangpin --shuangpin-profile <方案>` 把用例编成 26 键双拼的按键再打；再给 `--key-geometry` 和 `--touch-sigma` 时按 `convert_eval` 同样的规则合成误触（默认 `--touch-mode realistic`），量带着按错的键时每次按键的开销。双拼的纠错整句要加 `--autocorrect` 才会出现。
+//! `--scheme shuangpin --shuangpin-profile <方案>` 把用例编成 26 键双拼的按键再打；再给 `--key-geometry` 和 `--touch-sigma` 时按 `convert_eval` 同样的规则合成误触和落点（默认 `--touch-mode realistic`），像触屏宿主那样注册几何、每键带上按下点，量带着按错的键时每次按键的开销，换算触点的那一步也计在这一键里。`--no-touch-points` 只送按到的键（平面表）。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少。双拼的纠错整句要加 `--autocorrect` 才会出现。
 mod eval_resources;
 
 #[path = "convert_eval/grid_keys.rs"]
@@ -35,11 +35,12 @@ mod grid_keys;
 mod touch_noise;
 
 use msime_engine::host::{Command, Session};
+use msime_engine::touch::KeyGeometry;
 use msime_engine::{KeyGrid, SchemeType, ShuangpinProfileKind};
 use msime_input_runtime::{Action, Reranker, Runtime, SentenceModel};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use touch_noise::{KeyLayout, TouchMode, TouchNoise};
+use touch_noise::{KeyLayout, Point, TouchMode, TouchNoise};
 
 /// One 60 Hz frame. A keystroke that costs more than this cannot be absorbed between two frames,
 /// so the candidate list visibly lags the typing.
@@ -55,6 +56,8 @@ struct Case {
     input: String,
     /// 实际送进去的键，两臂共用。
     keys: Vec<u8>,
+    /// 每个键的落点，与 `keys` 对齐；不送落点时为空。
+    points: Vec<Point>,
 }
 
 /// Keystroke timings in arrival order, kept unsorted so the two arms stay paired by index.
@@ -131,22 +134,25 @@ fn load(path: &Path) -> Result<Vec<Case>, Box<dyn std::error::Error>> {
             id: fields[0].to_string(),
             input: fields[1].to_string(),
             keys: Vec::new(),
+            points: Vec::new(),
         });
     }
     Ok(cases)
 }
 
-/// 从空的输入串开始打一条输入的 `keys`，逐键计时。
+/// 从空的输入串开始打一条输入的 `keys`，逐键计时。`points` 不为空时每键像 `msime_client_touch_character` 那样按代次 `geometry_id` 换成触点、派发前交上、派发后清掉，这几步一起计时。
 ///
 /// 先发 `Cancel` 而不是新建会话：新建会话会重新打开词库，这笔开销会盖过要量的东西，而用户也不会每按一次键都付一次。
 fn type_case(
     runtime: &mut Runtime<Session>,
     keys: &[u8],
+    points: &[Point],
+    geometry_id: u32,
     grid: Option<KeyGrid>,
     into: &mut Arm,
 ) -> Result<(), Box<dyn std::error::Error>> {
     runtime.dispatch(Action::Command(Command::Cancel))?;
-    for &byte in keys {
+    for (position, &byte) in keys.iter().enumerate() {
         let action = match grid {
             Some(
                 KeyGrid::FourteenKey
@@ -160,7 +166,14 @@ fn type_case(
             },
         };
         let started = Instant::now();
+        let touched = points.get(position).map(|&(x, y)| {
+            let touch = runtime.key_touch(byte, geometry_id, x as f32, y as f32);
+            runtime.set_key_touch(touch);
+        });
         runtime.dispatch(action)?;
+        if touched.is_some() {
+            runtime.set_key_touch(None);
+        }
         into.samples.push(started.elapsed());
     }
     Ok(())
@@ -183,6 +196,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigma: Option<f64> = None;
     let mut bias = 0.0;
     let mut seed = 20261027;
+    let mut touch_points = true;
+    let mut touch_arms = false;
     let mut index = 0;
     while index < args.len() {
         let take = |index: &mut usize| -> Result<String, String> {
@@ -222,12 +237,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--touch-sigma" => sigma = Some(take(&mut index)?.parse()?),
             "--touch-bias-y" => bias = take(&mut index)?.parse()?,
             "--seed" => seed = take(&mut index)?.parse()?,
+            "--no-touch-points" => touch_points = false,
+            "--touch-arms" => touch_arms = true,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         index += 1;
     }
     let resources = resources.ok_or(
-        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>] [--scheme shuangpin --shuangpin-profile <profile> [--autocorrect] [--key-geometry <file.json>... --touch-sigma <σ> [--touch-bias-y <b>] [--touch-mode realistic] [--seed N]]]",
+        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>] [--scheme shuangpin --shuangpin-profile <profile> [--autocorrect] [--key-geometry <file.json>... --touch-sigma <σ> [--touch-bias-y <b>] [--touch-mode realistic] [--seed N] [--no-touch-points | --touch-arms]]]",
     )?;
     if sets.is_empty() {
         return Err("at least one --set is required".into());
@@ -272,10 +289,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mode.name(),
                 layout.name
             );
-            Some((TouchNoise::new(&layout, sigma, bias), mode))
+            if touch_arms && !touch_points {
+                return Err(
+                    "--touch-arms compares touch points with none; drop --no-touch-points".into(),
+                );
+            }
+            let geometry = KeyGeometry::from_json(&layout.json)?
+                .ok_or("a reference geometry needs a non-zero id")?;
+            Some((TouchNoise::new(&layout, sigma, bias), mode, geometry))
         }
         (Some(_), None) if touch_mode.is_some() || !geometry.is_empty() => {
             return Err("--key-geometry and --touch-mode need --touch-sigma".into())
+        }
+        _ if touch_arms || !touch_points => {
+            return Err("--touch-arms and --no-touch-points need --touch-sigma".into())
         }
         _ => None,
     };
@@ -300,11 +327,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_default()
                     .into_bytes();
                 match &touch {
-                    Some((noise, mode)) => {
+                    Some((noise, mode, _)) => {
                         let mut rng = touch_noise::case_rng(seed, &[position as u64]);
-                        noise
-                            .synthesize(*mode, &intended, &mut rng)?
-                            .unwrap_or(intended)
+                        match noise.synthesize_touches(*mode, &intended, &mut rng)? {
+                            Some(touches) => {
+                                if touch_points {
+                                    case.points = touches.iter().map(|(_, point)| *point).collect();
+                                }
+                                touches.into_iter().map(|(key, _)| key).collect()
+                            }
+                            None => intended,
+                        }
                     }
                     None => intended,
                 }
@@ -355,7 +388,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     plain.focus(true)?;
     let mut ranked = Runtime::new(Session::new(&options)?, 9)?;
     ranked.focus(true)?;
-    ranked.set_reranker(Some(Reranker::new(model)));
+    ranked.set_reranker(Some(Reranker::new(model.clone())));
+    // `--touch-arms`：两臂都挂模型，只差送不送落点。
+    if touch_arms {
+        plain.set_reranker(Some(Reranker::new(model)));
+    }
+    // 送落点时两臂都注册同一份几何；不送落点的那一臂注册了也用不上。
+    let geometry_id = match &touch {
+        Some((_, _, geometry)) if touch_points => {
+            plain.set_key_geometry(Some(geometry.clone()));
+            ranked.set_key_geometry(Some(geometry.clone()));
+            geometry.id()
+        }
+        _ => 0,
+    };
+    // 不送落点的那一臂（`--touch-arms` 的 plain）打同样的键、不带落点。
+    let plain_points = |case: &Case| -> Vec<Point> {
+        if touch_arms {
+            Vec::new()
+        } else {
+            case.points.clone()
+        }
+    };
     // 九键和 14 键的长串组码每次按键都要重新解一遍整句，量它们的按键延迟要在网格上打（#6059）。
     if grid.is_some() {
         plain.set_key_grid(grid)?;
@@ -367,8 +421,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // outside the samples.
     let mut discard = Arm::default();
     for case in cases.iter().take(warmup) {
-        type_case(&mut ranked, &case.keys, grid, &mut discard)?;
-        type_case(&mut plain, &case.keys, grid, &mut discard)?;
+        type_case(
+            &mut ranked,
+            &case.keys,
+            &case.points,
+            geometry_id,
+            grid,
+            &mut discard,
+        )?;
+        type_case(
+            &mut plain,
+            &case.keys,
+            &plain_points(case),
+            geometry_id,
+            grid,
+            &mut discard,
+        )?;
     }
 
     let mut off = Arm::default();
@@ -378,12 +446,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut worst: Vec<(f64, String)> = Vec::new();
     for (position, case) in cases.iter().enumerate() {
         let before = on.samples.len();
+        let flat = plain_points(case);
         if position % 2 == 0 {
-            type_case(&mut plain, &case.keys, grid, &mut off)?;
-            type_case(&mut ranked, &case.keys, grid, &mut on)?;
+            type_case(&mut plain, &case.keys, &flat, geometry_id, grid, &mut off)?;
+            type_case(
+                &mut ranked,
+                &case.keys,
+                &case.points,
+                geometry_id,
+                grid,
+                &mut on,
+            )?;
         } else {
-            type_case(&mut ranked, &case.keys, grid, &mut on)?;
-            type_case(&mut plain, &case.keys, grid, &mut off)?;
+            type_case(
+                &mut ranked,
+                &case.keys,
+                &case.points,
+                geometry_id,
+                grid,
+                &mut on,
+            )?;
+            type_case(&mut plain, &case.keys, &flat, geometry_id, grid, &mut off)?;
         }
         let case_max = on.samples[before..]
             .iter()
@@ -416,9 +499,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         warmup.min(cases.len())
     );
     println!("milliseconds per keystroke:");
-    row("engine only", &off_summary);
-    row("with model", &on_summary);
-    row("reranker adds", &delta_summary);
+    if touch_arms {
+        row("flat table", &off_summary);
+        row("with touches", &on_summary);
+        row("touches add", &delta_summary);
+    } else {
+        row("engine only", &off_summary);
+        row("with model", &on_summary);
+        row("reranker adds", &delta_summary);
+    }
 
     // The share matters as much as the percentile. Reranking is skipped entirely for most
     // keystrokes — the lattice does not run below three syllables and has nothing to choose from

@@ -298,6 +298,13 @@ public final class MSIMEInputService extends InputMethodService {
     private String clearableEnglishWord = "";
     private int clearableEnglishCursor = -1;
     private InputConnection clearableEnglishConnection;
+    /** 英文直输一次按键或一次选区回报里，光标位置和光标前后文每样只跨进程读一次，见 EditorReadCache。 */
+    private final EditorReadCache editorReads = new EditorReadCache();
+    /** 大于 0 时 render() 只记下要画，最外层的 endRenderBatch 再画一次，见 beginRenderBatch。 */
+    private int renderBatchDepth;
+    private boolean renderBatchPending;
+    /** 最近一次 render() 开始时选区回声追踪器记下过的预期数，见 updateEditorSelection 里的 renderedEcho。 */
+    private long renderedEchoExpectations = -1;
     private long englishSuggestionEpoch;
     private long englishSuggestionRequestedEpoch = -1;
     private String englishSuggestionRequestedPrefix = "";
@@ -1370,6 +1377,7 @@ public final class MSIMEInputService extends InputMethodService {
 
     boolean commitText(String text, TypingSource source) {
         clearQuickDeleteUndo();
+        editorReads.invalidate();
         if (connection == null) return false;
         boolean committed;
         try { committed = connection.commitText(text, 1); }
@@ -1390,6 +1398,7 @@ public final class MSIMEInputService extends InputMethodService {
     /** 删光标前 `length` 个 UTF-16 单元，并记下删完后的选区预期，免得这次删除迟到的回报把紧接着开始的新组字取消掉。有选区或组字区时删的位置由编辑器决定，追踪器会自己作废预期。 */
     boolean deleteBeforeCursor(int length) {
         clearQuickDeleteUndo();
+        editorReads.invalidate();
         pairedPunctuationStack.clear();
         boolean deleted = InputConnectionGuard.deleteSurroundingText(connection, length, 0);
         if (deleted) {
@@ -1404,6 +1413,7 @@ public final class MSIMEInputService extends InputMethodService {
     /** 删除键先删选区；没有前文可删时交给编辑器处理引用等控件，其余按码位删字并追踪回声。 */
     void deleteCodePointBeforeCursor() {
         clearQuickDeleteUndo();
+        editorReads.invalidate();
         pairedPunctuationStack.clear();
         if (deleteSelection()) return;
         CharSequence before = InputConnectionGuard.textBeforeCursor(connection, 2);
@@ -1439,6 +1449,7 @@ public final class MSIMEInputService extends InputMethodService {
 
     /** 与系统辅助方法保持相同的按键标记，但两次发键分别保护，连接断开时松键仍尽力发送。 */
     void sendEditorKeyEvents(int keyCode) {
+        editorReads.invalidate();
         InputConnection target = connection;
         if (target == null) return;
         long down = SystemClock.uptimeMillis();
@@ -1453,6 +1464,7 @@ public final class MSIMEInputService extends InputMethodService {
     /** 编辑器动作可能改文字也可能不改，选区预期先作废。 */
     private boolean performEditorAction(int action) {
         selectionEcho.invalidate();
+        editorReads.invalidate();
         return InputConnectionGuard.performEditorAction(connection, action);
     }
 
@@ -3497,13 +3509,7 @@ public final class MSIMEInputService extends InputMethodService {
 
     private String englishWordBeforeCursor() {
         if (!directEnglishActive() || connection == null) return "";
-        CharSequence before;
-        try {
-            before = connection.getTextBeforeCursor(CAPITALIZATION_CONTEXT_LIMIT, 0);
-        } catch (RuntimeException ignored) {
-            return "";
-        }
-        return EnglishSuggestionPolicy.currentWord(before);
+        return EnglishSuggestionPolicy.currentWord(editorTextBeforeCursor());
     }
 
     /** 只清除完整的当前英文词，不跨选区、词中光标或被截断的前文。 */
@@ -3512,9 +3518,40 @@ public final class MSIMEInputService extends InputMethodService {
                 || !EditorPolicy.useEngine(editorInputType) || quickDeleteCursor(connection) < 0) return "";
         String word = englishWordBeforeCursor();
         if (word.isEmpty() || word.length() >= CAPITALIZATION_CONTEXT_LIMIT) return "";
-        CharSequence after = InputConnectionGuard.textAfterCursor(connection, 1);
+        CharSequence after = editorReads.after(connection, () -> InputConnectionGuard.textAfterCursor(connection, 1));
         if (after == null || !EnglishSuggestionPolicy.currentWord(after).isEmpty()) return "";
         return word;
+    }
+
+    /** 光标前 {@link #CAPITALIZATION_CONTEXT_LIMIT} 个字符，读不到时为 null；英文当前词和自动大写共用这一次读取。 */
+    private CharSequence editorTextBeforeCursor() {
+        return editorReads.before(connection,
+            () -> InputConnectionGuard.textBeforeCursor(connection, CAPITALIZATION_CONTEXT_LIMIT));
+    }
+
+    /** 开始一段不写编辑器、可能多处要求重画的处理：期间的 render() 合成 {@link #endRenderBatch()} 时的一次。 */
+    private void beginRenderBatch() {
+        renderBatchDepth++;
+    }
+
+    private void endRenderBatch() {
+        if (--renderBatchDepth > 0 || !renderBatchPending) return;
+        renderBatchPending = false;
+        render();
+    }
+
+    /** 一次英文直输的编辑器事件：重画合成一次，光标位置和前后文每样只读一次，最后那次重画也用同一份读取。 */
+    private void beginEditorEvent() {
+        editorReads.open();
+        beginRenderBatch();
+    }
+
+    private void endEditorEvent() {
+        try {
+            endRenderBatch();
+        } finally {
+            editorReads.close();
+        }
     }
 
     /** 复用本地模式的取消入口；英文直输必须核对编辑器，再删当前词。 */
@@ -3536,10 +3573,15 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     private void refreshEnglishClearButton() {
-        String word = clearableEnglishWord();
-        if (!clearableEnglishWord.equals(word) || (!word.isEmpty()
-                && (clearableEnglishCursor != quickDeleteCursor(connection)
-                    || clearableEnglishConnection != connection))) render();
+        editorReads.open();
+        try {
+            String word = clearableEnglishWord();
+            if (!clearableEnglishWord.equals(word) || (!word.isEmpty()
+                    && (clearableEnglishCursor != quickDeleteCursor(connection)
+                        || clearableEnglishConnection != connection))) render();
+        } finally {
+            editorReads.close();
+        }
     }
 
     private void refreshEnglishSuggestions() {
@@ -3597,12 +3639,18 @@ public final class MSIMEInputService extends InputMethodService {
 
     private void applyEnglishSuggestions(long epoch, String prefix,
                                          EnglishSuggestionModel.Result result) {
-        if (epoch != englishSuggestionEpoch || !englishSuggestionsActive()
-                || !prefix.equals(englishWordBeforeCursor())
-                || !prefix.equals(result.prefix())) return;
-        englishSuggestions = result.items();
-        englishSuggestionPrefix = prefix;
-        render();
+        // 核对前文和随后重画里的清除键共用同一次读取。
+        editorReads.open();
+        try {
+            if (epoch != englishSuggestionEpoch || !englishSuggestionsActive()
+                    || !prefix.equals(englishWordBeforeCursor())
+                    || !prefix.equals(result.prefix())) return;
+            englishSuggestions = result.items();
+            englishSuggestionPrefix = prefix;
+            render();
+        } finally {
+            editorReads.close();
+        }
     }
 
     private void useEnglishSuggestion(int slot, Button button) {
@@ -4700,8 +4748,14 @@ public final class MSIMEInputService extends InputMethodService {
         if (englishNineKeyActive() && session != 0) command(2);
         commitText(fullWidthOutput(String.valueOf((char) value)));
         if (directEnglishActive()) {
-            refreshEnglishSuggestions();
-            refreshEnglishClearButton();
+            // 上屏之后不再写编辑器：候选条、清除键和它们要求的那次重画共用一次读取，只画一次。
+            beginEditorEvent();
+            try {
+                refreshEnglishSuggestions();
+                refreshEnglishClearButton();
+            } finally {
+                endEditorEvent();
+            }
         }
     }
 
@@ -5151,28 +5205,24 @@ public final class MSIMEInputService extends InputMethodService {
         updateAutomaticCapitalization(true);
     }
 
-    /** 切换方案前只更新英文大小写状态；调用方要把方案保存和最终渲染合成一次时暂不重画。 */
-    private void updateAutomaticCapitalization(boolean shouldRender) {
+    /** 切换方案前只更新英文大小写状态；调用方要把方案保存和最终渲染合成一次时暂不重画。返回英文键面的大小写是否变了。 */
+    private boolean updateAutomaticCapitalization(boolean shouldRender) {
         if (!dedicatedEnglish) {
             // 韩语键面上 Shift 是用户选的双辅音而不是大写；越南语和藏文里它是下一个字母的大小写或 Caps Lock（威利转写区分大小写），所以编辑器的更新不能把它清掉。
             if (!letterCompositionActive()) letterCase.reset();
-            return;
+            return false;
         }
-        CharSequence context = null;
         boolean automaticEnabled = localSettings.bool(AndroidLocalSettings.AUTO_CAPITALIZATION)
             && !englishSuggestionsActive();
-        if (automaticEnabled && connection != null) {
-            try {
-                context = connection.getTextBeforeCursor(CAPITALIZATION_CONTEXT_LIMIT, 0);
-            } catch (RuntimeException ignored) {
-                // 光标前文可缺省，不记录也不持久化。
-            }
-        }
+        // 光标前文可缺省（读不到时为 null），不记录也不持久化。
+        CharSequence context = automaticEnabled && connection != null ? editorTextBeforeCursor() : null;
         boolean next = EnglishCapitalizationPolicy.shouldShift(
             automaticEnabled, EditorPolicy.capitalizationMode(editorInputType), context);
         // 手动按下的单次大写留到下一个字母用掉为止，与 HarmonyOS 一致；否则按下 Shift 后编辑器回报一次光标位置就会把它冲掉。
-        if (!letterCase.isPressedShift() && letterCase.applyAutomatic(next)) imeLetterRows.refreshLetterCase();
+        boolean changed = !letterCase.isPressedShift() && letterCase.applyAutomatic(next);
+        if (changed) imeLetterRows.refreshLetterCase();
         if (shouldRender) render();
+        return changed;
     }
 
     private void rememberChineseScheme() {
@@ -5573,18 +5623,24 @@ public final class MSIMEInputService extends InputMethodService {
             }
             int unicode = event.getUnicodeChar();
             if (unicode >= 32 && unicode <= 126) {
-                if (TextPolicy.isAsciiLetter(unicode)) {
-                    char output = letterCase.usesUppercase() || event.isShiftPressed()
-                        ? Character.toUpperCase((char) unicode) : Character.toLowerCase((char) unicode);
-                    commitEnglishLiteral(output);
-                    if (letterCase.consumeLetter()) {
-                        finishTemporaryEnglishShift();
-                        imeLetterRows.refreshLetterCase();
+                // 末尾总要重画一次，上屏过程中要求的重画并进这一次。
+                beginRenderBatch();
+                try {
+                    if (TextPolicy.isAsciiLetter(unicode)) {
+                        char output = letterCase.usesUppercase() || event.isShiftPressed()
+                            ? Character.toUpperCase((char) unicode) : Character.toLowerCase((char) unicode);
+                        commitEnglishLiteral(output);
+                        if (letterCase.consumeLetter()) {
+                            finishTemporaryEnglishShift();
+                            imeLetterRows.refreshLetterCase();
+                        }
+                    } else {
+                        commitEnglishLiteral(unicode);
                     }
-                } else {
-                    commitEnglishLiteral(unicode);
+                    render();
+                } finally {
+                    endRenderBatch();
                 }
-                render();
                 return true;
             }
         }
@@ -5725,6 +5781,9 @@ public final class MSIMEInputService extends InputMethodService {
     private void updateEditorSelection(int oldStart, int oldEnd, int newStart, int newEnd,
             int composingStart, int composingEnd) {
         boolean selectionChanged = oldStart != newStart || oldEnd != newEnd;
+        // 下面这些面板会因选区变化被关掉或作废；它们本来就没开着时，这次回报不会因此改变界面。
+        boolean panelsIdle = !ViewPolicy.isVisible(voiceResultScroll) && !ViewPolicy.isVisible(aiPolishContainer)
+            && !ViewPolicy.isVisible(replyKeyboard) && replyTarget == null && aiTarget == null && !handwritingActive();
         if (selectionChanged) {
             editorContextRevision++;
             // Android reports this boundary after the host has moved the selection. Do not carry
@@ -5790,10 +5849,23 @@ public final class MSIMEInputService extends InputMethodService {
             view = null;
             render();
         }
-        updateAutomaticCapitalization();
-        if (directEnglishActive()) {
-            refreshEnglishSuggestions();
-            refreshEnglishClearButton();
+        // 英文键面上每次回报都重画一次，兜住选区变化带来的各种界面变化。例外是英文直输里输入法自己写入的回声：写完之后界面已经按写完的编辑器重画过（期间没有新的写入），这次回报又没有改变大小写、当前词和英文候选，再画一遍结果相同。英文直输每个字母都会收到这样一条回声，低端机上这次多余的整页重画和它带来的跨进程读取是持续打字时发热、卡顿的来源之一。
+        boolean renderedEcho = ownEcho && panelsIdle && !candidateRenderDeferred && directEnglishActive()
+            && renderedEchoExpectations == selectionEcho.expectations();
+        boolean english = dedicatedEnglish;
+        java.util.List<String> shownSuggestions = englishSuggestions;
+        String shownSuggestionPrefix = englishSuggestionPrefix;
+        beginEditorEvent();
+        try {
+            boolean letterCaseChanged = updateAutomaticCapitalization(false);
+            if (directEnglishActive()) {
+                refreshEnglishSuggestions();
+                refreshEnglishClearButton();
+            }
+            if (english && (!renderedEcho || letterCaseChanged || englishSuggestions != shownSuggestions
+                    || !englishSuggestionPrefix.equals(shownSuggestionPrefix))) render();
+        } finally {
+            endEditorEvent();
         }
         // 数字键面上打完算式（或光标挪到算式后面）时，工具栏给出计算结果。
         imeCalculator.refresh();
@@ -9213,6 +9285,12 @@ public final class MSIMEInputService extends InputMethodService {
     /** 只取绝对选区位置；编辑器不支持或仍有选区时不提供撤回。 */
     private int quickDeleteCursor(InputConnection target) {
         if (target == null) return -1;
+        // 当前连接上的位置在英文直输的一次编辑器事件里只读一次（这是整段文字的跨进程拷贝，见 EditorReadCache）；范围外照常直接读。
+        if (target == connection) return editorReads.cursor(target, () -> readQuickDeleteCursor(target));
+        return readQuickDeleteCursor(target);
+    }
+
+    private static int readQuickDeleteCursor(InputConnection target) {
         try {
             android.view.inputmethod.ExtractedTextRequest request = new android.view.inputmethod.ExtractedTextRequest();
             request.hintMaxChars = QuickDeleteUndo.CONTEXT_UNITS;
@@ -10633,6 +10711,11 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     void render() {
+        if (renderBatchDepth > 0) {
+            renderBatchPending = true;
+            return;
+        }
+        renderedEchoExpectations = selectionEcho.expectations();
         // 完整列表展开可能换代，先同步再绘制，避免候选文字与选词身份来自两代。
         if (candidatePanelOpen && imeNineKeyPanel.eligible()) imeNineKeyPanel.refreshSnapshot();
         scheduleCandidateGlosses();
@@ -10700,8 +10783,13 @@ public final class MSIMEInputService extends InputMethodService {
         if (status != null) status.setText(statusText.startsWith(" · ") ? statusText.substring(3) : statusText);
         if (candidatePage != null) candidatePage.setText(page.isEmpty() ? "" : page.substring(3));
         JSONArray visibleCandidates = view == null ? null : view.optJSONArray("candidates");
-        clearableEnglishWord = clearableEnglishWord();
-        clearableEnglishCursor = clearableEnglishWord.isEmpty() ? -1 : quickDeleteCursor(connection);
+        editorReads.open();
+        try {
+            clearableEnglishWord = clearableEnglishWord();
+            clearableEnglishCursor = clearableEnglishWord.isEmpty() ? -1 : quickDeleteCursor(connection);
+        } finally {
+            editorReads.close();
+        }
         clearableEnglishConnection = clearableEnglishWord.isEmpty() ? null : connection;
         boolean hasEnglishWord = !clearableEnglishWord.isEmpty();
         boolean hasEnglishSuggestions = englishSuggestionsActive() && !englishSuggestions.isEmpty();

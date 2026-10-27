@@ -271,6 +271,27 @@ if ! grep -qF 'this.refreshEnglishSuggestions();' <<< "$selection_body" \
   echo "editorSelectionChanged must re-validate English suggestions against the current word instead of clearing them" >&2
   exit 1
 fi
+# 双拼触点（#10018）：带按下点的入口（`pressTouch` → `msime_client_touch_character`）只给触屏键盘上 26 键双拼的字母和 `;`。何时带由 keyboard-logic.test.ts 的 `TouchPointPolicy.usesTouch` 覆盖；视图是 ArkTS，node 下编不了，这里钉住接线：视图只在 tapLetter 里经 touchKey 调 pressTouch，touchKey 问 usesTouch 并带上 touchDesign()，按下点只在 touchDesign() 时记；press 本身永远不带按下点（硬件键盘经 HardwareKeyDispatch 调它）；触点入口和几何注册只出现在这两个文件里。
+view="$ets/keyboard/KeyboardView.ets"
+session="$ets/keyboard/KeyboardSession.ets"
+tap_letter_body=$(sed -n '/^  private tapLetter(letter: string, touch: TouchPoint | null): void {$/,/^  }$/p' "$view")
+touch_key_body=$(sed -n '/^  private touchKey(touch: TouchPoint | null, shifted: boolean): TouchKey | null {$/,/^  }$/p' "$view")
+record_touch_body=$(sed -n '/^  private recordLetterTouch(letter: string | undefined, event: TouchEvent): void {$/,/^  }$/p' "$view")
+press_body=$(sed -n '/^  press(ascii: number, shift: boolean): boolean {$/,/^  }$/p' "$session")
+touch_callers=$(grep -rlF 'pressTouch(' "$ets" | sed "s|^$ets/||" | sort | tr '\n' ' ')
+touch_natives=$(grep -rlE 'client\.(touchCharacter|setKeyGeometry)\(' "$ets" | sed "s|^$ets/||" | sort | tr '\n' ' ')
+if [[ $(grep -cF 'KeyboardSession.shared.pressTouch(' "$view") -ne 1 ]] \
+  || ! grep -qF 'KeyboardSession.shared.pressTouch(' <<< "$tap_letter_body" \
+  || ! grep -qF 'this.touchKey(touch, shifted)' <<< "$tap_letter_body" \
+  || ! grep -qF 'TouchPointPolicy.usesTouch(' <<< "$touch_key_body" \
+  || ! grep -qF 'touchDesign: this.touchDesign(),' <<< "$touch_key_body" \
+  || ! grep -qF '!this.touchDesign()' <<< "$record_touch_body" \
+  || ! grep -qF 'return this.pressKey(ascii, shift, null);' <<< "$press_body" \
+  || [[ "$touch_callers" != "keyboard/KeyboardSession.ets keyboard/KeyboardView.ets " ]] \
+  || [[ "$touch_natives" != "keyboard/KeyboardSession.ets " ]]; then
+  echo "Only the touch keyboard's 26-key shuangpin letters may reach pressTouch / msime_client_touch_character, through KeyboardView.tapLetter and touchKey (TouchPointPolicy.usesTouch with touchDesign()); press() must stay pointless" >&2
+  exit 1
+fi
 "$tsc" --project "$here/tsconfig.json"
 # 上面已编译所有 tests/*.test.ts；逐个运行它们的输出。遍历源文件而不是输出目录，可以避免已删除测试遗留的旧 .js 被运行。
 for source in "$here"/*.test.ts; do

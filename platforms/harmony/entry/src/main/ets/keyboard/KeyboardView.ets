@@ -77,6 +77,7 @@ import {
   SpaceVoiceGesture
 } from './input/SpaceVoiceGesture';
 import { GlideArming, GlideKeyRect, GlidePoint, GlideTypingPolicy } from './input/GlideTypingPolicy';
+import { PendingTouches, TouchKey, TouchPoint, TouchPointPolicy } from './input/TouchPointPolicy';
 import { LetterHintTable } from './input/LetterHintTable';
 import { HintKeyRect, LetterHintGesture } from './input/LetterHintGesture';
 import { KeyPreviewFrame, KeyPreviewLayout } from './KeyPreviewLayout';
@@ -801,6 +802,14 @@ struct KeyboardView {
   private keyPreviewFinger: number = -1;
   /** 字母键上可能输入角标提示而不是字母的触摸。 */
   private letterHints: LetterHintGesture = new LetterHintGesture();
+  /** 26 键字母键和 `;` 的按下点，等这一键的点击取走（#10018，`TouchPointPolicy`）。 */
+  private pendingTouches: PendingTouches = new PendingTouches();
+  /** 微软双拼第二行末尾 `;` 键的位置（窗口坐标），同 `glideKeys`；没量到时为 null。 */
+  private semicolonKey: GlideKeyRect | null = null;
+  /** 交给引擎的键位布局（`TouchPointPolicy.geometryLayout`）缓存：键位、`;` 或键盘原点变了才重算，不必每键都拼一遍。 */
+  private touchLayoutCache: string | null = null;
+  private touchLayoutDirty: boolean = true;
+  private touchLayoutSemicolon: boolean = false;
   /** 每个被跟踪手指的长按计时器。 */
   private hintHoldTimers: Map<number, number> = new Map<number, number>();
   /** 双拼 18 键两个字母的键上的横滑。 */
@@ -1331,7 +1340,8 @@ struct KeyboardView {
         || this.tibetanFace() || this.zhuyinFace());
   }
 
-  private tapLetter(letter: string): void {
+  /** `touch` 是这一键的按下点（键盘根区域坐标），没有时为 null：无障碍点击、没有被记下的触摸。 */
+  private tapLetter(letter: string, touch: TouchPoint | null): void {
     if (this.glideSwallowsTap) {
       // The stroke already typed what it meant; see glideSwallowsTap.
       return;
@@ -1374,13 +1384,73 @@ struct KeyboardView {
       || (this.english && held);
     // 英文组合按实际字符保留大小写，Shift 标志本身不会把小写 ASCII 改为大写。
     const input: string = this.english && held ? letter.toUpperCase() : letter;
-    KeyboardSession.shared.press(input.charCodeAt(0), shifted);
+    const touchKey: TouchKey | null = this.touchKey(touch, shifted);
+    if (touchKey !== null) {
+      KeyboardSession.shared.pressTouch(input.charCodeAt(0), shifted, touchKey);
+    } else {
+      KeyboardSession.shared.press(input.charCodeAt(0), shifted);
+    }
     // A one-shot Shift is spent by the letter that follows it; Caps Lock is not. Neither is an
     // automatic Shift: it is not spent but recomputed from the text, which the change this press
     // just caused has already done. Clearing it here would give a capitals-only field one capital.
     if (this.caseMode === LetterCaseMode.SHIFTED && !automatic) {
       this.letterCase.reset();
       this.caseMode = this.letterCase.mode();
+    }
+  }
+
+  /** 这一键要不要带按下点交给引擎：只有触屏键盘上 26 键双拼的字母和 `;`，不是辅助码大写，键位都已量到（`TouchPointPolicy.usesTouch`）。 */
+  private touchKey(touch: TouchPoint | null, shifted: boolean): TouchKey | null {
+    if (touch === null || !TouchPointPolicy.usesTouch({
+      touchDesign: this.touchDesign(),
+      lettersLayer: this.qwertyLettersShowing(),
+      engineScheme: this.engineScheme,
+      english: this.english,
+      localMode: this.localMode,
+      shifted: shifted
+    })) {
+      return null;
+    }
+    const layout: string | null = this.touchLayout();
+    if (layout === null) {
+      return null;
+    }
+    const key: TouchKey = { point: touch, layout: layout };
+    return key;
+  }
+
+  /** 当前 26 键的键位布局，相对键盘根区域；有键还没量到时为 null。微软双拼画着 `;` 时它也得量到。 */
+  private touchLayout(): string | null {
+    const semicolon: boolean = this.secondRowSemicolon();
+    if (this.touchLayoutDirty || semicolon !== this.touchLayoutSemicolon) {
+      this.touchLayoutCache = semicolon && this.semicolonKey === null ? null
+        : TouchPointPolicy.geometryLayout(this.glideKeys, semicolon ? this.semicolonKey : null,
+          this.glideOriginX, this.glideOriginY);
+      this.touchLayoutSemicolon = semicolon;
+      this.touchLayoutDirty = false;
+    }
+    return this.touchLayoutCache;
+  }
+
+  /** 字母键和 `;` 的按下点，只在触屏键盘上记；取不取用到点击时再按 `touchKey` 定。一律取按下点，不取抬起点。 */
+  private recordLetterTouch(letter: string | undefined, event: TouchEvent): void {
+    if (letter === undefined || !this.touchDesign() || !TouchPointPolicy.tracksKey(letter)) {
+      return;
+    }
+    if (event.type === TouchType.Down) {
+      if (event.changedTouches.length === 0) {
+        return;
+      }
+      const touch: TouchObject = event.changedTouches[0];
+      const point: TouchPoint | null = TouchPointPolicy.point(touch.windowX, touch.windowY,
+        this.glideOriginX, this.glideOriginY);
+      if (point === null) {
+        this.pendingTouches.cancel(letter);
+      } else {
+        this.pendingTouches.down(letter, point, Date.now());
+      }
+    } else if (event.type === TouchType.Cancel) {
+      this.pendingTouches.cancel(letter);
     }
   }
 
@@ -1412,7 +1482,7 @@ struct KeyboardView {
       return;
     }
     const index: number = GlideTypingPolicy.letterIndex(letter);
-    if (index < 0) {
+    if (index < 0 && letter !== ';') {
       return;
     }
     const rect: GlideKeyRect = {
@@ -1421,6 +1491,12 @@ struct KeyboardView {
       width: Number(area.width),
       height: Number(area.height)
     };
+    // 键位一变，交给引擎的几何跟着重算（`touchLayout`）。`;` 不是滑行键，只给按下点的几何用。
+    this.touchLayoutDirty = true;
+    if (index < 0) {
+      this.semicolonKey = rect;
+      return;
+    }
     this.glideKeys[index] = rect;
   }
 
@@ -1603,6 +1679,7 @@ struct KeyboardView {
     this.hintHoldTimers.forEach((timer: number): void => clearTimeout(timer));
     this.hintHoldTimers.clear();
     this.letterHints.clear();
+    this.pendingTouches.clear();
     this.eighteenSwipes.clear();
     this.eighteenSwipeKey = '';
     this.eighteenSwipeLetter = '';
@@ -1865,7 +1942,10 @@ struct KeyboardView {
     .animation({ duration: KEY_PRESS_MS })
     .responseRegion(this.keyHitRegion())
     .onAreaChange((_old: Area, now: Area): void => this.recordGlideKey($$.letter, now))
-    .onTouch((event: TouchEvent): void => this.letterHintTouch($$.letter, $$.cornerHint, event))
+    .onTouch((event: TouchEvent): void => {
+      this.recordLetterTouch($$.letter, event);
+      this.letterHintTouch($$.letter, $$.cornerHint, event);
+    })
     .onClick($$.action)
   }
 
@@ -3326,7 +3406,7 @@ struct KeyboardView {
         size: this.letterFontSize(),
         emphasized: false,
         width: 0,
-        action: () => this.tapLetter(letter)
+        action: () => this.tapLetter(letter, this.pendingTouches.take(letter, Date.now()))
       };
     }
     return {
@@ -3338,7 +3418,7 @@ struct KeyboardView {
       size: this.letterFontSize(),
       emphasized: false,
       width: 0,
-      action: () => this.tapLetter(letter)
+      action: () => this.tapLetter(letter, this.pendingTouches.take(letter, Date.now()))
     };
   }
 
@@ -10444,6 +10524,7 @@ struct KeyboardView {
       this.glideOriginX = Number(now.globalPosition.x ?? 0);
       this.glideOriginY = Number(now.globalPosition.y ?? 0);
       this.rootWidth = Number(now.width);
+      this.touchLayoutDirty = true;
     })
     .onTouch((event: TouchEvent): void => this.pruneKeyPreview(event))
   }

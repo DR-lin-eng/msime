@@ -283,6 +283,13 @@ pub fn dictionary_state_revision(options: &EngineOptions) -> Result<String> {
     released(state::dictionary_state_revision(&runtime_paths(options)))
 }
 
+/// 与 [`dictionary_state_revision`] 相同，但日志文件自上次算过以来没变时直接返回上次的结果（见 `state::cached_dictionary_state_revision`）。只给空闲时发布本机词库版本这类预览用；准备、激活快照前的比对仍用不走缓存的 [`dictionary_state_revision`]。
+pub fn cached_dictionary_state_revision(options: &EngineOptions) -> Result<String> {
+    released(state::cached_dictionary_state_revision(&runtime_paths(
+        options,
+    )))
+}
+
 /// 在一个只读事务里依次读出日志的全部操作行（含学习调权和删除记录）、固定位置和选词计数，交给 `emit`；`emit` 返回假时停下并报 `INVALID_DICTIONARY_STATE`。本地备份导出输入记录用它。
 pub fn stream_dictionary_state(
     options: &EngineOptions,

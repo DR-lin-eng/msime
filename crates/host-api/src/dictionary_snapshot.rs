@@ -13,7 +13,8 @@ use msime_client_services::account::{
     AccountDictionarySnapshotRestore, AccountError, BackendAccountClient,
 };
 use msime_engine::host::{
-    dictionary_state_revision, stage_dictionary_state, EngineOptions, Session, SnapshotReadError,
+    cached_dictionary_state_revision, dictionary_state_revision, stage_dictionary_state,
+    EngineOptions, Session, SnapshotReadError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1073,6 +1074,18 @@ fn validate_options(options: HostOptions) -> Result<EngineOptions, &'static str>
 }
 
 fn version(options: &EngineOptions) -> Result<String, &'static str> {
+    version_with(options, dictionary_state_revision)
+}
+
+/// 与 [`version`] 相同，但日志自上次算过以来没变时直接用上次的修订号，不重新扫描全表（见 `cached_dictionary_state_revision`）。只用于宿主空闲时轮询、发布本机版本这类预览；准备快照前后的比对仍用 [`version`]。
+fn preview_version(options: &EngineOptions) -> Result<String, &'static str> {
+    version_with(options, cached_dictionary_state_revision)
+}
+
+fn version_with<E>(
+    options: &EngineOptions,
+    revision: impl FnOnce(&EngineOptions) -> Result<String, E>,
+) -> Result<String, &'static str> {
     let _access = DictionaryAccess::try_session(
         Path::new(&options.user_data),
         Path::new(&options.dictionaries),
@@ -1097,7 +1110,7 @@ fn version(options: &EngineOptions) -> Result<String, &'static str> {
         hash.update((text.len() as u64).to_be_bytes());
         hash.update(text.as_bytes());
     }
-    hash.update(dictionary_state_revision(options).map_err(|_| "snapshot revision unavailable")?);
+    hash.update(revision(options).map_err(|_| "snapshot revision unavailable")?);
     Ok(hex::encode(hash.finalize()))
 }
 
@@ -1622,7 +1635,15 @@ fn snapshot_queue(directory: &str) -> Result<DictionarySnapshotQueue, String> {
 }
 
 fn durable_local_version(options: &EngineOptions) -> Result<String, &'static str> {
-    let digest = version(options)?;
+    local_version_from(options, version(options)?)
+}
+
+/// 用 [`preview_version`] 的 [`durable_local_version`]：空闲时发布给队列的本机版本，日志没动就不重扫。
+fn preview_local_version(options: &EngineOptions) -> Result<String, &'static str> {
+    local_version_from(options, preview_version(options)?)
+}
+
+fn local_version_from(options: &EngineOptions, digest: String) -> Result<String, &'static str> {
     let generation = activation_receipt(options)?;
     local_version(generation.as_deref(), &digest).map_err(|_| "invalid snapshot local version")
 }
@@ -1717,7 +1738,7 @@ fn snapshot_queue_state(
     acknowledge: bool,
 ) -> Result<Value, String> {
     let options = validate_options(options).map_err(str::to_owned)?;
-    let current = durable_local_version(&options).map_err(str::to_owned)?;
+    let current = preview_local_version(&options).map_err(str::to_owned)?;
     queue
         .publish_local_version(&current)
         .map_err(snapshot_queue_error)?;
@@ -1737,9 +1758,10 @@ fn snapshot_queue_process(
     account_id: Option<String>,
 ) -> Result<Value, String> {
     let engine_options = validate_options(options.clone()).map_err(str::to_owned)?;
-    let current = durable_local_version(&engine_options).map_err(str::to_owned)?;
+    // 每次失焦都走这里，绝大多数时候队列里什么也没有：先用不重扫日志的预览版本发布，真认领到请求后再精确算一遍，后面的比对、冲突判定都用精确值。
+    let published = preview_local_version(&engine_options).map_err(str::to_owned)?;
     queue
-        .publish_local_version(&current)
+        .publish_local_version(&published)
         .map_err(snapshot_queue_error)?;
     // 键盘这次读不到共享的会话文件（读取失败或未登录）时不知道当前账号是谁：属于账号的请求 claim 原样留着，下一次空闲时再处理，不在未知账号下应用；本地备份恢复的请求（`LOCAL_RESTORE_OWNER`）不属于任何账号，照样处理，与 Android 原来的 Java 队列相同。
     let account_id = account_id.as_deref();
@@ -1758,6 +1780,7 @@ fn snapshot_queue_process(
         return serde_json::to_value(queue.read().map_err(snapshot_queue_error)?)
             .map_err(|_| "snapshot_unavailable".to_owned());
     };
+    let current = durable_local_version(&engine_options).map_err(str::to_owned)?;
     if request.expected_local_version != current {
         let _ = queue
             .complete(request.id, &lease, &current, false, account_id, || {
@@ -1998,7 +2021,7 @@ pub unsafe extern "C" fn msime_client_snapshot_version(
             return Err("invalid snapshot buffer".into());
         }
         let options = parse_options(unsafe { std::slice::from_raw_parts(options, length) })?;
-        let version = version(&options)?;
+        let version = preview_version(&options)?;
         let generation = activation_receipt(&options)?.unwrap_or_else(|| "legacy".to_owned());
         Ok(json!({"version": version, "generation": generation}))
     })

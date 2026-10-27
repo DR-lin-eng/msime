@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, OpenFlags};
 
 use super::journal::{
     drop_stale_pinyin_upserts, ensure_schema, open_database, open_existing_read_only,
+    prefer_write_ahead_log,
 };
 use crate::error::{EngineError, Result};
 use crate::lattice::ngram::SENTENCE_START;
@@ -323,6 +324,7 @@ impl PersonalNgramStore {
                 &self.path,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
             )?;
+            prefer_write_ahead_log(&connection);
             ensure_schema(&connection)?;
             drop_stale_pinyin_upserts(&connection);
             writer.connection = Some(connection);

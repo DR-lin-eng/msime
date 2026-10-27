@@ -125,6 +125,14 @@ if ! rg -q 'skipHidden = true;' "$repo_root/platforms/android/java/app/msime/and
   echo "applySkin must skip hidden subtrees and restyle them when they are shown" >&2
   exit 1
 fi
+# APNG 候选皮肤只在换帧那一刻重画（CandidateApngFrames.millisUntilNextFrame，CandidateCanvasDeviceSmoke 覆盖它的帧边界）。改回每次绘制都 postInvalidateOnAnimation，候选在屏上时整列按屏幕刷新率空转重画，而 APNG 一般 100 毫秒左右才换一帧。
+renderer_source="$repo_root/platforms/android/java/app/msime/android/candidate/CandidateCanvasRenderer.java"
+if rg -q 'postInvalidateOnAnimation' "$renderer_source" \
+  || ! rg -q 'millisUntilNextFrame\(elapsed, motion\)' "$renderer_source" \
+  || ! rg -q 'host\.postDelayed\(tick, nextFrame\)' "$renderer_source"; then
+  echo "The candidate canvas must schedule APNG redraws at the next frame boundary, not on every vsync" >&2
+  exit 1
+fi
 # Hangul composition is Engine state. Android labels the Dubeolsik keys and sends their ASCII letters; a syllable table here would be a second automaton that can drift from the Engine's.
 if ! rg -q '4 korean' "$repo_root/crates/host-api/include/msime_client.h" \
   || ! rg -q 'KOREAN_SCHEME = 4;' \

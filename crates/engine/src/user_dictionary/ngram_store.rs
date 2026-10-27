@@ -16,7 +16,6 @@ use super::journal::{
     drop_stale_pinyin_upserts, ensure_schema, open_database, open_existing_read_only,
     prefer_write_ahead_log,
 };
-use super::typo_profile::{file_stamp, FileStamp};
 use crate::error::{EngineError, Result};
 use crate::lattice::ngram::SENTENCE_START;
 use crate::lattice::personal::{PersonalNgram, PersonalNgramOptions, PersonalTransition};
@@ -34,26 +33,94 @@ pub(crate) const HALVE_SQL: &str = "DELETE FROM personal_bigram WHERE count<2;UP
 /// Bumped by `release_all`: every store's model is stale until it reloads from the file now at its path.
 static STORE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 注册表保留仍被会话或刷新线程使用的 store；下次打开 journal 时会回收只有注册表自身引用的旧路径。正在打开的这条路径例外：它的空闲 store 只要日志自模型上次和磁盘对齐后没被改过就留着（见 [`reclaim_idle`]），Android 每进一个输入框都重建会话，不留的话每次都要在建会话的线程上把两张表整表重读一遍。
+/// 注册表保留仍被会话或刷新线程使用的 store；下次打开 journal 时会回收只有注册表自身引用的旧路径。正在打开的这条路径例外：它的空闲 store 若在上一个会话放手时记下过日志（`note_settled`），且日志此后没被任何别的连接改过，就留着复用（见 [`reclaim_idle`]）。iOS 键盘每次收起都销毁会话，Android 每进一个输入框都重建会话，不留的话每次都要在建会话的线程上把两张表（上限 20 万条）整表重读一遍。
 static STORES: LazyLock<Mutex<HashMap<PathBuf, Arc<PersonalNgramStore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 日志和它的 `-wal` 的 `(修改时间, 大小)`，用来判断模型上次和磁盘对齐之后有没有别人写过这个文件。
-type DiskStamp = (FileStamp, FileStamp);
-
-/// 空的 `-wal` 当作没有：只读连接打开 WAL 日志时会建一个空的 `-wal` 并在关闭后留着，最后一个写连接关闭时又会删掉它，两者内容相同。不这样算的话，经只读连接读过盘的空闲 store 读前读后的戳就对不上，每次都被丢掉重读。
-fn disk_stamp(user_db: &Path) -> DiskStamp {
-    let mut wal = user_db.as_os_str().to_owned();
-    wal.push("-wal");
-    let wal_stamp = file_stamp(Path::new(&wal)).filter(|(_, len)| *len > 0);
-    (file_stamp(user_db), wal_stamp)
-}
-
-/// 丢掉只剩注册表自己引用的 store。`opening` 是正要打开的路径：它的空闲 store 若磁盘戳和模型上次对齐时一样就留下复用，省掉整表重读；戳变了（别的进程学了新词、重置或换了日志、本进程别的连接写过日志）就和以前一样丢掉重建，新 store 从磁盘读。
+/// 丢掉只剩注册表自己引用的 store。`opening` 是正要打开的路径：它的空闲 store 若日志自上一个会话放手以来没变（[`PersonalNgramStore::unchanged_since_settled`]）就留下复用，省掉整表重读；变了（别的进程学了新词、重置或换了日志）或没有记录就和以前一样丢掉重建，新 store 从磁盘读。`None`（宿主清缓存）时连这条路径的空闲 store 也放掉。
 fn reclaim_idle(stores: &mut HashMap<PathBuf, Arc<PersonalNgramStore>>, opening: Option<&Path>) {
     stores.retain(|path, store| {
-        Arc::strong_count(store) > 1 || (opening == Some(path.as_path()) && store.matches_disk())
+        let in_use = Arc::strong_count(store) > 1;
+        if opening != Some(path.as_path()) {
+            return in_use;
+        }
+        if in_use {
+            // A store a live session still uses is judged afresh when that session lets go.
+            lock(&store.settled).take();
+            return true;
+        }
+        store.unchanged_since_settled()
     });
+}
+
+/// The journal as a session left it when it let go of the store (`note_settled`). The next session keeps the store's model only while the journal is still the same file and no other connection, in this process or another, has committed to it since: a change made in between (the settings app merging or clearing habits, a restored or replaced journal, another input method process learning) is read from disk as before.
+struct Settled {
+    files: JournalFiles,
+    /// `PRAGMA data_version` as the store's connection saw it. It moves when any other connection commits, which the size and the modification time (a few milliseconds coarse on Linux and Android) cannot be trusted to show. `None` when no connection could be asked (see `probe_version`); the file stamps alone decide then.
+    data_version: Option<i64>,
+    /// The connection the version was read from when the store had no writer: one opened read-only for this. Only on a journal in rollback mode, where an idle connection holds no lock.
+    probe: Option<Connection>,
+}
+
+/// The journal and its `-wal` as `stat` shows them. Only `stat` is used, never an open: closing a descriptor of a database file drops every POSIX lock this process's SQLite connections hold on it.
+#[derive(Debug, PartialEq, Eq)]
+struct JournalFiles {
+    journal: FileStamp,
+    /// An empty `-wal` counts as none: a read-only connection on a WAL journal creates an empty one and leaves it behind, and the last writer to close deletes it, with the same content either way.
+    wal: Option<FileStamp>,
+}
+
+/// Size, modification time and, on unix, the file's identity, which tells a replaced journal from the one a connection still reads.
+#[derive(Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl FileStamp {
+    fn from(metadata: &std::fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl JournalFiles {
+    /// Any failure, a missing journal or a platform without a file system included, leaves the stamp unknown, and nothing is kept on an unknown stamp.
+    fn of(journal: &Path) -> Option<Self> {
+        let journal_stamp = FileStamp::from(&std::fs::metadata(journal).ok()?)?;
+        let wal = match std::fs::metadata(wal_path(journal)) {
+            Ok(metadata) if metadata.len() == 0 => None,
+            Ok(metadata) => Some(FileStamp::from(&metadata)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        Some(Self {
+            journal: journal_stamp,
+            wal,
+        })
+    }
+}
+
+fn wal_path(journal: &Path) -> PathBuf {
+    let mut wal = journal.as_os_str().to_owned();
+    wal.push("-wal");
+    PathBuf::from(wal)
+}
+
+fn data_version(connection: &Connection) -> rusqlite::Result<i64> {
+    connection.query_row("PRAGMA data_version", [], |row| row.get(0))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -89,8 +156,8 @@ pub struct PersonalNgramStore {
     loaded_invalidations: AtomicU64,
     write_failed: AtomicBool,
     probed: AtomicBool,
-    /// 模型最后一次和磁盘对齐（读完日志、或自己写完一批）时日志的磁盘戳；`None` 表示不知道，空闲时不复用。
-    synced_stamp: Mutex<Option<DiskStamp>>,
+    /// The journal as its last session left it (`note_settled`); taken by the next `for_journal` of this path.
+    settled: Mutex<Option<Settled>>,
 }
 
 /// `loaded_generation` before the first load, so a new store is stale and reads the file on first use.
@@ -119,13 +186,8 @@ impl PersonalNgramStore {
             loaded_invalidations: AtomicU64::new(0),
             write_failed: AtomicBool::new(false),
             probed: AtomicBool::new(false),
-            synced_stamp: Mutex::new(None),
+            settled: Mutex::new(None),
         }
-    }
-
-    /// 日志此刻的磁盘戳和模型上次对齐时一样：期间没有任何连接写过它，留着的模型就是现在读盘会得到的结果。
-    fn matches_disk(&self) -> bool {
-        *lock(&self.synced_stamp) == Some(disk_stamp(&self.path))
     }
 
     /// The store of a journal if one was ever opened; operations on a journal nobody learned into have nothing queued or held.
@@ -312,8 +374,6 @@ impl PersonalNgramStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .options();
         let mut fresh = PersonalNgram::new(options);
-        // 读之前取戳：读的过程中别人写进来的行可能没读到，戳就对不上，空闲时不会被当成最新的复用。
-        let stamp = disk_stamp(&self.path);
         let loaded = match &writer.connection {
             Some(connection) => load_from(connection, &mut fresh),
             // Reading must not create the journal: a session that never learns anything leaves no file behind.
@@ -350,7 +410,78 @@ impl PersonalNgramStore {
         self.loaded_generation.store(generation, Ordering::Release);
         self.loaded_invalidations
             .store(invalidations, Ordering::Release);
-        *lock(&self.synced_stamp) = Some(stamp);
+    }
+
+    /// Record the journal as it is now, after a session wrote its queue and let go of the store. A model that may differ from the file (stale, or with transitions still queued after a failed write) records nothing, so the next session gets a new store as before; so does an empty model, which costs nothing to read again.
+    fn note_settled(&self) {
+        let writer = lock(&self.writer);
+        let matches_disk = !self.stale()
+            && lock(&self.pending).is_empty()
+            && !self.write_failed.load(Ordering::Acquire);
+        let empty = self
+            .model
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty();
+        let settled = if matches_disk && !empty {
+            self.settle(&writer)
+        } else {
+            None
+        };
+        *lock(&self.settled) = settled;
+    }
+
+    fn settle(&self, writer: &Writer) -> Option<Settled> {
+        // The version is read before the files are stamped: a commit landing in between moves the version the next check reads, and opening a probe may itself leave an empty `-wal` behind.
+        let (data_version, probe) = match writer.connection.as_ref() {
+            Some(connection) => (Some(data_version(connection).ok()?), None),
+            None => self.probe_version()?,
+        };
+        Some(Settled {
+            files: JournalFiles::of(&self.path)?,
+            data_version,
+            probe,
+        })
+    }
+
+    /// The version of a journal this store only read, through a read-only connection kept for the check. Not on a journal with a `-wal`: in WAL mode a connection holds the `-shm` for as long as it is open (the iOS extension, which must not hold a lock while suspended, never switches its journal to WAL, see `prefer_write_ahead_log`), and every commit to a WAL journal appends to its `-wal`, which the file stamps show; the stamps alone decide there. On Windows, which opens database files without FILE_SHARE_DELETE, a probe left idle in the registry would block the reset's rename or a generation delete from another process, which `release_thread_journal` exists to prevent, so nothing is recorded there and the next session reads the journal again.
+    fn probe_version(&self) -> Option<(Option<i64>, Option<Connection>)> {
+        if cfg!(windows) {
+            return None;
+        }
+        if wal_path(&self.path).exists() {
+            return Some((None, None));
+        }
+        let probe = open_existing_read_only(&self.path).ok()??;
+        Some((Some(data_version(&probe).ok()?), Some(probe)))
+    }
+
+    /// Whether the journal is still as `note_settled` recorded it. Consumes the record.
+    fn unchanged_since_settled(&self) -> bool {
+        let writer = lock(&self.writer);
+        let Some(settled) = lock(&self.settled).take() else {
+            return false;
+        };
+        if JournalFiles::of(&self.path).as_ref() != Some(&settled.files) {
+            return false;
+        }
+        let Some(recorded) = settled.data_version else {
+            return true;
+        };
+        let connection = match settled.probe.as_ref() {
+            Some(probe) => probe,
+            None => match writer.connection.as_ref() {
+                Some(connection) => connection,
+                None => return false,
+            },
+        };
+        data_version(connection).is_ok_and(|version| version == recorded)
+    }
+
+    /// Whether a session recorded the journal as it let go of this store (`note_settled`).
+    #[cfg(test)]
+    pub(crate) fn settled_for_tests(&self) -> bool {
+        lock(&self.settled).is_some()
     }
 
     fn open_connection<'a>(&self, writer: &'a mut Writer) -> Result<&'a Connection> {
@@ -398,8 +529,6 @@ impl PersonalNgramStore {
         if over_limit {
             self.decay_locked(writer);
         }
-        // 模型已经含有刚写下的这批，磁盘也只多了这批（和衰减）；写完的戳就是模型对应的那份日志。会话期间别的进程写进来、模型没读到的行也会被这个戳盖过；但重置、换日志和合并备份都要先拿到独占维护权，本进程还有会话时拿不到，所以盖过的只可能是别的输入法进程同时学到的计数，下次重读时就会补上。
-        *lock(&self.synced_stamp) = Some(disk_stamp(&self.path));
         Ok(())
     }
 
@@ -634,6 +763,13 @@ pub(crate) fn flush_journal(user_db: &Path) -> Result<()> {
     }
 }
 
+/// A session of the journal let go of its store after writing the queue (`Session`'s drop): remember the file as it is, so the next session can keep the model if nothing changes it meanwhile. What another connection wrote while that session ran and the model never read is covered by this record too; but resetting, replacing the journal and merging a backup all take exclusive dictionary maintenance first, which they cannot get while this process still has a session, so what is missed can only be counts another input method process learned at the same time, and the next reread picks them up.
+pub(crate) fn note_settled(user_db: &Path) {
+    if let Some(store) = PersonalNgramStore::existing(user_db) {
+        store.note_settled();
+    }
+}
+
 /// 日志的两张表被别的连接改过（本地备份合并输入习惯）之后调用：这个日志的 store 若还在，把它的模型标成过期，下次用到时从磁盘重读。没有 store 时什么也不做，下次打开时本来就会读盘。
 pub(crate) fn invalidate_journal(user_db: &Path) {
     if let Some(store) = PersonalNgramStore::existing(user_db) {
@@ -671,8 +807,8 @@ impl PersonalNgramStore {
             self.write_failed.store(false, Ordering::Release);
         }
         writer.connection = None;
-        // 这条路径上的文件接下来可能被换掉，空闲时不再拿旧戳复用。
-        *lock(&self.synced_stamp) = None;
+        // The file at this path may be replaced next, and the record's probe is a connection to it.
+        lock(&self.settled).take();
     }
 }
 
@@ -907,11 +1043,33 @@ mod tests {
         ));
     }
 
-    /// 不进全局注册表的 store：别的用例并发打开日志时会回收全局表里的空闲 store，这几个用例在自己的表上跑 `reclaim_idle`。
+    /// 不进全局注册表的 store：别的用例并发打开日志时会回收全局表里的空闲 store，`release_all` 会关掉表里每个 store 的连接、丢掉它的记录，这几个用例在自己的表上跑 `reclaim_idle`。
     fn detached(journal: &Path) -> Arc<PersonalNgramStore> {
         Arc::new(PersonalNgramStore::new(journal))
     }
 
+    /// 像会话放手时那样 `note_settled`。别的用例并发的 `release_all` 会让所有模型过期，过期的模型不记录；先重读再记，最多试几次，免得这里的用例跟着失败。
+    fn settle(store: &PersonalNgramStore) {
+        for _ in 0..5 {
+            store.refresh();
+            store.note_settled();
+            if store.settled_for_tests() {
+                return;
+            }
+        }
+        panic!("模型一直过期，记不下日志");
+    }
+
+    fn keep(
+        stores: &mut HashMap<PathBuf, Arc<PersonalNgramStore>>,
+        store: Arc<PersonalNgramStore>,
+    ) -> std::sync::Weak<PersonalNgramStore> {
+        let kept = Arc::downgrade(&store);
+        stores.insert(store.path.clone(), store);
+        kept
+    }
+
+    /// 会话放手时记下日志，之后没人动过：下一个会话打开同一路径时留着这个 store，模型不重读；记录只担保一次接手。打开别的路径照旧回收它。不是 iOS 的平台上写连接会把日志切到 WAL，所以这里也覆盖了 WAL 日志。
     #[test]
     fn an_idle_store_is_kept_for_its_journal_until_the_file_changes() {
         let dir = Dir::new();
@@ -920,17 +1078,19 @@ mod tests {
         let store = detached(&journal);
         store.record(&run(&["我", "想", "去"], 2)).unwrap();
         store.flush().unwrap();
-        let mut stores = HashMap::from([(journal.clone(), Arc::clone(&store))]);
-        let kept = Arc::downgrade(&store);
-        drop(store);
+        settle(&store);
+        let version = store.version();
+        let mut stores = HashMap::new();
+        let kept = keep(&mut stores, store);
 
-        // 自己写完一批之后没人再动过日志：再打开同一路径时留着，模型不用重读。别的用例并发 `release_all` 会让它过期，那时照常重读，所以这里不断言没重读。
         reclaim_idle(&mut stores, Some(&journal));
         let store = kept.upgrade().expect("日志没变，空闲 store 却被丢掉重建");
+        assert_eq!(store.version(), version, "沿用 store 时重读了日志");
         assert_eq!(store.model().total(), 6);
+        assert!(!store.unchanged_since_settled(), "一份记录只能担保一次接手");
+        settle(&store);
         drop(store);
 
-        // 打开别的路径照旧回收它。
         reclaim_idle(&mut stores, Some(&other.journal()));
         assert!(
             kept.upgrade().is_none(),
@@ -938,6 +1098,7 @@ mod tests {
         );
     }
 
+    /// 别的进程学到的计数、合并备份都经别的连接写进日志，留着的模型看不到它们，只能丢掉重读。
     #[test]
     fn an_idle_store_is_dropped_once_another_connection_writes_its_journal() {
         let dir = Dir::new();
@@ -945,11 +1106,10 @@ mod tests {
         let store = detached(&journal);
         store.record(&run(&["我", "想"], 2)).unwrap();
         store.flush().unwrap();
-        let mut stores = HashMap::from([(journal.clone(), Arc::clone(&store))]);
-        let kept = Arc::downgrade(&store);
-        drop(store);
+        settle(&store);
+        let mut stores = HashMap::new();
+        let kept = keep(&mut stores, store);
 
-        // 别的进程学到的计数、合并备份都经别的连接写进日志，留着的模型看不到它们，只能丢掉重读。
         Connection::open(&journal)
             .unwrap()
             .execute_batch("INSERT INTO personal_bigram(previous,word,count) VALUES('甲','乙',5)")
@@ -961,50 +1121,122 @@ mod tests {
         );
     }
 
+    /// 只读过日志的 store 经自己的只读探测连接看 `data_version`：修改时间粒度粗的文件系统上，同样大小的原地改写只能这样看出来。
+    #[cfg(not(windows))]
     #[test]
-    fn an_idle_store_is_not_kept_without_a_known_stamp_or_after_a_release() {
+    fn a_store_read_from_disk_without_writing_is_kept_through_its_own_probe() {
         let dir = Dir::new();
         let journal = dir.journal();
-
-        // 从没读过盘的 store 不知道自己对应哪份日志。
-        let mut stores = HashMap::from([(journal.clone(), detached(&journal))]);
-        reclaim_idle(&mut stores, Some(&journal));
-        assert!(stores.is_empty(), "没对齐过磁盘的 store 被留下了");
-
-        // 读的是一个还不存在的日志；之后日志被建出来就不再复用。
+        let connection = Connection::open(&journal).unwrap();
+        ensure_schema(&connection).unwrap();
+        connection
+            .execute_batch("INSERT INTO personal_bigram(previous,word,count) VALUES('我','想',2);")
+            .unwrap();
         let store = detached(&journal);
-        assert!(store.model().is_empty());
-        stores.insert(journal.clone(), Arc::clone(&store));
-        let kept = Arc::downgrade(&store);
-        drop(store);
-        reclaim_idle(&mut stores, Some(&journal));
-        assert!(kept.upgrade().is_some(), "日志没变，空闲 store 却被丢掉");
-        super::super::journal::ensure_user_database(&journal).unwrap();
-        reclaim_idle(&mut stores, Some(&journal));
-        assert!(kept.upgrade().is_none(), "日志被建出来后仍复用旧的空模型");
+        assert_eq!(store.model().total(), 2);
+        assert!(lock(&store.writer).connection.is_none());
+        settle(&store);
+        assert!(store.unchanged_since_settled());
 
-        // 关掉日志（重置、换代次之前）之后这条路径上可能已是另一个文件。
+        settle(&store);
+        connection
+            .execute_batch("UPDATE personal_bigram SET count=3;")
+            .unwrap();
+        assert!(
+            !store.unchanged_since_settled(),
+            "同样大小的原地改写没被发现"
+        );
+    }
+
+    /// Windows 上只读过日志的 store 不记录，也就不留探测连接：它会挡住另一个进程改名或删除日志。
+    #[cfg(windows)]
+    #[test]
+    fn a_store_read_from_disk_without_writing_records_nothing_on_windows() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let connection = Connection::open(&journal).unwrap();
+        ensure_schema(&connection).unwrap();
+        connection
+            .execute_batch("INSERT INTO personal_bigram(previous,word,count) VALUES('我','想',2);")
+            .unwrap();
+        drop(connection);
+        let store = detached(&journal);
+        assert_eq!(store.model().total(), 2);
+        assert!(lock(&store.writer).connection.is_none());
+        store.note_settled();
+        assert!(!store.settled_for_tests());
+        assert!(!store.unchanged_since_settled());
+    }
+
+    /// 换成另一个文件（恢复、替换日志）就重读。Windows 不允许替换有连接开着的文件。
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_journal_is_read_again() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let store = detached(&journal);
+        store.record(&run(&["我", "想"], 1)).unwrap();
+        store.flush().unwrap();
+        settle(&store);
+        let copy = journal.with_extension("copy");
+        std::fs::copy(&journal, &copy).unwrap();
+        std::fs::rename(&copy, &journal).unwrap();
+        assert!(!store.unchanged_since_settled());
+    }
+
+    /// 模型可能和磁盘不一致（队列没写完、过期）、模型为空、日志关掉过（重置、换代次之前）时都不留；宿主清缓存（`release_idle` 传 `None`）时连当前路径的空闲 store 也放掉。
+    #[test]
+    fn an_idle_store_is_not_kept_without_a_record_or_after_a_release() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let mut stores = HashMap::new();
+
+        // 没有会话放手过，没有记录。
+        let store = detached(&journal);
+        store.record(&run(&["甲", "乙"], 1)).unwrap();
+        store.flush().unwrap();
+        let kept = keep(&mut stores, store);
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(kept.upgrade().is_none(), "没有记录的 store 被留下了");
+
+        // 排着没写的转移：文件里没有模型里的东西。推到 `record` 后面，免得后台写入先落地。
+        let store = detached(&journal);
+        store.record(&run(&["甲", "乙"], 1)).unwrap();
+        store.flush().unwrap();
+        lock(&store.pending).push(transition("", "乙", "丙", 1));
+        store.note_settled();
+        assert!(!store.settled_for_tests());
+        store.flush().unwrap();
+        // 过期：不管文件什么样都得重读。
+        store.invalidate_for_tests();
+        store.note_settled();
+        assert!(!store.settled_for_tests());
+
+        // 空模型重读不花什么，不记。
+        let empty = Dir::new();
+        let store = detached(&empty.journal());
+        assert!(store.model().is_empty());
+        store.note_settled();
+        assert!(!store.settled_for_tests());
+
+        // 关掉日志之后这条路径上可能已是另一个文件，记录连同探测连接一起丢掉。
         let store = detached(&journal);
         store.record(&run(&["我"], 2)).unwrap();
         store.flush().unwrap();
+        settle(&store);
         store.close_for_release();
-        stores.insert(journal.clone(), Arc::clone(&store));
-        let kept = Arc::downgrade(&store);
-        drop(store);
-        reclaim_idle(&mut stores, Some(&journal));
-        assert!(kept.upgrade().is_none(), "关掉日志后空闲 store 仍被复用");
+        assert!(!store.settled_for_tests());
 
-        // 宿主清缓存时（`release_idle` 传 `None`）连当前路径的空闲 store 也放掉。
         let store = detached(&journal);
-        assert!(store.model().total() > 0);
-        stores.insert(journal.clone(), Arc::clone(&store));
-        let kept = Arc::downgrade(&store);
-        drop(store);
+        store.record(&run(&["我"], 2)).unwrap();
+        store.flush().unwrap();
+        settle(&store);
+        let kept = keep(&mut stores, store);
         reclaim_idle(&mut stores, None);
         assert!(kept.upgrade().is_none(), "清缓存后空闲 store 仍被持有");
     }
 
-    /// 只读连接在 WAL 日志旁留下或不留空的 `-wal`，最后一个写连接关闭时又删掉它：这都不是日志被改过，经只读路径读过盘的空闲 store 照样留着复用。
+    /// 只读连接在 WAL 日志旁留下或不留空的 `-wal`，最后一个写连接关闭时又删掉它：这都不是日志被改过。旁边有 `-wal` 时不开探测连接，只看文件戳。
     #[test]
     fn an_empty_wal_appearing_or_vanishing_does_not_drop_an_idle_store() {
         let dir = Dir::new();
@@ -1019,34 +1251,44 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mut wal = journal.as_os_str().to_owned();
-        wal.push("-wal");
-        let wal = PathBuf::from(wal);
-
-        // 没有写连接的 store 经只读连接读日志。
-        let store = detached(&journal);
-        drop(store.model());
-        assert!(lock(&store.synced_stamp).is_some(), "读过盘却没记下戳");
-        let mut stores = HashMap::from([(journal.clone(), Arc::clone(&store))]);
-        let kept = Arc::downgrade(&store);
-        drop(store);
-        reclaim_idle(&mut stores, Some(&journal));
-        assert!(
-            kept.upgrade().is_some(),
-            "只读路径读过以后空闲 store 被丢掉"
+        let wal = wal_path(&journal);
+        if !wal.exists() {
+            std::fs::File::create(&wal).unwrap();
+        }
+        assert_eq!(
+            std::fs::metadata(&wal).unwrap().len(),
+            0,
+            "没有写入却留下了非空的 -wal"
         );
 
-        // 不管读完留下的是什么，空的 `-wal` 出现和消失都不算改过。
-        for _ in 0..2 {
-            if std::fs::metadata(&wal).is_ok_and(|metadata| metadata.len() == 0) {
-                std::fs::remove_file(&wal).unwrap();
-            } else {
-                assert!(!wal.exists(), "没有写入却留下了非空的 -wal");
-                std::fs::File::create(&wal).unwrap();
-            }
-            reclaim_idle(&mut stores, Some(&journal));
-            assert!(kept.upgrade().is_some(), "空的 -wal 被当成了日志改动");
+        // 空的 `-wal` 出现和消失，文件戳都不变。
+        let files = JournalFiles::of(&journal).unwrap();
+        std::fs::remove_file(&wal).unwrap();
+        assert_eq!(JournalFiles::of(&journal).as_ref(), Some(&files));
+        std::fs::File::create(&wal).unwrap();
+        assert_eq!(JournalFiles::of(&journal).as_ref(), Some(&files));
+
+        // 没有写连接的 store 经只读连接读日志；放手时旁边有 `-wal`，不开探测连接，之后 `-wal` 消失也照样沿用。Windows 上只读过日志的 store 不记录（见 `probe_version`）。
+        if cfg!(windows) {
+            return;
         }
+        let store = detached(&journal);
+        assert_eq!(store.model().total(), 5);
+        assert!(lock(&store.writer).connection.is_none());
+        if !wal.exists() {
+            std::fs::File::create(&wal).unwrap();
+        }
+        settle(&store);
+        assert!(lock(&store.settled)
+            .as_ref()
+            .is_some_and(|settled| settled.probe.is_none() && settled.data_version.is_none()));
+        if std::fs::metadata(&wal).is_ok_and(|metadata| metadata.len() == 0) {
+            std::fs::remove_file(&wal).unwrap();
+        }
+        assert!(
+            store.unchanged_since_settled(),
+            "空的 -wal 被当成了日志改动"
+        );
     }
 
     #[test]

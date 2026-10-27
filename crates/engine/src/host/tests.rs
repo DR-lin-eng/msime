@@ -4028,3 +4028,21 @@ fn host_multilingual_snapshot_keeps_the_raw_identity_and_language_ranges() {
         .multilingual_conversion
         .is_none());
 }
+
+/// The iOS keyboard destroys its session whenever it goes away and builds one on the next appearance; the personal context model survives that only if the session records the journal as it lets go. Not on Windows, where a store that only read the journal records nothing rather than keep a probe connection open.
+#[cfg(not(windows))]
+#[test]
+fn dropping_a_session_records_its_journal_for_the_next_one() {
+    let root = tempfile::tempdir().unwrap();
+    let options = helpcode_fixture(root.path(), "", "");
+    let journal = super::options::runtime_paths(&options).user(crate::assets::USER_JOURNAL);
+    let connection = Connection::open(&journal).unwrap();
+    crate::user_dictionary::journal::ensure_schema(&connection).unwrap();
+    connection
+        .execute_batch("INSERT INTO personal_bigram(previous,word,count) VALUES('你','好',2);")
+        .unwrap();
+    drop(connection);
+    let store = crate::user_dictionary::ngram_store::PersonalNgramStore::for_journal(&journal);
+    drop(Session::new(&options).unwrap());
+    assert!(store.settled_for_tests());
+}

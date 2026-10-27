@@ -1878,6 +1878,7 @@ fn snapshot_queue_process(
         staging_root,
         options,
         account_id,
+        skip_when_idle,
         |options| {
             crate::dictionary_updates::specification_for_options(options)
                 .map_err(|_| "snapshot resources rejected".to_owned())
@@ -1892,6 +1893,7 @@ fn snapshot_queue_process_with(
     staging_root: String,
     options: HostOptions,
     account_id: Option<String>,
+    skip_when_idle: bool,
     specification: impl FnOnce(&HostOptions) -> Result<ResourceSet, String>,
     on_demand: &[&[&str]],
 ) -> Result<Value, String> {

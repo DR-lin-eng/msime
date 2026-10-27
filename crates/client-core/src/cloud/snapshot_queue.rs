@@ -1006,7 +1006,7 @@ mod tests {
         let queue = DictionarySnapshotQueue::new(root).unwrap();
         queue.publish_local_version(&initial).unwrap();
         let id = queue
-            .enqueue(&source, "fixture", 1, &initial, &digest)
+            .enqueue(&source, "fixture", 1, &initial, &digest, false)
             .unwrap();
         let activated = version(&id.to_string(), 'b');
         queue

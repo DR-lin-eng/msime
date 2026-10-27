@@ -2016,7 +2016,7 @@ fn try_download_into(
     let specification = crate::tests::synthetic_desktop_lock(&device.root.path().join("resources"));
     let options = || -> crate::HostOptions { serde_json::from_value(device.host.clone()).unwrap() };
     let queue = super::snapshot_queue(device.root.path().join("queue").to_str().unwrap()).unwrap();
-    super::snapshot_queue_state(&queue, options(), false).unwrap();
+    super::snapshot_queue_state(&queue, options(), false, false).unwrap();
     if from_cloud_sync {
         use crate::cloud_sync::SyncLocal;
         let local = crate::cloud_sync::HostLocal {
@@ -2044,6 +2044,7 @@ fn try_download_into(
         staging.to_str().unwrap().into(),
         options(),
         Some("account".into()),
+        false,
         |_| Ok(specification),
         &[],
     )

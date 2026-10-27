@@ -52,6 +52,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     label: "app.msime.ios.typing-statistics", qos: .utility)
   private var candidateGlossEpoch: UInt64 = 0
   private var candidateGlossRequestedGeneration: UInt64?
+  /// Whether the request for `candidateGlossRequestedGeneration` covered the whole candidate list. When false it covered only the strip's page, and opening the candidate grid still asks once more for the whole list of the same generation.
+  private var candidateGlossRequestedFullList = false
   private let translations = CandidateTranslationStore()
   /// The translation service the shared document picks; `.none` means nothing was chosen or the chosen provider is incomplete, and no words leave the device.
   private var translationRoute: TranslationRoute = .none
@@ -5289,7 +5291,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     closeKeyboardPicker()
     playInputClick()
     do {
-      let snapshot = try CandidatePanelSnapshot.decode(session.allCandidates())
+      let allCandidates = try session.allCandidates()
+      let snapshot = try CandidatePanelSnapshot.decode(allCandidates)
       guard !snapshot.entries.isEmpty else { return }
       let columns = opensNineKeyPanel ? makeNineKeyPanelColumns() : nil
       let panel = KeyboardCandidatePanelView(
@@ -5322,6 +5325,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       installPanel(panel)
       updateExpandRotation(animated: true)
       updateNineKeyPanelColumns()
+      // 收起时候选条只查了自己那一页的释义，网格里其余候选的释义在打开时补查，用的就是上面刚读出的这份完整列表。
+      if visibleEmailSuffixes.isEmpty {
+        candidateGlossTimer?.invalidate()
+        candidateGlossTimer = nil
+        requestCandidateGlosses(allCandidates: allCandidates)
+      }
     } catch {
       showDiagnostic("候选列表暂不可用")
     }
@@ -7293,12 +7302,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
     // Ask once the typing pauses, not once per key.
     //
-    // The request needs every candidate the query has, and reading them costs in proportion:
-    // `yi` answers with hundreds, and that one call measured 3.5ms - more than the whole rest of
-    // a keystroke. The answer is applied asynchronously and guarded by generation, so the glosses
-    // for the compositions a fast typist passes through are fetched and then thrown away. Nobody
-    // ever saw them.
+    // The answer is applied asynchronously and guarded by generation, so the glosses for the compositions a fast typist passes through are fetched and then thrown away. Nobody ever saw them.
     candidateGlossTimer?.invalidate()
+    candidateGlossTimer = nil
+    // The render that applies an answer lands here again with the same generation; the strip's page was already asked for, so there is nothing to wait for.
+    if candidatePanel == nil, let visible = visibleInputGeneration, candidateGlossRequestedGeneration == visible { return }
     let timer = Timer(timeInterval: 0.12, repeats: false) { [weak self] _ in
       MainActor.assumeIsolated {
         self?.candidateGlossTimer = nil
@@ -7309,18 +7317,37 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     candidateGlossTimer = timer
   }
 
-  private func requestCandidateGlosses() {
+  /// `allCandidates` is the whole list the candidate grid just read, so opening the grid does not read it a second time.
+  private func requestCandidateGlosses(allCandidates prefetched: [String: Any]? = nil) {
     guard CandidateGlossPreference.enabled, glossesCandidates,
           !isInLocalMode, !visibleCandidates.isEmpty,
           let resources = session.candidateGlossResources(), !resources.isEmpty else { return }
     do {
-      let allCandidates = try session.allCandidates()
-      guard let value = allCandidates["generation"] as? NSNumber else { return }
-      guard let generation = CandidateGlossModel.integerValue(value, maximum: UInt64.max) else { return }
-      if candidateGlossRequestedGeneration == generation { return }
-      guard let candidates = allCandidates["candidates"] as? [[String: Any]] else { return }
+      let generation: UInt64
+      let candidates: [[String: Any]]
+      let fullList: Bool
+      // While the grid is closed only the strip's page is on screen, so only that page is asked for, straight from the rendered view. Reading the whole list costs in proportion to it: `yi` answers with hundreds, and that one call measured 3.5ms on the main thread - more than the whole rest of a keystroke - before the lookup, two more encodes of every row and the full view `applyTranslations` returns. The grid asks for the whole list when it opens (`showCandidatePanel`) and on every pause while it is open. A strip that is not the session's view (no sources, e.g. English suggestions or nine-key symbols) still reads the whole list as before.
+      if prefetched == nil, candidatePanel == nil, let visible = visibleInputGeneration,
+         visibleCandidateSources.count == visibleCandidates.count, visibleCandidateSources.allSatisfy({ $0 >= 0 }) {
+        if candidateGlossRequestedGeneration == visible { return }
+        generation = visible
+        candidates = zip(visibleCandidates, visibleCandidateSources).map { text, source -> [String: Any] in
+          ["text": text, "source": NSNumber(value: source)]
+        }
+        fullList = false
+      } else {
+        let allCandidates = try prefetched ?? session.allCandidates()
+        guard let value = allCandidates["generation"] as? NSNumber else { return }
+        guard let listGeneration = CandidateGlossModel.integerValue(value, maximum: UInt64.max) else { return }
+        if candidateGlossRequestedGeneration == listGeneration && candidateGlossRequestedFullList { return }
+        guard let rows = allCandidates["candidates"] as? [[String: Any]] else { return }
+        generation = listGeneration
+        candidates = rows
+        fullList = true
+      }
       let request = try CandidateGlossModel.request(generation: generation, candidates: candidates)
       candidateGlossRequestedGeneration = generation
+      candidateGlossRequestedFullList = fullList
       let targetEpoch = candidateGlossEpoch
       let targetResources = resources
       let queue = candidateGlossQueue

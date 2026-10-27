@@ -12,6 +12,11 @@ Status: implemented
 - `msime_client_create` 拿空的 `PluginTables` 作对照，每个新会话都重读指令表、短语表、辅助码表包和联系人名单；没填拼音的联系人姓名还要现场扫主词库查读音。
 - `personal_dictionary_sync` 在 Android 每次聚焦、HarmonyOS 每次重建会话前都要扫用户日志凑一页，再把 `sync.json` 原样重写并 fsync，即使队列是空的。
 - 偏好：Android 键盘可见时每秒 `msime_client_load_preferences` 整读并两遍解析、校验 `preferences.json`，主线程再把同一份快照交给 `msime_client_update_preferences`，后者照样校验、四次整棵比较、跑十几个 setter、重读效果包清单。快照队列的本机词库版本（Android 每次失焦、iOS 每 10 秒、HarmonyOS 每 2 秒）每次都把日志全表排序做 SHA-256，并重写一次 `state.json`。
+- Android 触屏默认的横向候选条每键调 `all_candidates`：整代候选（几百到几千行）序列化过 JNI，而条上一次只建几十个按钮；首字母时还逼引擎放出暂扣的尾部，按 `UNLIMITED_ROWS` 把整张 `tbl_1_<字母>`（483 到 4490 行）查出来并换一代。
+- 候选释义或候选翻译开着时，`candidate_glosses_with_user`、`candidate_target_glosses` 每次调用都重新打开 `msime-english.db`（算 learned 还要再开一次）、学到的释义库、两份释义库和离线目标语言库，并把 `custom_translations.txt` 读两遍；鸿蒙在 UI 线程上每个改变候选页的按键都调一次。
+- 鸿蒙键盘每次构建会话都 `process` 一次快照队列、每次显示后再 `state` 一次，两者都先算本机版本并发布；而鸿蒙上没有任何东西往键盘这份队列里排请求，发布出去的版本没人读。
+
+这一批问题由四条线并行审过：本篇这条共享 Rust 线，以及 Android、iOS、鸿蒙三条宿主线。宿主线各自也改到了共享 Rust（候选条按段取、释义缓存、快照队列空闲时只读、个人模型跨会话沿用、预览版本缓存），其中个人模型沿用、预览版本缓存、`state.json` 不重写三处与本线重复。合并后共享 Rust 的改动只在本篇这条 PR 里，重复的各留一套；三条宿主 PR 叠在本 PR 上，只含各自 `platforms/` 下的接线。
 
 ## Decision
 
@@ -31,9 +36,14 @@ Status: implemented
 - 主词库工作副本（`msime-pinyin.db`、`msime-english.db`）保留回滚日志：重置学习数据把它们挪作备份时不带旁路文件，旧 `-wal` 会套到新词库上。
 - 重置学习数据挪走日志之前先 `wal_checkpoint(TRUNCATE)`。损坏日志隔离本来就连同 `-wal`/`-shm` 一起改名（见 [用户词库日志损坏时挪开](2026-10-13-corrupt-user-journal-quarantine.md)），macOS/Linux 迁移数据目录先停输入法再连同旁路文件复制，都不用改。
 
-### n-gram 模型跨会话保温（`ngram_store.rs`）
+### 个人上下文模型跨会话沿用（`ngram_store.rs`、`host/session.rs`）
 
-打开日志时，正要打开的这条路径上的空闲 store 只要日志和 `-wal` 的（修改时间, 大小）与模型上次和磁盘对齐时一样就复用。对齐点是读完日志和自己写完一批之后，`release_all`（重置、换代次之前）清掉这个戳；空 `-wal` 与没有 `-wal` 同等看待。戳对不上（别的进程学了新词、重置、本进程别的连接写过）就丢掉重建，所以别处的修改照旧在下一个会话读到。其他路径的空闲 store 仍在下次打开日志时回收。`release_idle_personal_models` 接进 `Session::reset_cache` 和 `msime_client_release_process_cache`，内存告警时交还模型和连接。
+iOS 键盘每次收起都销毁会话，Android 每进一个输入框都重建会话，之前只要没有会话引用，注册表就把 store 丢掉，下一个会话把两张表整表重读。现在：
+
+- 记录点：`Session` 的 drop 在写完队列、放掉本线程的日志连接之后（host-api 会话这时还拿着词库租约）调 `note_settled`，本会话所有连接（整句联想写连接、选词计数和调频用的日志缓存连接）的写入都在记录之前。模型过期、队列没写完、上次写失败、模型为空时不记。
+- 记录内容：日志和非空 `-wal` 的大小、修改时间，unix 上加设备号和 inode；再加 store 自己连接看到的 `PRAGMA data_version`，任何别的连接（本进程或别的进程）提交过它就变，修改时间粒度粗的文件系统上同样大小的原地改写也认得出。没有写连接时开一条只读探测连接读它，留到下一次接手。日志旁有 `-wal` 时（WAL 模式，连接开着就占着 `-shm`）不开探测连接，只看文件戳，WAL 的每次提交都会追加 `-wal`；Windows 上只读过的 store 不记，免得空闲连接挡住别的进程改名或删除日志。空 `-wal` 与没有 `-wal` 同等看待。
+- 接手：`for_journal` 打开同一路径时，空闲 store 的记录对得上就沿用模型，记录只担保一次接手；还有会话在用的 store 丢掉记录，等那个会话放手时重记。其他路径的空闲 store 仍在下次打开日志时回收。`release_all`（重置、换代次之前）连同记录和探测连接一起丢掉；`release_idle_personal_models` 接进 `Session::reset_cache` 和 `msime_client_release_process_cache`，内存告警时交还模型和连接。
+- 会话期间别的输入法进程同时学到、模型没读到的计数会被这份记录盖过，下次重读时补上；重置、换日志、合并备份都要先拿独占维护权，本进程还有会话时拿不到，所以盖不过它们。
 
 ### 插件表进程缓存（`host-api/src/plugin_tables.rs`）
 
@@ -43,12 +53,21 @@ Status: implemented
 
 `PersonalDictionaryStore::update` 状态没变时不写文件。状态新增可选的 `snapshotSource`，记下读这一页时用户日志的来源戳（`dictionary_entries_source`：日志和 `-wal` 的 inode、长度、修改时间、状态改变时间）。本批没有应用请求、宿主没有未确认的页请求、页参数和戳都与已存的一页相同、上次读页没出错时直接沿用这一页。日志最后改动离现在不到 `REVISION_SETTLE`（两秒）时不给戳，调用方照常重查，避开同一时间粒度里长度不变的写入。旧的 `synchronize` 入口不给戳，行为不变。与 [忙碌重试](2026-10-17-personal-dictionary-sync-busy-retry.md) 的维护租约语义不冲突：取戳时持有独占租约。
 
+### 候选条按段取候选（`input-runtime/src/runtime.rs`、`host-api/src/ffi/input.rs`）
+
+`Runtime::candidate_range(start, count)` 只复制座位 `start` 起的一段，身份与 `all_candidates` 同一座位那一行相同；暂扣的尾部只在 `start` 走到已放出的末尾时才放，放出来照旧换一代。放尾部的逻辑抽成 `release_held_candidates` 与 `all_candidates` 共用，代次耗尽时的保护不变。host-api 导出 `msime_client_candidate_range`，`all_candidates` 不变。Android 候选条改用它在 Android PR 里。
+
+### 候选释义按文件身份缓存（`engine/src/host/glosses.rs`）
+
+`candidate_glosses_with_user` 和 `candidate_target_glosses` 在查询线程的 `thread_local` 里留着打开过的发布词库、学到的释义库、最多 8 份离线释义库连接和读好的自定义译文，键是路径加文件身份（长度、修改时间，unix 上加设备号和 inode，复用日文模型缓存的 `FileIdentity`）；发布词库和学到的释义库的键还带同目录 `custom_translations.txt` 的身份。文件被替换、改写或删除时下一次查询就重新打开。Windows 上 SQLite 打开文件不带 `FILE_SHARE_DELETE`，翻译线程与服务同寿命，所以那里只缓存自定义译文。`release_gloss_caches` 清掉调用线程的这四份缓存：`msime_client_release_process_cache` 一并调它，新增 `msime_client_release_gloss_caches` 只放释义、不动日文词典，鸿蒙在收起和失焦时调（鸿蒙 PR）。
+
 ### 偏好与快照版本（`client-core/src/preferences.rs`、`host-api/src/lib.rs`、`client-core/src/cloud/snapshot_queue.rs`、`engine/src/user_dictionary/state.rs`）
 
 - `PreferencesStore::load_reusing`：照旧加锁读出文件字节，与上一次逐字节相同就沿用上一份快照，跳过两遍解析和校验。文件不存在时每次照常取默认快照。`msime_client_load_preferences` 按目录留最近一份，C ABI 不变。
 - `HostSession::update` 认出与上一份相同的快照（且上一次 update 没有中途失败，`requested_settled`）后走 `update_unchanged`：不校验、不比较、不调只有偏好会改的 setter；仍按偏好重设繁简投影、用 `SessionSound::restamp` 给效果包清单盖戳、调 `apply_pending`，回复与完整更新字段相同。
 - `cached_dictionary_state_revision` 按日志主文件、`-wal`、`-journal` 的 stat 记下上次修订号，stat 一样就直接返回；最后改动早于两秒前才记缓存（git racy-clean 的做法）。只有空闲预览用它（`snapshot_queue_state`、`process` 认领前、`msime_client_snapshot_version`）；`process` 认领到请求后、prepare 前后、激活后都重新精确计算，缓存过时最多表现为一次可恢复的冲突。
-- 快照队列 `update_if_changed`：发布的本机版本没变时不重写 `state.json`。
+- 快照队列 `update_if_changed`：发布的本机版本没变、也没有请求因此标成已应用时不重写 `state.json`。
+- 快照队列的 `state` 和 `process` 可以带 `skip_when_idle`（默认 false）：队列里没有排队或准备中的请求时只读状态返回，不算本机版本、不发布、不建队列目录。鸿蒙键盘这样查（鸿蒙 PR），其他宿主不带，行为不变；真有请求时照旧先发布预览版本，`process` 认领后精确计算再比对。
 
 ## Alternatives considered
 
@@ -56,11 +75,14 @@ Status: implemented
 - **统计按条数攒批（如选词位置的 32 次一写）**：实现简单、内存有界。没有采用：维护者定的跨平台约定是「失焦或每 30 秒」，按条数写在慢速打字时会把计数无限期留在内存里，被杀时丢失的量不可控；而时间门槛加失焦写出把上限钉在 30 秒。
 - **把一批上屏合成一次大提交写入**：只算一次活跃时长，代码更少。但批内上屏之间的间隔会被抹掉，`daily_active_ms`、最长连续输入都会变，所以按原时刻逐条重放。
 - **主词库工作副本也进 WAL、或给它缓存一条可写连接并降 `synchronous`**：调频时主词库的那次提交同样要 fsync，缓存连接还能省掉每次打开。本线没有做：重置学习数据挪走工作副本时不带旁路文件，WAL 会把旧 `-wal` 套到新词库上；缓存可写连接要和换代次、替换词库的关闭时机重新对齐，风险超出这一轮的范围。日志进 WAL 已拿到大部分收益，主词库这一步留给后续单独评估。
-- **n-gram store 无条件常驻**：最省事，内存代价与会话期间相同。但别的进程或别的连接改过日志而没有通知本进程时，新会话就读不到改动；用（修改时间, 大小）戳把关，代价只是几次 stat。拼写纠错 profile 没有一起改：它的表很小、重读代价低，常驻会吃掉九键过滤刷新那条分配计数用例原有的余量。
+- **n-gram store 无条件常驻**：最省事，内存代价与会话期间相同。但别的进程或别的连接改过日志而没有通知本进程时，新会话就读不到改动；用文件戳和 `data_version` 把关，代价只是几次 stat 和一次 PRAGMA。拼写纠错 profile 没有一起改：它的表很小、重读代价低，常驻会吃掉九键过滤刷新那条分配计数用例原有的余量。
+- **个人模型按读完日志、自己写完一批时的（修改时间, 大小）判断能否沿用**（本线最初的做法）：不用改会话的 drop。但会话里选词计数、调频、删词经日志缓存连接写同一个文件，整句联想最后一批写完之后只要还有一次这样的写入，下一个会话就对不上、照样整表重读；同一节拍里另一个连接同样大小的原地改写也看不出来。改成会话放手时记录、加 `data_version`。
+- **个人模型遇到 WAL 日志就不记录**（iOS 线最初的做法）：iOS 的日志不进 WAL，这样对 iOS 足够；但本线让其他平台的日志都进了 WAL，Android 这个最常重建会话的宿主就完全拿不到沿用。改成 WAL 下不开探测连接、靠文件戳（每次提交都追加 `-wal`）和写连接的 `data_version` 判断。
+- **预览版本缓存放在 host-api、只给 `msime_client_snapshot_version` 用**（iOS 线另做过一份）：与本线引擎里的 `cached_dictionary_state_revision` 规则相同（日志、`-wal`、`-journal` 的文件身份，两秒落定），但覆盖不到队列的 `state` 和 `process` 发布，留引擎那一份。
 - **偏好按文件戳（mtime、inode）判断、或新增 `msime_client_load_preferences_if_changed` 只 stat 不读**：比逐字节比较更省 I/O。没有采用：mtime 粒度粗、inode 可能被重用、文件可能被原地改写，戳一样内容不一样时会读到旧快照；新增 C ABI 还要四端同时接。偏好文件不大，读字节的成本远小于两遍解析加校验。
 - **联系人读音在保存时算好写进 `mentions.json`**：聚焦时完全不用查词库。但改了落盘格式，主词库更新后读音也不会跟着变，没有采用。
 - **快照版本的缓存也用于冲突判定**：能把 `process` 认领后的那次全表扫描也省掉。但缓存过时就可能把旧数据当成新数据应用，正确性优先，只给空闲预览用。
-- **根治：Android 换输入框时保留会话、只发 focus(false/true)**：n-gram 重读、插件表重读、个人词库同步的大部分触发都来自每次聚焦销毁重建会话。这是 Android 生命周期的改动，影响面大，不在共享 Rust 这一线，本线只让「重建」本身变便宜。
+- **根治：Android 换输入框时保留会话、只发 focus(false/true)**：n-gram 重读、插件表重读、个人词库同步的大部分触发都来自每次聚焦销毁重建会话。这是 Android 生命周期的改动，影响面大，不在共享 Rust 这一线；Android PR 只在同一输入框重启连接时留会话，本线让「重建」本身变便宜。
 
 ## 旧笔记审计
 
@@ -71,20 +93,21 @@ Status: implemented
 - [插件表的文件戳带上 inode](2026-10-11-plugin-table-stamp-inode.md)：本篇的进程缓存沿用它的 `FileStamp`，该篇事实不变。
 - [个人词库同步忙碌重试](2026-10-17-personal-dictionary-sync-busy-retry.md)、[iOS 词库维护移出主线程](2026-10-22-ios-idle-maintenance-off-main.md)：前者持有租约语义，后者是 iOS 宿主侧的空闲轮询，本篇让同一轮在 Rust 里变便宜，部分重叠。
 - [输入统计锁绑定目录句柄](2026-10-09-typing-statistics-lock-directory.md)、[关闭上传时串行化云端操作](2026-10-17-typing-statistics-upload-race.md)：攒批写出仍走同一把目录句柄锁，上传前先写出批次，两篇不受影响。打字统计 UI 侧的模型与状态笔记只涉及 React 展示，无关。
+- 三条宿主线的笔记（`2026-10-27-android-keyboard-low-end-power.md`、`2026-10-27-ios-keyboard-low-end-power.md`、`2026-10-27-harmony-keyboard-idle-and-hot-path-costs.md`）随各自的宿主 PR 叠在本 PR 上合入，本分支里还没有，所以这里不链接；它们引用的共享层改动以本篇为准。
 
 ## Consequences
 
-- 空闲聚焦、空闲轮询、偏好原样再交、同一个输入框里的连续打字，不再整份读写或 fsync 统计文件、`sync.json`、`state.json`，也不再全表扫日志、重读 n-gram 表和插件表。代价是进程里多留几份数据（n-gram 模型几 MB、联系人名单约 100 KB、上一份偏好快照），内存告警时经清缓存入口放掉。
+- 空闲聚焦、空闲轮询、偏好原样再交、同一个输入框里的连续打字，不再整份读写或 fsync 统计文件、`sync.json`、`state.json`，也不再全表扫日志、重读 n-gram 表和插件表；候选条每键只过一段候选，释义每键不再重开词库。代价是进程里多留几份数据（n-gram 模型几 MB 和没有写连接时的一条只读探测连接、联系人名单约 100 KB、上一份偏好快照、查询线程上的释义库连接），内存告警时经清缓存入口放掉，释义另可经 `msime_client_release_gloss_caches` 按线程放掉。
 - 维护者认可的持久性取舍：进程被系统杀掉时最多丢 30 秒的打字统计计数（移动端失焦和销毁已在后台线程写出，实际窗口更小）；用户日志在 WAL + `NORMAL` 下断电最多丢最后几次学习，但不会损坏；把日志 ATTACH 到词库连接上的事务（删词、个人词库编辑、五笔造词）不再由超级日志跨文件绑定，只在每个文件内原子，按 SQLite 的提交顺序崩溃只会留下「日志已记下、词库工作副本回滚」，下次回放补齐，不会出现词库已删、日志没有墓碑。
 - 设置页读统计文件时，正在打字的计数最多晚 30 秒出现；设置页的任何统计操作会先把批次写出。
-- 新增 `{"operation":"flush"}` 统计操作和 `snapshotSource` 字段（可选，旧文件照读）。旧版本的库不认识 flush 会回错误，宿主忽略即可。
+- 新增 `{"operation":"flush"}` 统计操作、`snapshotSource` 字段（可选，旧文件照读）、快照队列的 `skip_when_idle` 字段（可选），以及 C ABI `msime_client_candidate_range` 和 `msime_client_release_gloss_caches`。宿主一侧的接线在叠在本 PR 上的三条宿主 PR 里，要在本 PR 之后合入；本 PR 单独合入时攒批也会在会话失焦和销毁时写出，不需要宿主先接 flush。
 - WAL 让测试进程同时开着的文件从约 100 涨到近 400，超过 macOS launchd 默认的软上限 256；`scripts/verify-local.sh` 在跑 Rust 测试前把软上限抬到 4096。CI 的 Rust 测试在 Linux 容器里跑，不受这个上限影响；在 macOS 上直接 `cargo test` 需要先 `ulimit -n 4096`。
-- 主词库那一次调频提交仍是回滚日志加 `FULL`，选非首位候选仍要为它 fsync 一次；Android 每次聚焦仍销毁重建会话、打开并预热词库连接。这两处是下一步的候选。
+- 主词库那一次调频提交仍是回滚日志加 `FULL`，选非首位候选仍要为它 fsync 一次；Android 换输入框时仍销毁重建会话、打开并预热词库连接（同一输入框重启连接时 Android PR 已留会话）。这两处是下一步的候选。
 
 ## Verification
 
-各项改动都带了单元测试：统计的攒批不逐次写文件、flush 写出、30 秒门槛、时钟回拨、攒批与逐条写入得到相同文档、与另一进程的清空和关闭合并、清空代号丢弃旧批次；日志以 WAL/`NORMAL` 提交、检查点后主文件单独拷走仍完整；空 `-wal` 出现又消失后 store 仍复用；插件表缓存命中与主词库或名单变化后重查；空闲同步既不读页也不重写 `sync.json`、各种失效条件下重查、来源戳落定规则；同一份偏好快照再交时回复与第一次相同、效果包跟上、同修订号换内容仍拒绝；偏好文件字节不变时沿用、保存或改坏后重读。多语言「选词不写日志」的断言改为连同 `-wal` 一起比较，否则 WAL 下写入只进 `-wal` 会让断言形同虚设。
+各项改动都带了单元测试：统计的攒批不逐次写文件、flush 写出、30 秒门槛、时钟回拨、攒批与逐条写入得到相同文档、与另一进程的清空和关闭合并、清空代号丢弃旧批次；日志以 WAL/`NORMAL` 提交、检查点后主文件单独拷走仍完整；个人模型在会话放手后沿用且只担保一次接手、别的连接写入或换文件后重读、同样大小的原地改写经探测连接发现、模型可能与磁盘不一致或为空时不记录、清缓存放掉、空 `-wal` 出现又消失不算改动、Windows 上不留探测连接、会话 drop 时记下日志；`candidate_range` 一批之内不放尾部、越过末尾才放并换代，真实全拼引擎与整代复制逐行一致；释义缓存在改写、删除、替换各类文件后与重新打开一致、释放后再查不变；`skip_when_idle` 下空队列的 `state`、`process` 不动、排着的请求照样处理，版本没变但正是激活出来的一代时请求仍标为已应用；预览版本与精确版本一致、日志改过后跟着变；插件表缓存命中与主词库或名单变化后重查；空闲同步既不读页也不重写 `sync.json`、各种失效条件下重查、来源戳落定规则；同一份偏好快照再交时回复与第一次相同、效果包跟上、同修订号换内容仍拒绝；偏好文件字节不变时沿用、保存或改坏后重读。多语言「选词不写日志」的断言改为连同 `-wal` 一起比较，否则 WAL 下写入只进 `-wal` 会让断言形同虚设。
 
-在编译机上跑 `cargo test --no-fail-fast -p msime-host-api -p msime-client-services -p msime-client-core -p msime-engine`：client-core 581 项、client-services 1406 项、engine 2699 项全部通过；host-api 1011 项通过、2 项失败（`listing_reports_every_pack_and_checks_the_state_root` 没列 `pronunciations` 包、`a_command_gets_the_local_time_to_the_minute`），两项在本线的基点上单独跑同样失败，与本线无关。`cargo clippy --keep-going --all-targets -- -D warnings` 只报 client-core 和 client-services 测试里两处基点上已有的 `field_reassign_with_default`，本线改到的代码没有告警。第一次全量跑时 engine 的分配预算用例（临时英文候选选词，预算 67）报 68，逐个提交单独跑定位到给 `journal_size_limit` 拼 PRAGMA 的 `format!`；改成字面量后通过。日志首次打开常在选词提交路径上，这条路径上的分配预算要留意。
+合并四条线之后，在编译机上跑 `ulimit -n 4096; cargo test --no-fail-fast -p msime-engine -p msime-host-api -p msime-client-core -p msime-client-services -p msime-input-runtime`：client-core 582 项、client-services 1406 项、engine 2705 项、input-runtime 406 项全部通过；host-api 1016 项通过、2 项失败（`listing_reports_every_pack_and_checks_the_state_root` 没列 `pronunciations` 包、`a_command_gets_the_local_time_to_the_minute`），两项在基点上同样失败，与本线无关。`cargo clippy --keep-going --all-targets -- -D warnings` 只报 client-core 和 client-services 测试里两处 develop 上已有的 `field_reassign_with_default`；`cargo fmt --all --check` 通过。第一次全量跑时 engine 的分配预算用例（临时英文候选选词，预算 67）报 68，逐个提交单独跑定位到给 `journal_size_limit` 拼 PRAGMA 的 `format!`；改成字面量后通过。日志首次打开常在选词提交路径上，这条路径上的分配预算要留意。
 
-缺口：没有在任何真机上测过耗电、发热或卡顿。验证办法是在低端 Android 机上对比改动前后 `:ime` 进程的 CPU 时间增量（`adb shell top -p <pid>`、`dumpsys batterystats`）、`/proc/<pid>/io` 的写入量，以及聚焦到可打字的 trace。Windows 7 面板的 flush 改动只在 C++ 源码层面跟随，没有在 Windows 7 上运行；iOS、HarmonyOS 宿主没有改动，也没有装机复测。
+缺口：没有在任何真机上测过耗电、发热或卡顿。验证办法是在低端 Android 机上对比改动前后 `:ime` 进程的 CPU 时间增量（`adb shell top -p <pid>`、`dumpsys batterystats`）、`/proc/<pid>/io` 的写入量，以及聚焦到可打字的 trace。Windows 7 面板的 flush 改动只在 C++ 源码层面跟随，没有在 Windows 7 上运行。三条宿主 PR 的编译和宿主侧测试记在各自的笔记里，都没有装机复测。

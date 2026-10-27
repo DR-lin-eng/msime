@@ -387,6 +387,107 @@ fn hand_written_glosses_apply_without_a_learned_store() {
     );
 }
 
+/// 释义来源在查询线程里按路径加文件身份缓存，省掉每个按键重新打开词库；同一线程上改写自定义译文、删掉学到的释义库、换掉发布词库，下一次查询都要看到新文件，结果与每次重新打开相同。替换的文件都比原来长，免得粗粒度的修改时间和复用的 inode 让新旧文件看起来一样。
+#[test]
+fn cached_glosses_follow_replaced_and_removed_files() {
+    let resources = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let packaged = resources.path().join("msime-english.db");
+    Connection::open(&packaged)
+        .unwrap()
+        .execute_batch(&format!(
+            "{ENGLISH_SCHEMA} INSERT INTO zh_en_glosses VALUES('测试','packaged gloss');"
+        ))
+        .unwrap();
+    let resources_path = resources.path().to_str().unwrap();
+    let user_path = user.path().to_str().unwrap();
+    let candidates = vec![("测试".into(), 0)];
+    let glosses = || candidate_glosses_with_user(resources_path, user_path, &candidates).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+
+    let custom = user.path().join("custom_translations.txt");
+    std::fs::write(&custom, "测试\thand written gloss\n").unwrap();
+    assert_eq!(glosses(), vec!["hand written gloss"]);
+    std::fs::write(
+        &custom,
+        "# edited in Settings\n测试\tedited hand written gloss\n",
+    )
+    .unwrap();
+    assert_eq!(glosses(), vec!["edited hand written gloss"]);
+    std::fs::remove_file(&custom).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+
+    assert!(save_candidate_gloss(
+        user_path,
+        true,
+        "测试",
+        "learned gloss"
+    ));
+    assert_eq!(glosses(), vec!["learned gloss"]);
+    assert!(save_candidate_gloss(
+        user_path,
+        true,
+        "测试",
+        "relearned gloss"
+    ));
+    assert_eq!(glosses(), vec!["relearned gloss"]);
+    std::fs::remove_file(user.path().join("translation-glosses.db")).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+
+    std::fs::remove_file(&packaged).unwrap();
+    Connection::open(&packaged)
+        .unwrap()
+        .execute_batch(&format!(
+            "{ENGLISH_SCHEMA} INSERT INTO zh_en_glosses VALUES('测试','replaced gloss');
+             CREATE TABLE padding(value BLOB); INSERT INTO padding VALUES(zeroblob(65536));"
+        ))
+        .unwrap();
+    assert_eq!(glosses(), vec!["replaced gloss"]);
+    assert_eq!(
+        candidate_glosses(resources_path, &candidates).unwrap(),
+        vec!["replaced gloss"]
+    );
+    std::fs::remove_file(&packaged).unwrap();
+    assert!(candidate_glosses(resources_path, &candidates).is_err());
+}
+
+/// 离线释义库的连接同样按文件身份缓存：换成另一种语言的文件、再删掉，下一次查询给出和重新打开一样的结果。
+#[test]
+fn cached_offline_target_glosses_follow_replaced_and_removed_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zh-fr.db");
+    offline_gloss_database(&path, "fr", 1);
+    let candidates = vec![("猫".into(), 0)];
+    let glosses = || candidate_target_glosses(path.to_str().unwrap(), "fr", &candidates);
+    assert_eq!(glosses().unwrap(), vec!["chat, chatte; félin"]);
+    assert_eq!(glosses().unwrap(), vec!["chat, chatte; félin"]);
+
+    std::fs::remove_file(&path).unwrap();
+    offline_gloss_database(&path, "ja", 1);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE padding(value BLOB); INSERT INTO padding VALUES(zeroblob(65536));",
+        )
+        .unwrap();
+    assert_eq!(
+        glosses().unwrap_err().to_string(),
+        "Offline gloss dictionary language mismatch"
+    );
+    assert_eq!(
+        candidate_target_glosses(path.to_str().unwrap(), "ja", &candidates).unwrap(),
+        vec!["chat, chatte; félin"]
+    );
+
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        glosses().unwrap_err().to_string(),
+        "Offline gloss dictionary unavailable"
+    );
+    assert!(!path.exists(), "a read-only open must not create the file");
+}
+
 #[cfg(unix)]
 #[test]
 fn learned_glosses_reject_a_symlinked_database() {

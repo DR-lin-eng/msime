@@ -506,6 +506,8 @@ public final class MSIMEInputService extends InputMethodService {
     private String languageDictionaries = "";
     // 本机已具备的方案资源包（日文词典、语言词库），在 onStartInput 里和运行时选项一起重读：设置页下载完后，下一次进入输入框切换器就出现新语言，与 host-api 获得焦点时刷新资源包的时机一致。
     private java.util.Set<String> resourcePacks = java.util.Set.of();
+    // 算出 resourcePacks 和 candidatePronunciationPackInstalled 时本机已装好的资源包 id。同一输入框重启连接时只有它没变才留着会话（keepsSessionAcrossRestart），变了就照常重建，让上面这两样和引擎会话一起跟上新装或删掉的资源包。
+    private java.util.Set<String> installedResourcePackIds = java.util.Set.of();
     boolean soundEnabled = true;
     boolean hapticsEnabled;
     KeyboardFeedbackPreferences.HapticStrength hapticStrength =
@@ -1707,6 +1709,7 @@ public final class MSIMEInputService extends InputMethodService {
             visibleSchemes = enabledSchemes;
             languageDictionaries = "";
             resourcePacks = java.util.Set.of();
+            installedResourcePackIds = java.util.Set.of();
         }
         letterCase.reset();
         clearEnglishSuggestions();
@@ -1744,6 +1747,8 @@ public final class MSIMEInputService extends InputMethodService {
         boolean sameEditor = info.inputType == editorInputType && info.fieldId == currentEditorFieldId
             && info.imeOptions == currentEditorImeOptions && currentEditorPackage.equals(info.packageName);
         if (!sameEditor) return false;
+        // 资源包可能刚在设置应用里装好或删掉：方案切换器、日文临时模式和音标可用与否都是建会话时按资源包算的，留着会话就一直是旧的。原来每次重启连接都重建、重读一遍，这里同样一次 JNI 列出，变了就不留会话。
+        if (!ResourcePacks.installedIds(this).equals(installedResourcePackIds)) return false;
         // 隐私模式可能刚在设置应用里开关过：先按文件重读本地设置，再比这个输入框此刻该不该学习。
         refreshLocalSettings();
         boolean suppressed = !EditorPolicy.allowLearning(info.imeOptions) || incognitoEnabled;
@@ -1830,6 +1835,7 @@ public final class MSIMEInputService extends InputMethodService {
                 resourcePacks = KeyboardScheme.availablePacks(
                     installedPacks::contains, options.optString("resources", ""));
                 candidatePronunciationPackInstalled = installedPacks.contains(ResourcePacks.PRONUNCIATIONS);
+                installedResourcePackIds = installedPacks;
                 JSONObject preferences = options.optJSONObject("preferences");
                 applyEditorPreferences(preferences, ClipboardHistoryRetentionPolicy.Source.RUNTIME_OPTIONS_COPY);
                 if (newDocument) {

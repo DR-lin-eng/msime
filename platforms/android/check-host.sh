@@ -1206,6 +1206,12 @@ if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /flushTypingS
   echo "Android must flush pending typing statistics when the field loses focus, the keyboard hides, and before the statistics worker shuts down" >&2
   exit 1
 fi
+# 同一输入框重启连接时留着会话，跳过了 startInputRuntime 里按资源包重算方案列表和音标可用的那一步；资源包装好或删掉之后必须走重建，否则切换器和音标要等换了输入框才跟上。
+if ! awk '/private boolean keepsSessionAcrossRestart\(/ { inside = 1 } inside && /ResourcePacks\.installedIds\(this\)\.equals\(installedResourcePackIds\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! rg -q 'installedResourcePackIds = installedPacks;' "$service_java"; then
+  echo "Android must rebuild the engine session on a same-field restart when the installed resource packs changed" >&2
+  exit 1
+fi
 # The host compiles against AndroidX and Material now, and those are AARs that only Gradle resolves,
 # so this script no longer compiles the whole source set -- `platforms/android/gradle-app` does, and
 # build-apk.sh drives it. What stays here is the part that is worth having without a Gradle daemon:

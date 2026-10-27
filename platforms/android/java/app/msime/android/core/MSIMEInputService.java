@@ -3110,10 +3110,10 @@ public final class MSIMEInputService extends InputMethodService {
                 && candidatePronunciationSourceSuggestions.equals(suggestions)
                 && preferencesKey.equals(candidatePronunciationPreferences)) return;
         try {
-            // 只有横向完整条或展开面板需要释放候选尾部；普通列表沿用当前视图，避免为音标改变候选代次。
+            // 横向完整条和展开面板要的比当前一页多，按 displayedCandidateSnapshot 取看得见的那些；普通列表沿用当前视图，避免为音标改变候选代次。
             JSONObject snapshot = !suggestions.isEmpty() && directEnglishActive() ? view
                 : candidateHorizontal || candidatePanelOpen || candidatePanelSnapshot != null
-                ? currentCandidateSnapshot() : view;
+                ? displayedCandidateSnapshot() : view;
             long generation = strictCandidateLong(snapshot, "generation");
             JSONArray snapshotCandidates = snapshot.optJSONArray("candidates");
             String request = CandidatePronunciationModel.request(generation,
@@ -3944,6 +3944,16 @@ public final class MSIMEInputService extends InputMethodService {
         return followCandidateGeneration(value(NativeClient.candidateRange(session, start, count)));
     }
 
+    /**
+     * 释义和音标要覆盖的候选：展开面板（含九键面板）开着时是整代（{@link #currentCandidateSnapshot}），否则是引擎已经放出来的那一段。
+     *
+     * <p>候选条每键只取一批，从不在打字时放出暂扣的尾部；释义和音标若照旧取整代，首字母打下去引擎仍要把整张声母表查出来、换一代，主线程仍要解析整代的 JSON，开了英文释义或音标的用户就白省了。从 0 起取的这一段不放尾部、不换代，候选条在这一代里滚得到的都在里面；滚过放出来的末尾时候选条自己放尾部、换一代并重画，新的一代再按这里取。上限与释义请求的条数上限相同。
+     */
+    private JSONObject displayedCandidateSnapshot() throws JSONException {
+        if (candidatePanelOpen || candidatePanelSnapshot != null) return currentCandidateSnapshot();
+        return candidateRangeSnapshot(0, CandidateGlossModel.MAX_CANDIDATES);
+    }
+
     private JSONObject followCandidateGeneration(JSONObject snapshot) throws JSONException {
         if (strictCandidateLong(snapshot, "session") != session)
             throw new JSONException("Unexpected candidate session");
@@ -3979,7 +3989,7 @@ public final class MSIMEInputService extends InputMethodService {
         final java.util.Map<String, String> targetRequests =
             new java.util.LinkedHashMap<>(offlineTargets.size());
         try {
-            JSONObject snapshot = currentCandidateSnapshot();
+            JSONObject snapshot = displayedCandidateSnapshot();
             generation = strictCandidateLong(snapshot, "generation");
             request = CandidateGlossModel.request(generation,
                 snapshot.getJSONArray("candidates"));

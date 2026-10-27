@@ -118,6 +118,13 @@ if rg -q 'currentCandidateSnapshot\(|allCandidates\(' "$strip_source" \
   echo "The touch candidate strip must fetch one batch per render through candidateRange, not the whole candidate generation" >&2
   exit 1
 fi
+# 英文释义和音标也在 render 里每键跑：只显示候选条时它们取引擎已放出的那一段（displayedCandidateSnapshot），整代只留给展开面板。直接调 currentCandidateSnapshot 会让开了释义或音标的用户首字母仍逼引擎查出整张声母表、主线程仍解析整代 JSON。
+service_source="$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"
+if awk '/private void scheduleCandidateGlosses\(\)/ || /private void scheduleCandidatePronunciations\(\)/ { inside = 1 } inside && /currentCandidateSnapshot\(\)/ { bad = 1 } inside && /^    }$/ { inside = 0 } END { exit !bad }' "$service_source" \
+  || ! awk '/private JSONObject displayedCandidateSnapshot\(\)/ { inside = 1 } inside && /candidateRangeSnapshot\(0, CandidateGlossModel\.MAX_CANDIDATES\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_source"; then
+  echo "Android candidate glosses and pronunciations must not fetch the whole candidate generation while only the strip is showing" >&2
+  exit 1
+fi
 # applySkin 每次 render 都走整棵键盘树，收着的面板（表情、符号网格可有几百格）不能每键跟着上一遍色：只在 applySkin 自己那几遍里跳过 GONE 子树并记下来，被直接显示出来时由画帧前的兜底补一次换肤。
 if ! rg -q 'skipHidden = true;' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
   || ! rg -q 'skippedHidden\.add\(child\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \

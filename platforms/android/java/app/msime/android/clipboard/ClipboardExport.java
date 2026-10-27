@@ -60,7 +60,8 @@ public final class ClipboardExport {
                 context.getApplicationInfo().loadLabel(context.getPackageManager()).toString(),
                 AppVersionPolicy.versionName(context, "0"), LocalDateTime.now());
             temporary = new File(context.getCacheDir(), filename);
-            Files.write(temporary.toPath(), snapshot.text().getBytes(StandardCharsets.UTF_8));
+            Files.write(temporary.toPath(), snapshot.text()
+                .getBytes(StandardCharsets.UTF_8));
             // 构建快照期间隐私设置可能已改变，公开文件前再检查一次。
             preferences = preferences(context);
             if (preferences == null || !preferences.optBoolean("clipboard_history", false))

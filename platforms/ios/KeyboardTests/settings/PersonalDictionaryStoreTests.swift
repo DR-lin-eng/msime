@@ -110,6 +110,34 @@ final class PersonalDictionaryStoreTests: XCTestCase {
     XCTAssertFalse(try keyboard.read().needsKeyboardSynchronization)
   }
 
+  func testAnOldListingIsRelistedEvenWithoutARefreshRequest() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let keyboard = PersonalDictionaryStore(directory: root)
+    try keyboard.synchronize(apply: { _ in }, page: { _ in .init(entries: [], hasMore: false) })
+    let settled = try keyboard.pollKeyboardSynchronization(idle: nil)
+    XCTAssertFalse(settled.needed)
+    let revision = try XCTUnwrap(settled.idle)
+    XCTAssertFalse(keyboard.listingIsStale())
+
+    // 没有人要刷新，但列表已经超过上限没重新列过：记住的身份也挡不住，主线程那一侧的复查同样认它。
+    let later = Date().addingTimeInterval(PersonalDictionaryStore.listingLifetime + 60)
+    let stale = try keyboard.pollKeyboardSynchronization(idle: revision, now: later)
+    XCTAssertTrue(stale.needed)
+    XCTAssertNil(stale.idle)
+    XCTAssertTrue(keyboard.listingIsStale(now: later))
+    XCTAssertFalse(try keyboard.read().needsKeyboardSynchronization)
+
+    // 列表失败时 `snapshotDate` 不动，但文件照样重写，下一轮空闲不会接着重试。
+    let file = root.appendingPathComponent("PersonalDictionary/sync.json")
+    try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-PersonalDictionaryStore.listingLifetime - 60)],
+                                          ofItemAtPath: file.path)
+    XCTAssertTrue(keyboard.listingIsStale())
+    try keyboard.synchronize(apply: { _ in }, page: { _ in throw PersonalDictionaryStore.StoreError.invalidState })
+    XCTAssertFalse(keyboard.listingIsStale())
+    XCTAssertFalse(try keyboard.pollKeyboardSynchronization(idle: nil).needed)
+  }
+
   func testQueueAcknowledgementFailureAndPaging() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

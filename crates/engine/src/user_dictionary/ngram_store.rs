@@ -41,10 +41,12 @@ static STORES: LazyLock<Mutex<HashMap<PathBuf, Arc<PersonalNgramStore>>>> =
 /// 日志和它的 `-wal` 的 `(修改时间, 大小)`，用来判断模型上次和磁盘对齐之后有没有别人写过这个文件。
 type DiskStamp = (FileStamp, FileStamp);
 
+/// 空的 `-wal` 当作没有：只读连接打开 WAL 日志时会建一个空的 `-wal` 并在关闭后留着，最后一个写连接关闭时又会删掉它，两者内容相同。不这样算的话，经只读连接读过盘的空闲 store 读前读后的戳就对不上，每次都被丢掉重读。
 fn disk_stamp(user_db: &Path) -> DiskStamp {
     let mut wal = user_db.as_os_str().to_owned();
     wal.push("-wal");
-    (file_stamp(user_db), file_stamp(Path::new(&wal)))
+    let wal_stamp = file_stamp(Path::new(&wal)).filter(|(_, len)| *len > 0);
+    (file_stamp(user_db), wal_stamp)
 }
 
 /// 丢掉只剩注册表自己引用的 store。`opening` 是正要打开的路径：它的空闲 store 若磁盘戳和模型上次对齐时一样就留下复用，省掉整表重读；戳变了（别的进程学了新词、重置或换了日志、本进程别的连接写过日志）就和以前一样丢掉重建，新 store 从磁盘读。
@@ -1000,6 +1002,51 @@ mod tests {
         drop(store);
         reclaim_idle(&mut stores, None);
         assert!(kept.upgrade().is_none(), "清缓存后空闲 store 仍被持有");
+    }
+
+    /// 只读连接在 WAL 日志旁留下或不留空的 `-wal`，最后一个写连接关闭时又删掉它：这都不是日志被改过，经只读路径读过盘的空闲 store 照样留着复用。
+    #[test]
+    fn an_empty_wal_appearing_or_vanishing_does_not_drop_an_idle_store() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        {
+            let connection = Connection::open(&journal).unwrap();
+            prefer_write_ahead_log(&connection);
+            ensure_schema(&connection).unwrap();
+            connection
+                .execute_batch(
+                    "INSERT INTO personal_bigram(previous,word,count) VALUES('甲','乙',5)",
+                )
+                .unwrap();
+        }
+        let mut wal = journal.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+
+        // 没有写连接的 store 经只读连接读日志。
+        let store = detached(&journal);
+        drop(store.model());
+        assert!(lock(&store.synced_stamp).is_some(), "读过盘却没记下戳");
+        let mut stores = HashMap::from([(journal.clone(), Arc::clone(&store))]);
+        let kept = Arc::downgrade(&store);
+        drop(store);
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(
+            kept.upgrade().is_some(),
+            "只读路径读过以后空闲 store 被丢掉"
+        );
+
+        // 不管读完留下的是什么，空的 `-wal` 出现和消失都不算改过。
+        for _ in 0..2 {
+            if std::fs::metadata(&wal).is_ok_and(|metadata| metadata.len() == 0) {
+                std::fs::remove_file(&wal).unwrap();
+            } else {
+                assert!(!wal.exists(), "没有写入却留下了非空的 -wal");
+                std::fs::File::create(&wal).unwrap();
+            }
+            reclaim_idle(&mut stores, Some(&journal));
+            assert!(kept.upgrade().is_some(), "空的 -wal 被当成了日志改动");
+        }
     }
 
     #[test]

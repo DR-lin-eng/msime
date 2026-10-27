@@ -1190,24 +1190,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       letterRowViews.append(rowView)
       keyColumn.addArrangedSubview(rowView)
     }
-    for (index, row) in ZhuyinKeyLayout.rows.enumerated() {
-      let rowView = makeZhuyinRow(row, includesDelete: index == ZhuyinKeyLayout.rows.count - 1)
-      rowView.isHidden = true
-      zhuyinRowViews.append(rowView)
-      keyColumn.addArrangedSubview(rowView)
-    }
-    for (index, row) in FourteenKeyLayout.rows.enumerated() {
-      let rowView = makeLetterGridRow(row, grid: .fourteenKey, includesEdges: index == FourteenKeyLayout.rows.count - 1)
-      rowView.isHidden = true
-      fourteenKeyRowViews.append(rowView)
-      keyColumn.addArrangedSubview(rowView)
-    }
-    for (index, row) in EighteenKeyLayout.rows.enumerated() {
-      let rowView = makeLetterGridRow(row, grid: .eighteenKey, includesEdges: index == EighteenKeyLayout.rows.count - 1)
-      rowView.isHidden = true
-      eighteenKeyRowViews.append(rowView)
-      keyColumn.addArrangedSubview(rowView)
-    }
+    // 大千注音、14 键和 18 键的各排不在这里建：只有用这几种方案的人用得到，第一次要画它们时由 `ensureAlternateLetterRows` 插到字母行和九键外框之间。
     keyColumn.addArrangedSubview(makeNineKeyLayout())
     let japaneseSymbols = makeKey(title: "123", accessibilityLabel: "切换到数字和符号") { [weak self] in
       self?.countKeyPress(TypingKeyID.layer)
@@ -1295,9 +1278,6 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 分几步拼出来：写成一个长的 + 表达式时，编译器会在类型推断上超时。
     var standardRows: [UIView] = [numberRow, extraRow]
     standardRows += letterRowViews
-    standardRows += zhuyinRowViews
-    standardRows += fourteenKeyRowViews
-    standardRows += eighteenKeyRowViews
     standardRows += symbolRowViews
     standardRows += symbolLayerRowViews as [UIView]
     standardRowHeights = standardRows.map {
@@ -5840,7 +5820,52 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
   }
 
+  /// 大千注音、14 键和 18 键的各排第一次要画时才建，建好后一直留着。首次出现的键盘原来把每种方案的键都建好再藏起来，两百多个按键里这三种占了将近八十个，挡在第一帧前面，而大多数人从来不用它们。
+  ///
+  /// 在 `updateKeyboardLayout` 的最前面调用，后面的键距、iPad 宽度、18 键第二排缩进和显隐都照常落到新建的行上。
+  private func ensureAlternateLetterRows() {
+    guard actionRow != nil, isChineseMode, !isInLocalMode, !showsSymbols else { return }
+    if inputScheme.isZhuyin && zhuyinRowViews.isEmpty {
+      zhuyinRowViews = ZhuyinKeyLayout.rows.enumerated().map { index, row in
+        makeZhuyinRow(row, includesDelete: index == ZhuyinKeyLayout.rows.count - 1)
+      }
+      insertAlternateLetterRows(zhuyinRowViews, before: fourteenKeyRowViews.first ?? eighteenKeyRowViews.first ?? nineKeyContainer)
+    }
+    switch letterGrid {
+    case .fourteenKey where fourteenKeyRowViews.isEmpty:
+      fourteenKeyRowViews = FourteenKeyLayout.rows.enumerated().map { index, row in
+        makeLetterGridRow(row, grid: .fourteenKey, includesEdges: index == FourteenKeyLayout.rows.count - 1)
+      }
+      insertAlternateLetterRows(fourteenKeyRowViews, before: eighteenKeyRowViews.first ?? nineKeyContainer)
+    case .eighteenKey where eighteenKeyRowViews.isEmpty:
+      eighteenKeyRowViews = EighteenKeyLayout.rows.enumerated().map { index, row in
+        makeLetterGridRow(row, grid: .eighteenKey, includesEdges: index == EighteenKeyLayout.rows.count - 1)
+      }
+      insertAlternateLetterRows(eighteenKeyRowViews, before: nineKeyContainer)
+    default: break
+    }
+  }
+
+  /// 把后建的几排按原来的顺序插进按键列（字母行之后、九键外框之前），先藏着，并补上原来在 `installKeyboard` 里给的东西：与底行等高的约束（`updateKeyboardLayout` 末尾按显隐启用）和当前键距（`applyLayoutPreferences` 只在几何变化时才重设）。
+  private func insertAlternateLetterRows(_ rows: [UIView], before anchor: UIView) {
+    var index = keyColumn.arrangedSubviews.firstIndex(of: anchor) ?? keyColumn.arrangedSubviews.count
+    for row in rows {
+      row.isHidden = true
+      if let keySpacing = appliedLayout?.keySpacing { (row as? UIStackView)?.spacing = keySpacing }
+      keyColumn.insertArrangedSubview(row, at: index)
+      index += 1
+      standardRowHeights.append((row, row.heightAnchor.constraint(equalTo: actionRow.heightAnchor)))
+    }
+    // `decorateKey` 建键时按键还不在窗口里，动态的阴影色按默认外观解析；首屏建的键由 `viewWillAppear` 的 `applyKeyboardSkin` 在窗口里重新解析，键盘开着时才建的行在这里补上。
+    let skin = KeyboardTheme.current
+    guard view.window != nil, skin.design == nil else { return }
+    for case let button as UIButton in rows.flatMap(\.subviews) {
+      button.layer.shadowColor = skin.shadowColor.resolvedColor(with: button.traitCollection).cgColor
+    }
+  }
+
   private func updateKeyboardLayout() {
+    ensureAlternateLetterRows()
     applyLayoutPreferences()
     applyKeyboardMetrics()
     applyOneHanded()

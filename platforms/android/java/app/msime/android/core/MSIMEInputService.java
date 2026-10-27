@@ -864,6 +864,8 @@ public final class MSIMEInputService extends InputMethodService {
     /** 离开输入框后的词库快照处理与空闲同步一样延后、可取消：它每次都要把整份用户词库扫一遍算版本，原先失焦就直接排进工作线程，紧接着的下一个输入框建会话要排在它后面。 */
     private volatile long dictionarySnapshotGeneration;
     private Runnable dictionarySnapshotTask;
+    /** 被取消的快照处理欠了多久；欠满一分钟后下一次失焦不再延后。主线程上用。 */
+    private final DictionarySnapshotBacklog dictionarySnapshotBacklog = new DictionarySnapshotBacklog();
     /** 用户每复制一次就记进本机剪贴板历史；只在本服务（当前默认输入法）存活期间监听，关掉剪贴板历史或命中隐私规则时什么也不记。 */
     private final ClipboardManager.OnPrimaryClipChangedListener clipboardWatcher = () -> {
         captureClipboard(ClipboardCapturePolicy.Trigger.COPIED, false);
@@ -2197,8 +2199,8 @@ public final class MSIMEInputService extends InputMethodService {
         cancelPersonalDictionarySynchronization();
         stop(false);
         schedulePersonalDictionarySynchronization(true);
-        // 刚离开输入框、还在等空闲的快照处理在关掉工作线程前排进去，与原来失焦即排队时一样不丢这一轮。
-        if (dictionarySnapshotTask != null) scheduleDictionarySnapshotProcessing(true);
+        // 还欠着的快照处理（刚离开输入框还在等空闲的，或被后面的输入框取消、一直没做成的）在关掉工作线程前排进去，与原来失焦即排队时一样不丢这一轮。
+        if (dictionarySnapshotBacklog.owed()) scheduleDictionarySnapshotProcessing(true);
         preferencesWorker.shutdown();
         // Queued before the shutdown, so the worker still writes it.
         flushKeyPresses();
@@ -2661,34 +2663,40 @@ public final class MSIMEInputService extends InputMethodService {
     /**
      * The session has been destroyed, so native maintenance may take the exclusive lock.
      *
-     * <p>失焦时不立刻排进工作线程，与空闲同步一样等 {@link #PERSONAL_DICTIONARY_SYNC_DELAY_MILLIS}：换输入框、切应用时紧接着的 onStartInput 会取消它，连着失焦几次也只留最后一次，下一个输入框的建会话不用排在整份词库的扫描后面。键盘真闲下来（切到桌面这类不打字的窗口、收起键盘）时照常处理排着的快照激活和待合并的输入记录；已排进工作线程但还没轮到的，被取消后在线程上直接跳过，留到下一个空闲边界。
+     * <p>失焦时不立刻排进工作线程，与空闲同步一样等 {@link #PERSONAL_DICTIONARY_SYNC_DELAY_MILLIS}：换输入框、切应用时紧接着的 onStartInput 会取消它，连着失焦几次也只留最后一次，下一个输入框的建会话不用排在整份词库的扫描后面。只有 onFinishInput 排它：焦点落到桌面这类不打字的窗口时照常处理；按返回键收起键盘不经过 onFinishInput，会话还在，与本改动之前一样不处理。已排进工作线程但还没轮到的，被取消后在线程上直接跳过。被取消的那一轮记在 {@link #dictionarySnapshotBacklog} 里：一直在输入框之间切换、欠满一分钟时，这一次失焦不再延后，立即排队且不可取消；服务销毁时还欠着的在关掉工作线程前补上。
      */
     private void scheduleDictionarySnapshotProcessing(boolean immediate) {
         if (runtimeOptionsForSnapshot.isEmpty()) return;
         String options = runtimeOptionsForSnapshot;
         Context application = getApplicationContext();
+        boolean deferrable = dictionarySnapshotBacklog.owe(SystemClock.uptimeMillis()) && !immediate;
         long generation = ++dictionarySnapshotGeneration;
         if (dictionarySnapshotTask != null) main.removeCallbacks(dictionarySnapshotTask);
         Runnable task = () -> {
-            if (generation != dictionarySnapshotGeneration || session != 0) return;
+            if (generation != dictionarySnapshotGeneration) return;
             dictionarySnapshotTask = null;
+            // 等的这段时间里又建了会话（没经过 onStartInput 的取消）：这一轮仍记着欠，留给下一次失焦或服务销毁。
+            if (session != 0) return;
+            // 不可取消的这一轮一定会做，现在就算还清，免得它还没做完时再失焦又排一轮整份扫描。
+            if (!deferrable) dictionarySnapshotBacklog.settled();
             try {
                 preferencesWorker.execute(() -> {
-                    if (generation != dictionarySnapshotGeneration) return;
+                    if (deferrable && generation != dictionarySnapshotGeneration) return;
                     try {
                         Path root = DictionarySnapshotQueue.directory(application);
                         DictionarySnapshotWorker.process(root, root.resolve("staging"), options,
                             () -> SyncSignals.accountId(application));
+                        if (deferrable) main.post(dictionarySnapshotBacklog::settled);
                     }
                     catch (Exception | LinkageError ignored) { /* Retry at the next idle boundary. */ }
                 });
             } catch (RuntimeException ignored) { /* Service shutdown owns the final worker state. */ }
         };
         dictionarySnapshotTask = task;
-        if (immediate) {
-            task.run();
-        } else {
+        if (deferrable) {
             main.postDelayed(task, PERSONAL_DICTIONARY_SYNC_DELAY_MILLIS);
+        } else {
+            task.run();
         }
     }
 

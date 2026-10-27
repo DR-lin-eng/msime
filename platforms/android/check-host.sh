@@ -1188,12 +1188,16 @@ if ! rg -q '"import_android_v1"' "$repo_root/platforms/android/java/app/msime/an
   echo "Android must convert the old snapshot queue before importing the old cloud sync progress" >&2
   exit 1
 fi
-# 离开输入框后的快照处理每次都要扫一遍整份用户词库算版本，必须像空闲同步一样延后排队、并在下一个要建会话的输入框开始时取消；改回失焦即排进工作线程，换输入框时新会话又要排在这次扫描后面。
+# 离开输入框后的快照处理每次都要扫一遍整份用户词库算版本，必须像空闲同步一样延后排队、并在下一个要建会话的输入框开始时取消；改回失焦即排进工作线程，换输入框时新会话又要排在这次扫描后面。被取消的那一轮要记在 DictionarySnapshotBacklog 里：欠满一分钟就不再延后，服务销毁时还欠着的要补上，否则一直在几个输入框之间切换的用户永远等不到快照激活和输入记录合并。
 if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /scheduleDictionarySnapshotProcessing\(false\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
       "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
   || ! awk '/public void onStartInput\(EditorInfo info, boolean restarting\)/ { inside = 1 } inside && /cancelDictionarySnapshotProcessing\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
       "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
   || ! rg -q 'if \(generation != dictionarySnapshotGeneration\) return;' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/private void scheduleDictionarySnapshotProcessing\(boolean immediate\)/ { inside = 1 } inside && /dictionarySnapshotBacklog\.owe\(SystemClock\.uptimeMillis\(\)\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /if \(dictionarySnapshotBacklog\.owed\(\)\) scheduleDictionarySnapshotProcessing\(true\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
       "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
   echo "Android must defer dictionary snapshot processing after a blur and cancel it when the next field starts a session" >&2
   exit 1

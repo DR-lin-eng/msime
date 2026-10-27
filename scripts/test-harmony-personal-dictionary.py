@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Harmony's bounded personal-dictionary queue draining while the IME stays alive."""
+"""鸿蒙输入法存活时，个人词库队列按有界批次继续排空。"""
 import pathlib
 import sys
 
@@ -32,8 +32,9 @@ def main() -> int:
         )
     ]
     required = {
-        "bounded native batch": ".synchronize_batch_reporting_present(" in host
-        and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, page)" in store
+        "bounded native batch": ".synchronize_batch_reporting_present_with_source(" in host
+        and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, source, page)" in store
+        and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, || None, page)" in store
         and ".take(limit)" in store,
         "idle sync before Engine session": start < drain < create,
         "two-second yield": "IDLE_DICTIONARY_RETRY_MS: number = 2000" in session,

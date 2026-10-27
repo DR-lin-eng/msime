@@ -857,6 +857,9 @@ public final class MSIMEInputService extends InputMethodService {
     boolean backspaceClearedComposition;
     private volatile long personalDictionarySyncGeneration;
     private Runnable personalDictionarySyncTask;
+    /** 离开输入框后的词库快照处理与空闲同步一样延后、可取消：它每次都要把整份用户词库扫一遍算版本，原先失焦就直接排进工作线程，紧接着的下一个输入框建会话要排在它后面。 */
+    private volatile long dictionarySnapshotGeneration;
+    private Runnable dictionarySnapshotTask;
     /** 用户每复制一次就记进本机剪贴板历史；只在本服务（当前默认输入法）存活期间监听，关掉剪贴板历史或命中隐私规则时什么也不记。 */
     private final ClipboardManager.OnPrimaryClipChangedListener clipboardWatcher = () -> {
         captureClipboard(ClipboardCapturePolicy.Trigger.COPIED, false);
@@ -1634,8 +1637,10 @@ public final class MSIMEInputService extends InputMethodService {
             && InputViewRefreshPolicy.defersEngineStartup(EditorPolicy.useEngine(info.inputType),
                 info.inputType, isInputViewShown(), hardwareKeyboardAttached);
         // 只有接下来要建引擎会话的输入框才停掉空闲同步：建会话前 scheduleEngineStartup 会先在同一个工作线程上同步一轮。焦点落到不打字的窗口（桌面、设置页）时系统同样会调这里，原先一律停掉，离开输入框 500 ms 后的空闲同步几乎总被取消，导入词库的词条就一直等不到写入。这类窗口报的是 TYPE_NULL，会话推迟到键盘真显示时才建（deferEngine），到那时再停。
-        if (info != null && EditorPolicy.useEngine(info.inputType) && !deferEngine)
+        if (info != null && EditorPolicy.useEngine(info.inputType) && !deferEngine) {
             cancelPersonalDictionarySynchronization();
+            cancelDictionarySnapshotProcessing();
+        }
         boolean newDocument = !restarting || currentDocumentIdentifier == 0;
         if (newDocument) {
             currentDocumentIdentifier = nextDocumentIdentifier++;
@@ -1758,8 +1763,9 @@ public final class MSIMEInputService extends InputMethodService {
         if (!InputViewRefreshPolicy.shouldResumeDeferredStartup(deferred, engineStartGeneration, session,
                 connection, getCurrentInputConnection(), info != null && EditorPolicy.useEngine(info.inputType)))
             return;
-        // 到这时才知道这个输入框真要建会话，与 onStartInput 里一样先停掉空闲同步。
+        // 到这时才知道这个输入框真要建会话，与 onStartInput 里一样先停掉空闲同步和快照处理。
         cancelPersonalDictionarySynchronization();
+        cancelDictionarySnapshotProcessing();
         scheduleEngineStartup(runtimeOptionsForSnapshot, engineStartGeneration);
     }
 
@@ -1973,7 +1979,7 @@ public final class MSIMEInputService extends InputMethodService {
         imeVoiceEntry.cancel();
         stop(true);
         schedulePersonalDictionarySynchronization(false);
-        scheduleDictionarySnapshotProcessing();
+        scheduleDictionarySnapshotProcessing(false);
         connection = null;
         resetCaretAnchor();
         main.removeCallbacks(caretWindowSync);
@@ -2147,6 +2153,8 @@ public final class MSIMEInputService extends InputMethodService {
         cancelPersonalDictionarySynchronization();
         stop(false);
         schedulePersonalDictionarySynchronization(true);
+        // 刚离开输入框、还在等空闲的快照处理在关掉工作线程前排进去，与原来失焦即排队时一样不丢这一轮。
+        if (dictionarySnapshotTask != null) scheduleDictionarySnapshotProcessing(true);
         preferencesWorker.shutdown();
         // Queued before the shutdown, so the worker still writes it.
         flushKeyPresses();
@@ -2597,21 +2605,46 @@ public final class MSIMEInputService extends InputMethodService {
         }
     }
 
-    /** The session has been destroyed, so native maintenance may take the exclusive lock. */
-    private void scheduleDictionarySnapshotProcessing() {
+    private void cancelDictionarySnapshotProcessing() {
+        dictionarySnapshotGeneration++;
+        if (dictionarySnapshotTask != null) {
+            main.removeCallbacks(dictionarySnapshotTask);
+            dictionarySnapshotTask = null;
+        }
+    }
+
+    /**
+     * The session has been destroyed, so native maintenance may take the exclusive lock.
+     *
+     * <p>失焦时不立刻排进工作线程，与空闲同步一样等 {@link #PERSONAL_DICTIONARY_SYNC_DELAY_MILLIS}：换输入框、切应用时紧接着的 onStartInput 会取消它，连着失焦几次也只留最后一次，下一个输入框的建会话不用排在整份词库的扫描后面。键盘真闲下来（切到桌面这类不打字的窗口、收起键盘）时照常处理排着的快照激活和待合并的输入记录；已排进工作线程但还没轮到的，被取消后在线程上直接跳过，留到下一个空闲边界。
+     */
+    private void scheduleDictionarySnapshotProcessing(boolean immediate) {
         if (runtimeOptionsForSnapshot.isEmpty()) return;
         String options = runtimeOptionsForSnapshot;
         Context application = getApplicationContext();
-        try {
-            preferencesWorker.execute(() -> {
-                try {
-                    Path root = DictionarySnapshotQueue.directory(application);
-                    DictionarySnapshotWorker.process(root, root.resolve("staging"), options,
-                        () -> SyncSignals.accountId(application));
-                }
-                catch (Exception | LinkageError ignored) { /* Retry at the next idle boundary. */ }
-            });
-        } catch (RuntimeException ignored) { /* Service shutdown owns the final worker state. */ }
+        long generation = ++dictionarySnapshotGeneration;
+        if (dictionarySnapshotTask != null) main.removeCallbacks(dictionarySnapshotTask);
+        Runnable task = () -> {
+            if (generation != dictionarySnapshotGeneration || session != 0) return;
+            dictionarySnapshotTask = null;
+            try {
+                preferencesWorker.execute(() -> {
+                    if (generation != dictionarySnapshotGeneration) return;
+                    try {
+                        Path root = DictionarySnapshotQueue.directory(application);
+                        DictionarySnapshotWorker.process(root, root.resolve("staging"), options,
+                            () -> SyncSignals.accountId(application));
+                    }
+                    catch (Exception | LinkageError ignored) { /* Retry at the next idle boundary. */ }
+                });
+            } catch (RuntimeException ignored) { /* Service shutdown owns the final worker state. */ }
+        };
+        dictionarySnapshotTask = task;
+        if (immediate) {
+            task.run();
+        } else {
+            main.postDelayed(task, PERSONAL_DICTIONARY_SYNC_DELAY_MILLIS);
+        }
     }
 
     private void applyCandidateAppearance(JSONObject preferences) {

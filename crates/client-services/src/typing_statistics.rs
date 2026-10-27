@@ -664,6 +664,11 @@ pub struct TypingStatistics {
     /// 已解锁的徽章 ID 和解锁那天。只增不减：保留期删掉旧数据以后徽章也不会重新锁上；只有 reset 会清空。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub achievements: BTreeMap<String, String>,
+    /// 清空代号：每次 [`TypingStatisticsStore::reset`] 换一个随机值，旧文件和从没清空过的文件读成 0（不序列化）。
+    ///
+    /// 只给攒批用：进程攒着的上屏记下开始攒时文件的代号，写出时代号变了，说明这期间别的进程清空过统计，这批上屏是清空之前打的，丢掉，不写回清空后的文件。用随机值而不是计数，是因为清空次数也是在说用户，清空要清得什么都不剩。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub generation: u64,
 }
 
 impl Default for TypingStatistics {
@@ -689,6 +694,7 @@ impl Default for TypingStatistics {
             daily_voice_ms: BTreeMap::new(),
             skins_tried: BTreeSet::new(),
             achievements: BTreeMap::new(),
+            generation: 0,
         }
     }
 }
@@ -1018,6 +1024,8 @@ struct PendingCommits {
     since_ms: u64,
     /// 文件里的累计字数加上 `commits` 的字数，成就里程碑据此判断，不必为此另读一遍文件。
     total: u64,
+    /// 上次读写文件时它的清空代号（[`TypingStatistics::generation`]）。写出时文件的代号不同，就是别的进程在这期间清空过，`commits` 整批丢掉。
+    generation: u64,
     commits: Vec<PendingCommit>,
 }
 
@@ -1042,11 +1050,32 @@ fn pending_commits() -> MutexGuard<'static, BTreeMap<PathBuf, PendingCommits>> {
 
 /// 把本进程为所有目录攒着的上屏都写出去。尽力而为：写不进的那批丢掉，统计不能成为别的操作失败的原因。
 ///
-/// 给不知道具体目录的收尾点用（会话销毁、`msime_client_flush_all`、桌面宿主的失焦）；知道目录的宿主调 [`TypingStatisticsStore::flush`]。
+/// 给不知道具体目录、又能在当前线程上等磁盘的收尾点用（Windows 的失焦、桌面宿主的会话销毁、`msime_client_flush_all`）；在 UI 线程上的收尾点用 [`flush_pending_commits_in_background`]。知道目录的宿主调 [`TypingStatisticsStore::flush`]。
 pub fn flush_pending_commits() {
     let directories: Vec<PathBuf> = pending_commits().keys().cloned().collect();
     for directory in directories {
         let _ = TypingStatisticsStore::new(directory).flush();
+    }
+}
+
+/// [`flush_pending_commits`]，但在新开的后台线程上写，调用方不等磁盘，也不等别的线程手里的 [`PENDING_COMMITS`]。
+///
+/// 给可能在 UI 线程或主线程上的收尾点用（移动宿主的失焦和会话销毁、macOS 和 Linux 的失焦）：那里不能整份读写统计文件再 fsync，也不能等统计工作线程正在做的那次写。本进程没有攒着任何目录时什么都不做，不开线程；锁正被别的线程拿着时照样开线程，由它去等。开不了线程时退回到在当前线程上写：丢计数比卡一下更糟。
+pub fn flush_pending_commits_in_background() {
+    let nothing_held = match PENDING_COMMITS.try_lock() {
+        Ok(pending) => pending.is_empty(),
+        Err(std::sync::TryLockError::Poisoned(pending)) => pending.into_inner().is_empty(),
+        Err(std::sync::TryLockError::WouldBlock) => false,
+    };
+    if nothing_held {
+        return;
+    }
+    if std::thread::Builder::new()
+        .name("msime-statistics-flush".into())
+        .spawn(flush_pending_commits)
+        .is_err()
+    {
+        flush_pending_commits();
     }
 }
 
@@ -1090,7 +1119,7 @@ impl TypingStatisticsStore {
         let mut pending = pending_commits();
         let lock = self.lock_file()?;
         if let Some(entry) = pending.remove(&self.directory) {
-            let _ = self.write_commits_locked(&lock, &entry.commits);
+            let _ = self.write_commits_locked(&lock, &entry.commits, entry.generation);
         }
         Ok(lock)
     }
@@ -1157,14 +1186,15 @@ impl TypingStatisticsStore {
 
     /// 在文件锁内重读统计，按到达的顺序把攒着的上屏逐条记进去，再写一次。
     ///
-    /// 重读是因为别的进程（设置页）可能在这期间清空了统计、改了保留期或关掉了统计：攒着的计数合并进它写下的文件，统计关着时整批丢掉不写。每条上屏带着自己的时刻、日期和小时，记法与当初逐条写入完全相同。整批成功或文件不变。返回重读（并在有上屏时合并）后的统计。
+    /// 重读是因为别的进程（设置页）可能在这期间清空了统计、改了保留期或关掉了统计：改了保留期就合并进它写下的文件；统计关着，或文件的清空代号已经不是 `generation`（这批上屏是清空之前打的，攒批之前它们早已在文件里、随清空一起删掉），整批丢掉不写。每条上屏带着自己的时刻、日期和小时，记法与当初逐条写入完全相同。整批成功或文件不变。返回重读（并在有上屏时合并）后的统计。
     fn write_commits_locked(
         &self,
         lock: &StatisticsLock,
         commits: &[PendingCommit],
+        generation: u64,
     ) -> Result<TypingStatistics, TypingStatisticsError> {
         let mut value = self.read_locked(lock)?;
-        if !value.enabled || commits.is_empty() {
+        if !value.enabled || commits.is_empty() || value.generation != generation {
             return Ok(value);
         }
         for commit in commits {
@@ -1186,7 +1216,8 @@ impl TypingStatisticsStore {
             return Ok(());
         }
         let lock = self.lock_file()?;
-        self.write_commits_locked(&lock, &entry.commits).map(|_| ())
+        self.write_commits_locked(&lock, &entry.commits, entry.generation)
+            .map(|_| ())
     }
 
     pub fn load(&self) -> Result<TypingStatistics, TypingStatisticsError> {
@@ -1309,6 +1340,7 @@ impl TypingStatisticsStore {
                     enabled: value.enabled,
                     since_ms: now_ms,
                     total: value.total,
+                    generation: value.generation,
                     commits: Vec::new(),
                 })
             }
@@ -1334,12 +1366,13 @@ impl TypingStatisticsStore {
         let commits = std::mem::take(&mut entry.commits);
         match self
             .lock_file()
-            .and_then(|lock| self.write_commits_locked(&lock, &commits))
+            .and_then(|lock| self.write_commits_locked(&lock, &commits, entry.generation))
         {
             Ok(value) => {
                 entry.enabled = value.enabled;
                 entry.since_ms = now_ms;
                 entry.total = value.total;
+                entry.generation = value.generation;
                 Ok((if value.enabled { count } else { 0 }, value.total))
             }
             Err(error) => {
@@ -1574,8 +1607,29 @@ impl TypingStatisticsStore {
         value.skins_tried.clear();
         // 徽章只增不减的唯一例外：用户要求清空统计时，解锁记录也一并清空。
         value.achievements.clear();
+        // 别的进程攒着的清空前的上屏据此认出清空，不写回来。
+        value.generation = next_generation(value.generation);
         self.write_locked(&lock, &value)?;
         Ok(value)
+    }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// 清空后的代号：随机、非零、与清空前不同。系统随机数不可用时退回到在旧值上加一，只要不同就够用。
+fn next_generation(previous: u64) -> u64 {
+    let mut bytes = [0_u8; 8];
+    let random = if getrandom::fill(&mut bytes).is_ok() {
+        u64::from_le_bytes(bytes)
+    } else {
+        previous.wrapping_add(1)
+    };
+    if random == 0 || random == previous {
+        previous.wrapping_add(1).max(1)
+    } else {
+        random
     }
 }
 

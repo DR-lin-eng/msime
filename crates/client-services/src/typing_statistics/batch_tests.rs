@@ -173,8 +173,21 @@ fn batched_commits_produce_the_same_document_as_writing_each_one() {
     assert_eq!(on_disk(&batched_directory), expected);
 }
 
+/// 代替另一个进程做 `reset`：清空的字段与 [`TypingStatisticsStore::reset`] 相同，也换清空代号，但不先写出本进程攒着的上屏。
+fn other_process_reset(store: &TypingStatisticsStore) {
+    other_process(store, |value| {
+        *value = TypingStatistics {
+            enabled: value.enabled,
+            retention: value.retention,
+            last_pruned_day: value.last_pruned_day.clone(),
+            generation: next_generation(value.generation),
+            ..TypingStatistics::default()
+        };
+    });
+}
+
 #[test]
-fn pending_commits_merge_into_a_file_another_process_reset() {
+fn pending_commits_typed_before_another_process_reset_are_not_written_back() {
     let (directory, store) = enabled_store();
     store
         .record_at("昨天", TypingSource::Quanpin, "2026-10-26", Some(9), 1_000)
@@ -183,20 +196,80 @@ fn pending_commits_merge_into_a_file_another_process_reset() {
     store
         .record_at("今天", TypingSource::Quanpin, DAY, Some(9), 90_000)
         .unwrap();
-    // The settings app clears the statistics while this process still holds today's commit.
+    // The settings app clears the statistics while this process still holds today's commit. Before batching that commit was already in the file and the clear removed it; it must not come back.
+    other_process_reset(&store);
+    let cleared = fs::read(directory.path().join(STATISTICS_FILE)).unwrap();
+    store.flush().unwrap();
+    assert_eq!(
+        fs::read(directory.path().join(STATISTICS_FILE)).unwrap(),
+        cleared
+    );
+    let after = on_disk(&directory);
+    assert_eq!(after.total, 0);
+    assert!(after.days.is_empty());
+    assert!(after.daily_hours.is_empty());
+    assert_eq!(after.last_commit_ms, 0);
+
+    // The batch is dropped only once: typing after the clear is counted against the cleared file.
+    store
+        .record_at("之后", TypingSource::Quanpin, DAY, Some(10), 200_000)
+        .unwrap();
+    store.flush().unwrap();
+    assert_eq!(on_disk(&directory).total, 2);
+}
+
+#[test]
+fn a_due_record_after_another_process_reset_drops_the_held_batch() {
+    let (directory, store) = enabled_store();
+    store
+        .record_at("你好", TypingSource::Quanpin, DAY, Some(9), 1_000)
+        .unwrap();
+    other_process_reset(&store);
+    let (_, total) = store
+        .record_with_total_at(
+            "世界",
+            TypingSource::Quanpin,
+            DAY,
+            Some(9),
+            1_000 + COMMIT_FLUSH_INTERVAL_MS,
+        )
+        .unwrap();
+    assert_eq!(total, 0, "the running total follows the cleared file");
+    assert_eq!(on_disk(&directory).total, 0);
+    store
+        .record_at("再见", TypingSource::Quanpin, DAY, Some(9), 40_000)
+        .unwrap();
+    store.flush().unwrap();
+    assert_eq!(on_disk(&directory).total, 2);
+}
+
+#[test]
+fn a_retention_change_elsewhere_keeps_the_held_batch() {
+    let (directory, store) = enabled_store();
+    store
+        .record_at("你好", TypingSource::Quanpin, DAY, Some(9), 1_000)
+        .unwrap();
     other_process(&store, |value| {
-        let retention = value.retention;
-        *value = TypingStatistics {
-            enabled: true,
-            retention,
-            ..TypingStatistics::default()
-        };
+        value.retention = StatisticsRetention::Days30;
     });
     store.flush().unwrap();
-    let merged = on_disk(&directory);
-    assert_eq!(merged.total, 2);
-    assert!(!merged.days.contains_key("2026-10-26"));
-    assert_eq!(merged.days[DAY], 2);
+    let written = on_disk(&directory);
+    assert_eq!(written.total, 2);
+    assert_eq!(written.retention, StatisticsRetention::Days30);
+}
+
+#[test]
+fn reset_changes_the_generation() {
+    let (directory, store) = enabled_store();
+    let before = on_disk(&directory).generation;
+    store
+        .record_at("你好", TypingSource::Quanpin, DAY, Some(9), 1_000)
+        .unwrap();
+    let cleared = store.reset().unwrap();
+    assert_eq!(cleared.total, 0);
+    assert_ne!(cleared.generation, before);
+    assert_ne!(cleared.generation, 0);
+    assert_eq!(on_disk(&directory), cleared);
 }
 
 #[test]
@@ -375,4 +448,23 @@ fn the_running_total_includes_what_the_process_still_holds() {
         (3, 7)
     );
     assert_eq!(on_disk(&directory).total, 2);
+}
+
+#[test]
+fn the_background_flush_writes_what_the_process_holds() {
+    let (directory, store) = enabled_store();
+    store
+        .record_at("你好", TypingSource::Quanpin, DAY, Some(9), 1_000)
+        .unwrap();
+    assert_eq!(on_disk(&directory).total, 0);
+    flush_pending_commits_in_background();
+    // The caller does not wait for the write; poll the file until the background thread has replaced it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while on_disk(&directory).total != 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background flush never wrote the held commit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }

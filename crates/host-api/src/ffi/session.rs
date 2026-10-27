@@ -223,10 +223,22 @@ pub extern "C" fn msime_client_focus(handle: u64, focused: bool) -> *mut c_char 
     response(|| focus_session(handle, focused))
 }
 
-/// 失焦时是否顺带写出本进程攒着的打字统计上屏（`record` 的批次）。
+/// 写出本进程攒着的打字统计上屏（`record` 的批次）：`inline` 时在当前线程上写完再返回，否则交给后台线程。
 ///
-/// 桌面宿主（Windows、macOS、Linux）在常驻进程里从后台线程调 `record`，没有接 `flush`：不在这里写，停下不打字以后最后一批要等到下一次上屏满间隔才写，设置页一直看不到。移动宿主不在这里写，它们按约定在键盘收起、输入框失焦时自己在统计工作线程上调 `flush`；会话调用可能在 UI 线程上（鸿蒙），在这里写会把读写和 fsync 放回 UI 线程。
-const FLUSHES_TYPING_STATISTICS_ON_FOCUS_OUT: bool = !cfg!(any(
+/// 失焦和会话销毁都要写：移动宿主的键盘扩展和输入法进程可能在收起后被系统直接杀掉，桌面宿主停下不打字以后最后一批也要等到下一次上屏满间隔才写，设置页一直看不到。宿主另在统计工作线程上调 `flush` 时这里再写一次也只是空转。
+pub(crate) fn flush_typing_statistics(inline: bool) {
+    if inline {
+        msime_client_services::typing_statistics::flush_pending_commits();
+    } else {
+        msime_client_services::typing_statistics::flush_pending_commits_in_background();
+    }
+}
+
+/// 失焦时在当前线程上写统计。只有 Windows：它的失焦在服务进程的 IPC 线程上。macOS 的失焦在 IMK 主线程、Linux 的在 GLib 主循环、移动宿主的可能在 UI 线程上，而它们的 `record` 在别的线程上跑：在这里写会把整份读写和 fsync 放到主线程，还可能等统计线程手里那次写的 fsync，所以交给后台线程。
+const FLUSHES_TYPING_STATISTICS_INLINE_ON_FOCUS_OUT: bool = cfg!(target_os = "windows");
+
+/// 销毁会话时在当前线程上写统计。桌面宿主销毁会话不频繁，之后进程可能就退出了，后台线程来不及写完；移动宿主（Android 每换一个输入框就销毁重建一次会话，鸿蒙在 ArkTS 里同步销毁）的销毁在 UI 线程上，交给后台线程。
+pub(crate) const FLUSHES_TYPING_STATISTICS_INLINE_ON_DESTROY: bool = !cfg!(any(
     target_os = "android",
     target_env = "ohos",
     target_os = "ios"
@@ -240,9 +252,7 @@ pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String>
         // Focus-out is where a host's field ends, so selections counted in it are written here rather than waiting for a batch to fill. The same goes for the engine's delayed context learning: the iOS keyboard extension and the Android IME process can be killed without ever destroying their sessions, and the engine no longer writes that queue at process exit.
         if !focused {
             session.flush_selections();
-            if FLUSHES_TYPING_STATISTICS_ON_FOCUS_OUT {
-                msime_client_services::typing_statistics::flush_pending_commits();
-            }
+            flush_typing_statistics(FLUSHES_TYPING_STATISTICS_INLINE_ON_FOCUS_OUT);
             msime_engine::flush_personal_learning();
         } else {
             session.refresh_plugin_tables();

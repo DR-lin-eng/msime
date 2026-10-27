@@ -50,8 +50,10 @@ pub(crate) fn destroy_session(handle: u64) -> Result<Value, String> {
         session.lifecycle_destroy();
         // A host may tear a session down without a focus-out first; what it counted is still written.
         session.flush_selections();
-        // 宿主经 `record` 攒在本进程里的上屏也在这里写出：销毁会话是收尾，之后进程可能就退出了。
-        msime_client_services::typing_statistics::flush_pending_commits();
+        // 宿主经 `record` 攒在本进程里的上屏也在这里写出：销毁会话是收尾，之后进程可能就退出了。移动宿主在 UI 线程上销毁，交给后台线程写。
+        crate::ffi::session::flush_typing_statistics(
+            crate::ffi::session::FLUSHES_TYPING_STATISTICS_INLINE_ON_DESTROY,
+        );
         // Dropping the engine session writes its own journal's delayed context learning; this also covers every other journal the process learned into, while this session still holds its dictionary access.
         msime_engine::flush_personal_learning();
         // 停顿模型可能仍在后台评分；销毁会话时放弃任务，避免模型残留在作业表中。

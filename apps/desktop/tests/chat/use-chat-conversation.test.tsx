@@ -145,9 +145,10 @@ test.each(
     if (operation === "更换客户端") {
       rerender({ host: nextHost });
       await waitFor(() => expect(result.current.loadingModels).toBe(false));
+      expect(result.current.sending).toBe(false);
+    } else {
+      act(() => result.current.cancel());
     }
-    // 保留现有交互：取消当前发送后，用户可继续发送。
-    act(() => result.current.cancel());
     act(() => result.current.setDraft("当前消息"));
     act(() => result.current.send());
     await act(async () => {

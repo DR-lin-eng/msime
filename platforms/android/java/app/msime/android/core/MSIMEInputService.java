@@ -3683,7 +3683,15 @@ public final class MSIMEInputService extends InputMethodService {
 
     /** 完整候选会放出暂扣尾部并可能重排座位，读取后必须同步同一代视图。 */
     JSONObject currentCandidateSnapshot() throws JSONException {
-        JSONObject snapshot = value(NativeClient.allCandidates(session));
+        return followCandidateGeneration(value(NativeClient.allCandidates(session)));
+    }
+
+    /** 横向候选条按需取的一段（{@link NativeClient#candidateRange}）。取到放出来的末尾之后再要会放出暂扣尾部并换一代，同样要同步同一代视图。 */
+    JSONObject candidateRangeSnapshot(int start, int count) throws JSONException {
+        return followCandidateGeneration(value(NativeClient.candidateRange(session, start, count)));
+    }
+
+    private JSONObject followCandidateGeneration(JSONObject snapshot) throws JSONException {
         if (strictCandidateLong(snapshot, "session") != session)
             throw new JSONException("Unexpected candidate session");
         if (!sameCandidateVersion(snapshot, view)) {

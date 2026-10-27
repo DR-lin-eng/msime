@@ -110,6 +110,14 @@ if ! rg -q 'pool\.get\(visible\)' <<< "$strip_add_body" \
   echo "The touch candidate strip must reuse its pooled buttons instead of creating new ones on every render" >&2
   exit 1
 fi
+# 触屏候选条每键只取它建得出来的一批（NativeClient.candidateRange），滚近尾部再取下一批。改回每键取整代候选（allCandidates / currentCandidateSnapshot），每键都要在主线程上解析几百到几千行的候选 JSON，首字母还会逼引擎把暂扣的整张声母表查出来；Rust 侧的分段语义由 input-runtime 和 host-api 的 candidate_range 测试覆盖。
+strip_source="$repo_root/platforms/android/java/app/msime/android/core/ImeCandidateStrip.java"
+if rg -q 'currentCandidateSnapshot\(|allCandidates\(' "$strip_source" \
+  || ! rg -q 's\.candidateRangeSnapshot\(0, wanted\)' "$strip_source" \
+  || ! rg -q 's\.candidateRangeSnapshot\(loaded, CandidateGridBatchPolicy\.BATCH\)' "$strip_source"; then
+  echo "The touch candidate strip must fetch one batch per render through candidateRange, not the whole candidate generation" >&2
+  exit 1
+fi
 # applySkin 每次 render 都走整棵键盘树，收着的面板（表情、符号网格可有几百格）不能每键跟着上一遍色：只在 applySkin 自己那几遍里跳过 GONE 子树并记下来，被直接显示出来时由画帧前的兜底补一次换肤。
 if ! rg -q 'skipHidden = true;' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
   || ! rg -q 'skippedHidden\.add\(child\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \

@@ -26,7 +26,7 @@
 //! it checks is therefore a ceiling on this crate's share of a frame, not a guarantee about what a
 //! user perceives.
 //!
-//! `--scheme shuangpin --shuangpin-profile <方案>` 把用例编成 26 键双拼的按键再打；再给 `--key-geometry` 和 `--touch-sigma` 时按 `convert_eval` 同样的规则合成误触和落点（默认 `--touch-mode realistic`），像触屏宿主那样注册几何、每键带上按下点，量带着按错的键时每次按键的开销，换算触点的那一步也计在这一键里。`--no-touch-points` 只送按到的键（平面表）。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少。双拼的纠错整句要加 `--autocorrect` 才会出现。
+//! `--scheme shuangpin --shuangpin-profile <方案>` 把用例编成 26 键双拼的按键再打；再给 `--key-geometry` 和 `--touch-sigma` 时按 `convert_eval` 同样的规则合成误触和落点（默认 `--touch-mode realistic`），像触屏宿主那样注册几何、每键带上按下点，量带着按错的键时每次按键的开销，换算触点的那一步也计在这一键里。`--no-touch-points` 只送按到的键（平面表）。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少；再加 `--no-touch-points` 两臂都不送（A/A），量出同一台机器上配对增量本身的噪声底，触点那一臂的增量要和它比。双拼的纠错整句要加 `--autocorrect` 才会出现。
 mod eval_resources;
 
 #[path = "convert_eval/grid_keys.rs"]
@@ -244,7 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index += 1;
     }
     let resources = resources.ok_or(
-        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>] [--scheme shuangpin --shuangpin-profile <profile> [--autocorrect] [--key-geometry <file.json>... --touch-sigma <σ> [--touch-bias-y <b>] [--touch-mode realistic] [--seed N] [--no-touch-points | --touch-arms]]]",
+        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>] [--scheme shuangpin --shuangpin-profile <profile> [--autocorrect] [--key-geometry <file.json>... --touch-sigma <σ> [--touch-bias-y <b>] [--touch-mode realistic] [--seed N] [--no-touch-points] [--touch-arms]]]",
     )?;
     if sets.is_empty() {
         return Err("at least one --set is required".into());
@@ -289,11 +289,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mode.name(),
                 layout.name
             );
-            if touch_arms && !touch_points {
-                return Err(
-                    "--touch-arms compares touch points with none; drop --no-touch-points".into(),
-                );
-            }
             let geometry = KeyGeometry::from_json(&layout.json)?
                 .ok_or("a reference geometry needs a non-zero id")?;
             Some((TouchNoise::new(&layout, sigma, bias), mode, geometry))
@@ -499,7 +494,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         warmup.min(cases.len())
     );
     println!("milliseconds per keystroke:");
-    if touch_arms {
+    if touch_arms && !touch_points {
+        // A/A：两臂做完全相同的事，增量只有计时噪声。
+        row("flat table", &off_summary);
+        row("flat again", &on_summary);
+        row("noise", &delta_summary);
+    } else if touch_arms {
         row("flat table", &off_summary);
         row("with touches", &on_summary);
         row("touches add", &delta_summary);

@@ -160,7 +160,7 @@ cargo run --release -p msime-input-runtime --example convert_eval -- \
 
 **调参。** `--touch-tuning base=12,scale=8,...` 覆盖引擎的触点计价参数（`base`、`scale`、`sigma_x`、`sigma_y`、`bias_y`、`min`、`max`、`cut`、`show`，意思见 `msime_engine::touch::TouchTuning`），只覆盖给出的几项，报告头里多一行 `touch_tuning`。它经 `host::Session::set_touch_tuning` 设进引擎，只有 Rust 示例能设，宿主经 FFI 设不了。
 
-`rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile <方案> --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 `realistic`（或 `--touch-mode` 指定的模式）合成误触和落点，像宿主一样每键带上按下点，量带着按错的键时每次按键的开销；`--no-touch-points` 只送按到的键。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少。
+`rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile <方案> --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 `realistic`（或 `--touch-mode` 指定的模式）合成误触和落点，像宿主一样每键带上按下点，量带着按错的键时每次按键的开销；`--no-touch-points` 只送按到的键。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少；再加 `--no-touch-points` 两臂都不送（A/A），量的是同一台机器上配对增量本身的噪声。配对增量的 p95 在 A/A 下也不是 0（两次相同的按键各自抖动），所以触点的代价看「with touches 与 flat table 两臂 p95 之差」，并且同一条命令重复至少 5 轮、取中位数并报出各轮的范围，单轮的数字不作数。
 
 ## 往整句集里加用例
 

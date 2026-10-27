@@ -1304,6 +1304,23 @@ fn a_learning_export_carries_the_journal_and_restages_to_the_same_revision() {
     );
 }
 
+/// 键盘空闲时反复问的预览版本（`msime_client_snapshot_version`、队列的 `state`）与不缓存的 `version` 一致，日志改过之后也跟着变。命中缓存时不重读日志由引擎的 `cached_dictionary_state_revision` 用例覆盖。
+#[test]
+fn the_preview_version_matches_the_exact_version_before_and_after_a_write() {
+    let device = LearningDevice::with_learning();
+    let first = super::preview_version(&device.options).unwrap();
+    assert_eq!(first, super::version(&device.options).unwrap());
+    assert_eq!(super::preview_version(&device.options).unwrap(), first);
+
+    device.sql(&format!(
+        "INSERT INTO user_dictionary_operations(dictionary,key,value,operation,weight,display,user_inserted) VALUES('pinyin','hao','{}','upsert',100,'',1);",
+        "好".repeat(1000)
+    ));
+    let changed = super::preview_version(&device.options).unwrap();
+    assert_ne!(changed, first);
+    assert_eq!(changed, super::version(&device.options).unwrap());
+}
+
 /// 快照格式装不下的输入记录跳过，选词计数截到 10，导出照样通过自检。
 #[test]
 fn a_learning_export_leaves_out_what_the_format_cannot_carry() {

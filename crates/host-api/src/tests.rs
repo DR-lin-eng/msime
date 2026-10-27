@@ -4711,6 +4711,93 @@ fn nine_key_digits_offer_ranked_english_across_the_host_boundary() {
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
+/// 横向候选条每键只取一批（`msime_client_candidate_range`）：首字母打下去时不把整张声母表放出来，身份与整代复制里同一座位的那一行相同；把放出来的取完再要，才放出暂扣的尾部并换一代。
+#[test]
+fn candidate_range_takes_one_batch_and_releases_the_initial_tail_only_past_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    // 声母 c 有 30 个字，比首字母先给的 24 行多。
+    let mut fixture =
+        String::from("CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);");
+    let words: Vec<char> = "才菜参残草测层茶查差柴产长常场唱超朝车成城程吃池出初除处川穿"
+        .chars()
+        .collect();
+    assert_eq!(words.len(), 30);
+    for (index, word) in words.iter().enumerate() {
+        fixture.push_str(&format!(
+            "INSERT INTO tbl_1_c VALUES('c{index:02}','c','{word}',{});",
+            1000 - index * 10
+        ));
+    }
+    fixture.push_str("CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);");
+    for directory in [&resources, &dictionaries] {
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(&fixture)
+            .unwrap();
+    }
+    bundle_wubi_table(&resources);
+    let preferences = Preferences {
+        learning: false,
+        ..chinese_preferences()
+    };
+    let options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences": preferences }).to_string();
+    let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
+    let handle = created["value"]["session"].as_u64().unwrap();
+    read(msime_client_focus(handle, true));
+    let typed = read(msime_client_character(handle, b'c', false));
+    let generation = typed["value"]["view"]["generation"].as_u64().unwrap();
+
+    let first = read(msime_client_candidate_range(handle, 0, 48))["value"].clone();
+    assert_eq!(first["generation"], generation, "{first}");
+    let total = first["total"].as_u64().unwrap() as usize;
+    assert!(total < words.len(), "the initial tail stays held: {first}");
+    assert_eq!(first["candidates"].as_array().unwrap().len(), total);
+    assert_eq!(
+        read(msime_client_view(handle))["value"]["generation"],
+        generation
+    );
+    let window = read(msime_client_candidate_range(handle, 2, 3))["value"].clone();
+    let window = window["candidates"].as_array().unwrap();
+    assert_eq!(window.len(), 3);
+    assert_eq!(window[0]["id"]["index"], 2);
+    assert_eq!(window[0]["id"]["generation"], generation);
+    assert_eq!(window[0]["text"], first["candidates"][2]["text"]);
+
+    // 取到放出来的末尾之后再要：放出尾部、换一代，视图跟着换。
+    let more = read(msime_client_candidate_range(handle, total, 48))["value"].clone();
+    let released = more["generation"].as_u64().unwrap();
+    assert!(released > generation, "{more}");
+    let released_total = more["total"].as_u64().unwrap() as usize;
+    assert!(released_total >= words.len(), "{more}");
+    assert_eq!(
+        read(msime_client_view(handle))["value"]["generation"],
+        released
+    );
+    // 新的一代里每个座位都和整代复制同一身份、同一候选；取到末尾以后同一代不再给。
+    let whole = read(msime_client_candidate_range(handle, 0, released_total))["value"].clone();
+    let complete = read(msime_client_all_candidates(handle))["value"].clone();
+    assert_eq!(complete["generation"], released);
+    assert_eq!(whole["candidates"], complete["candidates"]);
+    let exhausted = read(msime_client_candidate_range(handle, released_total, 48))["value"].clone();
+    assert_eq!(exhausted["generation"], released);
+    assert_eq!(exhausted["candidates"].as_array().unwrap().len(), 0);
+
+    // 选中范围里取来的候选和整代复制里的一样可用。
+    let index = whole["candidates"][released_total - 1]["id"]["index"]
+        .as_u64()
+        .unwrap() as usize;
+    let selected = read(msime_client_select_any_candidate(handle, released, index));
+    assert_eq!(selected["value"]["handled"], true, "{selected}");
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 /// 宿主按宽度排出的一行跨过固定页：报出显示页后，`;` 选的是这一行的第二个，翻译查询列的也是这一行。
 #[test]
 fn display_page_routes_second_third_shortcut_and_translation_query_through_the_abi() {

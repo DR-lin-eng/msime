@@ -950,6 +950,8 @@ char *msime_client_select_edge(uint64_t session, uint64_t generation, size_t ind
 /* On-demand {session,generation,preedit,candidates:[Candidate...]}. Unlike View,
  * candidates contains the complete cached Engine generation with global IDs. */
 char *msime_client_all_candidates(uint64_t session);
+/* {session,generation,preedit,reading,total,candidates:[Candidate...]}：座位 start 起最多 count 行，到 total（这一代已放出的候选数）为止，身份与 msime_client_all_candidates 同一座位的那一行相同，可交给 msime_client_select_any_candidate。每键重画的横向候选条只取它这次建得出来的一批，不必整代复制。引擎暂扣的尾部（首字母只先给 24 行）只在 start 到了 total 时才放出；放出来会重排座位并换一代，宿主看到 generation 变了要按新的一代从头取。同一代里 candidates 为空表示已经没有更多。 */
+char *msime_client_candidate_range(uint64_t session, size_t start, size_t count);
 /* 宿主按自己的排版显示了与固定分页不同的一组候选（macOS 横排按宽度自适应）时，报出这一代里这些候选的全局序号
  * （来自 all_candidates 的 id.index，<=256 个）。二三候选键、五笔自定义选词键和翻译查询都按看得见的这一组；
  * count 为 0 时清掉。只对 generation 这一代有效，组字推进后自动失效。

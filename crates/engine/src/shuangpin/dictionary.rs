@@ -603,6 +603,7 @@ impl ShuangpinDictionary {
         let touched = touch_slice(&self.key_touches, &self.touch_input, rows_key)
             .zip(self.key_geometry.as_deref());
         let tuning = self.touch_tuning;
+        let touch_priced = touched.is_some();
         let span_cache = &mut self.typo_span_cache;
         let mut typo_edges = |literal_best: &SentencePath| match touched {
             Some((touches, geometry)) => collect_priced_shuangpin_typo_edges(
@@ -661,6 +662,8 @@ impl ShuangpinDictionary {
             typo.key,
         );
         sentence.sentence_association = true;
+        sentence.touch_supported =
+            touch_priced && typo.score >= typo.literal_score - tuning.show_margin;
         sentence.sentence_words = typo.words;
         sentence.corrected_from = fold_reading(typed).into();
         candidates.insert(at, sentence);

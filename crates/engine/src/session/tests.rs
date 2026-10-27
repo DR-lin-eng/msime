@@ -1002,6 +1002,138 @@ fn caret_prefix_floors_to_a_shuangpin_unit() {
     assert_eq!(words(&session), words(&prefix));
 }
 
+// ---- 触屏触点（#10018） ----
+
+/// a 到 z 排成一行，键宽 10、键高 10。
+fn touch_geometry() -> Arc<crate::touch::KeyGeometry> {
+    let mut keys = [[0.0f32; 4]; 26];
+    for (index, key) in keys.iter_mut().enumerate() {
+        *key = [index as f32 * 10.0, 0.0, 10.0, 10.0];
+    }
+    Arc::new(crate::touch::KeyGeometry::new(3, &keys, None, &[]).unwrap())
+}
+
+/// 当前请求带着的触点。
+fn request_touches(session: &Session) -> Vec<Option<crate::touch::KeyTouch>> {
+    session.input.engine.request().key_touches.clone()
+}
+
+/// 待用触点只交给紧接着的那一个 26 键双拼字母：命令、选词这些入口一开头就丢掉它，改道到别处的按键不会把它留给后面的字母；全拼和没有几何时不带触点。
+#[test]
+fn a_pending_touch_reaches_only_the_next_shuangpin_letter() {
+    let touch = Some(crate::touch::KeyTouch {
+        dx: 1,
+        dy: 0,
+        copy: 0,
+    });
+    let fixture = Fixture::new(CARET_PREFIX_FIXTURE);
+    let mut session = fixture.session_with(|options| options.scheme = SchemeType::Shuangpin);
+    // 没有几何：触点进不了请求。
+    session.set_key_touch(touch);
+    session.character(b'n', false);
+    assert!(request_touches(&session).is_empty());
+    session.command(Command::Cancel);
+
+    session.set_key_geometry(Some(touch_geometry()));
+    session.set_key_touch(touch);
+    session.character(b'n', false);
+    session.character(b'i', false);
+    assert_eq!(request_touches(&session), [touch, None]);
+    // 退格删掉带触点的那个键之后，剩下的一个触点都没有。
+    session.command(Command::Backspace);
+    session.command(Command::Backspace);
+    session.character(b'n', false);
+    assert!(request_touches(&session).is_empty());
+    session.command(Command::Cancel);
+
+    // 设了触点、这一键却改道成命令：触点作废，下一个字母不带。
+    session.set_key_touch(touch);
+    session.command(Command::Cancel);
+    session.character(b'n', false);
+    assert!(request_touches(&session).is_empty());
+    // 选词、标点同理。
+    session.set_key_touch(touch);
+    session.select(0);
+    session.character(b'n', false);
+    assert!(request_touches(&session).is_empty());
+    session.set_key_touch(touch);
+    session.punctuation(b',');
+    session.character(b'n', false);
+    assert!(request_touches(&session).is_empty());
+    session.command(Command::Cancel);
+
+    // 清掉几何之后不再带触点。
+    session.set_key_geometry(None);
+    session.set_key_touch(touch);
+    session.character(b'n', false);
+    assert!(request_touches(&session).is_empty());
+    session.command(Command::Cancel);
+
+    // 全拼不收触点。
+    let mut quanpin = fixture.session_with(|_| {});
+    quanpin.set_key_geometry(Some(touch_geometry()));
+    quanpin.set_key_touch(touch);
+    quanpin.character(b'n', false);
+    assert!(quanpin.input.engine.request().key_touches.is_empty());
+}
+
+/// 合成词库：小鹤 mw gr xi 是没关系，r 按成邻键 f 就成了 gen（跟）。
+const TOUCH_TYPO_FIXTURE: &str = "CREATE TABLE tbl_1_m(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_m VALUES('mei','m','没',1000);CREATE TABLE tbl_1_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_g VALUES('gen','g','跟',1000),('guan','g','关',500);CREATE TABLE tbl_1_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_x VALUES('xi','x','系',1000);CREATE TABLE tbl_2_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);";
+
+/// QWERTY 字母键，键宽 10、键高 14，每排比上一排右移半个键。
+fn qwerty_geometry() -> Arc<crate::touch::KeyGeometry> {
+    let mut keys = [[0.0f32; 4]; 26];
+    for (letters, left, y) in [
+        ("qwertyuiop", 5.0, 7.0),
+        ("asdfghjkl", 10.0, 21.0),
+        ("zxcvbnm", 20.0, 35.0),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
+        }
+    }
+    Arc::new(crate::touch::KeyGeometry::new(5, &keys, None, &[]).unwrap())
+}
+
+/// 落点支持的纠错整句在快照里报 `touch_corrections`，runtime 才不把它挪到表尾；同一串键不带触点（平面表）时为假。
+#[test]
+fn a_supported_touch_correction_is_reported_in_the_snapshot() {
+    let fixture = Fixture::new(TOUCH_TYPO_FIXTURE);
+    let shuangpin = |options: &mut SessionOptions| {
+        options.scheme = SchemeType::Shuangpin;
+        options.autocorrect_types = crate::types::autocorrect_type::TRANSPOSITION
+            | crate::types::autocorrect_type::NEIGHBOR;
+    };
+    let typed = |session: &mut Session, touched: bool| {
+        for (index, byte) in b"mwgfxi".iter().enumerate() {
+            if touched {
+                // f 那一键落在 f 和左上方的 r 之间。
+                let (dx, dy) = if index == 3 { (-5, -10) } else { (0, 0) };
+                session.set_key_touch(Some(crate::touch::KeyTouch { dx, dy, copy: 0 }));
+            }
+            session.character(*byte, false);
+        }
+    };
+    let mut flat = fixture.session_with(shuangpin);
+    typed(&mut flat, false);
+    let snapshot = flat.snapshot();
+    assert!(snapshot.candidates.iter().any(|item| item.word == "没关系"));
+    assert!(!snapshot.touch_corrections);
+
+    let mut touched = fixture.session_with(shuangpin);
+    touched.set_key_geometry(Some(qwerty_geometry()));
+    typed(&mut touched, true);
+    let snapshot = touched.snapshot();
+    let row = snapshot
+        .candidates
+        .iter()
+        .find(|item| item.word == "没关系")
+        .unwrap();
+    assert!(row.touch_supported);
+    assert!(snapshot.touch_corrections);
+    assert!(snapshot.candidates[0].corrected_from.is_empty());
+}
+
 #[test]
 fn caret_commands_redecode_and_selection_returns_to_the_end() {
     let fixture = Fixture::new(CARET_PREFIX_FIXTURE);

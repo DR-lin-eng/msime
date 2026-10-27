@@ -273,6 +273,7 @@ impl JapaneseProvider {
                     target.corrected_from.clone_from(&item.corrected_from);
                     target.sentence_association = item.sentence_association;
                     target.sentence_words.clone_from(&item.sentence_words);
+                    target.touch_supported = item.touch_supported;
                 } else {
                     rows.items.push(item.clone());
                 }

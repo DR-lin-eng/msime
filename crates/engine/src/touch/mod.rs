@@ -255,6 +255,8 @@ pub struct TouchTuning {
     pub max_penalty: f64,
     /// P_CUT：平面表里没有的键（真实布局下的斜邻键、`;`）罚分超过它就不加。
     pub cut: f64,
+    /// 纠错整句的分数（已经扣了罚分）不比字面整句低出这么多时，落点算是支持它：它留在引擎给的座位上（整句块之后），不和整句的次选读法一起挪到表尾。打对了的输入按在键心，罚分高，纠错整句多半低于这条线，照旧沉底，不挤占它后面的候选。
+    pub show_margin: f64,
 }
 
 impl Default for TouchTuning {
@@ -268,6 +270,7 @@ impl Default for TouchTuning {
             min_penalty: 4.0,
             max_penalty: 28.0,
             cut: 16.0,
+            show_margin: 0.0,
         }
     }
 }

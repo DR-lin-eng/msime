@@ -1576,14 +1576,9 @@ impl InputSession {
         &self.mixed_candidates
     }
 
-    /// 当前列出的是 26 键双拼带着触点查出的那张表（见 `SessionSnapshot::touch_corrections`）：请求带触点，候选也就是这份请求的，不在改字、本地模式、专用英文、日期页或光标前缀解码里。
+    /// 列出的候选里有落点支持的纠错整句（`WordItem::touch_supported`），见 `SessionSnapshot::touch_corrections`。
     pub fn touch_corrections(&self) -> bool {
-        self.conversion.is_none()
-            && !self.dedicated_english
-            && self.local_mode == LocalInputMode::None
-            && self.date_time_menu_page.is_none()
-            && !self.prefix_active
-            && !self.engine.request().key_touches.is_empty()
+        self.candidates().iter().any(|item| item.touch_supported)
     }
 
     /// Discards the composition. A scheme whose dictionary cannot be opened is unavailable: the error is returned and the session stays in its scheme with its composition untouched.

@@ -4709,60 +4709,94 @@ fn repeated_dedicated_english_preserves_real_grid_candidates() {
     }
 }
 
-/// 键位几何由 runtime 持有：宿主空闲时重建引擎（`replace_engine`）之后新引擎照样拿到它，带触点的按键照样进请求。代次不符、坐标不是有限数或清除几何之后，这一键不带触点。
+/// 键位几何由 runtime 持有：宿主空闲时重建引擎（`replace_engine`）之后新引擎照样拿到它，带触点的按键照样按落点给纠错整句计价。代次不符、坐标不是有限数或清除几何之后，这一键不带触点。合成词库里小鹤 mw gr xi 是没关系，r 按成左下方的邻键 f 就成了 gen。
 #[test]
 fn key_geometry_survives_an_engine_replacement() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = real_engine_options(directory.path());
     options.scheme = 1;
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(
+        "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_m VALUES('mei','m','没',1000);\
+         CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_g VALUES('gen','g','跟',1000),('guan','g','关',500);\
+         CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_x VALUES('xi','x','系',1000);\
+         CREATE TABLE tbl_2_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);",
+    )
+    .unwrap();
     let session = msime_engine::host::Session::new(&options).unwrap();
     let mut runtime = Runtime::new(session, 5).unwrap();
     runtime.focus(true).unwrap();
+    // QWERTY 字母键，键宽 10、键高 14，每排比上一排右移半个键。
     let mut keys = [[0.0f32; 4]; 26];
-    for (index, key) in keys.iter_mut().enumerate() {
-        *key = [index as f32 * 10.0, 0.0, 10.0, 10.0];
+    for (letters, left, y) in [
+        ("qwertyuiop", 5.0, 7.0),
+        ("asdfghjkl", 10.0, 21.0),
+        ("zxcvbnm", 20.0, 35.0),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
+        }
     }
+    let center = |key: u8| {
+        let [x, y, _, _] = keys[usize::from(key - b'a')];
+        (x, y)
+    };
     runtime.set_key_geometry(Some(
         msime_engine::touch::KeyGeometry::new(9, &keys, None, &[]).unwrap(),
     ));
     assert_eq!(runtime.key_geometry_id(), Some(9));
-    let n = 130.0;
-    assert_eq!(runtime.key_touch(b'n', 8, n, 0.0), None);
-    assert_eq!(runtime.key_touch(b'n', 9, f32::NAN, 0.0), None);
+    let (x, y) = center(b'f');
+    assert_eq!(runtime.key_touch(b'f', 8, x, y), None);
+    assert_eq!(runtime.key_touch(b'f', 9, f32::NAN, y), None);
+    // f 那一键落在 f 和左上方的 r 之间。
+    assert_eq!(
+        runtime.key_touch(b'f', 9, x - 2.5, y - 7.0),
+        Some(msime_engine::touch::KeyTouch {
+            dx: -5,
+            dy: -10,
+            copy: 0
+        })
+    );
+    let type_mwgfxi = |runtime: &mut Runtime<msime_engine::host::Session>| {
+        runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+        for byte in *b"mwgfxi" {
+            let (x, y) = center(byte);
+            let (x, y) = if byte == b'f' {
+                (x - 2.5, y - 7.0)
+            } else {
+                (x, y)
+            };
+            let touch = runtime.key_touch(byte, 9, x, y);
+            runtime.set_key_touch(touch);
+            runtime
+                .dispatch(Action::Character {
+                    value: byte,
+                    shift: false,
+                })
+                .unwrap();
+            runtime.set_key_touch(None);
+        }
+        runtime.cached.touch_corrections
+    };
 
     runtime
         .replace_engine(msime_engine::host::Session::new(&options).unwrap(), 5)
         .unwrap();
-    let touch = runtime.key_touch(b'n', 9, n + 1.0, 2.0);
-    assert_eq!(
-        touch,
-        Some(msime_engine::touch::KeyTouch {
-            dx: 2,
-            dy: 4,
-            copy: 0
-        })
-    );
-    runtime.set_key_touch(touch);
-    runtime
-        .dispatch(Action::Character {
-            value: b'n',
-            shift: false,
-        })
-        .unwrap();
-    runtime.set_key_touch(None);
-    assert!(runtime.cached.touch_corrections);
+    assert!(type_mwgfxi(&mut runtime));
+    assert!(texts(&runtime.view()).contains(&"没关系".to_owned()));
 
     runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
     runtime.set_key_geometry(None);
     assert_eq!(runtime.key_geometry_id(), None);
-    assert_eq!(runtime.key_touch(b'n', 9, n, 0.0), None);
-    runtime
-        .dispatch(Action::Character {
-            value: b'n',
-            shift: false,
-        })
-        .unwrap();
-    assert!(!runtime.cached.touch_corrections);
+    assert_eq!(runtime.key_touch(b'f', 9, x, y), None);
+    assert!(!type_mwgfxi(&mut runtime));
 }
 
 #[test]

@@ -213,6 +213,6 @@ pub struct SessionSnapshot {
     pub caret_edit_suffix: bool,
     /// 光标后编辑里首选前面固定的那段文字（已经交出去的部分加上光标前那段的最佳转换）。`candidates` 仍是光标后那段的行，首选显示为这段文字接上 `candidates[0].word`，宿主可以把这几个字画淡；选中首选时上屏的是光标前那段的转换接上这一行。模式不生效时为空。
     pub caret_edit_prefix: String,
-    /// 这张表是 26 键双拼带着触点查出来的，里面的纠错整句按落点计过价。runtime 据此不把纠错行当作整句的次选读法挪到表尾（`ordering::runner_up_order_with`）。没有触点的请求（桌面、实体键盘）永远为假。
+    /// 候选里的纠错整句是 26 键双拼按触点计过价、落点支持留在引擎座位上的那种（`WordItem::touch_supported`）。runtime 据此不把纠错行当作整句的次选读法挪到表尾（`ordering::runner_up_order_with`）。没有触点的请求（桌面、实体键盘）永远为假。
     pub touch_corrections: bool,
 }

@@ -127,7 +127,7 @@ pub struct EngineSnapshot {
     pub caret_edit_suffix: bool,
     /// 首选前面固定的那段文字（`SessionSnapshot::caret_edit_prefix`），首选显示为它接上 `candidates[0]`；模式不生效时为空。
     pub caret_edit_prefix: String,
-    /// 26 键双拼的这张表带着触点查出，纠错行按落点计过价（`SessionSnapshot::touch_corrections`）；runtime 不把它当作次选读法挪到表尾。
+    /// 纠错行是 26 键双拼按触点计过价、落点支持留在引擎座位上的那种（`SessionSnapshot::touch_corrections`）；runtime 不把它当作次选读法挪到表尾。
     pub touch_corrections: bool,
 }
 

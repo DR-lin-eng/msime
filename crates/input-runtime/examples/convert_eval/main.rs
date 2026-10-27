@@ -390,9 +390,10 @@ fn parse_tuning(text: &str) -> Result<TouchTuning, String> {
             "min" => &mut tuning.min_penalty,
             "max" => &mut tuning.max_penalty,
             "cut" => &mut tuning.cut,
+            "show" => &mut tuning.show_margin,
             other => {
                 return Err(format!(
-                    "--touch-tuning: unknown {other} (expected base, scale, sigma_x, sigma_y, bias_y, min, max or cut)"
+                    "--touch-tuning: unknown {other} (expected base, scale, sigma_x, sigma_y, bias_y, min, max, cut or show)"
                 ))
             }
         };
@@ -930,6 +931,7 @@ fn render_shuangpin(
                 "base": tuning.base, "scale": tuning.scale,
                 "sigma_x": tuning.sigma_x, "sigma_y": tuning.sigma_y, "bias_y": tuning.bias_y,
                 "min": tuning.min_penalty, "max": tuning.max_penalty, "cut": tuning.cut,
+                "show": tuning.show_margin,
             })
         )
     });

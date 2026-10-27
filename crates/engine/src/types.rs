@@ -798,6 +798,8 @@ pub struct WordItem {
     pub sentence_association: bool,
     /// Word boundaries of a decoded sentence, for personal context learning.
     pub sentence_words: Vec<String>,
+    /// 26 键双拼按触点计价的纠错整句，而且落点支持把它留在引擎给的座位上（分数不比字面整句低出 `TouchTuning::show_margin`）：runtime 不把它当整句的次选读法挪到表尾。其余行永远为假。
+    pub touch_supported: bool,
 }
 
 impl WordItem {

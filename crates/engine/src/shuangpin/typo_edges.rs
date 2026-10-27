@@ -423,6 +423,7 @@ mod tests {
             min_penalty: 4.0,
             max_penalty: 28.0,
             cut: 16.0,
+            show_margin: 0.0,
         }
     }
 

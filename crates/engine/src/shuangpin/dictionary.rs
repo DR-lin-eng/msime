@@ -11,7 +11,8 @@ use super::query::{
     trim_trailing_letters_preserve_delimiters,
 };
 use super::typo_edges::{
-    collect_priced_shuangpin_typo_edges, collect_shuangpin_typo_edges, SHUANGPIN_TYPO_TYPES,
+    collect_priced_shuangpin_typo_edges, collect_shuangpin_typo_edges, touch_supports_correction,
+    SHUANGPIN_TYPO_TYPES,
 };
 use super::utils::{convert_seg_shuangpin_to_seg_complete_pinyin, pinyin_segmentation};
 use super::ShuangpinProfile;
@@ -603,7 +604,6 @@ impl ShuangpinDictionary {
         let touched = touch_slice(&self.key_touches, &self.touch_input, rows_key)
             .zip(self.key_geometry.as_deref());
         let tuning = self.touch_tuning;
-        let touch_priced = touched.is_some();
         let span_cache = &mut self.typo_span_cache;
         let mut typo_edges = |literal_best: &SentencePath| match touched {
             Some((touches, geometry)) => collect_priced_shuangpin_typo_edges(
@@ -662,8 +662,21 @@ impl ShuangpinDictionary {
             typo.key,
         );
         sentence.sentence_association = true;
-        sentence.touch_supported =
-            touch_priced && typo.score >= typo.literal_score - tuning.show_margin;
+        // 落点支持的改正才留在座位上：分数不比字面整句低太多，而且改动的每一键都是落点支持的改法。
+        let touch_supported = touched.is_some_and(|(touches, geometry)| {
+            typo.score >= typo.literal_score - tuning.show_margin
+                && touch_supports_correction(
+                    profile,
+                    codes.as_slice(),
+                    touches,
+                    geometry,
+                    &tuning,
+                    segments,
+                    sentence.canonical_pinyin.as_str(),
+                    types,
+                )
+        });
+        sentence.touch_supported = touch_supported;
         sentence.sentence_words = typo.words;
         sentence.corrected_from = fold_reading(typed).into();
         candidates.insert(at, sentence);

@@ -81,6 +81,47 @@ pub fn collect_priced_shuangpin_typo_edges(
     })
 }
 
+/// 纠错整句改动过的每个音节，在这一键的落点下改过去的价都不超过 `TouchTuning::show_penalty`：落点本身支持这次改正。`corrected_key` 是纠错整句的读音（逐音节以 `'` 相连），音节数与 `segments` 不同、或某个改动不在这个两键码的变体里时为假。
+#[allow(clippy::too_many_arguments)]
+pub fn touch_supports_correction(
+    profile: &'static ShuangpinProfile,
+    codes: &[&str],
+    touches: &[Option<KeyTouch>],
+    geometry: &KeyGeometry,
+    tuning: &TouchTuning,
+    segments: &[String],
+    corrected_key: &str,
+    autocorrect_types: u32,
+) -> bool {
+    let corrected: Vec<&str> = corrected_key.split('\'').collect();
+    if corrected.len() != segments.len() || codes.len() != segments.len() {
+        return false;
+    }
+    let decoded = decode_table(profile);
+    let types = autocorrect_types & SHUANGPIN_TYPO_TYPES;
+    corrected
+        .iter()
+        .zip(segments)
+        .enumerate()
+        .all(|(position, (corrected, literal))| {
+            let corrected = normalized_syllable(corrected);
+            if corrected == normalized_syllable(literal) {
+                return true;
+            }
+            let touched = [touches[2 * position], touches[2 * position + 1]];
+            priced_variants(
+                decoded,
+                codes[position].as_bytes(),
+                touched,
+                geometry,
+                tuning,
+                types,
+            )
+            .iter()
+            .any(|variant| variant.syllable == corrected && variant.penalty <= tuning.show_penalty)
+        })
+}
+
 /// 一个两键码按触点计价的变体，罚分低的在前，同一个音节只留最低的那个价。
 fn priced_variants(
     decoded: &'static DecodeTable,
@@ -424,6 +465,7 @@ mod tests {
             max_penalty: 28.0,
             cut: 16.0,
             show_margin: 0.0,
+            show_penalty: f64::INFINITY,
         }
     }
 

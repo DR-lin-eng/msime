@@ -8,8 +8,8 @@
 pub const TOUCH_STEPS_PER_KEY: f32 = 20.0;
 /// 偏移钳到 ±1.5 键：更远的落点宿主不会归给这个键。
 pub const TOUCH_OFFSET_LIMIT: i8 = 30;
-/// 平面表里的 QWERTY 邻键离被按的键超过这么远（键为单位）时不算邻键。分离键盘上 T 和 Y、G 和 H 分在两半，平面表却把它们当邻键；普通布局里斜邻键的键心相距不到 1.3 个键。
-const FLAT_NEIGHBOR_REACH: f32 = 2.0;
+/// 平面表里的 QWERTY 邻键离被按的键超过这么远（键为单位）时不算邻键。分离键盘上 T 和 Y、G 和 H 分在两半，平面表却把它们当邻键，参考的 iPad 分离布局里它们相距 8 个键以上；普通布局里平面表邻键的键心最远相距 2.25 个键（iPhone 微软双拼那份的 J 和 M：第二行多了 `;`，键距变宽）。
+const FLAT_NEIGHBOR_REACH: f32 = 3.0;
 
 /// 一次按键的落点：相对被按键中心的偏移，单位 1/20 键（[`TOUCH_STEPS_PER_KEY`]），钳到 ±[`TOUCH_OFFSET_LIMIT`]。`copy` 是这个字母的第几个实例：0 是 `keys` 里的那个，1 起依次是 `duplicates` 里同一字母的各个（分离键盘两边各有一个 G、V）。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -257,6 +257,8 @@ pub struct TouchTuning {
     pub cut: f64,
     /// 纠错整句的分数（已经扣了罚分）不比字面整句低出这么多时，落点算是支持它：它留在引擎给的座位上（整句块之后），不和整句的次选读法一起挪到表尾。打对了的输入按在键心，罚分高，纠错整句多半低于这条线，照旧沉底，不挤占它后面的候选。
     pub show_margin: f64,
+    /// 同时要求纠错整句改动的每一键在落点下的价都不超过它，落点才算支持这次改正。打对的输入里，按在键心附近的那一键改过去的价高，挡在这条线外；只看分数差时，字面整句本来就排得很靠后的那些用例常有一条分数接近的纠错整句，它坐到整句块之后，把金标准往后挤一位。
+    pub show_penalty: f64,
 }
 
 impl Default for TouchTuning {
@@ -271,6 +273,7 @@ impl Default for TouchTuning {
             max_penalty: 28.0,
             cut: 16.0,
             show_margin: 0.0,
+            show_penalty: f64::INFINITY,
         }
     }
 }

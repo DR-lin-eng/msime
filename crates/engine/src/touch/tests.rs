@@ -157,6 +157,7 @@ fn tuning() -> TouchTuning {
         max_penalty: 28.0,
         cut: 16.0,
         show_margin: 0.0,
+        show_penalty: f64::INFINITY,
     }
 }
 

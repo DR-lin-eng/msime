@@ -1175,6 +1175,7 @@ fn test_tuning() -> TouchTuning {
         max_penalty: 28.0,
         cut: 16.0,
         show_margin: 0.0,
+        show_penalty: f64::INFINITY,
     }
 }
 
@@ -1249,6 +1250,38 @@ fn touches_price_the_correction_and_never_share_a_cached_answer() {
     };
     assert!(weight(&engine.query(&spread, None)) < seen.unwrap().0);
     assert_eq!(weight(&engine.query(&toward_r, None)), seen.unwrap().0);
+}
+
+/// 纠错整句只有在落点支持时才标上 `touch_supported`（runtime 据此不把它挪到表尾）：分数不比字面整句低出 `show_margin`，而且改动的那一键改过去的价不超过 `show_penalty`。没有触点时永远不标。
+#[test]
+fn the_correction_keeps_its_seat_only_when_the_touch_supports_it() {
+    let fixture = Fixture::new(TYPO_FIXTURE);
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    let mut supported = |request: &QueryRequest| {
+        let candidates = engine.query(request, None);
+        typo_row(&candidates)
+            .unwrap_or_else(|| panic!("no typo sentence in {:?}", words(&candidates)))
+            .touch_supported
+    };
+    let with = |leaning: &[(usize, i8, i8)], tuning: TouchTuning| QueryRequest {
+        touch_tuning: tuning,
+        ..touched_request("mwgfxi", leaning)
+    };
+    let strict = TouchTuning {
+        show_penalty: 10.0,
+        ..test_tuning()
+    };
+    // f 那一键落在 r 的键心上，改过去的价是下限 4；落在 f 和 r 正中，价是 B = 12。
+    assert!(supported(&with(&[(3, -10, -20)], strict)));
+    assert!(!supported(&with(&[(3, -5, -10)], strict)));
+    assert!(supported(&with(&[(3, -5, -10)], test_tuning())));
+    // 分数差的线压到字面整句之上很远时，同一个落点也不算支持。
+    let demanding = TouchTuning {
+        show_margin: -100.0,
+        ..test_tuning()
+    };
+    assert!(!supported(&with(&[(3, -10, -20)], demanding)));
+    assert!(!supported(&autocorrect_request("mwgfxi", true)));
 }
 
 /// 按错的那一键几乎落在想按的键心上时，这次改正的价降到下限，纠错整句仍然只排在字面整句之后，不抢首选（首选规则是后面一期的事）。

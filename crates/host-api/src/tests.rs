@@ -20972,6 +20972,66 @@ fn large_imported_contact_list_keeps_derived_name_candidates_available() {
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
+/// 联系人读音在进程里按名单和主词库的戳记下：Android 每次聚焦都新建会话，新会话来源没动时沿用记下的读音，主词库或名单一变就要重新查，不能停在旧的上面。
+#[test]
+fn a_new_session_reads_contact_readings_again_once_the_dictionary_or_list_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let dictionaries = dir.path().join("dictionaries");
+    std::fs::create_dir_all(&dictionaries).unwrap();
+    let dictionary = dictionaries.join("msime-pinyin.db");
+    rusqlite::Connection::open(&dictionary)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_2_n VALUES('ni''hao','nh','拟好',100);",
+        )
+        .unwrap();
+    // 带上电话：名单里的「拟好」才有一条词库给不出的候选「拟好 202-555-0101」。
+    let save = |phone: &str| {
+        msime_client_services::plugins::mentions::MentionStore::new(
+            dir.path().join("state/plugins"),
+        )
+        .save(&[msime_client_services::plugins::mentions::MentionEntry {
+            text: "拟好".into(),
+            key: String::new(),
+            phone: phone.into(),
+        }])
+        .unwrap()
+    };
+    save("202-555-0101");
+    let contact = "拟好 202-555-0101".to_owned();
+    let session_candidates = |keys: &[u8]| {
+        let handle = plugin_host(dir.path(), chinese_preferences());
+        assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+        let candidates = local_mode_candidates(handle, keys);
+        assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+        candidates
+    };
+    assert!(session_candidates(b"nihao").contains(&contact));
+    assert!(session_candidates(b"nihao").contains(&contact));
+
+    // 改读音的同时多建一张表，让文件长度一定变：只靠修改时间的话，计时粒度粗的文件系统上可能看不出变化。
+    rusqlite::Connection::open(&dictionary)
+        .unwrap()
+        .execute_batch(
+            "UPDATE tbl_2_n SET key='nai''hao';\
+             CREATE TABLE tbl_3_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);",
+        )
+        .unwrap();
+    let candidates = session_candidates(b"naihao");
+    assert!(candidates.contains(&contact), "{candidates:?}");
+    let candidates = session_candidates(b"nihao");
+    assert!(!candidates.contains(&contact), "{candidates:?}");
+
+    save("202-555-0102");
+    let candidates = session_candidates(b"naihao");
+    assert!(
+        candidates.contains(&"拟好 202-555-0102".to_owned()),
+        "{candidates:?}"
+    );
+    assert!(!candidates.contains(&contact), "{candidates:?}");
+}
+
 #[test]
 fn english_online_host_builds_explicit_requests_and_revokes_them_immediately() {
     use msime_client_core::cloud::candidates::{

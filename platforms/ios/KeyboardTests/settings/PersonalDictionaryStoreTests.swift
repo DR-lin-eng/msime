@@ -92,6 +92,24 @@ final class PersonalDictionaryStoreTests: XCTestCase {
     XCTAssertNotNil(next.idle)
   }
 
+  func testASettingsPageAsksForAFreshListWithoutChangingTheRequestedPage() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let host = PersonalDictionaryStore(directory: root)
+    let keyboard = PersonalDictionaryStore(directory: root)
+    try host.requestPage(offset: 100, kind: .wubi, query: "gg")
+    var pages: [PersonalPageRequest] = []
+    try keyboard.synchronize(apply: { _ in }, page: { pages.append($0); return .init(entries: [], hasMore: false) })
+    XCTAssertFalse(try keyboard.read().needsKeyboardSynchronization)
+
+    // 键盘出现时不再无条件刷新，设置页打开时要一份；键盘照原来请求的那一页重新列出。
+    try host.requestRefresh()
+    XCTAssertTrue(try keyboard.pollKeyboardSynchronization(idle: nil).needed)
+    try keyboard.synchronize(apply: { _ in }, page: { pages.append($0); return .init(entries: [], hasMore: false) })
+    XCTAssertEqual(pages, Array(repeating: PersonalPageRequest(offset: 100, kind: .wubi, query: "gg"), count: 2))
+    XCTAssertFalse(try keyboard.read().needsKeyboardSynchronization)
+  }
+
   func testQueueAcknowledgementFailureAndPaging() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

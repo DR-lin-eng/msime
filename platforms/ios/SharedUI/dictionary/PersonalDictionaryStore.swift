@@ -390,6 +390,11 @@ final class PersonalDictionaryStore: @unchecked Sendable {
     }
   }
 
+  /// 请键盘下次出现或空闲时把当前请求的那一页重新列一遍。键盘只在有待应用的编辑或者有刷新请求时才同步（`needsKeyboardSynchronization`），不再每次出现都刷新，所以显示这份快照的设置页打开时要用它要一份新的。
+  func requestRefresh() throws {
+    try update { $0.refreshID = UUID() }
+  }
+
   // Keep the queue lock through apply and acknowledgement. If writing sync.json is interrupted,
   // the same UUID is retried; Engine's transaction receipt makes that retry a no-op success.
   func synchronize(apply: (PersonalWordRequest) throws -> Void,

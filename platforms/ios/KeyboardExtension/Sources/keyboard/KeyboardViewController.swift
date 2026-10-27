@@ -464,6 +464,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// Key presses waiting for the next write. Counted only while statistics are on, which the store is asked on every appearance; with them off nothing is kept, not even in memory.
   private var keyPresses = TypingKeyCounter()
   private var countsKeyPresses = false
+  /// 上次要共享层写出以来，有没有交给它 `record` 过上屏；没有就不必再调 flush。只在主线程读写。
+  private var typingStatisticsUnflushed = false
   private var keyPressFlushTimer: Timer?
   private var visiblePreedit = ""
   /// The already-chosen half of a phrase at the front of `visiblePreedit`, which 「候选栏预编辑」 never hides.
@@ -820,7 +822,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     synchronizeReplyKeyboard()
     // The host going to the background may end the extension without a viewWillDisappear.
     NotificationCenter.default.addObserver(
-      self, selector: #selector(flushKeyPresses), name: .NSExtensionHostWillResignActive, object: nil)
+      self, selector: #selector(flushStatistics), name: .NSExtensionHostWillResignActive, object: nil)
     DiagnosticLog.shared.write("keyboard_built \(DiagnosticLog.MemorySample.current().fields)")
   }
 
@@ -1096,6 +1098,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       flushDeferredNineKeySnapshot()
       render(discardComposition())
       asynchronousInputDocument = document
+      // 换了输入框就是上一个失焦了：攒着的上屏这时写出，不等键盘收起。
+      flushTypingStatistics()
     }
     synchronizeInputContext()
     // 宿主可能把焦点换到了凭据输入框，诊断日志跟着当前输入框开关；只在闸门的判断变了时重新配置，不必每次按键都去读偏好。
@@ -1164,7 +1168,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     diagnosticDismissTimer = nil
     keyPressFlushTimer?.invalidate()
     keyPressFlushTimer = nil
-    flushKeyPresses()
+    flushStatistics()
     // A reused controller must not count presses on its next appearance until that appearance's isEnabled() answer arrives.
     countsKeyPresses = false
   }
@@ -6653,12 +6657,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     setFullWidthInput(width == CharacterWidthPreference.fullwidth)
   }
 
-  // Swallowing this left the settings screen showing zeros with nothing to explain them, which is
-  // how it reached a bug report rather than the person typing. The reason does not change between
-  // keystrokes and a banner on each one would bury the composition, so it is said once per session.
-  // The store locks, rewrites and fsyncs per commit, so it runs off main on a serial queue.
+  // Swallowing this left the settings screen showing zeros with nothing to explain them, which is how it reached a bug report rather than the person typing. The reason does not change between keystrokes and a banner on each one would bury the composition, so it is said once per session.
+  // The shared store holds commits in this process and rewrites and fsyncs the file only once 30 seconds have passed since its last write (or on `flushTypingStatistics`), but that write, and the first read of the file, still happen inside a call, so it runs off main on a serial queue.
   private func recordTypingStatistics(_ text: String, source: TypingSource) {
     guard hasFullAccess, privacyGate.allows(.typing) else { return }
+    typingStatisticsUnflushed = true
     let date = Date()
     statisticsQueue.async { [weak self] in
       do {
@@ -6689,7 +6692,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         if !enabled { _ = keyPresses.drain() }
       }
     }
-    let timer = Timer(timeInterval: 30, target: self, selector: #selector(flushKeyPresses), userInfo: nil, repeats: true)
+    let timer = Timer(timeInterval: 30, target: self, selector: #selector(flushStatistics), userInfo: nil, repeats: true)
     RunLoop.main.add(timer, forMode: .common)
     keyPressFlushTimer = timer
   }
@@ -6715,6 +6718,21 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   @objc private func flushKeyPresses() {
     if let batch = keyPresses.drain() { writeKeyPresses(batch) }
+  }
+
+  /// 按键批次和攒着的上屏一起写出：30 秒定时器、键盘收起和宿主退到后台（扩展可能不经 viewWillDisappear 就被结束）都走这里。
+  @objc private func flushStatistics() {
+    flushKeyPresses()
+    flushTypingStatistics()
+  }
+
+  /// 共享层的 `record` 把上屏攒在本进程里，距上次写文件满 30 秒的下一次上屏才写，停下不打字时最后一批会一直留在内存里，进程被杀就丢了，设置页也看不到。所以键盘收起、换输入框、宿主退到后台和每 30 秒的定时器在这里要它写出。排在统计队列上，跟在之前交出去的 record 后面；没有攒着的上屏时共享层不碰磁盘。flush 失败只记进诊断日志，不打扰正在打字的人。
+  private func flushTypingStatistics() {
+    guard typingStatisticsUnflushed else { return }
+    typingStatisticsUnflushed = false
+    statisticsQueue.async {
+      do { try TypingStatisticsStore().flush() } catch { DiagnosticLog.shared.write("statistics_flush_failed") }
+    }
   }
 
   private func writeKeyPresses(_ batch: TypingKeyBatch) {

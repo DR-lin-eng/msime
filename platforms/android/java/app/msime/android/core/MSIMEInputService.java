@@ -9692,8 +9692,8 @@ public final class MSIMEInputService extends InputMethodService {
         // 键距是键的外边距；这两个容器把落在空隙里的按下交给拥有那段空隙的键，画面不变（见 KeyboardKeyArea）。
         KeyboardKeyArea letterArea = new KeyboardKeyArea(this, this::followsKeySpacing);
         letterArea.setGlideTracker(imeGlideTyping);
-        // 26 键双拼：按键记下每根手指的按下点，键位一变就重新注册几何（ImeTouchPoints）。
-        letterArea.setTouchPoints(imeTouchPoints.pending);
+        // 26 键双拼：按键记下每根手指的按下点，键位一变就重新注册几何（ImeTouchPoints）。只记字母键和微软双拼的 `;`（shuangpinLetterKey 造的键），别的键点击时不取按下点。
+        letterArea.setTouchPoints(imeTouchPoints.pending, key -> key instanceof ShuangpinHintButton);
         letterArea.addOnLayoutChangeListener((view, left, top, right, bottom,
                 oldLeft, oldTop, oldRight, oldBottom) -> imeTouchPoints.register());
         keyRows = letterArea;

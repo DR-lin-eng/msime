@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-- **采点在按键区，按键存**：`KeyboardKeyArea` 在 `ACTION_DOWN` / `ACTION_POINTER_DOWN` 时，把按下点记给它落在的键，落在空隙里就记给拥有空隙的那个键（`route` 本来就算出了这个键）。坐标取原始事件的按键区坐标，也就是键距挪动之前的那一个。按下点按键存（`TouchPointPolicy`，最多 10 个键），不按指针存：点击在抬起时才发生，那时已经不知道是哪根手指；多指连按时每个键各自留着自己那一下。
+- **采点在按键区，按键存**：`KeyboardKeyArea` 在 `ACTION_DOWN` / `ACTION_POINTER_DOWN` 时，把按下点记给它落在的键，落在空隙里就记给拥有空隙的那个键（`route` 本来就算出了这个键）。坐标取原始事件的按键区坐标，也就是键距挪动之前的那一个。按下点按键存（`TouchPointPolicy`，最多 10 个键），不按指针存：点击在抬起时才发生，那时已经不知道是哪根手指；多指连按时每个键各自留着自己那一下。只记点击时会取走按下点的键（`shuangpinLetterKey` 造的 `ShuangpinHintButton`：26 个字母和微软的 `;`），数字行、Shift、退格的按下不记。槽满时覆盖按下最早的那个键：最早一版按轮转游标覆盖，空位被重新用上时游标不动，快速两指连按里按着的字母会被后一根手指挤掉、悄悄退回 `msime_client_character`（评审用固定种子的连按序列复现，`TouchPointPolicySmoke` 钉住）。
 - **取用即清**：字母键的点击回调把自己交给 `MSIMEInputService.type(char, View)`，它一开头就取出并清掉这个键的按下点，不论这一键后面走哪条路。只有走到最后送给引擎的那一步、`TouchPointPolicy.usesTouch` 成立（26 键字母层、`scheme` 为双拼、`key_grid` 为 `none`、不在专用英文和本地模式、小写字母或 `;`、没有 Shift、当前会话注册过几何）时才改调 `msime_client_touch_character`。辅助码的大写分支、英文直出、韩文和标点都在它前面返回或另走，行为不变。
 - **丢弃**：整次触摸 `ACTION_CANCEL`、滑行接管、键行重建时全部丢掉；滑出符号、长按选项吞掉的那一下，以及候选可见时抬起离键太远（超出 touch slop）、宿主替它补的那次 `performClick`，丢掉这个键的；按下到点击超过 2 秒的作废，免得一次没点成的按下被很久以后的无障碍点击捡走。无障碍点击本身没有按下，取不到落点。
 - **几何**：`ImeGlideTyping.measureKeys` 抽成共享的 `LetterKeyMeasure`，滑行和这里都用它；它另外量出显示中的微软 `;` 键和分离键盘右半边重复的字母键。`ImeTouchPoints` 挂在按键区的 `OnLayoutChangeListener` 上，每次布局后量一遍：在 26 键字母层、26 个字母键都量到、和上次注册的矩形不同或会话换了时，换一个只增不减的代次号注册。点击时发现会话换过而还没注册，先补注册。量的是 `offsetDescendantRectToMyCoords` 给出的布局位置，和按下点同一个坐标系，按下动画的缩放不算在内。

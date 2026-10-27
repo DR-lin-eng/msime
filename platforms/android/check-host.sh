@@ -91,6 +91,14 @@ if [[ "$touch_calls" != 1 ]] || ! rg -q 'NativeClient\.touchCharacter\(' <<< "$t
   echo "Double-pinyin touch-downs must reach msime_client_touch_character only from type(char, View)" >&2
   exit 1
 fi
+# 按键区只给点击时会取走按下点的键（shuangpinLetterKey 造的 ShuangpinHintButton：26 个字母和微软双拼的 `;`）记按下点。数字行、Shift、退格的按下从不被取走，记下来只会占着槽位；槽满时让出哪一个由 TouchPointPolicySmoke 覆盖，这里钉住接线。
+if [[ $(rg -c 'setTouchPoints\(' "$android_java/core/MSIMEInputService.java") != 1 ]] \
+  || ! rg -q 'setTouchPoints\(imeTouchPoints\.pending, key -> key instanceof ShuangpinHintButton\);' \
+    "$android_java/core/MSIMEInputService.java" \
+  || ! rg -q 'pressed != null && touchKey\.test\(pressed\)' "$android_java/keyboard/KeyboardKeyArea.java"; then
+  echo "Only double-pinyin letter keys may record touch-downs in the key area" >&2
+  exit 1
+fi
 # 功能面板「手写」磁贴再点一次要回到进入手写前的入口和中英状态（#9703）。0.5.0 取的是启用列表里第一个非手写入口，默认全拼 9 键、英文 26 键或小鹤双拼的用户关掉手写后都落到全拼 26 键。入口怎么选由 KeyboardSchemeSmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：离开手写经 handwritingReturn 取入口，并把记下的英文状态交给方案保存，保存成功后再进英文。
 toggle_body=$(sed -n '/^    void toggleHandwritingScheme() {$/,/^    }$/p' \
   "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java")

@@ -59,6 +59,44 @@ public final class TouchPointPolicySmoke {
         check(points.take(many[1], 100, point) && point[0] == 1, "keys are matched by identity, not by equality");
         check(!points.take(null, 100, point), "a null key never matches");
 
+        // 槽位满时让出的是最早按下的那个键，而不是轮转游标恰好指着的槽：空位被重新用上时游标不动，新按下的键会落在游标上。
+        TouchPointPolicy held = new TouchPointPolicy();
+        Object[] stale = new Object[TouchPointPolicy.SLOTS];
+        for (int key = 0; key < stale.length; key++) {
+            stale[key] = new Object();
+            held.record(stale[key], key, key, key);
+        }
+        held.take(stale[0], 20, point);
+        Object a = new Object();
+        Object b = new Object();
+        held.record(a, 1, 1, 100);
+        held.record(b, 2, 2, 110);
+        check(held.take(b, 120, point) && point[0] == 2, "the second finger keeps its touch-down");
+        check(held.take(a, 130, point) && point[0] == 1, "a held letter in a reused slot is not the one evicted");
+        check(!held.take(stale[1], 130, point), "the oldest record gave way instead");
+
+        // 数字行、Shift、退格这类永远不取按下点的 12 个键先占满槽位，之后 200 次快速两指连按（每次之后一半的机会按一下这些键）不丢任何一个字母的按下点。种子固定，旧的轮转游标在这串按键里会丢掉两个按着的字母。
+        TouchPointPolicy rollover = new TouchPointPolicy();
+        java.util.Random presses = new java.util.Random(0);
+        long now = 0;
+        Object[] otherKeys = new Object[12];
+        for (int key = 0; key < otherKeys.length; key++) {
+            otherKeys[key] = new Object();
+            rollover.record(otherKeys[key], key, key, now++);
+        }
+        Object[] letterKeys = new Object[26];
+        for (int key = 0; key < letterKeys.length; key++) letterKeys[key] = new Object();
+        for (int round = 0; round < 200; round++) {
+            int firstLetter = presses.nextInt(26);
+            Object first = letterKeys[firstLetter];
+            Object second = letterKeys[(firstLetter + 1 + presses.nextInt(25)) % 26];
+            rollover.record(first, round, 1, now += 30);
+            rollover.record(second, round, 2, now += 30);
+            check(rollover.take(first, now += 30, point) && point[0] == round && point[1] == 1, "rollover " + round + ": the held letter keeps its touch-down");
+            check(rollover.take(second, now += 30, point) && point[0] == round && point[1] == 2, "rollover " + round + ": the second letter keeps its touch-down");
+            if (presses.nextInt(2) == 0) rollover.record(otherKeys[presses.nextInt(otherKeys.length)], 0, 0, now += 30);
+        }
+
         check(TouchPointPolicy.releasedOnKey(-7.9f, 50, 100, 120, 8), "lifting within the slop is still on the key");
         check(!TouchPointPolicy.releasedOnKey(-8.1f, 50, 100, 120, 8), "lifting beyond the slop is off the key");
         check(!TouchPointPolicy.releasedOnKey(50, 128, 100, 120, 8), "the far edge is exclusive");

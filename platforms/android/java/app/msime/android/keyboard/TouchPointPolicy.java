@@ -15,17 +15,15 @@ public final class TouchPointPolicy {
     private final float[] xs = new float[SLOTS];
     private final float[] ys = new float[SLOTS];
     private final long[] times = new long[SLOTS];
-    /** 没有空位时下一个被覆盖的槽。 */
-    private int oldest;
 
-    /** 记下 `key` 这一次按下的位置（按键区坐标）和时刻（`SystemClock.uptimeMillis` 的毫秒）；同一个键之前没被取走的那一下作废。 */
+    /** 记下 `key` 这一次按下的位置（按键区坐标）和时刻（`SystemClock.uptimeMillis` 的毫秒）；同一个键之前没被取走的那一下作废。没有空位时覆盖按下最早的那个键：还按着的键总比早已抬起却没被取走的那些按下新，不会被后来的手指挤掉。 */
     public void record(Object key, float x, float y, long time) {
         if (key == null) return;
         int slot = slotOf(key);
         if (slot < 0) slot = slotOf(null);
         if (slot < 0) {
-            slot = oldest;
-            oldest = (oldest + 1) % SLOTS;
+            slot = 0;
+            for (int other = 1; other < SLOTS; other++) if (times[other] < times[slot]) slot = other;
         }
         keys[slot] = key;
         xs[slot] = x;

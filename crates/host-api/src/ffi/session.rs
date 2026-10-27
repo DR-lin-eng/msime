@@ -276,6 +276,7 @@ pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String>
 
 #[no_mangle]
 pub extern "C" fn msime_client_reset_cache(handle: u64) -> *mut c_char {
+    crate::plugin_tables::release_cached_tables();
     dispatch(handle, Action::ResetCache)
 }
 
@@ -285,6 +286,7 @@ pub extern "C" fn msime_client_reset_cache(handle: u64) -> *mut c_char {
 pub extern "C" fn msime_client_release_process_cache() {
     release_japanese_dictionary_cache();
     release_idle_personal_models();
+    crate::plugin_tables::release_cached_tables();
 }
 
 #[no_mangle]

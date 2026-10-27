@@ -69,6 +69,20 @@ static MENTION_ENTRIES: Slot<(PathBuf, FileStamp, PathBuf, FileStamp), Vec<Menti
 static HELPCODE_TABLES: Slot<(PathBuf, String, PackStamps), Result<SharedKeymap, String>> =
     Mutex::new(None);
 
+/// 放掉进程里为下一个会话留着的四种表（宿主的清缓存、内存告警：`msime_client_reset_cache`、`msime_client_release_process_cache`）。开着的会话各自持有读进 Engine 的那份，不受影响；之后新建的会话照来源重读一遍文件。
+pub(crate) fn release_cached_tables() {
+    *COMMAND_TABLES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
+    *PHRASE_TABLES.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    *MENTION_ENTRIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
+    *HELPCODE_TABLES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
+}
+
 /// `key` 与 `slot` 记下的来源相同时返回记下的表；否则调 `load` 读一遍，它说可以留（第二项为 `true`）时记下。读文件时不持锁。
 fn cached<K: PartialEq, V: Clone>(
     slot: &Slot<K, V>,

@@ -805,6 +805,8 @@ public final class MSIMEInputService extends InputMethodService {
     private boolean statisticsFailureReported;
     /** Key presses since the last write, per key and local day. Main thread only. */
     private final KeyPressBatch keyPresses = new KeyPressBatch();
+    /** The directory whose committed text the native store may still hold unwritten. Main thread only. */
+    private final PendingTypingStatistics pendingTypingStatistics = new PendingTypingStatistics();
     /** Each soft key's heatmap id. Weak, so the keys of a rebuilt row leave with it. */
     private final java.util.Map<View, String> keyIds = new java.util.WeakHashMap<>();
     /** The store's statistics switch as last read; until it has been read, nothing is counted. */
@@ -1220,7 +1222,41 @@ public final class MSIMEInputService extends InputMethodService {
             reportTypingStatisticsFailure();
             return;
         }
+        String earlier = pendingTypingStatistics.record(directory);
+        if (earlier != null) submitTypingStatisticsFlush(earlier);
         submitTypingStatistics(request, null, engineStartGeneration);
+    }
+
+    /**
+     * Ask the native store to write the commits it is still holding in memory.
+     *
+     * <p>{@code record} no longer rewrites and fsyncs the whole document per commit: the store keeps the counts and writes them at most every half minute, checked on the next commit. So whatever was typed last waits here until the editor loses focus, the keyboard is hidden or the service goes away. It runs on the statistics worker, after every record already queued there.
+     */
+    private void flushTypingStatistics() {
+        String directory = pendingTypingStatistics.drain();
+        if (directory != null) submitTypingStatisticsFlush(directory);
+    }
+
+    /**
+     * Queue one flush for {@code directory}; its result is ignored. A native library older than the flush operation answers with an error, and it wrote every commit already. When the queue is full the counts stay in the store, which writes them on the next commit after half a minute or before any other request for that directory.
+     */
+    private void submitTypingStatisticsFlush(String directory) {
+        final String request;
+        try {
+            request = new JSONObject().put("directory", directory)
+                .put("action", new JSONObject().put("operation", "flush")).toString();
+        } catch (JSONException error) {
+            return;
+        }
+        try {
+            typingStatisticsWorker.execute(() -> {
+                try {
+                    NativeClient.typingStatistics(request);
+                } catch (RuntimeException | LinkageError ignored) {
+                }
+            });
+        } catch (RuntimeException ignored) {
+        }
     }
 
     /**
@@ -1960,6 +1996,7 @@ public final class MSIMEInputService extends InputMethodService {
         imeDebugOverlay.recordEvent(DiagnosticEventKind.IME_FINISH);
         cancelPendingCompositionMarkerLoss();
         flushKeyPresses();
+        flushTypingStatistics();
         clearQuickDeleteUndo();
         imeLetterRows.cancelBackspaceRepeat();
         cancelInputViewRefresh();
@@ -2016,6 +2053,7 @@ public final class MSIMEInputService extends InputMethodService {
         // 窗口收起后不再每秒重读偏好：会话要一直活到输入框失焦，按返回键收起键盘后输入框通常还留着焦点，原先这段时间里每秒都在后台读偏好、解析皮肤、把快照推给引擎，电池统计里全算后台耗电（#9916）。窗口再显示时 onWindowShown 先读一次再接着轮询。
         imeWindowVisible = false;
         preferencesReloader.stop();
+        flushTypingStatistics();
         super.onWindowHidden();
     }
 
@@ -2158,6 +2196,7 @@ public final class MSIMEInputService extends InputMethodService {
         preferencesWorker.shutdown();
         // Queued before the shutdown, so the worker still writes it.
         flushKeyPresses();
+        flushTypingStatistics();
         typingStatisticsWorker.shutdown();
         emojiWorker.shutdown();
         // 同样排在 shutdown 之前：正在复制的那张写完后，这一步把它和更早的副本一起删掉。

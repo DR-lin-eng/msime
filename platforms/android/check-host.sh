@@ -1198,6 +1198,14 @@ if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /scheduleDict
   echo "Android must defer dictionary snapshot processing after a blur and cancel it when the next field starts a session" >&2
   exit 1
 fi
+# 上屏统计在 native 里按目录攒着，最多每半分钟写一次，最后一段要靠宿主在失焦、收起键盘和销毁时叫一次 flush；销毁时的那次必须排在统计工作线程 shutdown 之前，否则排不进去，进程一退这段统计就丢了。
+if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! awk '/public void onWindowHidden\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { flush = NR } inside && /typingStatisticsWorker\.shutdown\(\);/ { shutdown = NR } inside && /^    }$/ { exit } END { exit !(flush && shutdown && flush < shutdown) }' "$service_java" \
+  || ! rg -q '"operation", "flush"' "$service_java"; then
+  echo "Android must flush pending typing statistics when the field loses focus, the keyboard hides, and before the statistics worker shuts down" >&2
+  exit 1
+fi
 # The host compiles against AndroidX and Material now, and those are AARs that only Gradle resolves,
 # so this script no longer compiles the whole source set -- `platforms/android/gradle-app` does, and
 # build-apk.sh drives it. What stays here is the part that is worth having without a Gradle daemon:

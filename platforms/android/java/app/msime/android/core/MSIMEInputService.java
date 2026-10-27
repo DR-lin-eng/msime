@@ -332,6 +332,8 @@ public final class MSIMEInputService extends InputMethodService {
     JSONArray themeCatalog;
     /** Resolved keyboards by request, so the four surfaces of one snapshot cost at most two native calls. */
     private final java.util.Map<String, KeyboardSkin> resolvedThemes = new java.util.HashMap<>(8);
+    /** 键盘设计按对象记下的内容散列：设计里可能有半兆以上的 base64 照片，同一份快照的四块面板各自 toString 一遍才能查缓存。键盘进程不原地改设计对象，换了内容就是换了对象。 */
+    private final java.util.WeakHashMap<JSONObject, Integer> designHashes = new java.util.WeakHashMap<>();
     /** 输入法自己写进编辑器后预期的选区，用来认出 `onUpdateSelection` 里迟到的回声。 */
     final SelectionEchoTracker selectionEcho = new SelectionEchoTracker();
     private JSONObject localModes = new JSONObject();
@@ -685,6 +687,9 @@ public final class MSIMEInputService extends InputMethodService {
     /** 本输入框的运行时选项在强制关闭学习之前的原样，隐私模式切换时据此重建会话。 */
     private String runtimeOptionsBase = "";
     JSONObject preferencesSnapshot;
+    /** 上次整套应用成功的 loadPreferences 原始响应，和应用前取的 {@link #preferencesApplyInputs}；每次 {@link #applyPreferencesSnapshot} 开头清空，只由每秒重读和建会话的首份快照记下。 */
+    private String appliedPreferencesResponse;
+    private java.util.List<Object> appliedPreferencesInputs;
     private long preferenceSaveGeneration;
     /** 功能面板本地设置（单手、隐私）自己的写入代数，与几何、方案、繁体那些偏好保存互不作废，否则一方的 saving 标志会卡住。 */
     private long localSettingSaveGeneration;
@@ -2194,6 +2199,8 @@ public final class MSIMEInputService extends InputMethodService {
         wubiMixedPinyin = false;
         wubiProfile = KeyboardScheme.WUBI_86;
         preferencesSnapshot = null;
+        appliedPreferencesResponse = null;
+        appliedPreferencesInputs = null;
         schemeSaving = false;
         touchGeometrySaving = false;
         panelPreferenceSaving = false;
@@ -2370,6 +2377,8 @@ public final class MSIMEInputService extends InputMethodService {
             }
             view = value(created);
             session = strictCandidateLong(view, "session");
+            appliedPreferencesResponse = null;
+            appliedPreferencesInputs = null;
             String resources = options.optString("resources", "");
             if (new File(resources).isAbsolute()) {
                 emojiResources = resources;
@@ -2396,9 +2405,13 @@ public final class MSIMEInputService extends InputMethodService {
             boolean hasPreferencesDirectory = !directory.isEmpty() && new File(directory).isAbsolute();
             if (hasPreferencesDirectory) preferencesDirectory = directory;
             // 建会话前刚读过的实时偏好直接作为第一份快照：原先要等 preferencesReloader 在工作线程上再读一遍、回到主线程后才有 preferencesSnapshot，冷启动的应用里这段要一秒左右，其间皮肤和输入方式两个工具栏按钮按「设置加载中」画成灰色（#5680）。应用失败不影响会话，下面的 reloader 马上再读一次并报告。
+            boolean liveApplied = false;
             if (hasPreferencesDirectory && livePreferences != null) {
+                java.util.List<Object> inputs = preferencesApplyInputs();
                 try {
                     applyPreferencesSnapshot(value(livePreferences));
+                    rememberAppliedPreferences(livePreferences, inputs);
+                    liveApplied = true;
                 } catch (JSONException | LinkageError ignored) {
                     // 不记录偏好内容和原生层的返回；下面的 reloader 会再读一次。
                 }
@@ -2407,7 +2420,11 @@ public final class MSIMEInputService extends InputMethodService {
             message = "";
             render();
             // 窗口没显示时（会话在 onStartInput 里先于窗口建好，或在收起后为隐私模式重建）不起轮询，等 onWindowShown 再起。
-            if (hasPreferencesDirectory && imeWindowVisible) preferencesReloader.start(directory, this::reloadPreferences);
+            // 刚应用的就是几毫秒前读到的实时偏好，不必立刻再整套读一遍，按平常的节奏一秒后再查；没应用上时照旧马上读。
+            if (hasPreferencesDirectory && imeWindowVisible) {
+                if (liveApplied) preferencesReloader.startAfter(directory, this::reloadPreferences, 1000);
+                else preferencesReloader.start(directory, this::reloadPreferences);
+            }
             // 输入连接恢复时，时钟数据目录可能尚未恢复，等运行时真正准备好再续接城市选择。
             imeWorldClock.resumePicker(getCurrentInputEditorInfo());
         } catch (Exception | LinkageError error) {
@@ -3021,6 +3038,11 @@ public final class MSIMEInputService extends InputMethodService {
 
     private void reloadPreferences(String response) {
         if (session == 0) return;
+        // 键盘显示期间每秒都会走到这里。文档和它之外的输入都与上次整套应用时相同，就什么也不做：原先每秒都要整份深拷贝两次、经 JNI 推给引擎再读回视图、清一次剪贴板历史、重读设计库，低端机上是持续的发热和每秒一次的卡顿。上次被推迟或失败（preferencesNotice 非空）时照常重试。
+        java.util.List<Object> inputs = preferencesApplyInputs();
+        if (response != null && preferencesSnapshot != null && preferencesNotice.isEmpty()
+                && response.equals(appliedPreferencesResponse) && inputs.equals(appliedPreferencesInputs))
+            return;
         boolean previousPreferencesReady = preferencesSnapshot != null;
         String previousView = view == null ? "" : view.toString();
         String previousNotice = preferencesNotice;
@@ -3050,6 +3072,7 @@ public final class MSIMEInputService extends InputMethodService {
             if (response == null) throw new JSONException("Preferences unavailable");
             JSONObject snapshot = value(response);
             applyPreferencesSnapshot(snapshot);
+            rememberAppliedPreferences(response, inputs);
         } catch (JSONException | LinkageError error) {
             // Never replace the working session or log preferences/native responses.
             preferencesNotice = " · 设置读取或应用失败，保留当前设置";
@@ -3084,7 +3107,26 @@ public final class MSIMEInputService extends InputMethodService {
                 || !previousView.equals(view == null ? "" : view.toString())) render();
     }
 
+    /**
+     * {@link #applyPreferencesSnapshot} 在偏好文档之外读的输入：会话、偏好目录、本地设置（含应用主题）、月份（季节配色）、系统明暗、学习开关、键盘内调高度、剪贴板模式与存储、候选包解析结果、设计库文件。其中任何一项变了，即使文档没变也要整套应用。
+     */
+    private java.util.List<Object> preferencesApplyInputs() {
+        Object library = preferencesDirectory.isEmpty() ? null
+            : CandidateSkinStamp.file(java.nio.file.Paths.get(preferencesDirectory, "CustomSkins", "library.json"));
+        return java.util.Arrays.asList(session, preferencesDirectory, AndroidLocalSettings.load(this),
+            java.time.LocalDate.now().getMonthValue(), systemDark(), learningSuppressed(), inlineHeightActive,
+            clipboardMode, clipboardHistory, candidateSkinResolver.state(), library);
+    }
+
+    private void rememberAppliedPreferences(String response, java.util.List<Object> inputs) {
+        appliedPreferencesResponse = response;
+        appliedPreferencesInputs = inputs;
+    }
+
     private void applyPreferencesSnapshot(JSONObject snapshot) throws JSONException {
+        // 任何来源的应用都作废上次的记录：保存后直接应用、触控板、建会话都会换掉会话里的快照，下一次重读必须整套比对。
+        appliedPreferencesResponse = null;
+        appliedPreferencesInputs = null;
         refreshLocalSettings();
         // 应用主题在本地设置里，季节随月份变：每次重读都按刚读到的本地设置重新解析种子，下面的候选条外观和 reloadPreferences 的皮肤比较才用的是同一个当前种子。渲染时的 refreshSeasonIfNeeded 一分钟才查一次，只靠它的话设置页换了应用主题，键盘最多要等一分钟。
         imeStyler.refreshAppTheme(true);
@@ -6105,7 +6147,7 @@ public final class MSIMEInputService extends InputMethodService {
         } catch (JSONException error) {
             return KeyboardSkin.system(dark);
         }
-        String cacheKey = request + (design == null ? "" : ":" + design.toString().hashCode());
+        String cacheKey = request + (design == null ? "" : ":" + designHashes.computeIfAbsent(design, value -> value.toString().hashCode()));
         KeyboardSkin cached = resolvedThemes.get(cacheKey);
         if (cached != null) return cached;
         KeyboardSkin resolved;

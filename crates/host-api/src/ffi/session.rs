@@ -183,6 +183,7 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
                 edition,
                 applied,
                 requested: None,
+                requested_settled: false,
                 preferences_pending: false,
                 punctuation_override: None,
                 paired_punctuation_override: None,

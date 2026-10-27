@@ -1618,6 +1618,74 @@ fn mixed_input_changes_defer_until_composition_ends() {
     assert_eq!(update(handle, 2, &preferences)["ok"], false);
     read(msime_client_destroy(handle));
 }
+/// Android 键盘显示期间每秒把读到的偏好原样再交一次：同一份快照不再整套重做，但回复与第一次相同，组字中延后的偏好照样在组字结束后生效，设置页重新导入的效果包照样跟上。
+#[test]
+fn an_identical_preferences_resend_answers_like_the_first_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    bundle_wubi_table(&path("resources"));
+    let state = path("state");
+    let options = json!({ "api_version": 1, "resources": path("resources"), "user_data": path("user"), "cache": path("cache"), "dictionaries": path("dictionaries"), "preferences_directory": state, "preferences": chinese_preferences() }).to_string();
+    let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
+    assert_eq!(created["ok"], true, "{created}");
+    let handle = created["value"]["session"].as_u64().unwrap();
+    read(msime_client_focus(handle, true));
+    read(msime_client_character(handle, b'U', true));
+
+    let mut preferences = chinese_preferences();
+    preferences.candidate_page_size = 7;
+    preferences.plugins.effect_pack = "neon".into();
+    let first = update(handle, 1, &preferences);
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["value"]["deferred"], true);
+    assert_eq!(update(handle, 1, &preferences), first);
+    SESSIONS.with(|sessions| {
+        let sessions = sessions.borrow();
+        assert!(sessions[&handle].requested_settled);
+        assert!(sessions[&handle].preferences_pending);
+    });
+    let effect = read(msime_client_typing_effect_settings(handle));
+    assert!(effect["value"]["issue"].is_string(), "{effect}");
+
+    // 设置页装上了选中的效果包：原样再交一次偏好就跟上，不必等下一次聚焦。
+    let pack = state.join("plugins/effect/neon");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(
+        pack.join("plugin.toml"),
+        "schema_version = 1\nkind = \"effect\"\nid = \"neon\"\nname = \"Neon\"\nversion = \"1\"\nlicense = \"CC0-1.0\"\n[effect]\nstyle = \"sparks\"\nintensity = 80\ncolors = [\"#00FFCC\"]\nparticles = 12\n",
+    )
+    .unwrap();
+    assert_eq!(update(handle, 1, &preferences), first);
+    let effect = read(msime_client_typing_effect_settings(handle));
+    assert_eq!(effect["value"]["issue"], Value::Null, "{effect}");
+    assert_eq!(effect["value"]["style"], "sparks");
+
+    // 组字结束时延后的偏好换上，再交一次报告已经应用。
+    read(msime_client_command(handle, 3));
+    let settled = update(handle, 1, &preferences);
+    assert_eq!(settled["ok"], true, "{settled}");
+    assert_eq!(settled["value"]["deferred"], false);
+    assert_eq!(settled["value"]["revision"], 1);
+    assert_eq!(
+        settled["value"]["floating_toolbar"],
+        first["value"]["floating_toolbar"]
+    );
+    SESSIONS.with(|sessions| {
+        let sessions = sessions.borrow();
+        assert!(!sessions[&handle].preferences_pending);
+        assert_eq!(sessions[&handle].applied, preferences);
+    });
+
+    // 同一修订号换了内容仍然拒绝，不会被当成没变。
+    preferences.candidate_page_size = 6;
+    assert_eq!(update(handle, 1, &preferences)["ok"], false);
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 /// 不读触发字符数的宿主（macOS、Windows、Linux）一律拿默认的 5，触屏宿主照文档里存的数。
 #[test]
 fn english_minimum_prefix_is_fixed_where_the_host_does_not_read_it() {
@@ -7825,6 +7893,20 @@ fn multilingual_preferences_reach_host_session_and_rebuild() {
     // 临时宿主投影跨越空闲重建保留，下一次显式偏好更新才接管输出。
     let reset = update(handle, 4, &preferences);
     assert!(reset["value"]["view"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["source"] == 18 && row["text"] == "hello网络"));
+    // 同一份偏好原样再交一次（Android 键盘显示期间每秒一次）同样把输出交还给偏好：Windows 宿主每次更新偏好后也按偏好重置自己的繁简状态。
+    let switched = read(msime_client_set_multilingual_output(handle, true));
+    assert!(switched["value"]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["source"] == 18 && row["text"] == "hello網絡"));
+    let resent = update(handle, 4, &preferences);
+    assert_eq!(resent["ok"], true, "{resent}");
+    assert!(resent["value"]["view"]["candidates"]
         .as_array()
         .unwrap()
         .iter()

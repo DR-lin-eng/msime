@@ -20,7 +20,7 @@ def main() -> int:
     host = HOST.read_text(encoding="utf-8")
     retry_policy = RETRY_POLICY.read_text(encoding="utf-8") if RETRY_POLICY.exists() else ""
     start = session.index("  start(resources:")
-    drain = session.index("this.drainPersonalDictionary(options)", start)
+    drain = session.index("= this.drainPersonalDictionary(options)", start)
     create = session.index("client.create(options)", drain)
     scheduler = session[
         session.index("  private schedulePersonalDictionaryDrain()") : session.index(
@@ -34,26 +34,25 @@ def main() -> int:
         )
     ]
     required = {
-        "bounded native batch": (
-            ".synchronize_batch_reporting_present_with_source(" in host
-            and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, source, page)" in store
-            and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, || None, page)" in store
-            or ".synchronize_batch_reporting_present(" in host
-            and (
-                "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, page)" in store
-                or "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, || None, page)" in store
-            )
-        ) and ".take(limit)" in store,
+        "bounded native batch": ".synchronize_batch_reporting_present_with_source(" in host
+        and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, source, page)" in store
+        and "self.synchronize_batch(MAX_ACTIVE_REQUESTS, apply, || None, page)" in store
+        and ".take(limit)" in store,
         "idle sync before Engine session": start < drain < create,
         "drain result adopted": "this.personalDictionarySettled = this.drainPersonalDictionary(options)" in session
-        or "const drained: PersonalDictionaryDrain = this.drainPersonalDictionary(options)" in session
-        and "this.personalDictionarySettled = drained === 'settled'" in session,
+        or (
+            "const drained: PersonalDictionaryDrain = this.drainPersonalDictionary(options)" in session
+            and "this.personalDictionarySettled = drained === 'settled'" in session
+        )
+        or (
+            "const drained: boolean = this.drainPersonalDictionary(options)" in session
+            and "const mirrored: boolean = this.syncUserWords(options)" in session
+            and "this.personalDictionarySettled = drained && mirrored" in session
+        ),
         "two-second yield": "IDLE_DICTIONARY_RETRY_MS: number = 2000" in session
         or "IDLE_DICTIONARY_RETRY_MS: number = 2000" in retry_policy
         and "IdleDictionaryRetryPolicy.delay(this.personalDictionaryStalls)" in scheduler,
-        # Keep the queue out of both an active composition and a local Engine mode. The old
-        # helper name was removed from KeyboardSession; checking the actual state also lets the
-        # ArkTS compiler catch stale method calls instead of preserving one for this guard.
+        # 组合输入和本地引擎模式都不能排空队列；直接检查实际状态，让 ArkTS 编译器也能发现已移除的方法调用。
         "composition and local-mode guard": "this.composing() || this.localMode !== 'none'" in scheduler,
         "Engine session release": "this.restartIdleSession('personal dictionary queue')" in scheduler,
         "mode restoration": "client.setEnglishMode" in scheduler

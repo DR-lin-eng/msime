@@ -24,7 +24,7 @@ use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// 本机缓存的文件名：读到的日志位置、由它算出的状态（只有密文和公开数据）和待清理的旧 epoch。仅本人可读写，原子替换写入。
@@ -565,20 +565,37 @@ impl VirtualRelay {
     }
 
     fn load(&self) -> Result<Option<StoredLog>, RelayError> {
-        let Some(bytes) = self
-            .storage()
-            .read_private(WEBDAV_STATE_FILE, MAX_STATE_FILE_BYTES)
-            .map_err(|_| RelayError::Storage)?
+        Self::load_from(&self.config, &self.directory)
+    }
+
+    /// 只读已缓存的登记结果；内部身份与空日志都不能当作已登记设备。
+    pub(crate) fn cached_device(
+        config: &RelayConfig,
+        directory: &Path,
+        device_id: &str,
+    ) -> Result<bool, RelayError> {
+        Ok(Self::load_from(config, directory)?.is_some_and(|stored| {
+            stored
+                .ledger
+                .state
+                .devices
+                .iter()
+                .any(|device| device.device_id == device_id)
+        }))
+    }
+
+    fn load_from(config: &RelayConfig, directory: &Path) -> Result<Option<StoredLog>, RelayError> {
+        let Some(bytes) =
+            FileAccountSessionStorage::new(directory, AccountSessionFileLayout::Native)
+                .read_private(WEBDAV_STATE_FILE, MAX_STATE_FILE_BYTES)
+                .map_err(|_| RelayError::Storage)?
         else {
             return Ok(None);
         };
         let Ok(stored) = serde_json::from_slice::<StoredLog>(&bytes) else {
             return Ok(None);
         };
-        Ok(
-            (stored.relay == self.config.url() && stored.space == self.config.space())
-                .then_some(stored),
-        )
+        Ok((stored.relay == config.url() && stored.space == config.space()).then_some(stored))
     }
 
     fn save(&self, stored: &StoredLog) -> Result<(), RelayError> {

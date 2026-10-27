@@ -323,6 +323,7 @@ pub fn execute(
         ..options
     };
     let mut requests = std::mem::take(&mut state.schedule.requests);
+    let request_start = parts.remote.request_count();
     let result = {
         let mut metered = Metered {
             inner: &mut *parts.remote,
@@ -337,7 +338,14 @@ pub fn execute(
             sink: &mut *parts.sink,
         };
         let result = run(state, &mut metered_parts, ring, options);
-        requests.extend(metered.requests);
+        if let Ok(report) = &result {
+            metered.inner.finish(report, now_ms);
+        }
+        if let (Some(start), Some(end)) = (request_start, metered.inner.request_count()) {
+            requests.extend(std::iter::repeat_n(now_ms, end.saturating_sub(start)));
+        } else {
+            requests.extend(metered.requests);
+        }
         result
     };
     state.schedule.requests = requests;

@@ -96,6 +96,8 @@ final class DictionarySnapshotWorker {
       guard force || state.request?.status.active == true || state.localVersion == nil || Date().timeIntervalSince(lastVersionCheck) >= 10 else { return }
       let options = try session.dictionaryStateVersionOptions()
       let readVersion = self.readVersion
+      // 没有待处理的请求时，这一轮只是为了让状态文件里的版本跟上词库。读出的版本和刚读到的状态一样，就没有什么要写、要认领的，不再回主线程取锁读写状态文件；读取期间才排进来的请求留给下一轮空闲 tick。
+      let unchanged = state.request?.status.active == true ? nil : state.localVersion
       task = Task { [weak self] in
         defer {
           self?.task = nil
@@ -107,6 +109,10 @@ final class DictionarySnapshotWorker {
           let current = try await withTaskCancellationHandler(operation: { try await poll.value }, onCancel: { poll.cancel() })
           try Task.checkCancellation()
           guard let self else { return }
+          if current == unchanged {
+            lastVersionCheck = Date()
+            return
+          }
           try queue.publishLocalVersion(current)
           lastVersionCheck = Date()
           // 读取期间账号可能改变；认领之前重新确认归属。实际激活留给下一次空闲 tick。
@@ -155,6 +161,8 @@ final class DictionarySnapshotWorker {
           owner.lease = nil
           if MetasequoiaInputSessionBridge.isSnapshotBusy(error) { return }
           if case DictionarySnapshotQueue.Failure.busy = error { return }
+          // 一直读不出版本时也按 10 秒节流，不要每两秒就整份重读词库、再弹一次同样的提示。
+          owner.lastVersionCheck = Date()
           if let claimedRequest, let state = try? owner.queue.read(),
              state.request?.id == claimedRequest, state.request?.status.active == true {
             try? owner.queue.fail(id: claimedRequest)

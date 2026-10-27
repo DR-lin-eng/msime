@@ -143,6 +143,9 @@ pub(crate) fn open_database(path: &Path, flags: OpenFlags) -> Result<Connection>
     Ok(connection)
 }
 
+/// 检查点以后 `-wal` 截回的大小，与 SQLite 默认的自动检查点（1000 页）在 4 KiB 页上的大小相同。
+const WAL_SIZE_LIMIT_BYTES: i64 = 4 * 1024 * 1024;
+
 /// 让日志连接用 WAL、`synchronous=NORMAL` 提交。默认的回滚日志加 `synchronous=FULL` 每次提交都要建 `-journal`、fsync 两三次再删掉它；选词计数、调频、选词转移和整句联想都在输入线程上同步提交，低端机的 eMMC 上一次 fsync 就是几到几十毫秒，选非首位候选时整个键盘随之卡顿。WAL 下一次提交只是往 `-wal` 末尾追加，NORMAL 只在检查点时 fsync；断电最多丢掉最后几次学习，不会损坏数据库，学习数据可以接受。
 ///
 /// WAL 写进文件头、对之后所有连接生效，`synchronous` 却按连接算，所以长期持有的写连接（每线程缓存的日志连接、整句联想的写线程）各自调一次。切换要短暂独占数据库：别的进程正占着回滚日志的锁、或文件系统不支持 WAL 的共享内存（网络盘）时 SQLite 留在原来的模式，这里照常使用；只有真的进了 WAL 才降到 NORMAL，回滚日志配 NORMAL 断电时可能损坏数据库。
@@ -150,6 +153,10 @@ pub(crate) fn open_database(path: &Path, flags: OpenFlags) -> Result<Connection>
 /// iOS 不切换。键盘扩展和 App 在 App Group 容器里共用日志，WAL 的连接在整个生命周期里都对 `-shm` 持有一把共享锁；挂起时还持有 App Group 里的文件锁会被系统按 `0xdead10cc` 杀掉。会话收起时会释放本线程的日志连接，但整句联想的写线程和其他线程缓存的连接要等下一次访问或 `close_cached_journals` 才关，回滚日志在两次事务之间不持锁，换成 WAL 就会在挂起时一直拿着锁。
 ///
 /// 主词库（`msime-pinyin.db`、`msime-english.db` 的工作副本）也不切换：重置学习数据把它们挪作备份时不带旁路文件，旧的 `-wal` 会套到新复制的词库上。
+///
+/// 跨文件事务因此不再是整体原子的。删词、个人词库编辑、五笔造词这些操作把日志 ATTACH 到词库连接上，在一个事务里同时改词库和日志；只要有一个库是 WAL，SQLite 就不用超级日志把它们绑在一起，只保证每个文件各自原子。提交顺序是固定的：WAL 的日志在提交第一阶段就写下带提交标记的帧，回滚日志的词库要到第二阶段删掉 `-journal`（或超级日志）才算提交，所以进程被杀或断电只会留下「日志已经记下、词库工作副本回滚了」，不会反过来。日志是学习数据的权威来源，工作副本在下一次回放（安装、升级、换代次）时按日志补齐；在那之前这一次删词或编辑在候选里看不到，这是接受的代价。改动这些事务时不要依赖「两边要么都在、要么都不在」。
+///
+/// 进了 WAL 还设 `journal_size_limit`：默认 -1 时检查点以后 `-wal` 不截短，一次大事务（导入词库、合并快照、减半）把它撑到多大就一直多大；整句联想的写连接在输入法进程里一直开着，最后一个连接关闭时才删 `-wal` 的机会也就没有了。设了上限，检查点重置日志时把 `-wal` 截回这个大小，不影响持久性。
 pub(crate) fn prefer_write_ahead_log(connection: &Connection) {
     #[cfg(not(target_os = "ios"))]
     {
@@ -165,6 +172,12 @@ pub(crate) fn prefer_write_ahead_log(connection: &Connection) {
         if wal {
             // 设置失败只是保持默认的 FULL：更慢，但不影响正确性。
             let _ = connection.execute_batch("PRAGMA synchronous=NORMAL");
+            // 这条 PRAGMA 回一行新值；设置失败只是 `-wal` 不截短。
+            let _ = connection.query_row(
+                &format!("PRAGMA journal_size_limit={WAL_SIZE_LIMIT_BYTES}"),
+                [],
+                |_| Ok(()),
+            );
         }
     }
     #[cfg(target_os = "ios")]
@@ -874,6 +887,10 @@ mod tests {
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .unwrap();
         assert_eq!(synchronous, 1, "synchronous=NORMAL");
+        let size_limit: i64 = journal
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(size_limit, WAL_SIZE_LIMIT_BYTES);
         write_upsert(&journal, PersonalDictionaryKind::Pinyin, "ni", "你", 1, "").unwrap();
         assert!(wal_length(&path) > 0);
         let reader = open_existing_read_only(&path).unwrap().unwrap();

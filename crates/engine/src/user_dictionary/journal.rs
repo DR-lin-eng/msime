@@ -143,8 +143,9 @@ pub(crate) fn open_database(path: &Path, flags: OpenFlags) -> Result<Connection>
     Ok(connection)
 }
 
-/// 检查点以后 `-wal` 截回的大小，与 SQLite 默认的自动检查点（1000 页）在 4 KiB 页上的大小相同。
-const WAL_SIZE_LIMIT_BYTES: i64 = 4 * 1024 * 1024;
+/// 检查点以后 `-wal` 截回的大小（4 MiB），与 SQLite 默认的自动检查点（1000 页）在 4 KiB 页上的大小相同。写成字面量而不是 `format!` 拼出来：首次打开日志常发生在选词提交的路径上，那里有分配次数预算。
+#[cfg(not(target_os = "ios"))]
+const WAL_SIZE_LIMIT_PRAGMA: &str = "PRAGMA journal_size_limit=4194304";
 
 /// 让日志连接用 WAL、`synchronous=NORMAL` 提交。默认的回滚日志加 `synchronous=FULL` 每次提交都要建 `-journal`、fsync 两三次再删掉它；选词计数、调频、选词转移和整句联想都在输入线程上同步提交，低端机的 eMMC 上一次 fsync 就是几到几十毫秒，选非首位候选时整个键盘随之卡顿。WAL 下一次提交只是往 `-wal` 末尾追加，NORMAL 只在检查点时 fsync；断电最多丢掉最后几次学习，不会损坏数据库，学习数据可以接受。
 ///
@@ -173,11 +174,7 @@ pub(crate) fn prefer_write_ahead_log(connection: &Connection) {
             // 设置失败只是保持默认的 FULL：更慢，但不影响正确性。
             let _ = connection.execute_batch("PRAGMA synchronous=NORMAL");
             // 这条 PRAGMA 回一行新值；设置失败只是 `-wal` 不截短。
-            let _ = connection.query_row(
-                &format!("PRAGMA journal_size_limit={WAL_SIZE_LIMIT_BYTES}"),
-                [],
-                |_| Ok(()),
-            );
+            let _ = connection.query_row(WAL_SIZE_LIMIT_PRAGMA, [], |_| Ok(()));
         }
     }
     #[cfg(target_os = "ios")]
@@ -890,7 +887,7 @@ mod tests {
         let size_limit: i64 = journal
             .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(size_limit, WAL_SIZE_LIMIT_BYTES);
+        assert_eq!(size_limit, 4 * 1024 * 1024);
         write_upsert(&journal, PersonalDictionaryKind::Pinyin, "ni", "你", 1, "").unwrap();
         assert!(wal_length(&path) > 0);
         let reader = open_existing_read_only(&path).unwrap().unwrap();

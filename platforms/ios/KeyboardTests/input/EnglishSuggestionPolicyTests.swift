@@ -17,6 +17,26 @@ final class EnglishSuggestionPolicyTests: XCTestCase {
     }
   }
 
+  /// 逐字母的英文建议在输入线程上算：结果与同步查询一致，快速连打时只送回最后一次请求，按空格时同步查询取到的仍是同一个结果。
+  @MainActor
+  func testAsynchronousCorrectionMatchesSynchronousAndDeliversOnlyTheLatestRequest() {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: state) }
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    var delivered: [[String]] = []
+    let arrived = expectation(description: "latest correction")
+    bridge.englishCorrections(forPrefix: "languge") { delivered.append($0) }
+    bridge.englishCorrections(forPrefix: "langiage") { items in
+      XCTAssertTrue(Thread.isMainThread)
+      delivered.append(items)
+      arrived.fulfill()
+    }
+    wait(for: [arrived], timeout: 10)
+    XCTAssertEqual(delivered, [["langiage", "language"]])
+    XCTAssertEqual(bridge.englishCorrections(forPrefix: "langiage"), ["langiage", "language"])
+    XCTAssertEqual(bridge.englishCorrections(forPrefix: "languge"), ["languge", "language"])
+  }
+
   func testWordStopsAtNonAsciiLettersAndBoundaries() {
     XCTAssertEqual(EnglishSuggestionPolicy.currentWord(before: "我用iph"), "iph")
     XCTAssertEqual(EnglishSuggestionPolicy.currentWord(before: "こんにちはhel"), "hel")

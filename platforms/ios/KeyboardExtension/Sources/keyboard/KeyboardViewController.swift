@@ -29,6 +29,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private let session = MetasequoiaInputSessionBridge()
   private var englishCorrectionRejectedPrefix = ""
   private var englishCorrectionRejectedDocument: UUID?
+  /// 候选条内容每换一次加一，在途的英文建议回来时拿它判断自己是否已过时。
+  private var englishSuggestionStripGeneration: UInt64 = 0
   /// 引擎会话刚建好时的内存读数，紧跟在 `session` 后面声明，`keyboard_loaded` 记成 `session=`。
   private let sessionMemory = DiagnosticLog.MemorySample.current()
   /// 「全角输入」 for the running keyboard: starts from the shared `character_width`, then the 全角 card switches it.
@@ -3739,8 +3741,16 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       updateCandidateStrip(preedit: "", candidates: [])
       return
     }
-    updateCandidateStrip(
-      preedit: "", candidates: session.englishCorrections(forPrefix: prefix))
+    // 纠错要在词典里搜一遍，词越长越慢，低端机上每个字母都会卡主线程，所以放到输入线程上算。结果回来之前候选条保持原样，不先清空再补上，免得每个字母闪一下。回来时候选条已被别的路径改过、换了输入框或光标前的词已经变了，这次结果就作废。
+    englishSuggestionStripGeneration &+= 1
+    let generation = englishSuggestionStripGeneration
+    let document = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
+    session.englishCorrections(forPrefix: prefix) { [weak self] items in
+      guard let self, generation == englishSuggestionStripGeneration,
+            document == KeyboardHostContext.documentIdentifier(for: textDocumentProxy),
+            prefix == englishWordBeforeCursor else { return }
+      updateCandidateStrip(preedit: "", candidates: items)
+    }
   }
 
   private var englishCorrectionsEnabled: Bool {
@@ -6885,6 +6895,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
                                     candidateEngineIndices: [Int]? = nil,
                                     answeredByPinyinFallback: Bool = false) {
     // 光标前打到 `xxx@` 时邮箱后缀占候选条，排在英文建议之前，与 Android 一样；它们不是 Engine 的候选，不带编码、释义和来源。
+    // 还在输入线程上算的英文建议不能再盖掉这次的内容。
+    englishSuggestionStripGeneration &+= 1
     let emailSuffixes = emailSuffixesForStrip(preedit: preedit)
     visibleEmailSuffixes = emailSuffixes
     let showsEmailSuffixes = !emailSuffixes.isEmpty

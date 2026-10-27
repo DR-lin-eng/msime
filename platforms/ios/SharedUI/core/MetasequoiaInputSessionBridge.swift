@@ -1215,11 +1215,71 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     }
   }
 
-  /// 从共享引擎读取原文和唯一纠错；查询不改变键盘组字，也不学习当前词。
+  /// 英文纠错在输入线程上的状态。Engine 把纠错词典放在调用线程的线程局部变量里，所以查询一律在 `MSIMEInputThread` 这一条常驻线程上做：主线程不再另开一份词典连接，也不在每个字母上跑整段纠错搜索。
+  private final class EnglishCorrectionWork: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latestRequest: UInt64 = 0
+    /// 只在输入线程上读写：最近一次算出的结果。打完一个词按空格或标点时，同一个词刚在最后一个字母上算过，这里直接取用，不再算第二遍。
+    var memo: (resources: String, prefix: String, items: [String])?
+
+    func begin() -> UInt64 {
+      lock.lock()
+      defer { lock.unlock() }
+      latestRequest &+= 1
+      return latestRequest
+    }
+
+    func isLatest(_ request: UInt64) -> Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return request == latestRequest
+    }
+  }
+  private let englishCorrectionWork = EnglishCorrectionWork()
+
+  /// 从共享引擎读取原文和唯一纠错；查询不改变键盘组字，也不学习当前词。同步版本，在输入线程上算完再返回，空格、标点自动纠错要在上屏前拿到结果。
   func englishCorrections(forPrefix prefix: String) -> [String] {
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else { return [] }
+    let work = englishCorrectionWork
+    return MSIMEInputThread.shared.sync { Self.englishCorrections(prefix: prefix, resources: resources, work: work) }
+  }
+
+  /// 异步版本：在输入线程上算，结果回到主线程交给 `completion`。快速连打时排在队里、已被更新请求取代的查询直接跳过、不回调，只有最后一次请求的结果会送回；调用方仍要在回调里核对当前的词。
+  func englishCorrections(forPrefix prefix: String, completion: @escaping ([String]) -> Void) {
+    precondition(Thread.isMainThread)
+    let work = englishCorrectionWork
+    let request = work.begin()
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else {
+      completion([])
+      return
+    }
+    MSIMEInputThread.shared.async {
+      guard work.isLatest(request) else { return }
+      let items = Self.englishCorrections(prefix: prefix, resources: resources, work: work)
+      DispatchQueue.main.async {
+        guard work.isLatest(request) else { return }
+        completion(items)
+      }
+    }
+  }
+
+  private func englishCorrectionResources(forPrefix prefix: String) -> String? {
     guard handle != 0, !prefix.isEmpty, prefix.utf8.count <= 128,
           let resources = options["resources"] as? String,
-          NSString(string: resources).isAbsolutePath else { return [] }
+          NSString(string: resources).isAbsolutePath else { return nil }
+    return resources
+  }
+
+  /// 只在输入线程上调用。
+  private static func englishCorrections(prefix: String, resources: String,
+                                         work: EnglishCorrectionWork) -> [String] {
+    if let memo = work.memo, memo.resources == resources, memo.prefix == prefix { return memo.items }
+    let items = englishCorrections(prefix: prefix, resources: resources)
+    work.memo = (resources, prefix, items)
+    return items
+  }
+
+  private static func englishCorrections(prefix: String, resources: String) -> [String] {
     do {
       let request = try JSONSerialization.data(withJSONObject: ["prefix": prefix, "limit": 2, "correction": true])
       let resourceData = Data(resources.utf8)

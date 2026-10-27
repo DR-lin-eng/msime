@@ -245,7 +245,7 @@ fn state_revision(
 }
 
 /// 日志文件最后一次改动要早于现在多久，这次算出的修订号才记进缓存，见 [`cached_dictionary_state_revision`]。两秒盖过 FAT 这类最粗的两秒时间精度。
-const REVISION_SETTLE: Duration = Duration::from_secs(2);
+pub(crate) const REVISION_SETTLE: Duration = Duration::from_secs(2);
 
 /// 宿主进程里通常只有一份日志；准备快照时会多出暂存代次的日志，测试里是各自的临时目录。满了就整个清掉重来。
 const REVISION_CACHE_LIMIT: usize = 16;

@@ -19296,6 +19296,9 @@ fn an_idle_personal_dictionary_sync_keeps_the_page_and_the_file() {
     edit("你好", "seed-first");
     sync();
     assert_eq!(values(), ["你好"]);
+    // 刚写过的日志不给来源戳（同一个时间粒度里的写入 stat 可能看不出来，见 `dictionary_entries_source`），等它落定（两秒）以后的那次同步才记下。
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    sync();
     assert!(store.read().unwrap().snapshot_source.is_some());
     let written = identity();
     // 读页本身（只读连接打开 WAL 日志）不能让下一次的来源戳变掉。

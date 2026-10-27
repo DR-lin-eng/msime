@@ -60,6 +60,8 @@ export function useChatConversation({
 
   useEffect(() => {
     setSending(false);
+    setCatalog(null);
+    setSelectedModel("");
     void loadModels();
     return () => {
       sendingRef.current = false;

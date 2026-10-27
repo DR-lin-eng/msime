@@ -4812,6 +4812,13 @@ enum RecoveryScope {
     Malformed,
 }
 
+/// [`PreferencesStore::load_reusing`] 读到的一份偏好：快照和读出它的文档原始字节。偏好文件不存在时没有字节。
+#[derive(Debug, Clone)]
+pub struct LoadedPreferences {
+    bytes: Option<Vec<u8>>,
+    pub snapshot: PreferencesSnapshot,
+}
+
 pub struct PreferencesStore {
     directory: PathBuf,
     /// 构造时指定的版本；`None` 时以状态目录里的版本记录为准（[`crate::edition::Edition::recorded_in`]），没有记录就是 full。只影响没有偏好文件时读到的默认值和修复时垫底的默认值。
@@ -4925,14 +4932,16 @@ impl PreferencesStore {
     fn read_locked_keeping_unknown(
         &self,
     ) -> Result<(PreferencesSnapshot, Vec<UnknownPreferenceField>), PreferencesError> {
+        let bytes = self.read_document_bytes()?;
+        self.decode_document(bytes.as_deref())
+    }
+
+    /// 偏好文件的原始字节，文件不存在时为 `None`。调用方持有锁。
+    fn read_document_bytes(&self) -> Result<Option<Vec<u8>>, PreferencesError> {
         let path = self.path();
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let snapshot = self.missing_document();
-                crate::network::install(&snapshot.preferences.network);
-                return Ok((snapshot, Vec::new()));
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         if !metadata.file_type().is_file() {
@@ -4946,7 +4955,20 @@ impl PreferencesStore {
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
-        let mut document: serde_json::Value = serde_json::from_slice(&bytes)?;
+        Ok(Some(bytes))
+    }
+
+    /// 从 `read_document_bytes` 读到的字节读出快照和未知键；没有文件时是 [`Self::missing_document`]。
+    fn decode_document(
+        &self,
+        bytes: Option<&[u8]>,
+    ) -> Result<(PreferencesSnapshot, Vec<UnknownPreferenceField>), PreferencesError> {
+        let Some(bytes) = bytes else {
+            let snapshot = self.missing_document();
+            crate::network::install(&snapshot.preferences.network);
+            return Ok((snapshot, Vec::new()));
+        };
+        let mut document: serde_json::Value = serde_json::from_slice(bytes)?;
         // 只在读磁盘时回退新版本的未知布局；设置提交仍由枚举反序列化严格校验。
         if let Some(layout) = document.pointer_mut("/preferences/korean/layout") {
             if layout
@@ -4978,6 +5000,23 @@ impl PreferencesStore {
     pub fn load(&self) -> Result<PreferencesSnapshot, PreferencesError> {
         let _lock = self.lock()?;
         self.read_locked()
+    }
+
+    /// 同 [`Self::load`]，但偏好文件与 `previous` 读到的逐字节相同时沿用它的快照，不再解析和校验：读出的快照只取决于这些字节。代理设置照样按读到的文档装进 [`crate::network`]。交回的结果供下一次传入。Android 键盘显示期间每秒在工作线程上读一次偏好，文件绝大多数时候没变。偏好文件不存在时每次照常取默认快照：那份快照还取决于目录里的版本记录。
+    pub fn load_reusing(
+        &self,
+        previous: Option<LoadedPreferences>,
+    ) -> Result<LoadedPreferences, PreferencesError> {
+        let _lock = self.lock()?;
+        let bytes = self.read_document_bytes()?;
+        if let Some(previous) =
+            previous.filter(|previous| bytes.is_some() && previous.bytes == bytes)
+        {
+            crate::network::install(&previous.snapshot.preferences.network);
+            return Ok(previous);
+        }
+        let (snapshot, _unknown) = self.decode_document(bytes.as_deref())?;
+        Ok(LoadedPreferences { bytes, snapshot })
     }
 
     /// None means the writer lock is busy; retry later without using defaults.

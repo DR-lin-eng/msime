@@ -6659,7 +6659,25 @@ fn background_preferences_reader_uses_shared_store_and_preserves_bad_files() {
     };
     assert_eq!(
         load(path.clone())["value"],
-        serde_json::to_value(saved).unwrap()
+        serde_json::to_value(&saved).unwrap()
+    );
+    // 文件没变时再读得到同一份快照；保存过之后读到新的那份。
+    assert_eq!(
+        load(path.clone())["value"],
+        serde_json::to_value(&saved).unwrap()
+    );
+    let resaved = PreferencesStore::new(directory.path())
+        .save(
+            saved.revision,
+            Preferences {
+                learning: false,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        load(path.clone())["value"],
+        serde_json::to_value(resaved).unwrap()
     );
     let file = directory.path().join("preferences.json");
     std::fs::write(&file, "broken").unwrap();

@@ -839,6 +839,11 @@ pub unsafe extern "C" fn msime_client_nine_key_shuangpin_layout(
     })
 }
 
+/// 进程里 `msime_client_load_preferences` 最近读到的一份偏好，连同它所在的目录：Android 键盘显示期间每秒在工作线程上读一次，偏好文件没变时不再解析和校验，见 [`PreferencesStore::load_reusing`]。
+static LOADED_PREFERENCES: Mutex<
+    Option<(String, msime_client_core::preferences::LoadedPreferences)>,
+> = Mutex::new(None);
+
 /// Load the shared store on a worker thread; no session handle is accessed.
 /// # Safety
 /// `directory` points to `length` readable UTF-8 bytes. Null is rejected.
@@ -858,10 +863,22 @@ pub unsafe extern "C" fn msime_client_load_preferences(
             "invalid preferences directory encoding",
             "preferences directory must be absolute",
         )?;
-        let snapshot = PreferencesStore::new(directory)
-            .load()
+        // 读文件时不持这把锁：同时来的另一次读拿不到上一份，照常整读一遍。
+        let previous = LOADED_PREFERENCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .filter(|(cached, _)| cached == directory)
+            .map(|(_, loaded)| loaded);
+        let loaded = PreferencesStore::new(directory)
+            .load_reusing(previous)
             .map_err(|e| e.to_string())?;
-        serde_json::to_value(snapshot).map_err(|e| e.to_string())
+        let value = serde_json::to_value(&loaded.snapshot).map_err(|e| e.to_string())?;
+        *LOADED_PREFERENCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((directory.to_owned(), loaded));
+        Ok(value)
     })
 }
 

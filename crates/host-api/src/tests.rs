@@ -19147,6 +19147,70 @@ fn a_collection_addition_of_an_existing_user_word_is_left_alone_and_reported() {
     assert_eq!(weight_of("你们"), Some(json!(10_000)), "{listed}");
 }
 
+/// 键盘每次聚焦都会同步个人词库。队列空、词库没动时不能每次都扫一页日志、重写并 fsync sync.json；日志在队列之外变了（打字时学到的自造词）时，设置页看到的那一页仍要跟着刷新。
+#[test]
+fn an_idle_personal_dictionary_sync_keeps_the_page_and_the_file() {
+    use msime_client_services::dictionary::personal::PersonalDictionaryStore;
+    let directory = tempfile::tempdir().unwrap();
+    let options = host_options_with_main_dictionary(directory.path());
+    let edit = |value: &str, request_id: &str| {
+        let entry = json!({"kind": "pinyin", "key": "ni'hao", "value": value, "weight": 100});
+        let edited = call_android_data(
+            msime_client_dictionary,
+            json!({"options": options, "action": {"operation": "edit", "previous": null, "replacement": entry, "request_id": request_id}}),
+        );
+        assert_eq!(edited["ok"], true, "{edited}");
+    };
+    let sync = || {
+        let synced = call_android_data(msime_client_personal_dictionary_sync, options.clone());
+        assert_eq!(synced["ok"], true, "{synced}");
+        assert!(synced["value"]["snapshot_error"].is_null(), "{synced}");
+    };
+    let store = PersonalDictionaryStore::new(directory.path().join("PersonalDictionary"));
+    let path = directory
+        .path()
+        .join("PersonalDictionary")
+        .join("sync.json");
+    let identity = || {
+        let metadata = std::fs::metadata(&path).unwrap();
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+        #[cfg(not(unix))]
+        let inode = 0;
+        (
+            inode,
+            metadata.modified().unwrap(),
+            std::fs::read(&path).unwrap(),
+        )
+    };
+    let values = || -> Vec<String> {
+        store
+            .read()
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect()
+    };
+
+    edit("你好", "seed-first");
+    sync();
+    assert_eq!(values(), ["你好"]);
+    assert!(store.read().unwrap().snapshot_source.is_some());
+    let written = identity();
+    // 读页本身（只读连接打开 WAL 日志）不能让下一次的来源戳变掉。
+    sync();
+    sync();
+    assert_eq!(identity(), written, "an idle sync rewrote sync.json");
+
+    edit("拟好", "seed-second");
+    sync();
+    let mut listed = values();
+    listed.sort();
+    assert_eq!(listed, ["你好", "拟好"]);
+    assert_ne!(identity(), written);
+}
+
 #[test]
 fn common_phrases_and_collections_forward_to_client_core() {
     let directory = tempfile::tempdir().unwrap();

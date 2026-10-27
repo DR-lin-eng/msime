@@ -46,6 +46,52 @@ pub fn dictionary_entries(
     ))
 }
 
+/// [`dictionary_entries`] 和 [`dictionary_entries_for_kind`] 的读取来源：是否读主词库，加上用户日志和它的 `-wal` 的戳（Unix 上是 inode、长度、修改时间和状态改变时间，别处是长度和修改时间；文件不在记作 `-`）。两次结果相同，同一页就读得出同样的内容，宿主据此跳过重查。空的 `-wal` 没有任何帧，与没有 `-wal` 同等看待：只读连接打开 WAL 日志时会建出空 `-wal`，读写连接最后关闭时又会删掉它，不这样处理的话，列表读取本身就会让下一次的戳变掉。读不出戳（路径无效、元数据读取失败）时为 `None`，调用方必须照常重查。
+pub fn dictionary_entries_source(options: &EngineOptions) -> Option<String> {
+    let paths = runtime_paths(options);
+    paths.validate().ok()?;
+    let journal = paths.user(crate::assets::USER_JOURNAL);
+    let mut wal = journal.as_os_str().to_owned();
+    wal.push("-wal");
+    Some(format!(
+        "{}|{}|{}",
+        u8::from(main_dictionary(options)),
+        source_stamp(&journal, false)?,
+        source_stamp(Path::new(&wal), true)?
+    ))
+}
+
+fn source_stamp(path: &Path, empty_is_missing: bool) -> Option<String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) if empty_is_missing && metadata.len() == 0 => return Some("-".into()),
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some("-".into()),
+        Err(_) => return None,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(format!(
+            "{}:{}:{}.{}:{}.{}",
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(format!("{}:{}", metadata.len(), modified.as_nanos()))
+    }
+}
+
 pub fn dictionary_export_entries(
     options: &EngineOptions,
     offset: usize,

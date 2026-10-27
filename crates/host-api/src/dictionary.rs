@@ -1532,7 +1532,7 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
     .map_err(|_| "dictionary access unavailable")?
     .ok_or("dictionary maintenance busy")?;
     store
-        .synchronize_batch_reporting_present(
+        .synchronize_batch_reporting_present_with_source(
             |requests| {
                 let entries: Vec<_> = requests
                     .iter()
@@ -1594,6 +1594,8 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
                     })
                     .collect()
             },
+            // 队列空、宿主没要新页时，日志的戳没动就沿用上次那一页，聚焦时不必再扫日志、重写 sync.json。
+            || msime_engine::host::dictionary_entries_source(&options),
             |request| {
                 let (entries, has_more) = user_entries_page(
                     &options,

@@ -1,7 +1,6 @@
 package app.msime.android;
 
 import app.msime.android.core.InputViewValuePolicy;
-import android.widget.Button;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import org.json.JSONArray;
@@ -23,6 +22,10 @@ final class ImeCandidateStrip {
     private boolean appendPosted;
     private long renderedSession = Long.MIN_VALUE;
     private long renderedGeneration = Long.MIN_VALUE;
+    /**
+     * 候选条按钮按位置复用。render 前候选行照旧 `removeAllViews`，这里只把同一批按钮按顺序挂回去、换上这一代的内容和点击目标，不再每次整排新建：每键几十个 Button 连同各自的监听、底图和文字测量，在低端机上是一两帧的主线程时间，旧按钮又全成了垃圾。换了键盘视图就整池丢掉。
+     */
+    private final java.util.ArrayList<KeyboardPressButton> pool = new java.util.ArrayList<>();
 
     ImeCandidateStrip(MSIMEInputService service) { s = service; }
 
@@ -67,10 +70,16 @@ final class ImeCandidateStrip {
         // 每个键盘视图只装一次布局监听；同代重画仍使用最新的列表和快照。
         if (observedList != list) {
             observedList = list;
+            pool.clear();
             list.addOnLayoutChangeListener((view, left, top, right, bottom,
                     oldLeft, oldTop, oldRight, oldBottom) -> postAppendCheck());
         }
         int total = entries == null ? 0 : entries.length();
+        // 换了一代只先建第一批；之前滚远时多出来的按钮留两批备用，其余放掉，不长期占着内存。
+        if (!same) {
+            int retained = 2 * CandidateGridBatchPolicy.BATCH;
+            if (pool.size() > retained) pool.subList(retained, pool.size()).clear();
+        }
         add(CandidateGridBatchPolicy.initialCount(total, previous, same), false);
         if (!same) scroll.scrollTo(0, 0);
     }
@@ -95,7 +104,11 @@ final class ImeCandidateStrip {
             JSONObject candidate = entries.optJSONObject(built++);
             if (candidate == null || !AiPendingCandidatePolicy.isVisible(
                     InputViewValuePolicy.integer(candidate, "source", -1))) continue;
-            Button button = s.imeCandidates.stripCandidateButton(snapshot, candidate, visible++);
+            if (visible == pool.size()) pool.add(s.imeCandidates.newStripCandidateButton());
+            KeyboardPressButton button = pool.get(visible);
+            s.imeCandidates.bindStripCandidateButton(button, snapshot, candidate, visible++);
+            // render 前候选行已经 removeAllViews，池里的按钮这时都没有父视图；万一还挂在别处，先摘下来再挂。
+            if (button.getParent() instanceof android.view.ViewGroup parent) parent.removeView(button);
             list.addView(button, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             if (style) s.imeStyler.applySkinToView(button, true, s.skin);

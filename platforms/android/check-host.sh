@@ -96,6 +96,27 @@ if ! rg -q 'CandidateAppearance\.STRIP_CHIP_MIN_WIDTH_DP' <<< "$style_body" \
   echo "Candidate strip buttons must keep only the touch minimum width, not the skin's desktop itemMinWidth" >&2
   exit 1
 fi
+# 每次按键的 render 末尾都会把候选重新上色一遍：外观和密度没变、按钮的底也还是上次装上的那块时，不能再给每个候选新建五块 GradientDrawable 和一个 StateListDrawable，文字配色也共用一份 ColorStateList。低端机上每键几十个候选、几百个短命 Drawable，是打字发热和卡顿的来源之一。
+if ! rg -q 'if \(!keepsChipFace\(button\)\) \{' <<< "$style_body" \
+  || rg -q 'ColorPolicy\.stateList' <<< "$style_body"; then
+  echo "Candidate chip styling must keep the installed chip face when appearance and density are unchanged" >&2
+  exit 1
+fi
+# 触屏候选条按位置复用按钮（ImeCandidateStrip.pool），每次 render 只重新绑定内容和点击目标；改回每次新建按钮，每键就要整排重建几十个 Button 再量一遍字宽。
+strip_add_body=$(sed -n '/^    private void add(int target, boolean style) {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidateStrip.java")
+if ! rg -q 'pool\.get\(visible\)' <<< "$strip_add_body" \
+  || ! rg -q 'bindStripCandidateButton\(' <<< "$strip_add_body"; then
+  echo "The touch candidate strip must reuse its pooled buttons instead of creating new ones on every render" >&2
+  exit 1
+fi
+# applySkin 每次 render 都走整棵键盘树，收着的面板（表情、符号网格可有几百格）不能每键跟着上一遍色：只在 applySkin 自己那几遍里跳过 GONE 子树并记下来，被直接显示出来时由画帧前的兜底补一次换肤。
+if ! rg -q 'skipHidden = true;' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
+  || ! rg -q 'skippedHidden\.add\(child\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
+  || ! rg -q 'addOnPreDrawListener\(restyleShown\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java"; then
+  echo "applySkin must skip hidden subtrees and restyle them when they are shown" >&2
+  exit 1
+fi
 # Hangul composition is Engine state. Android labels the Dubeolsik keys and sends their ASCII letters; a syllable table here would be a second automaton that can drift from the Engine's.
 if ! rg -q '4 korean' "$repo_root/crates/host-api/include/msime_client.h" \
   || ! rg -q 'KOREAN_SCHEME = 4;' \

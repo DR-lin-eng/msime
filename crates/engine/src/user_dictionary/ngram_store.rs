@@ -16,6 +16,7 @@ use super::journal::{
     drop_stale_pinyin_upserts, ensure_schema, open_database, open_existing_read_only,
     prefer_write_ahead_log,
 };
+use super::typo_profile::{file_stamp, FileStamp};
 use crate::error::{EngineError, Result};
 use crate::lattice::ngram::SENTENCE_START;
 use crate::lattice::personal::{PersonalNgram, PersonalNgramOptions, PersonalTransition};
@@ -33,9 +34,25 @@ pub(crate) const HALVE_SQL: &str = "DELETE FROM personal_bigram WHERE count<2;UP
 /// Bumped by `release_all`: every store's model is stale until it reloads from the file now at its path.
 static STORE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 注册表保留仍被会话或刷新线程使用的 store；下次打开 journal 时会回收只有注册表自身引用的旧路径。
+/// 注册表保留仍被会话或刷新线程使用的 store；下次打开 journal 时会回收只有注册表自身引用的旧路径。正在打开的这条路径例外：它的空闲 store 只要日志自模型上次和磁盘对齐后没被改过就留着（见 [`reclaim_idle`]），Android 每进一个输入框都重建会话，不留的话每次都要在建会话的线程上把两张表整表重读一遍。
 static STORES: LazyLock<Mutex<HashMap<PathBuf, Arc<PersonalNgramStore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 日志和它的 `-wal` 的 `(修改时间, 大小)`，用来判断模型上次和磁盘对齐之后有没有别人写过这个文件。
+type DiskStamp = (FileStamp, FileStamp);
+
+fn disk_stamp(user_db: &Path) -> DiskStamp {
+    let mut wal = user_db.as_os_str().to_owned();
+    wal.push("-wal");
+    (file_stamp(user_db), file_stamp(Path::new(&wal)))
+}
+
+/// 丢掉只剩注册表自己引用的 store。`opening` 是正要打开的路径：它的空闲 store 若磁盘戳和模型上次对齐时一样就留下复用，省掉整表重读；戳变了（别的进程学了新词、重置或换了日志、本进程别的连接写过日志）就和以前一样丢掉重建，新 store 从磁盘读。
+fn reclaim_idle(stores: &mut HashMap<PathBuf, Arc<PersonalNgramStore>>, opening: Option<&Path>) {
+    stores.retain(|path, store| {
+        Arc::strong_count(store) > 1 || (opening == Some(path.as_path()) && store.matches_disk())
+    });
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic in another thread while it held the lock leaves plain data behind, which is still what the store wrote last.
@@ -70,6 +87,8 @@ pub struct PersonalNgramStore {
     loaded_invalidations: AtomicU64,
     write_failed: AtomicBool,
     probed: AtomicBool,
+    /// 模型最后一次和磁盘对齐（读完日志、或自己写完一批）时日志的磁盘戳；`None` 表示不知道，空闲时不复用。
+    synced_stamp: Mutex<Option<DiskStamp>>,
 }
 
 /// `loaded_generation` before the first load, so a new store is stale and reads the file on first use.
@@ -78,21 +97,33 @@ const NEVER_LOADED: u64 = u64::MAX;
 impl PersonalNgramStore {
     pub fn for_journal(user_db: &Path) -> Arc<PersonalNgramStore> {
         let mut stores = lock(&STORES);
-        stores.retain(|_, store| Arc::strong_count(store) > 1);
-        Arc::clone(stores.entry(user_db.to_path_buf()).or_insert_with(|| {
-            Arc::new(PersonalNgramStore {
-                model: RwLock::new(PersonalNgram::new(PersonalNgramOptions::default())),
-                path: user_db.to_path_buf(),
-                writer: Mutex::new(Writer::default()),
-                pending: Mutex::new(Vec::with_capacity(FLUSH_BATCH)),
-                version: AtomicU64::new(0),
-                invalidations: AtomicU64::new(0),
-                loaded_generation: AtomicU64::new(NEVER_LOADED),
-                loaded_invalidations: AtomicU64::new(0),
-                write_failed: AtomicBool::new(false),
-                probed: AtomicBool::new(false),
-            })
-        }))
+        reclaim_idle(&mut stores, Some(user_db));
+        Arc::clone(
+            stores
+                .entry(user_db.to_path_buf())
+                .or_insert_with(|| Arc::new(PersonalNgramStore::new(user_db))),
+        )
+    }
+
+    fn new(user_db: &Path) -> PersonalNgramStore {
+        PersonalNgramStore {
+            model: RwLock::new(PersonalNgram::new(PersonalNgramOptions::default())),
+            path: user_db.to_path_buf(),
+            writer: Mutex::new(Writer::default()),
+            pending: Mutex::new(Vec::with_capacity(FLUSH_BATCH)),
+            version: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
+            loaded_generation: AtomicU64::new(NEVER_LOADED),
+            loaded_invalidations: AtomicU64::new(0),
+            write_failed: AtomicBool::new(false),
+            probed: AtomicBool::new(false),
+            synced_stamp: Mutex::new(None),
+        }
+    }
+
+    /// 日志此刻的磁盘戳和模型上次对齐时一样：期间没有任何连接写过它，留着的模型就是现在读盘会得到的结果。
+    fn matches_disk(&self) -> bool {
+        *lock(&self.synced_stamp) == Some(disk_stamp(&self.path))
     }
 
     /// The store of a journal if one was ever opened; operations on a journal nobody learned into have nothing queued or held.
@@ -279,6 +310,8 @@ impl PersonalNgramStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .options();
         let mut fresh = PersonalNgram::new(options);
+        // 读之前取戳：读的过程中别人写进来的行可能没读到，戳就对不上，空闲时不会被当成最新的复用。
+        let stamp = disk_stamp(&self.path);
         let loaded = match &writer.connection {
             Some(connection) => load_from(connection, &mut fresh),
             // Reading must not create the journal: a session that never learns anything leaves no file behind.
@@ -315,6 +348,7 @@ impl PersonalNgramStore {
         self.loaded_generation.store(generation, Ordering::Release);
         self.loaded_invalidations
             .store(invalidations, Ordering::Release);
+        *lock(&self.synced_stamp) = Some(stamp);
     }
 
     fn open_connection<'a>(&self, writer: &'a mut Writer) -> Result<&'a Connection> {
@@ -362,6 +396,8 @@ impl PersonalNgramStore {
         if over_limit {
             self.decay_locked(writer);
         }
+        // 模型已经含有刚写下的这批，磁盘也只多了这批（和衰减）；写完的戳就是模型对应的那份日志。会话期间别的进程写进来、模型没读到的行也会被这个戳盖过；但重置、换日志和合并备份都要先拿到独占维护权，本进程还有会话时拿不到，所以盖过的只可能是别的输入法进程同时学到的计数，下次重读时就会补上。
+        *lock(&self.synced_stamp) = Some(disk_stamp(&self.path));
         Ok(())
     }
 
@@ -610,6 +646,11 @@ pub(crate) fn forget_journal_rows(user_db: &Path, removed: &[PersonalTransition]
     }
 }
 
+/// 宿主的清缓存动作（`Session::reset_cache`、`msime_client_release_process_cache`）调用：放掉没有会话在用、只为下一个会话留着的 store，连同它的模型和日志连接。还在用的照常用。
+pub fn release_idle() {
+    reclaim_idle(&mut lock(&STORES), None);
+}
+
 /// Flush, drop what cannot be written, and close every store's connection.
 pub fn release_all() {
     STORE_GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -628,6 +669,8 @@ impl PersonalNgramStore {
             self.write_failed.store(false, Ordering::Release);
         }
         writer.connection = None;
+        // 这条路径上的文件接下来可能被换掉，空闲时不再拿旧戳复用。
+        *lock(&self.synced_stamp) = None;
     }
 }
 
@@ -860,6 +903,103 @@ mod tests {
             &first,
             &PersonalNgramStore::for_journal(&directory.journal()),
         ));
+    }
+
+    /// 不进全局注册表的 store：别的用例并发打开日志时会回收全局表里的空闲 store，这几个用例在自己的表上跑 `reclaim_idle`。
+    fn detached(journal: &Path) -> Arc<PersonalNgramStore> {
+        Arc::new(PersonalNgramStore::new(journal))
+    }
+
+    #[test]
+    fn an_idle_store_is_kept_for_its_journal_until_the_file_changes() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let other = Dir::new();
+        let store = detached(&journal);
+        store.record(&run(&["我", "想", "去"], 2)).unwrap();
+        store.flush().unwrap();
+        let mut stores = HashMap::from([(journal.clone(), Arc::clone(&store))]);
+        let kept = Arc::downgrade(&store);
+        drop(store);
+
+        // 自己写完一批之后没人再动过日志：再打开同一路径时留着，模型不用重读。别的用例并发 `release_all` 会让它过期，那时照常重读，所以这里不断言没重读。
+        reclaim_idle(&mut stores, Some(&journal));
+        let store = kept.upgrade().expect("日志没变，空闲 store 却被丢掉重建");
+        assert_eq!(store.model().total(), 6);
+        drop(store);
+
+        // 打开别的路径照旧回收它。
+        reclaim_idle(&mut stores, Some(&other.journal()));
+        assert!(
+            kept.upgrade().is_none(),
+            "别的路径的空闲 store 仍被注册表持有"
+        );
+    }
+
+    #[test]
+    fn an_idle_store_is_dropped_once_another_connection_writes_its_journal() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let store = detached(&journal);
+        store.record(&run(&["我", "想"], 2)).unwrap();
+        store.flush().unwrap();
+        let mut stores = HashMap::from([(journal.clone(), Arc::clone(&store))]);
+        let kept = Arc::downgrade(&store);
+        drop(store);
+
+        // 别的进程学到的计数、合并备份都经别的连接写进日志，留着的模型看不到它们，只能丢掉重读。
+        Connection::open(&journal)
+            .unwrap()
+            .execute_batch("INSERT INTO personal_bigram(previous,word,count) VALUES('甲','乙',5)")
+            .unwrap();
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(
+            kept.upgrade().is_none(),
+            "日志被改过，空闲 store 却还在复用"
+        );
+    }
+
+    #[test]
+    fn an_idle_store_is_not_kept_without_a_known_stamp_or_after_a_release() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+
+        // 从没读过盘的 store 不知道自己对应哪份日志。
+        let mut stores = HashMap::from([(journal.clone(), detached(&journal))]);
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(stores.is_empty(), "没对齐过磁盘的 store 被留下了");
+
+        // 读的是一个还不存在的日志；之后日志被建出来就不再复用。
+        let store = detached(&journal);
+        assert!(store.model().is_empty());
+        stores.insert(journal.clone(), Arc::clone(&store));
+        let kept = Arc::downgrade(&store);
+        drop(store);
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(kept.upgrade().is_some(), "日志没变，空闲 store 却被丢掉");
+        super::super::journal::ensure_user_database(&journal).unwrap();
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(kept.upgrade().is_none(), "日志被建出来后仍复用旧的空模型");
+
+        // 关掉日志（重置、换代次之前）之后这条路径上可能已是另一个文件。
+        let store = detached(&journal);
+        store.record(&run(&["我"], 2)).unwrap();
+        store.flush().unwrap();
+        store.close_for_release();
+        stores.insert(journal.clone(), Arc::clone(&store));
+        let kept = Arc::downgrade(&store);
+        drop(store);
+        reclaim_idle(&mut stores, Some(&journal));
+        assert!(kept.upgrade().is_none(), "关掉日志后空闲 store 仍被复用");
+
+        // 宿主清缓存时（`release_idle` 传 `None`）连当前路径的空闲 store 也放掉。
+        let store = detached(&journal);
+        assert!(store.model().total() > 0);
+        stores.insert(journal.clone(), Arc::clone(&store));
+        let kept = Arc::downgrade(&store);
+        drop(store);
+        reclaim_idle(&mut stores, None);
+        assert!(kept.upgrade().is_none(), "清缓存后空闲 store 仍被持有");
     }
 
     #[test]

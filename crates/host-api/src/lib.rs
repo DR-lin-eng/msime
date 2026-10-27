@@ -50,7 +50,8 @@ use msime_engine::host::{
     ShuangpinCustomTable, ShuangpinCustomTablePart,
 };
 use msime_engine::{
-    release_japanese_dictionary_cache, SchemeSet, SchemeType, ShuangpinProfileKind,
+    release_idle_personal_models, release_japanese_dictionary_cache, SchemeSet, SchemeType,
+    ShuangpinProfileKind,
 };
 #[cfg(unix)]
 use msime_input_runtime::TranslationQuery;

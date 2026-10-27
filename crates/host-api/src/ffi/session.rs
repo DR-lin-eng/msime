@@ -273,6 +273,7 @@ pub extern "C" fn msime_client_reset_cache(handle: u64) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn msime_client_release_process_cache() {
     release_japanese_dictionary_cache();
+    release_idle_personal_models();
 }
 
 #[no_mangle]

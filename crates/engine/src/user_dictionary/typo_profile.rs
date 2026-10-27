@@ -197,9 +197,9 @@ pub fn load_pinyin_typo_state(user_db: &Path) -> Result<PinyinTypoState> {
 }
 
 /// `(modified, size)` of a file, `None` when it cannot be read; the journal and its `-wal` together say whether anything was written since the last load.
-type FileStamp = Option<(SystemTime, u64)>;
+pub(super) type FileStamp = Option<(SystemTime, u64)>;
 
-fn file_stamp(path: &Path) -> FileStamp {
+pub(super) fn file_stamp(path: &Path) -> FileStamp {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
 }

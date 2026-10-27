@@ -55,7 +55,7 @@ Status: implemented
 ## Consequences
 
 - **收益**：评测基线、`verify-local.sh` 和 `MSIME_EVAL_RESOURCES` 下的真实词库测试量的是设备经自动更新已经在用的词库；新装用户和自动更新不可用的用户拿到的随包词库与其他人一致。
-- **代价**：基线数字整体下降（见上表），这是词库数据带来的，记录在案而不是被掩盖；下一个动排序的改动要以新基线为准。
+- **代价**：基线数字整体下降（见上表），这是词库数据带来的，记录在案而不是被掩盖；下一个动排序的改动要以新基线为准，包括正在 `dict-v2.0.39` 上做九键实验的 `feat/nine-key-word-ranking` 等分支。
 - **安装包体积门槛会挡住下一次发版**。本次没有改这两个门槛，需要另外拍板：
   - Android 的 full 与拼音瘦包（`platforms/android/build-apk.sh`，`MSIME_ANDROID_MAX_APK_BYTES` 默认 135,000,000）带着五笔码表。`android-v0.6.0` 的 full 瘦包已是 133,833,900 字节；`msime-wubi.db` 用 gzip -6 估算从约 7.4 MB 涨到约 44.9 MB，拼音库约多 0.4 MB，瘦包估计约 171.7 MB，超出门槛约 37 MB。2026-10-26 刚为守住这个门槛把读音表改成资源包（[英文音标候选](../feature/2026-10-26-android-candidate-pronunciation.md)），直接抬门槛与那次的取舍相反；另一条路是像 macOS 一样把五笔码表改成按需资源包（[macOS 五笔按需下载](../feature/2026-10-20-macos-on-demand-voice-runtime-and-wubi.md)）。
   - macOS 五笔版随包带五笔码表，`platforms/macos/package-release.sh` 给 `EngineResources` 定的 126000 KiB 预算会被约 199,200 KiB 超出（原约 120,400 KiB，五笔码表 14,196→92,756 KiB；按锁里大小逐个向上取整到 4 KiB，核心 8 个文件含 `sentence-model` 105,724 KiB，加 `helpcodes/` 约 688 KiB，没有实际打包）。full 与拼音版不带五笔码表，约 106,400 KiB，不受影响。PR 里的 `ci-macos-package.yml` 只打 full，查不出来，`release-macos.yml` 打全部版本时才会失败。
@@ -70,4 +70,6 @@ Status: implemented
 - 在 Mac Studio 上 `cargo run --release -q -p msime-client-core --example install_resources --locked -- target/resources` 下载并校验了新锁全部资源，目录名即新代次。
 - 评测：`convert_eval` 按 `verify-local.sh` 的十一组参数，先以 `--resource-lock` 指向旧锁在 `dict-v2.0.24` 上跑，再在新锁资源上以 `--update-baseline` 跑，结果见上表。完整 25,119 条全拼词级在新锁上 top-1 0.756、top-5 0.945；完整九键词级因构建机过载没有跑完。
 - 测试：`cargo test -p msime-engine -p msime-input-runtime -p msime-client-providers -p msime-host-api -p msime-client-core` 不设资源时，client-core（含钉住新代次的 `full_keeps_the_desktop_lock_and_its_generation`）、client-providers、engine、input-runtime 全部通过；host-api 失败的是下面那两项，另有 `a_lookup_keeps_the_users_japanese_mixing`（合成夹具，不读锁）失败一次，单独重跑通过。再以 `MSIME_EVAL_RESOURCES` 分别指向两份词库跑 engine、input-runtime、host-api：两边各 4150 项通过、8 项失败，失败的是同一组，没有一项由换锁引起——四个 golden 真实集和 `japanese::decoder::tests::real_model_loads` 按设计要 `dict-v2.0.1`（golden 记录自 C++ 参考引擎）；`session::tests::real_resources_mix_japanese_conversions` 在两份词库上都给不出 ohayou 的日文候选，而两版的 `msime-japanese.dat` 字节相同；host-api 的资源包清单测试漏了 #9931 新加的 `pronunciations`；脚本插件的本地时间测试与词库无关。被忽略的 `shipped_rime_import_retains_reported_common_character_positions` 以新锁的 `msime-pinyin.db` 显式运行通过。
+- 变基到 `1ff98ba20d`（含 #10055 英文纠错、#10053 云词库）后，按 `verify-local.sh` 的十一组参数不带 `--update-baseline` 重跑 `convert_eval`，全部 `at baseline`，提交的基线不受这几次合并影响。
+- 英文：`msime-english.db` 这次字节有变，而 #10055 的真实词库验收 `mobile_english_shipped_dictionary` 是在旧词库上调的。以 `MSIME_ENGLISH_CORRECTION_TEST_DB` 分别指向两份词库运行这个被忽略的测试，94 条期望在新旧两份上都通过（exit 0）；构建机负载约 690，计时只作参考：冷启动均值 10.54 ms（旧 13.63 ms），逐键均值 3.96 ms（旧 4.26 ms）。
 - 延迟：`rerank_latency` 在新旧词库上交替各跑两轮，构建机负载 60 到 180，挂模型的 p95 旧词库 29.15、15.17 ms，新词库 16.72、97.94 ms，同一词库两轮之间的差远大于两个词库之间的差，这次量不出结论，需要在空闲机器上复测。

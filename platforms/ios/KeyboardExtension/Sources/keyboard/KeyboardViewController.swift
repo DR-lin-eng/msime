@@ -476,11 +476,17 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var candidatePalette: CandidatePalette?
   /// 当前候选皮肤的解码快照，普通条与展开面板共用；解码在后台完成。
   private var candidateCanvasSkin: ExternalCandidateSkin.Canvas?
+  /// 上一次加载候选皮肤时的请求（开关、明暗、主题、皮肤目录和清单的修改时间与大小），没变就沿用已解码的快照。只有内存警告清它（见 `viewWillAppear` 里的说明）。
   private var candidateCanvasRequestKey: Data?
   private var candidateCanvasEpoch: UInt64 = 0
   /// Whether the top row shows candidates (or the reading, a diagnostic or the local mode) rather than the toolbar; set by `renderCandidateStrip`, read by `currentStripBackground`.
   private var stripShowsCandidates = false
   private var candidateCanvasActive = true
+  /// 上一次给整棵按键树换装（`applyKeyboardSkin` 里的 `recolor`）时的皮肤和 trait。`viewWillAppear` 拿它和现在的比，都没变就不再重新换装。
+  private var appliedKeySkin: KeyboardTheme?
+  private var appliedKeySkinTraits: UITraitCollection?
+  /// 有按键在窗口外经过 `decorateKey`：阴影色是静态的 CGColor，这时按默认外观解析，要等一次在窗口里的完整换装重新解析。
+  private var keySkinNeedsWindowPass = true
   private var candidatePreeditGapConstraint: NSLayoutConstraint?
   private static let candidateCanvasQueue = DispatchQueue(label: "app.msime.candidate-canvas", qos: .userInitiated)
   private var candidateRevision: UInt64 = 0
@@ -873,10 +879,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
     candidateCanvasActive = true
-    candidateCanvasRequestKey = nil
+    // 不清候选皮肤的请求键：键里已有皮肤 id、明暗、主题和清单的修改时间与大小，皮肤真的换了照样重新加载。以前这里每次出现都清掉它，跟随桌面候选皮肤的用户每次出现都要丢掉快照、在后台把整包图片重新读一遍解一遍，候选条先退回配色再换回皮肤。
     InputSchemePreference.refreshResourceAvailability()
     // 进程可能跨过换季或应用主题的改动；在下面任何地方解析皮肤之前先刷新。变了就重新解析主题，让末尾的 `applyKeyboardSkin` 给按键换上新的颜色实例：按键进窗口时已按旧季节解析过同一批动态色，同一个实例再设一次 UIButton 不会重新解析。
-    if KeyboardTheme.refreshSeason() { KeyboardTheme.reload(session.sharedPreferences, dark: drawsDark) }
+    let seasonChanged = KeyboardTheme.refreshSeason()
+    if seasonChanged { KeyboardTheme.reload(session.sharedPreferences, dark: drawsDark) }
     incognito = KeyboardPrivacyPreference.incognito
     oneHandedMode = KeyboardLayoutPreference.oneHanded
     readToolbarPreferences()
@@ -946,7 +953,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     onlineCandidates.cancel()
     renderCandidateStrip()
     scheduleCandidateGlosses()
-    applyKeyboardSkin()
+    // 换了季节必须整棵重新换装（见上面 `refreshSeason` 的注释）；否则只在皮肤、trait 变了或有按键在窗口外建过时才重走按键树。
+    applyKeyboardSkin(onlyIfChanged: !seasonChanged)
     synchronizeReplyKeyboard()
     startCountingKeyPresses()
   }
@@ -7845,12 +7853,15 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   private func decorateKey(_ button: UIButton) {
     button.addTarget(self, action: #selector(prepareKeyFeedback), for: .touchDown)
+    if button.window == nil { keySkinNeedsWindowPass = true }
     let skin = KeyboardTheme.current
     guard var configuration = button.configuration else { return }
     if let design = skin.design {
-      let surface = SkinKeySurfaceView()
-      surface.design = design
-      surface.fillColor = configuration.background.backgroundColor ?? skin.keyBackground
+      // 已经有按键表面就接着用，只在设计或底色变了时重画；以前每次换装、每次切换 ⇧ 都给按键新建一个表面，丢掉旧的位图重新画。
+      let surface = configuration.background.customView as? SkinKeySurfaceView ?? SkinKeySurfaceView()
+      if surface.design != design { surface.design = design }
+      let fill = configuration.background.backgroundColor ?? skin.keyBackground
+      if surface.fillColor != fill { surface.fillColor = fill }
       configuration.background.customView = surface
       configuration.background.backgroundColor = .clear
       configuration.background.cornerRadius = 0
@@ -8424,13 +8435,42 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return skin.design == nil ? .clear : skin.keyBackground.withAlphaComponent(0.6)
   }
 
-  private func applyKeyboardSkin() {
-    handwriting.canvas.setNeedsDisplay()
-    replyModel.objectWillChange.send()
+  /// 给键盘换上 `KeyboardTheme.current`。`onlyIfChanged` 时（每次出现由 `viewWillAppear` 调用），皮肤和 trait 都与上一次换装相同、也没有按键在窗口外建过，就跳过重画背景、重走整棵按键树重设每个按键的配置这些重活；按键状态相关的更新（回车、方案键、工具栏、候选条）照常做。
+  private func applyKeyboardSkin(onlyIfChanged: Bool = false) {
     let skin = KeyboardTheme.current
+    let reskinsKeys = !onlyIfChanged || keySkinNeedsWindowPass || appliedKeySkin != skin || appliedKeySkinTraits != traitCollection
+    if reskinsKeys {
+      handwriting.canvas.setNeedsDisplay()
+      replyModel.objectWillChange.send()
+    }
     candidatePalette = currentCandidatePalette()
     refreshCandidatePalette()
     candidateButtonStyleRevision &+= 1
+    if reskinsKeys { recolorKeys(skin) }
+    styleReturnKey()
+    updateLanguageModeButton()
+    updateSchemeButton()
+    updateShortcutButtons()
+    renderCandidateStrip()
+    updateSpellingStrip()
+    updateSpaceKeyTitle()
+    exitLocalModeButton.configuration?.baseForegroundColor = candidatePalette?.accent ?? skin.accent
+    preeditButton.configuration?.baseForegroundColor = candidatePalette?.preeditText ?? candidatePalette?.secondary ?? skin.secondary
+    expandCandidatesButton.configuration?.baseForegroundColor = candidatePalette?.text ?? skin.keyForeground
+    expandDivider.backgroundColor = skin.hairline
+    inlineHeightBar?.apply(skin: skin)
+    oneHandGutter.apply(skin: skin)
+    voicePanel?.apply(skin: skin)
+    for (_, _, hint, corner) in letterButtons {
+      hint.textColor = skin.accent
+      corner.textColor = skin.secondary
+    }
+    view.tintColor = skin.accent
+    applyCandidateAppearance()
+  }
+
+  /// 换装里的重活：键盘背景、整棵按键树和回车键的配置。每个按键重设一遍配置，设计皮肤还要重画每个按键表面，键盘图片或花纹的背景整块重画。
+  private func recolorKeys(_ skin: KeyboardTheme) {
     view.backgroundColor = skin.drawsNativeBackground ? .clear : skin.background
     skinBackdrop.skin = skin
     // Only here, not in KeyboardSkinBackgroundView: the App's skin previews have no system backdrop behind them.
@@ -8466,26 +8506,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       enter.configuration = configuration
       decorateKey(enter)
     }
-    styleReturnKey()
-    updateLanguageModeButton()
-    updateSchemeButton()
-    updateShortcutButtons()
-    renderCandidateStrip()
-    updateSpellingStrip()
-    updateSpaceKeyTitle()
-    exitLocalModeButton.configuration?.baseForegroundColor = candidatePalette?.accent ?? skin.accent
-    preeditButton.configuration?.baseForegroundColor = candidatePalette?.preeditText ?? candidatePalette?.secondary ?? skin.secondary
-    expandCandidatesButton.configuration?.baseForegroundColor = candidatePalette?.text ?? skin.keyForeground
-    expandDivider.backgroundColor = skin.hairline
-    inlineHeightBar?.apply(skin: skin)
-    oneHandGutter.apply(skin: skin)
-    voicePanel?.apply(skin: skin)
-    for (_, _, hint, corner) in letterButtons {
-      hint.textColor = skin.accent
-      corner.textColor = skin.secondary
-    }
-    view.tintColor = skin.accent
-    applyCandidateAppearance()
+    appliedKeySkin = skin
+    appliedKeySkinTraits = traitCollection
+    // 在窗口外走完的这一遍，阴影色仍按默认外观解析，下一次出现还要再走。
+    keySkinNeedsWindowPass = view.window == nil
   }
 
   /// 键盘画在深色下：「键盘明暗」设成深色，或者跟随时宿主是深色。

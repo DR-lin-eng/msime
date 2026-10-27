@@ -597,6 +597,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   private var aiCredential: String?
   /// 隐私会话标记和九键一样是会话状态，选项里不带，重建的会话要再告诉一次。
   private var privateSession = false
+  /// 运行时已确认带着 `privateSession` 的那个会话句柄；0 表示当前会话还没确认过。键盘每次空闲渲染都会再设一次隐私标记，值没变、会话也没重建时就不再跨到输入线程。
+  private var privateSessionHandle: UInt64 = 0
+  /// 当前会话最后一次接受并已经生效（没被组字推迟）的偏好，即交给它的 `engineBound` 文档；nil 表示不确定，下一次偏好更新照常发送。
+  ///
+  /// 键盘每次空闲渲染（每次上屏、每个中文标点、中文模式下按住删除键时每秒十几次）都会把学习和调频设置再推一遍，以前每次都要把整份偏好文档编成 JSON、同步跨到输入线程、在 Rust 里解析校验比较，再把整个 view 编回来解析，值却一次也没变。会话的偏好只经这个桥的 `msime_client_update_preferences` 改动，所以与这份完全相同的请求不会改变会话的任何状态，可以不发。被推迟的那次不记：组字结束后同样的请求还要再发一次，才能如实报告已经生效。
+  private var appliedPreferences: [String: Any]?
 
   init(resources: URL? = nil, stateRoot: URL? = nil) {
     options = [:]
@@ -741,8 +747,13 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     for key in Self.appEditedKeys { next[key] = reloaded[key] }
     guard handle != 0, !NSDictionary(dictionary: next).isEqual(to: applied) else { return }
     revision &+= 1
-    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": next]
-    _ = try? Self.callUpdate(msimeClientUpdatePreferences, handle, snapshot)
+    let sent = Self.engineBound(next)
+    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": sent]
+    appliedPreferences = nil
+    if let response = try? Self.callUpdate(msimeClientUpdatePreferences, handle, snapshot),
+       (try? Self.preferencesUpdateSucceeded(response)) == true {
+      appliedPreferences = sent
+    }
   }
 
   var fuzzyPinyinRulesApplied: UInt32? { appliedFuzzyPinyinRules }
@@ -1605,9 +1616,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   /// 把隐私模式告诉运行时（与 Android 的 `markPrivateSession` 相同）：隐私会话不记选词位置和上屏效率。学习本身仍由偏好里的 `learning` 决定。返回运行时是否接受。
   @discardableResult func setPrivateSession(_ enabled: Bool) -> Bool {
     flushPendingCharacters()
+    if handle != 0, privateSessionHandle == handle, enabled == privateSession { return true }
     privateSession = enabled
     guard handle != 0 else { return false }
-    return (try? Self.decode(msimeClientSetPrivateSession(handle, enabled))) != nil
+    let accepted = (try? Self.decode(msimeClientSetPrivateSession(handle, enabled))) != nil
+    privateSessionHandle = accepted ? handle : 0
+    return accepted
   }
   /// Chinese or ASCII marks for this session, on top of the document's `chinese_punctuation`; `punctuation_lock` still wins.
   @discardableResult func setChinesePunctuation(_ enabled: Bool) -> MetasequoiaInputSnapshot {
@@ -1765,14 +1779,22 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     // 选中只吃掉部分输入的候选时，让运行时把已选的那一段留在组字里而不是立刻上屏：用户还在打后
     // 半截，前半截已经进了文档的话，搜索框会拿半个词去搜，编辑器为它记一次撤销。键盘把它画在候选
     // 条的读音前面，两件事必须一起做（scripts/test-phrase-preedit-hosts.py 守的就是这一半状态）。
-    var requested = options
+    var requested = engineOptions
     requested["phrase_preedit"] = true
+    // 新会话的偏好来自建会话的选项，不是上一个会话最后接受的那份；隐私标记也要重新确认。
+    appliedPreferences = nil
+    privateSessionHandle = 0
     handle = try Self.callCreateFocused(requested)
     if keyGrid != .none { _ = dispatch { msimeClientSetKeyGrid(handle, keyGrid.rawValue) } }
     if fullwidth { _ = dispatch { msimeClientSetCharacterWidth(handle, true) } }
     if let chinesePunctuation { _ = dispatch { msimeClientSetChinesePunctuation(handle, chinesePunctuation) } }
     if aiCredential != nil { _ = applyAICredential() }
-    if privateSession { _ = try? Self.decode(msimeClientSetPrivateSession(handle, true)) }
+    if privateSession {
+      if (try? Self.decode(msimeClientSetPrivateSession(handle, true))) != nil { privateSessionHandle = handle }
+    } else {
+      // 新会话本来就不是隐私会话。
+      privateSessionHandle = handle
+    }
   }
 
   /// 主线程复制选项；后台版本读取不访问可变会话，也不占用按键线程。
@@ -1781,7 +1803,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     if let initializationDiagnostic, options["user_data"] == nil {
       throw InputBridgeFailure.response(initializationDiagnostic)
     }
-    return try JSONSerialization.data(withJSONObject: options)
+    return try JSONSerialization.data(withJSONObject: engineOptions)
   }
 
   func localDictionaryStateVersion() throws -> String {
@@ -1804,7 +1826,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
           let dictionaries = options["dictionaries"] as? String else { throw InputBridgeFailure.invalidResponse }
     return ["resources": URL(fileURLWithPath: resources), "user": URL(fileURLWithPath: user),
             "contentIdentifier": dictionaries,
-            "preparedOptions": try JSONSerialization.data(withJSONObject: options)]
+            "preparedOptions": try JSONSerialization.data(withJSONObject: engineOptions)]
   }
 
   func activateDictionarySnapshot(_ snapshot: MSIMEPreparedDictionarySnapshot,
@@ -1848,7 +1870,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     var action: [String: Any] = ["operation": "edit", "request_id": requestID]
     action["previous"] = previous ?? NSNull()
     action["replacement"] = replacement ?? NSNull()
-    let request: [String: Any] = ["options": options, "action": action]
+    let request: [String: Any] = ["options": engineOptions, "action": action]
     let result = try withDictionaryMaintenance {
       try Self.callOptions(msimeClientDictionary, request)
     }
@@ -1886,7 +1908,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     var action: [String: Any] = ["operation": "list", "offset": offset, "limit": 100]
     if let kind { action["kind"] = kind.bridgeName }
     if !query.isEmpty { action["query"] = query }
-    let request: [String: Any] = ["options": options, "action": action]
+    let request: [String: Any] = ["options": engineOptions, "action": action]
     var result = try Self.callOptions(msimeClientDictionary, request)
     if let hasMore = result.removeValue(forKey: "has_more") { result["hasMore"] = hasMore }
     return result
@@ -1899,7 +1921,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       for page in 0..<maximumPages {
         let action: [String: Any] = ["operation": "export", "kind": kind.bridgeName, "format": format,
                                      "offset": page * 1000, "limit": 1000]
-        let result = try Self.callOptions(msimeClientDictionary, ["options": options, "action": action])
+        let result = try Self.callOptions(msimeClientDictionary, ["options": engineOptions, "action": action])
         guard let chunk = result["text"] as? String, let hasMore = result["has_more"] as? Bool else {
           throw InputBridgeFailure.invalidResponse
         }
@@ -1997,16 +2019,44 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     var prefs = previous
     mutate(&prefs)
     options["preferences"] = prefs
+    let sent = Self.engineBound(prefs)
+    // 会话已经接受并应用了完全相同的偏好：再发一次不改变任何状态，见 `appliedPreferences`。
+    if let appliedPreferences, NSDictionary(dictionary: appliedPreferences).isEqual(to: sent) { return true }
     revision &+= 1
-    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": prefs]
+    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": sent]
+    appliedPreferences = nil
     do {
       let response = try Self.callUpdate(msimeClientUpdatePreferences, handle, snapshot)
-      return try Self.preferencesUpdateSucceeded(response)
+      let applied = try Self.preferencesUpdateSucceeded(response)
+      if applied { appliedPreferences = sent }
+      return applied
     } catch {
       options["preferences"] = previous
       revision &-= 1
       return false
     }
+  }
+
+  /// 交给 Rust 会话和词库调用的偏好：去掉 `custom_theme.keyboard.photo`。
+  ///
+  /// 照片皮肤的照片按 base64 内联在共享文档里，最大约 680 KB。会话和词库都不画键盘皮肤（主题由 `ResolvedTheme` 另外解析），带着它的话每次建会话、改偏好、列个人词库、查词库版本都要在主线程把它整段编一遍 JSON，Rust 再解析一遍、按 base64 解一遍做校验。所有交给会话的偏好都经过这里，会话里的偏好因此始终一致，换照片也不会让会话以为偏好变了而重建 Engine。`options["preferences"]` 仍是完整文档，`sharedPreferences` 的读者（键盘皮肤、候选配色）照旧读得到照片；写回共享文档的路径都先从磁盘重新读文档（`persistSharedPreferences`），不从这里写回，所以文档里的照片不会因此丢失。
+  static func engineBound(_ preferences: [String: Any]) -> [String: Any] {
+    guard var custom = preferences["custom_theme"] as? [String: Any],
+          var keyboard = custom["keyboard"] as? [String: Any],
+          keyboard["photo"] is String else { return preferences }
+    keyboard.removeValue(forKey: "photo")
+    custom["keyboard"] = keyboard
+    var stripped = preferences
+    stripped["custom_theme"] = custom
+    return stripped
+  }
+
+  /// `options` with its preferences passed through `engineBound`, for every call that hands the prepared options to Rust.
+  private var engineOptions: [String: Any] {
+    guard let preferences = options["preferences"] as? [String: Any] else { return options }
+    var engine = options
+    engine["preferences"] = Self.engineBound(preferences)
+    return engine
   }
 
   /// The keyboard host's own contract, laid over whatever the shared document holds.

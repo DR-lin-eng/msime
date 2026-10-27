@@ -32,12 +32,40 @@ struct Dav {
     authorization: String,
     /// 服务端暂时不可用：每个请求答 503，不带 `Retry-After`。
     down: Arc<AtomicBool>,
-    /// 收到过多少个请求（不含测试自己绕过鉴权发的）。
     requests: Arc<AtomicUsize>,
+    rate_limited: Arc<AtomicBool>,
+    dictionary_retries: Arc<AtomicUsize>,
+    registration_blocked: Arc<AtomicBool>,
 }
 
 async fn handle(State(dav): State<Dav>, request: Request) -> Response {
     dav.requests.fetch_add(1, Ordering::SeqCst);
+    if dav.registration_blocked.load(Ordering::SeqCst)
+        && request.method() == "MOVE"
+        && request
+            .headers()
+            .get("destination")
+            .is_some_and(|destination| {
+                destination
+                    .to_str()
+                    .is_ok_and(|path| path.contains("/keyring/") && path.contains("/e-"))
+            })
+    {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    if dav.rate_limited.load(Ordering::SeqCst) {
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "0")]).into_response();
+    }
+    if request.uri().path().contains("/msime-dictionary/v1/")
+        && dav
+            .dictionary_retries
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    {
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "0")]).into_response();
+    }
     if dav.down.load(Ordering::SeqCst) {
         return StatusCode::BAD_GATEWAY.into_response();
     }
@@ -99,6 +127,9 @@ fn start() -> Server {
         ),
         down: Arc::default(),
         requests: Arc::default(),
+        rate_limited: Arc::default(),
+        dictionary_retries: Arc::default(),
+        registration_blocked: Arc::default(),
     };
     let app_dav = dav.clone();
     runtime.spawn(async move {
@@ -290,6 +321,209 @@ fn paired(
     (first, second)
 }
 
+fn expire_request_window(directory: &Path) {
+    let path = directory.join(STATE_FILE);
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // 多轮收敛与回退恢复用例模拟阶段之间额度窗口已过期；硬限额由专门回归覆盖。
+    for request in stored["state"]["schedule"]["requests"]
+        .as_array_mut()
+        .unwrap()
+    {
+        *request = serde_json::json!(0);
+    }
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+}
+
+#[test]
+fn failed_registration_keeps_the_internal_identity_without_publishing_it() {
+    for cached in [false, true] {
+        let server = start();
+        let directory = tempfile::tempdir().unwrap();
+        let sync = device(&server, directory.path(), "Synthetic desktop");
+        let mut words = Words::default();
+        server.dav.rate_limited.store(!cached, Ordering::SeqCst);
+        server
+            .dav
+            .registration_blocked
+            .store(cached, Ordering::SeqCst);
+        let failed = manual(&sync, &mut words);
+        assert!(failed.report.is_err());
+        assert!(failed.view.device_id.is_none());
+        assert!(directory
+            .path()
+            .join("cloud-clipboard-relay-keystore")
+            .is_file());
+        assert_eq!(
+            directory
+                .path()
+                .join("cloud-clipboard-webdav-state")
+                .exists(),
+            cached
+        );
+        let status = sync.status().unwrap();
+        assert!(status.device_id.is_none(), "未登记的内部身份不能开放给宿主");
+        assert!(!status.approved);
+        let offline = sync
+            .run(&mut words, Trigger::LocalChange, Options::default())
+            .unwrap();
+        assert!(!offline.network);
+        assert!(offline.view.device_id.is_none());
+        assert_eq!(offline.view.last_error, status.last_error);
+        server.dav.rate_limited.store(false, Ordering::SeqCst);
+        server
+            .dav
+            .registration_blocked
+            .store(false, Ordering::SeqCst);
+        let registered = manual(&sync, &mut words);
+        assert!(registered.report.is_ok(), "{:?}", registered.report);
+        assert!(registered.view.device_id.is_some());
+        assert_eq!(sync.status().unwrap().device_id, registered.view.device_id);
+    }
+}
+
+#[test]
+fn http_registration_failures_keep_the_budget_without_a_previous_identity() {
+    for previous_identity in [false, true] {
+        let server = start();
+        let directory = tempfile::tempdir().unwrap();
+        let sync = device(&server, directory.path(), "Synthetic desktop");
+        let mut words = Words::default();
+        let mut used = 0;
+        if previous_identity {
+            assert!(manual(&sync, &mut words).report.is_ok());
+            used = server.dav.requests.load(Ordering::SeqCst);
+            std::fs::remove_file(directory.path().join("cloud-clipboard-relay-keystore")).unwrap();
+            std::fs::remove_file(directory.path().join("cloud-clipboard-webdav-state")).unwrap();
+        }
+        server.dav.rate_limited.store(true, Ordering::SeqCst);
+        for _ in 0..18 {
+            let run = manual(&sync, &mut words);
+            assert_eq!(
+                run.report.unwrap_err().code(),
+                "dictionary_sync_rate_limited"
+            );
+        }
+        let actual = server.dav.requests.load(Ordering::SeqCst);
+        assert_eq!(
+            actual, 60,
+            "首次注册失败或身份丢失都不能重新领取滚动窗口额度（先前已用 {used}）"
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            stored["state"]["schedule"]["requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            actual
+        );
+    }
+}
+
+#[test]
+fn http_retries_cannot_exceed_the_remaining_automatic_or_manual_budget() {
+    for (trigger, limit) in [(Trigger::Opened, 40), (Trigger::Manual, 60)] {
+        let server = start();
+        let directory = tempfile::tempdir().unwrap();
+        let sync = device(&server, directory.path(), "Synthetic desktop");
+        let mut words = Words::default();
+        assert!(manual(&sync, &mut words).report.is_ok());
+        let path = directory.path().join(STATE_FILE);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        stored["state"]["schedule"]["requests"] = serde_json::json!(vec![now; limit - 3]);
+        stored["state"]["schedule"]["last_pull_ms"] = serde_json::json!(0);
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        settle();
+        server.dav.requests.store(0, Ordering::SeqCst);
+        server.dav.rate_limited.store(true, Ordering::SeqCst);
+        let run = sync.run(&mut words, trigger, Options::default()).unwrap();
+        assert_eq!(
+            run.report.unwrap_err().code(),
+            "dictionary_sync_rate_limited"
+        );
+        assert_eq!(
+            server.dav.requests.load(Ordering::SeqCst),
+            3,
+            "HTTP 重试也必须在发出之前扣额度",
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            stored["state"]["schedule"]["requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            limit
+        );
+    }
+}
+
+#[test]
+fn http_compaction_cleanup_is_charged_before_the_final_state_save() {
+    let server = start();
+    let directory = tempfile::tempdir().unwrap();
+    let sync = device(&server, directory.path(), "Synthetic desktop");
+    let mut words = Words(BTreeSet::from([word("ni'hao", "合成词条")]));
+    assert!(manual(&sync, &mut words).report.is_ok());
+    let path = directory.path().join(STATE_FILE);
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // 只把本机压缩计数置到阈值，远端事件和摘要仍由真实同步生成。
+    stored["state"]["ledger"]["events"] = serde_json::json!(64);
+    stored["state"]["schedule"]["requests"] = serde_json::json!([]);
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let stale = "msime-dictionary/v1/tmp/1-00000000000000000000000000000000.json";
+    assert_eq!(server.raw("PUT", stale, None, b"synthetic".to_vec()).0, 201);
+    server.dav.requests.store(0, Ordering::SeqCst);
+    let run = manual(&sync, &mut words);
+    assert!(run.report.unwrap().compacted);
+    assert_eq!(server.raw("GET", stale, None, Vec::new()).0, 404);
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        stored["state"]["schedule"]["requests"]
+            .as_array()
+            .unwrap()
+            .len(),
+        server.dav.requests.load(Ordering::SeqCst),
+        "清理的列目录和删除也要进入同一份额度记录",
+    );
+}
+
+#[test]
+fn http_requests_are_all_charged_to_the_sync_budget() {
+    for retries in [0, 2] {
+        let server = start();
+        server
+            .dav
+            .dictionary_retries
+            .store(retries, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let sync = device(&server, directory.path(), "Synthetic desktop");
+        let mut words = Words(BTreeSet::from([word("ni'hao", "合成词条")]));
+        let run = manual(&sync, &mut words);
+        assert!(run.report.is_ok(), "{:?}", run.report);
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            stored["state"]["schedule"]["requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            server.dav.requests.load(Ordering::SeqCst),
+            "实际 HTTP 请求都必须计入滚动窗口，包括临时目录创建和词库重试",
+        );
+        assert_eq!(server.dav.dictionary_retries.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[test]
 fn two_devices_pair_and_sync_their_words_through_a_real_webdav_server() {
     let server = start();
@@ -448,6 +682,8 @@ fn two_devices_racing_for_the_same_sequence_number_both_get_their_words_in() {
     let first = Arc::new(first);
     let second = Arc::new(second);
     for round in 0..3u32 {
+        expire_request_window(a_dir.path());
+        expire_request_window(b_dir.path());
         a.0.insert(word("ma", &format!("甲{round}")));
         b.0.insert(word("ba", &format!("乙{round}")));
         let (first_clone, second_clone) = (first.clone(), second.clone());
@@ -468,6 +704,8 @@ fn two_devices_racing_for_the_same_sequence_number_both_get_their_words_in() {
         b = right_words;
     }
     for _ in 0..2 {
+        expire_request_window(a_dir.path());
+        expire_request_window(b_dir.path());
         manual(&first, &mut a).report.unwrap();
         manual(&second, &mut b).report.unwrap();
     }
@@ -497,9 +735,19 @@ fn a_truncated_log_is_refused_until_the_user_trusts_the_share_again() {
         manual(&sync, &mut words).report.unwrap_err().code(),
         "dictionary_sync_rollback"
     );
+    let state_path = directory.path().join(STATE_FILE);
+    let before: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
     let mut confirmed = action;
     confirmed["trust_remote"] = serde_json::json!(true);
     assert_eq!(host_probe(directory.path(), confirmed)["ok"], true);
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        after["state"]["schedule"]["requests"], before["state"]["schedule"]["requests"],
+        "重新信任网盘不能返还已经使用的额度",
+    );
+    expire_request_window(directory.path());
     let run = manual(&sync, &mut words);
     run.report.unwrap();
     assert!(run.view.joined);

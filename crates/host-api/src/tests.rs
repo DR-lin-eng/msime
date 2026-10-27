@@ -3446,10 +3446,20 @@ fn key_geometry_is_validated_at_the_host_boundary() {
     short["keys"].as_array_mut().unwrap().pop();
     let mut flat: Value = serde_json::from_str(&valid).unwrap();
     flat["keys"][0][2] = json!(0.0);
+    // 每个数都有限，归一后的键心却溢出成无穷（键宽 1e-3、键心 1e36）；距离平方会溢出的远键也一样拒绝。
+    let mut overflowing: Value = serde_json::from_str(&valid).unwrap();
+    for key in overflowing["keys"].as_array_mut().unwrap() {
+        key[2] = json!(1.0e-3);
+    }
+    overflowing["keys"][0][0] = json!(1.0e36);
+    let mut far: Value = serde_json::from_str(&valid).unwrap();
+    far["keys"][0][0] = json!(1.0e30);
     for rejected in [
         extra.to_string(),
         short.to_string(),
         flat.to_string(),
+        overflowing.to_string(),
+        far.to_string(),
         "[]".to_owned(),
     ] {
         assert_eq!(

@@ -10,6 +10,8 @@ pub const TOUCH_STEPS_PER_KEY: f32 = 20.0;
 pub const TOUCH_OFFSET_LIMIT: i8 = 30;
 /// 平面表里的 QWERTY 邻键离被按的键超过这么远（键为单位）时不算邻键。分离键盘上 T 和 Y、G 和 H 分在两半，平面表却把它们当邻键，参考的 iPad 分离布局里它们相距 8 个键以上；普通布局里平面表邻键的键心最远相距 2.25 个键（iPhone 微软双拼那份的 J 和 M：第二行多了 `;`，键距变宽）。
 const FLAT_NEIGHBOR_REACH: f32 = 3.0;
+/// 归一后的坐标（键心和落点）离原点最多这么多个键。宿主的坐标原点和单位任意，真实键盘用屏幕坐标也只有几百个键宽；超过它的几何（键宽极小、坐标极大）在算距离平方时会溢出成无穷，两个无穷相减得 NaN，罚分和邻键判断随之失效，所以整份拒绝。
+const COORDINATE_LIMIT: f32 = 10_000.0;
 
 /// 一次按键的落点：相对被按键中心的偏移，单位 1/20 键（[`TOUCH_STEPS_PER_KEY`]），钳到 ±[`TOUCH_OFFSET_LIMIT`]。`copy` 是这个字母的第几个实例：0 是 `keys` 里的那个，1 起依次是 `duplicates` 里同一字母的各个（分离键盘两边各有一个 G、V）。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -37,7 +39,7 @@ pub type KeyRect = [f32; 4];
 pub enum KeyGeometryError {
     /// `id` 为 0：那是「清除几何」，不是一份几何。
     ZeroId,
-    /// 某个数不是有限数，或宽高不为正。
+    /// 某个数不是有限数，宽高不为正，或归一后的键心离原点超过 [`COORDINATE_LIMIT`] 个键。
     InvalidRect,
     /// 重复键不是一个小写字母。
     InvalidDuplicate,
@@ -47,7 +49,9 @@ impl std::fmt::Display for KeyGeometryError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::ZeroId => "key geometry id must be non-zero",
-            Self::InvalidRect => "key geometry needs finite centers and positive sizes",
+            Self::InvalidRect => {
+                "key geometry needs finite centers, positive sizes and a bounded extent"
+            }
             Self::InvalidDuplicate => "key geometry duplicates must be one lowercase letter",
         })
     }
@@ -56,7 +60,7 @@ impl std::fmt::Display for KeyGeometryError {
 impl std::error::Error for KeyGeometryError {}
 
 impl KeyGeometry {
-    /// `keys` 是 a 到 z，`semicolon` 是微软双拼显示的 `;` 键，`duplicates` 是分离键盘里重复的字母键。数值都要有限、宽高为正，否则整份拒绝。
+    /// `keys` 是 a 到 z，`semicolon` 是微软双拼显示的 `;` 键，`duplicates` 是分离键盘里重复的字母键。数值都要有限、宽高为正，归一后的键心都在 [`COORDINATE_LIMIT`] 之内，否则整份拒绝。
     pub fn new(
         id: u32,
         keys: &[KeyRect; 26],
@@ -104,6 +108,13 @@ impl KeyGeometry {
                 .iter()
                 .map(|(letter, rect)| normalized(*letter, *rect)),
         );
+        // 原始数值都有限，归一后仍可能溢出（键宽 1e-3、坐标 1e36），或大到距离平方溢出。
+        if !normalized_keys
+            .iter()
+            .all(|&(_, x, y)| within_limit(x) && within_limit(y))
+        {
+            return Err(KeyGeometryError::InvalidRect);
+        }
         Ok(Self {
             id,
             unit,
@@ -173,13 +184,13 @@ impl KeyGeometry {
         })
     }
 
-    /// 宿主坐标里的按下点 (x, y) 落在 `key` 上的触点：取 `key` 离它最近的那个实例，偏移量化到 1/20 键并钳到 ±1.5 键。`key` 不在几何里（没有 `;` 键时的 `;`、不是字母）或坐标不是有限数时为 `None`，这一键按没有触点处理。大写字母按小写算。
+    /// 宿主坐标里的按下点 (x, y) 落在 `key` 上的触点：取 `key` 离它最近的那个实例，偏移量化到 1/20 键并钳到 ±1.5 键。`key` 不在几何里（没有 `;` 键时的 `;`、不是字母）、坐标不是有限数或归一后超出 [`COORDINATE_LIMIT`] 时为 `None`，这一键按没有触点处理。大写字母按小写算。
     pub fn touch(&self, key: u8, x: f32, y: f32) -> Option<KeyTouch> {
-        if !x.is_finite() || !y.is_finite() {
+        let point = (x / self.unit.0, y / self.unit.1);
+        if !within_limit(point.0) || !within_limit(point.1) {
             return None;
         }
         let key = key.to_ascii_lowercase();
-        let point = (x / self.unit.0, y / self.unit.1);
         let (copy, center) = self
             .copies(key)
             .enumerate()
@@ -277,6 +288,11 @@ impl Default for TouchTuning {
             show_penalty: 14.0,
         }
     }
+}
+
+/// 有限且不超过 [`COORDINATE_LIMIT`]；NaN 不满足。
+fn within_limit(value: f32) -> bool {
+    value.abs() <= COORDINATE_LIMIT
 }
 
 fn distance_squared((ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {

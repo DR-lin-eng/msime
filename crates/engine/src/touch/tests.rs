@@ -62,6 +62,8 @@ fn a_touch_needs_finite_coordinates_and_a_key_in_the_geometry() {
     let (x, y) = center(b'a');
     assert_eq!(geometry.touch(b'a', f32::NAN, y), None);
     assert_eq!(geometry.touch(b'a', x, f32::INFINITY), None);
+    // 有限但归一后远在几何范围之外的落点同样不带触点。
+    assert_eq!(geometry.touch(b'a', 1.0e36, y), None);
     // 没有 `;` 键的几何里 `;` 没有触点，数字也没有。
     assert_eq!(geometry.touch(b';', x, y), None);
     assert_eq!(geometry.touch(b'1', x, y), None);
@@ -100,6 +102,28 @@ fn geometry_is_validated_as_a_whole() {
     );
     assert_eq!(
         KeyGeometry::new(1, &keys, Some([1.0, 1.0, -1.0, 1.0]), &[]),
+        Err(KeyGeometryError::InvalidRect)
+    );
+    // 原始数值都有限，归一后溢出成无穷：键宽 1e-3、键心 1e36。
+    let mut tiny = keys;
+    for key in &mut tiny {
+        key[2] = 1.0e-3;
+    }
+    tiny[0][0] = 1.0e36;
+    assert_eq!(
+        KeyGeometry::new(1, &tiny, None, &[]),
+        Err(KeyGeometryError::InvalidRect)
+    );
+    // 归一后有限，但两个键心的距离平方会溢出：键心 ±1e30。
+    let mut far = keys;
+    far[0][0] = -1.0e30;
+    far[1][0] = 1.0e30;
+    assert_eq!(
+        KeyGeometry::new(1, &far, None, &[]),
+        Err(KeyGeometryError::InvalidRect)
+    );
+    assert_eq!(
+        KeyGeometry::new(1, &keys, None, &[(b'g', [1.0e30, 1.0, 10.0, 14.0])]),
         Err(KeyGeometryError::InvalidRect)
     );
     assert_eq!(

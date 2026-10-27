@@ -1625,17 +1625,24 @@ public final class MSIMEInputService extends InputMethodService {
             render();
             return;
         }
+        // 应用对同一个输入框 restartInput 而引擎里没有组字时（聊天应用发送后清空输入框），留着原会话，只在焦点边界上复位：原来每发一条消息都要销毁会话、在工作线程上重读偏好和皮肤、同步个人词库（每次都重写并 fsync 一个文件），再在主线程上新建会话。
+        boolean keepSession = keepsSessionAcrossRestart(info, restarting, nextConnection);
         long startGeneration = ++engineStartGeneration;
         cloudClipboardGeneration++;
         clipboardImageGeneration++;
-        // 只有接下来要建引擎会话的输入框才停掉空闲同步：建会话前 scheduleEngineStartup 会先在同一个工作线程上同步一轮。焦点落到不打字的窗口（桌面、设置页）时系统同样会调这里，原先一律停掉，离开输入框 500 ms 后的空闲同步几乎总被取消，导入词库的词条就一直等不到写入。
-        if (info != null && EditorPolicy.useEngine(info.inputType)) cancelPersonalDictionarySynchronization();
+        boolean deferEngine = !keepSession && info != null && nextConnection != null
+            && InputViewRefreshPolicy.defersEngineStartup(EditorPolicy.useEngine(info.inputType),
+                info.inputType, isInputViewShown(), hardwareKeyboardAttached);
+        // 只有接下来要建引擎会话的输入框才停掉空闲同步：建会话前 scheduleEngineStartup 会先在同一个工作线程上同步一轮。焦点落到不打字的窗口（桌面、设置页）时系统同样会调这里，原先一律停掉，离开输入框 500 ms 后的空闲同步几乎总被取消，导入词库的词条就一直等不到写入。这类窗口报的是 TYPE_NULL，会话推迟到键盘真显示时才建（deferEngine），到那时再停。
+        if (info != null && EditorPolicy.useEngine(info.inputType) && !deferEngine)
+            cancelPersonalDictionarySynchronization();
         boolean newDocument = !restarting || currentDocumentIdentifier == 0;
         if (newDocument) {
             currentDocumentIdentifier = nextDocumentIdentifier++;
         }
         imeBottomRow.resetSpaceCursor();
-        stop(false);
+        if (keepSession) stopKeepingSession();
+        else stop(false);
         inputFailureRecoveryAttempts = 0;
         connection = getCurrentInputConnection();
         imeTextEditPanel.editorChanged(info == null ? -1 : info.initialSelStart,
@@ -1653,10 +1660,13 @@ public final class MSIMEInputService extends InputMethodService {
             inputModeStore = InputModeStore.from(
                 getSharedPreferences(INPUT_MODE_PREFERENCES, MODE_PRIVATE));
         }
-        enabledSchemes = KeyboardScheme.enabledFromPreferenceIds(null, edition);
-        visibleSchemes = enabledSchemes;
-        languageDictionaries = "";
-        resourcePacks = java.util.Set.of();
+        // 方案列表、语言词库和资源包是会话的偏好和运行时选项算出来的；留着会话时仍是它的，不退回出厂值。
+        if (!keepSession) {
+            enabledSchemes = KeyboardScheme.enabledFromPreferenceIds(null, edition);
+            visibleSchemes = enabledSchemes;
+            languageDictionaries = "";
+            resourcePacks = java.util.Set.of();
+        }
         letterCase.reset();
         clearEnglishSuggestions();
         int nextInputType = info == null ? 0 : info.inputType;
@@ -1680,14 +1690,85 @@ public final class MSIMEInputService extends InputMethodService {
         // 否则九键和 26 键会落入「直接输入」而无法组字。
         boolean engineWanted = info != null && connection != null
             && EditorPolicy.useEngine(info.inputType);
-        startInputRuntime(info, restarting, newDocument, startGeneration, engineWanted, true);
+        if (keepSession) {
+            resumeKeptSession(info, restarting);
+            return;
+        }
+        startInputRuntime(info, restarting, newDocument, startGeneration, engineWanted, true, deferEngine);
+    }
+
+    /** 同一输入框重启连接时能否留着引擎会话（{@link InputViewRefreshPolicy#keepsSessionAcrossRestart}）。 */
+    private boolean keepsSessionAcrossRestart(EditorInfo info, boolean restarting, InputConnection next) {
+        if (!restarting || info == null || next == null || session == 0) return false;
+        boolean sameEditor = info.inputType == editorInputType && info.fieldId == currentEditorFieldId
+            && info.imeOptions == currentEditorImeOptions && currentEditorPackage.equals(info.packageName);
+        if (!sameEditor) return false;
+        // 隐私模式可能刚在设置应用里开关过：先按文件重读本地设置，再比这个输入框此刻该不该学习。
+        refreshLocalSettings();
+        boolean suppressed = !EditorPolicy.allowLearning(info.imeOptions) || incognitoEnabled;
+        // 选中只吃掉部分输入的候选后，已选的那一段留在 phrase_prefix 里；失焦会把它上屏，所以和组字一样不留会话。
+        boolean composing = hasEngineComposition()
+            || !InputViewValuePolicy.textOr(view, "phrase_prefix", "").isEmpty();
+        return InputViewRefreshPolicy.keepsSessionAcrossRestart(restarting, session, view != null,
+            currentDocumentIdentifier, sameEditor, EditorPolicy.useEngine(info.inputType), composing,
+            privacySessionRestartPending, suppressed, sessionLearningSuppressed);
+    }
+
+    /**
+     * 留着会话的重启连接：按换输入框的规矩复位引擎，而不是销毁重建。失焦写下这一段的选词和延迟学习、给脚本插件 focus_out；聚焦丢掉组字、上下文和联想，重读插件表、资源包和音效。之后与新会话建好时一样，把隐私标记、中英、全半角和中文标点这些「只对本次会话」的状态按偏好重新交给引擎。
+     */
+    private void resumeKeptSession(EditorInfo info, boolean restarting) {
+        message = "";
+        refreshKeyStatistics(info, restarting, keyStatisticsDirectory);
+        // 与 startInputRuntime 相同：同一文档、同一输入类型时这里不改中英，照样经它记下这次输入开始。
+        Boolean englishOverride = inputContext.englishOverride(
+            EditorPolicy.prefersLatin(editorInputType), currentDocumentIdentifier, dedicatedEnglish);
+        if (englishOverride != null) dedicatedEnglish = englishOverride;
+        try {
+            apply(NativeClient.focus(session, false));
+            apply(NativeClient.focus(session, true));
+            markPrivateSession();
+            // markPrivateSession 失败时已经经 fail 停掉会话并排上恢复，不能再碰已销毁的句柄。
+            if (session == 0) return;
+            view = value(NativeClient.setEnglishMode(session, dedicatedEnglish));
+        } catch (JSONException | LinkageError error) {
+            // 与会话中途的引擎失败同样处理：停掉会话，按这个输入框的运行时选项重建。
+            fail(error);
+            return;
+        }
+        applyCharacterWidth(fullWidthPreference);
+        applyChinesePunctuation(chinesePunctuationPreference);
+        refreshEnglishSuggestions();
+        updateAutomaticCapitalization();
+        imeLetterRows.refreshKeyRowsForEditor();
+        render();
+        synchronizeReplyKeyboard();
+        imeWorldClock.resumePicker(getCurrentInputEditorInfo());
+    }
+
+    /** 接上 onStartInput 推迟的键行更新和引擎启动（{@link InputViewRefreshPolicy#defersEngineStartup}）。 */
+    private void resumeDeferredInputStart(EditorInfo info) {
+        if (editorKeyRowsPending) {
+            editorKeyRowsPending = false;
+            imeLetterRows.refreshKeyRowsForEditor();
+            render();
+        }
+        long deferred = deferredEngineStartup;
+        deferredEngineStartup = -1;
+        if (!InputViewRefreshPolicy.shouldResumeDeferredStartup(deferred, engineStartGeneration, session,
+                connection, getCurrentInputConnection(), info != null && EditorPolicy.useEngine(info.inputType)))
+            return;
+        // 到这时才知道这个输入框真要建会话，与 onStartInput 里一样先停掉空闲同步。
+        cancelPersonalDictionarySynchronization();
+        scheduleEngineStartup(runtimeOptionsForSnapshot, engineStartGeneration);
     }
 
     /** 配置准备完成后仍初始化原输入框；不重复触发生命周期，也不重放已直出的文字。 */
     private void startInputRuntime(EditorInfo info, boolean restarting, boolean newDocument,
-            long startGeneration, boolean engineWanted, boolean allowBootstrap) {
+            long startGeneration, boolean engineWanted, boolean allowBootstrap, boolean deferEngine) {
         message = EngineStartupStatusPolicy.initialMessage(engineWanted);
         String statisticsPreferences = "";
+        boolean deferred = deferEngine && engineWanted;
         try {
             if (engineWanted && allowBootstrap
                     && !new File(getFilesDir(), "runtime-options.json").exists()) {
@@ -1695,7 +1776,8 @@ public final class MSIMEInputService extends InputMethodService {
                 runtimeOptionsBase = "";
                 runtimeOptionsForSnapshot = "";
                 pendingRuntimeBootstrap = new PendingRuntimeBootstrap(info, restarting, newDocument);
-                scheduleEngineStartup("", startGeneration);
+                if (deferred) deferredEngineStartup = startGeneration;
+                else scheduleEngineStartup("", startGeneration);
             } else {
                 pendingRuntimeBootstrap = null;
                 JSONObject options = new JSONObject(
@@ -1727,7 +1809,8 @@ public final class MSIMEInputService extends InputMethodService {
                     runtimeOptionsBase = options.toString();
                     if (learningSuppressed()) options.getJSONObject("preferences").put("learning", false);
                     runtimeOptionsForSnapshot = options.toString();
-                    scheduleEngineStartup(runtimeOptionsForSnapshot, startGeneration);
+                    if (deferred) deferredEngineStartup = startGeneration;
+                    else scheduleEngineStartup(runtimeOptionsForSnapshot, startGeneration);
                 }
             }
         } catch (Exception | LinkageError error) {
@@ -1738,8 +1821,12 @@ public final class MSIMEInputService extends InputMethodService {
         }
         refreshKeyStatistics(info, restarting, keyStatisticsDirectory(statisticsPreferences));
         updateAutomaticCapitalization();
-        imeLetterRows.rebuildKeyRows();
-        render();
+        // 推迟建会话的窗口键盘没显示，键行和重画也留给 onStartInputView（resumeDeferredInputStart）。
+        editorKeyRowsPending = deferred;
+        if (!deferred) {
+            imeLetterRows.refreshKeyRowsForEditor();
+            render();
+        }
         synchronizeReplyKeyboard();
     }
 
@@ -1823,6 +1910,7 @@ public final class MSIMEInputService extends InputMethodService {
         if (inlineAutofill != null) inlineAutofill.showInput();
         Telemetry.inputViewShown(this);
         cancelInputViewRefresh();
+        resumeDeferredInputStart(info);
         // 同一编辑器的键盘视图可以单独收起、再显示。收起时启动代次作废，但这不会触发新的
         // onStartInput；把那次尚未建成的会话重新排上，避免一直停在「准备中」的直接输入状态。
         if (InputViewRefreshPolicy.shouldResumeCancelledStartup(
@@ -1973,7 +2061,11 @@ public final class MSIMEInputService extends InputMethodService {
             hardwareKeyboardMode, hardwareKeyboardAttached, attached);
         hardwareKeyboardUserExpanded = HardwareKeyboardModePolicy.userExpandedAfterConfiguration(
             hardwareKeyboardUserExpanded, hardwareKeyboardAttached, attached);
+        boolean hardwareKeyboardNewlyAttached = attached && !hardwareKeyboardAttached;
         hardwareKeyboardAttached = attached;
+        // 停在推迟建会话的 TYPE_NULL 窗口上时接上了实体键盘：实体键盘在键盘没显示时就要经引擎组字，现在就建。
+        if (hardwareKeyboardNewlyAttached && deferredEngineStartup >= 0)
+            resumeDeferredInputStart(getCurrentInputEditorInfo());
         // 旋转、分屏后光标在屏幕上的位置变了：让编辑器立即重报一次，候选栏先按旧位置夹在新窗口里，新位置到了再挪过去。
         if (caretAnchorsAvailable())
             InputConnectionGuard.requestCursorUpdates(connection,
@@ -2136,6 +2228,8 @@ public final class MSIMEInputService extends InputMethodService {
      * 实体键盘按下一键：进入候选条模式。输入法窗口被系统收着时（接着实体键盘、「显示虚拟键盘」关着），这一键处理完若开始了组词，就把窗口叫出来显示候选条。
      */
     private void noteHardwareTyping() {
+        // 推迟建会话的 TYPE_NULL 窗口上来了实体键盘的按键（键盘没被系统报成已接上时会这样）：现在就建，之后的键经引擎组字。
+        if (deferredEngineStartup >= 0) resumeDeferredInputStart(getCurrentInputEditorInfo());
         if (!hardwareKeyboardMode) {
             hardwareKeyboardMode = true;
             if (keyboardRoot != null) render();
@@ -2165,30 +2259,83 @@ public final class MSIMEInputService extends InputMethodService {
     private void stop(boolean finish) {
         boolean keepMoreTools = preserveMoreToolsOnStop;
         preserveMoreToolsOnStop = false;
-        stop(finish, keepMoreTools);
+        stop(finish, keepMoreTools, false);
     }
 
-    /** 停止并重启输入会话时保留已打开的功能菜单，避免隐私开关切换时闪退式收起再弹出。 */
-    private void stop(boolean finish, boolean keepMoreTools) {
+    /** 同一输入框重启连接、留着引擎会话时的收尾（{@link InputViewRefreshPolicy#keepsSessionAcrossRestart}）：只做编辑器边界上的复位。 */
+    private void stopKeepingSession() {
+        boolean keepMoreTools = preserveMoreToolsOnStop;
+        preserveMoreToolsOnStop = false;
+        stop(false, keepMoreTools, true);
+    }
+
+    /**
+     * 停止并重启输入会话时保留已打开的功能菜单，避免隐私开关切换时闪退式收起再弹出。
+     *
+     * @param keepSession 为真时不销毁引擎会话，会话带着的偏好快照、皮肤、翻译路由和保存中的状态都不动，只关面板、收起组字区、作废这个输入框上还在路上的请求，与输入框一起结束的那些照常复位。
+     */
+    private void stop(boolean finish, boolean keepMoreTools, boolean keepSession) {
         if (imeWorldClock != null) imeWorldClock.close();
         if (imeOcr != null) imeOcr.close();
         imeCompositionEditor.close();
         pendingEngineStartup = -1;
+        deferredEngineStartup = -1;
         pendingRuntimeBootstrap = null;
         // Rebuilding the Engine (including an in-place privacy-mode restart) invalidates any
         // clipboard image copy still running on the worker. Its completion must not submit an
         // image after the user has enabled the privacy gate.
         clipboardImageGeneration++;
-        candidateTranslationBindingEpoch++;
-        candidateTranslationVerifiedGeneration = -1L;
-        candidateTranslationAppliedGeneration = -1L;
-        userTranslationAppliedGeneration = -1L;
+        if (!keepSession) {
+            candidateTranslationBindingEpoch++;
+            candidateTranslationVerifiedGeneration = -1L;
+            candidateTranslationAppliedGeneration = -1L;
+            userTranslationAppliedGeneration = -1L;
+        }
         imeLetterRows.cancelBackspaceRepeat();
         imeDebugOverlay.clearDiagnostic();
         clearSmartPunctuationSnapshots();
         deactivateHandwriting();
         invalidateOnlineProviders();
         invalidateCandidateGlosses();
+        if (!keepSession) stopSessionState();
+        else clearEnglishSuggestions();
+        if (!keepSession && session != 0) {
+            try { if (finish && connection != null) apply(NativeClient.command(session, 2)); }
+            catch (Exception | LinkageError ignored) { /* Never log editor text or native responses. */ }
+            try { NativeClient.destroy(session); } catch (LinkageError ignored) { }
+            session = 0;
+        }
+        // A Stroke composition still marked here (the session stopped without CommitRaw) is stroke glyphs, not text: remove it rather than finish it into the document.
+        if (connection != null && strokeCompositionMarked()) bridge.discard(sink(typingSource()));
+        // 会话停下时不知道编辑器里是否还有组字区（restartInput 前应用常已清空或改写了文字），换成确定读音可能把它插进文档，所以只结束组字区，不写文字。
+        else if (connection != null) bridge.abandon(sink(typingSource()));
+        if (!keepSession) view = null;
+        if (temporaryEnglishShift) {
+            dedicatedEnglish = false;
+            temporaryEnglishShift = false;
+            letterCase.reset();
+        }
+        closeCandidatePanel();
+        // 换编辑器时不让任何工具栏面板（含常用语）活下来，理由同 finishInputViewPresentation。
+        if (keepMoreTools) {
+            closeEmojiPicker();
+            closeCommonPhrases();
+            closeClipboardHistory();
+            closeSkinPicker();
+            closeSchemePicker();
+            closeSymbolPanel();
+            closeAiPolish();
+            closeVoiceResult();
+            closeLayoutSettings();
+            closeReplyKeyboard();
+            imeTextEditPanel.close();
+        } else {
+            closeToolbarPanels();
+        }
+    }
+
+    /** 跟着引擎会话走的状态：偏好快照和由它算出的皮肤、释义、翻译、五笔设置，以及偏好轮询和保存中的标记。会话销毁时一起清掉，新会话建好后由实时偏好重新填上。 */
+    private void stopSessionState() {
         preferencesReloader.stop();
         preferenceSaveGeneration++;
         preferencesDirectory = "";
@@ -2218,39 +2365,6 @@ public final class MSIMEInputService extends InputMethodService {
         panelPreferenceSaving = false;
         skinSaving = false;
         traditionalOutputSaving = false;
-        if (session != 0) {
-            try { if (finish && connection != null) apply(NativeClient.command(session, 2)); }
-            catch (Exception | LinkageError ignored) { /* Never log editor text or native responses. */ }
-            try { NativeClient.destroy(session); } catch (LinkageError ignored) { }
-            session = 0;
-        }
-        // A Stroke composition still marked here (the session stopped without CommitRaw) is stroke glyphs, not text: remove it rather than finish it into the document.
-        if (connection != null && strokeCompositionMarked()) bridge.discard(sink(typingSource()));
-        // 会话停下时不知道编辑器里是否还有组字区（restartInput 前应用常已清空或改写了文字），换成确定读音可能把它插进文档，所以只结束组字区，不写文字。
-        else if (connection != null) bridge.abandon(sink(typingSource()));
-        view = null;
-        if (temporaryEnglishShift) {
-            dedicatedEnglish = false;
-            temporaryEnglishShift = false;
-            letterCase.reset();
-        }
-        closeCandidatePanel();
-        // 换编辑器时不让任何工具栏面板（含常用语）活下来，理由同 finishInputViewPresentation。
-        if (keepMoreTools) {
-            closeEmojiPicker();
-            closeCommonPhrases();
-            closeClipboardHistory();
-            closeSkinPicker();
-            closeSchemePicker();
-            closeSymbolPanel();
-            closeAiPolish();
-            closeVoiceResult();
-            closeLayoutSettings();
-            closeReplyKeyboard();
-            imeTextEditPanel.close();
-        } else {
-            closeToolbarPanels();
-        }
     }
 
     /**
@@ -2280,6 +2394,7 @@ public final class MSIMEInputService extends InputMethodService {
             startEngineSession(options, null);
         };
         boolean suppressLearning = learningSuppressed();
+        startupLearningSuppressed = suppressLearning;
         PendingRuntimeBootstrap bootstrap = pendingRuntimeBootstrap;
         InputConnection startupConnection = connection;
         try {
@@ -2303,7 +2418,7 @@ public final class MSIMEInputService extends InputMethodService {
                                 || pendingRuntimeBootstrap != bootstrap) return;
                         if (ready) {
                             startInputRuntime(bootstrap.info(), bootstrap.restarting(),
-                                bootstrap.newDocument(), generation, true, false);
+                                bootstrap.newDocument(), generation, true, false, false);
                         } else {
                             stop(false);
                             message = "共享运行时未就绪：仅直接输入";
@@ -2389,6 +2504,10 @@ public final class MSIMEInputService extends InputMethodService {
             }
             view = value(created);
             session = strictCandidateLong(view, "session");
+            // 只有选项里确实写着不学习，才算按不学习建的会话；两边对不上时按会学习记，不学习的输入框重启连接时就会重建而不是留着它。
+            JSONObject createdPreferences = options.optJSONObject("preferences");
+            sessionLearningSuppressed = startupLearningSuppressed && createdPreferences != null
+                && !createdPreferences.optBoolean("learning", true);
             appliedPreferencesResponse = null;
             appliedPreferencesInputs = null;
             String resources = options.optString("resources", "");
@@ -5036,6 +5155,14 @@ public final class MSIMEInputService extends InputMethodService {
     private PendingRuntimeBootstrap pendingRuntimeBootstrap;
     private record PendingRuntimeBootstrap(EditorInfo info, boolean restarting, boolean newDocument) {}
     private long dictionaryStartupRetryDeadline;
+    /** onStartInput 推迟到 onStartInputView 的那次会话启动所属的代次（{@link InputViewRefreshPolicy#defersEngineStartup}）；没有时为 -1，stop 时清掉。与 {@link #pendingEngineStartup} 分开记：后者为 -1 表示启动失败或已停下、显示时不再重试，推迟的启动不能混进这个语义。 */
+    private long deferredEngineStartup = -1;
+    /** 推迟引擎启动的那次 onStartInput 也没有更新键行、没有重画（键盘没显示），等 onStartInputView 补上。 */
+    private boolean editorKeyRowsPending;
+    /** scheduleEngineStartup 排上那次启动时这个输入框是否不学习；建会话时记到 {@link #sessionLearningSuppressed}。 */
+    private boolean startupLearningSuppressed;
+    /** 现在这个会话建立时是否按不学习建的。引擎的 learning 只在建会话时定，同一输入框重启连接时只有和现在的要求一致才留着会话。 */
+    private boolean sessionLearningSuppressed;
 
     /** 有一次会话启动在路上：排上之后没有换代（换输入框、收起、销毁都会换代），也没有被 stop 取消（建会话失败、输入连接失败都经过 stop）。 */
     private boolean engineStartupPending() {

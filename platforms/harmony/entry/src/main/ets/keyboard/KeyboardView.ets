@@ -806,10 +806,6 @@ struct KeyboardView {
   private pendingTouches: PendingTouches = new PendingTouches();
   /** 微软双拼第二行末尾 `;` 键的位置（窗口坐标），同 `glideKeys`；没量到时为 null。 */
   private semicolonKey: GlideKeyRect | null = null;
-  /** 交给引擎的键位布局（`TouchPointPolicy.geometryLayout`）缓存：键位、`;` 或键盘原点变了才重算，不必每键都拼一遍。 */
-  private touchLayoutCache: string | null = null;
-  private touchLayoutDirty: boolean = true;
-  private touchLayoutSemicolon: boolean = false;
   /** 每个被跟踪手指的长按计时器。 */
   private hintHoldTimers: Map<number, number> = new Map<number, number>();
   /** 双拼 18 键两个字母的键上的横滑。 */
@@ -1419,20 +1415,19 @@ struct KeyboardView {
     return key;
   }
 
-  /** 当前 26 键的键位布局，相对键盘根区域；有键还没量到时为 null。微软双拼画着 `;` 时它也得量到。 */
+  /** 当前 26 键的键位布局，相对键盘根区域；有键还没量到时为 null。微软双拼画着 `;` 时它也得量到。每键按当前键位现算，见 `TouchPointPolicy.geometryLayout`。 */
   private touchLayout(): string | null {
-    const semicolon: boolean = this.secondRowSemicolon();
-    if (this.touchLayoutDirty || semicolon !== this.touchLayoutSemicolon) {
-      this.touchLayoutCache = semicolon && this.semicolonKey === null ? null
-        : TouchPointPolicy.geometryLayout(this.glideKeys, semicolon ? this.semicolonKey : null,
-          this.glideOriginX, this.glideOriginY);
-      this.touchLayoutSemicolon = semicolon;
-      this.touchLayoutDirty = false;
-    }
-    return this.touchLayoutCache;
+    return TouchPointPolicy.geometryLayout(this.glideKeys, this.secondRowSemicolon(), this.semicolonKey,
+      this.glideOriginX, this.glideOriginY);
   }
 
-  /** 字母键和 `;` 的按下点，只在触屏键盘上记；取不取用到点击时再按 `touchKey` 定。一律取按下点，不取抬起点。 */
+  /** 点击时取走这一键的按下点，按这个键现在的位置换成键盘根区域坐标，与 `touchLayout` 同一帧的布局（`PendingTouches.take`）。 */
+  private takeTouch(letter: string): TouchPoint | null {
+    return this.pendingTouches.take(letter, Date.now(),
+      TouchPointPolicy.keyRect(this.glideKeys, this.semicolonKey, letter), this.glideOriginX, this.glideOriginY);
+  }
+
+  /** 字母键和 `;` 的按下点，只在触屏键盘上记；取不取用到点击时再按 `touchKey` 定。一律取按下点，不取抬起点。按下时只记相对被按的键的位置，点击时由 `takeTouch` 按键当时的位置换回坐标，按下和点击之间重新排版也不会错位。 */
   private recordLetterTouch(letter: string | undefined, event: TouchEvent): void {
     if (letter === undefined || !this.touchDesign() || !TouchPointPolicy.tracksKey(letter)) {
       return;
@@ -1442,13 +1437,13 @@ struct KeyboardView {
         return;
       }
       const touch: TouchObject = event.changedTouches[0];
-      const point: TouchPoint | null = TouchPointPolicy.point(touch.windowX, touch.windowY,
-        this.glideOriginX, this.glideOriginY);
-      if (point === null) {
-        this.pendingTouches.cancel(letter);
-      } else {
-        this.pendingTouches.down(letter, point, Date.now());
-      }
+      const key: GlideKeyRect = {
+        left: Number(event.target.area.globalPosition.x ?? 0),
+        top: Number(event.target.area.globalPosition.y ?? 0),
+        width: Number(event.target.area.width),
+        height: Number(event.target.area.height)
+      };
+      this.pendingTouches.down(letter, touch.windowX, touch.windowY, key, Date.now());
     } else if (event.type === TouchType.Cancel) {
       this.pendingTouches.cancel(letter);
     }
@@ -1491,8 +1486,7 @@ struct KeyboardView {
       width: Number(area.width),
       height: Number(area.height)
     };
-    // 键位一变，交给引擎的几何跟着重算（`touchLayout`）。`;` 不是滑行键，只给按下点的几何用。
-    this.touchLayoutDirty = true;
+    // `;` 不是滑行键，只给按下点的几何用（`touchLayout`、`takeTouch`）。
     if (index < 0) {
       this.semicolonKey = rect;
       return;
@@ -3406,7 +3400,7 @@ struct KeyboardView {
         size: this.letterFontSize(),
         emphasized: false,
         width: 0,
-        action: () => this.tapLetter(letter, this.pendingTouches.take(letter, Date.now()))
+        action: () => this.tapLetter(letter, this.takeTouch(letter))
       };
     }
     return {
@@ -3418,7 +3412,7 @@ struct KeyboardView {
       size: this.letterFontSize(),
       emphasized: false,
       width: 0,
-      action: () => this.tapLetter(letter, this.pendingTouches.take(letter, Date.now()))
+      action: () => this.tapLetter(letter, this.takeTouch(letter))
     };
   }
 
@@ -10524,7 +10518,6 @@ struct KeyboardView {
       this.glideOriginX = Number(now.globalPosition.x ?? 0);
       this.glideOriginY = Number(now.globalPosition.y ?? 0);
       this.rootWidth = Number(now.width);
-      this.touchLayoutDirty = true;
     })
     .onTouch((event: TouchEvent): void => this.pruneKeyPreview(event))
   }

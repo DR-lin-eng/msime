@@ -8486,7 +8486,7 @@ group("only 26-key shuangpin letters on the touch keyboard carry their touch-dow
 
 group("the key geometry is the letter keys' centres and sizes from the keyboard origin", () => {
   const keys = glideKeyboard();
-  const layout = TouchPointPolicy.geometryLayout(keys, null, 10, 100) as string;
+  const layout = TouchPointPolicy.geometryLayout(keys, false, null, 10, 100) as string;
   check(layout !== null, "a measured keyboard has a layout");
   const geometry = JSON.parse(TouchPointPolicy.geometryJson(7, layout)) as {
     id: number;
@@ -8520,7 +8520,7 @@ group("the key geometry is the letter keys' centres and sizes from the keyboard 
   const microsoft = JSON.parse(
     TouchPointPolicy.geometryJson(
       8,
-      TouchPointPolicy.geometryLayout(keys, semicolon, 10, 100) as string,
+      TouchPointPolicy.geometryLayout(keys, true, semicolon, 10, 100) as string,
     ),
   ) as { semicolon: number[] };
   check(
@@ -8528,98 +8528,240 @@ group("the key geometry is the letter keys' centres and sizes from the keyboard 
     "the Microsoft semicolon key at the end of the second row",
   );
   check(
-    TouchPointPolicy.geometryLayout(keys, null, 10, 100) ===
-      TouchPointPolicy.geometryLayout(glideKeyboard(), null, 10, 100),
+    TouchPointPolicy.geometryLayout(keys, false, null, 10, 100) ===
+      TouchPointPolicy.geometryLayout(glideKeyboard(), false, null, 10, 100),
     "the same keys give the same layout string, so nothing is re-registered",
   );
   const jitter = glideKeyboard();
   jitter[0] = { ...(jitter[0] as GlideKeyRect), left: (jitter[0] as GlideKeyRect).left + 0.0001 };
   check(
-    TouchPointPolicy.geometryLayout(jitter, null, 10, 100) === layout,
+    TouchPointPolicy.geometryLayout(jitter, false, null, 10, 100) === layout,
     "float noise below a hundredth of a vp does not change it",
   );
   const moved = glideKeyboard().map((key) =>
     key === null ? null : { ...key, left: key.left + 40, top: key.top + 7 },
   );
   check(
-    TouchPointPolicy.geometryLayout(moved, null, 50, 107) === layout,
+    TouchPointPolicy.geometryLayout(moved, false, null, 50, 107) === layout,
     "the keyboard moving in the window moves its origin with it, so the geometry stays",
   );
 
   check(
-    TouchPointPolicy.geometryLayout(GlideTypingPolicy.emptyKeys(), null, 0, 0) === null,
+    TouchPointPolicy.geometryLayout(GlideTypingPolicy.emptyKeys(), false, null, 0, 0) === null,
     "none before the keys are measured",
   );
   const missing = glideKeyboard();
   missing[GlideTypingPolicy.letterIndex("m")] = null;
   check(
-    TouchPointPolicy.geometryLayout(missing, null, 0, 0) === null,
+    TouchPointPolicy.geometryLayout(missing, false, null, 0, 0) === null,
     "nor with one letter unmeasured",
   );
   const flat = glideKeyboard();
   flat[3] = { ...(flat[3] as GlideKeyRect), height: 0 };
   check(
-    TouchPointPolicy.geometryLayout(flat, null, 0, 0) === null,
+    TouchPointPolicy.geometryLayout(flat, false, null, 0, 0) === null,
     "nor with a key of no size (a face just rebuilt)",
   );
   const broken = glideKeyboard();
   broken[4] = { ...(broken[4] as GlideKeyRect), left: Number.NaN };
   check(
-    TouchPointPolicy.geometryLayout(broken, null, 0, 0) === null,
+    TouchPointPolicy.geometryLayout(broken, false, null, 0, 0) === null,
     "nor with a coordinate that is not a number",
   );
   check(
-    TouchPointPolicy.geometryLayout(keys, { left: 0, top: 0, width: -1, height: 40 }, 0, 0) ===
-      null,
+    TouchPointPolicy.geometryLayout(
+      keys,
+      true,
+      { left: 0, top: 0, width: -1, height: 40 },
+      0,
+      0,
+    ) === null,
     "nor with a semicolon key of no size",
   );
   check(
-    TouchPointPolicy.geometryLayout(keys.slice(0, 25), null, 0, 0) === null,
+    TouchPointPolicy.geometryLayout(keys, true, null, 10, 100) === null,
+    "nor while the Microsoft semicolon is drawn but not yet measured",
+  );
+  check(
+    TouchPointPolicy.geometryLayout(keys, false, semicolon, 10, 100) === layout,
+    "a semicolon measured earlier but no longer drawn is left out",
+  );
+  check(
+    TouchPointPolicy.geometryLayout(keys, true, semicolon, 10, 100) !== layout,
+    "showing it changes the layout, so the next key registers a new generation",
+  );
+  check(
+    TouchPointPolicy.geometryLayout(keys.slice(0, 25), false, null, 0, 0) === null,
     "nor with 25 keys",
   );
 });
 
 group("a touch-down point waits for its key's click and is spent by it", () => {
   const pending = new PendingTouches();
-  check(pending.take("a", 0) === null, "nothing before any touch");
-  pending.down("a", { x: 3, y: 4 }, 1000);
-  const taken = pending.take("a", 1080);
+  // 键盘根区域原点在窗口 (10, 100)；键 30x40。
+  const key = (left: number, top: number): GlideKeyRect => ({ left, top, width: 30, height: 40 });
+  const at = (point: { x: number; y: number } | null, x: number, y: number): boolean =>
+    point !== null && Math.abs(point.x - x) < 1e-9 && Math.abs(point.y - y) < 1e-9;
+  check(pending.take("a", 0, key(27, 148), 10, 100) === null, "nothing before any touch");
+  pending.down("a", 30, 155, key(27, 148), 1000);
   check(
-    taken !== null && taken.x === 3 && taken.y === 4,
-    "the click takes the point its key went down at",
+    at(pending.take("a", 1080, key(27, 148), 10, 100), 20, 55),
+    "the click takes the point its key went down at, from the keyboard origin",
   );
-  check(pending.take("a", 1090) === null, "and spends it, so a later accessibility click has none");
-  pending.down("a", { x: 1, y: 1 }, 2000);
-  pending.down("s", { x: 2, y: 2 }, 2010);
   check(
-    (pending.take("a", 2050) as { x: number }).x === 1,
+    pending.take("a", 1090, key(27, 148), 10, 100) === null,
+    "and spends it, so a later accessibility click has none",
+  );
+  pending.down("a", 28, 150, key(27, 148), 2000);
+  pending.down("s", 62, 150, key(61, 148), 2010);
+  check(
+    at(pending.take("a", 2050, key(27, 148), 10, 100), 18, 50),
     "two thumbs: the first key's click after the second key went down",
   );
-  check((pending.take("s", 2060) as { x: number }).x === 2, "each key keeps its own point");
-  pending.down("d", { x: 5, y: 5 }, 3000);
-  pending.down("d", { x: 6, y: 6 }, 3200);
+  check(at(pending.take("s", 2060, key(61, 148), 10, 100), 52, 50), "each key keeps its own point");
+  pending.down("d", 100, 150, key(95, 148), 3000);
+  pending.down("d", 101, 150, key(95, 148), 3200);
   check(
-    (pending.take("d", 3250) as { x: number }).x === 6,
+    at(pending.take("d", 3250, key(95, 148), 10, 100), 91, 50),
     "the next touch-down on a key replaces an unclicked one",
   );
-  pending.down("f", { x: 7, y: 7 }, 4000);
+  pending.down("f", 130, 150, key(129, 148), 4000);
   pending.cancel("f");
-  check(pending.take("f", 4010) === null, "a cancelled touch leaves nothing");
-  pending.down("g", { x: 8, y: 8 }, 5000);
   check(
-    pending.take("g", 5000 + TouchPointPolicy.MAX_AGE_MS) !== null,
+    pending.take("f", 4010, key(129, 148), 10, 100) === null,
+    "a cancelled touch leaves nothing",
+  );
+  pending.down("g", 170, 150, key(163, 148), 5000);
+  check(
+    pending.take("g", 5000 + TouchPointPolicy.MAX_AGE_MS, key(163, 148), 10, 100) !== null,
     "a point is good up to the age limit",
   );
-  pending.down("g", { x: 8, y: 8 }, 5000);
-  check(pending.take("g", 5001 + TouchPointPolicy.MAX_AGE_MS) === null, "a stale point is dropped");
-  pending.down("h", { x: 9, y: 9 }, 6000);
-  check(pending.take("h", 5999) === null, "and so is one from a clock that went backwards");
-  pending.down("j", { x: 1, y: 1 }, 7000);
-  pending.down(";", { x: 1, y: 1 }, 7000);
+  pending.down("g", 170, 150, key(163, 148), 5000);
+  check(
+    pending.take("g", 5001 + TouchPointPolicy.MAX_AGE_MS, key(163, 148), 10, 100) === null,
+    "a stale point is dropped",
+  );
+  pending.down("h", 200, 150, key(197, 148), 6000);
+  check(
+    pending.take("h", 5999, key(197, 148), 10, 100) === null,
+    "and so is one from a clock that went backwards",
+  );
+  pending.down("j", 230, 150, key(231, 148), 7000);
+  pending.down(";", 330, 150, key(333, 148), 7000);
   pending.clear();
   check(
-    pending.take("j", 7001) === null && pending.take(";", 7001) === null,
+    pending.take("j", 7001, key(231, 148), 10, 100) === null &&
+      pending.take(";", 7001, key(333, 148), 10, 100) === null,
     "a replaced face drops every point",
+  );
+  pending.down("k", 270, 150, key(265, 148), 8000);
+  check(
+    pending.take("k", 8001, null, 10, 100) === null,
+    "a key not measured at click time gives no point",
+  );
+  pending.down("l", 300, 150, { left: 299, top: 148, width: 0, height: 40 }, 9000);
+  check(
+    pending.take("l", 9001, key(299, 148), 10, 100) === null,
+    "a key of no size at touch-down keeps nothing",
+  );
+  pending.down("l", Number.NaN, 150, key(299, 148), 9100);
+  check(
+    pending.take("l", 9101, key(299, 148), 10, 100) === null,
+    "nor does a touch that is not a number",
+  );
+  pending.down("l", 300, 150, key(299, 148), 9200);
+  check(
+    pending.take("l", 9201, { left: 299, top: 148, width: 30, height: 0 }, 10, 100) === null,
+    "nor a key of no size at click time",
+  );
+});
+
+group("a touch-down point follows its key when the keyboard re-lays out before the click", () => {
+  // 工具条隐藏时组字一开始它就出现，面板变高、按键整体下移一条工具条的高度（#10018 评审）：两指快打时第二键的按下在第一键的点击之前，它的点击在重新排版之后。
+  const before = glideKeyboard();
+  const strip = 68;
+  const after = glideKeyboard().map((rect) =>
+    rect === null ? null : { ...rect, top: rect.top + strip },
+  );
+  const index = GlideTypingPolicy.letterIndex("w");
+  const wBefore = before[index] as GlideKeyRect;
+  const pending = new PendingTouches();
+  pending.down("w", wBefore.left + 21, wBefore.top + 9, wBefore, 1000);
+  const point = pending.take("w", 1060, TouchPointPolicy.keyRect(after, null, "w"), 10, 100);
+  const geometry = JSON.parse(
+    TouchPointPolicy.geometryJson(
+      1,
+      TouchPointPolicy.geometryLayout(after, false, null, 10, 100) as string,
+    ),
+  ) as { keys: number[][] };
+  const w = geometry.keys[index];
+  check(
+    point !== null && point.x - (w[0] - w[2] / 2) === 21 && point.y - (w[1] - w[3] / 2) === 9,
+    "the point sits where it went down inside the key, measured against the geometry of the same frame",
+  );
+  check(
+    point !== null && point.y === wBefore.top + 9 - 100 + strip,
+    "so it moved down with the key instead of staying a strip above it",
+  );
+
+  const resized = glideKeyboard().map((rect) =>
+    rect === null
+      ? null
+      : {
+          left: 10 + (rect.left - 10) * 2,
+          top: rect.top,
+          width: rect.width * 2,
+          height: rect.height,
+        },
+  );
+  pending.down("w", wBefore.left + 15, wBefore.top + 30, wBefore, 2000);
+  const turned = pending.take("w", 2050, TouchPointPolicy.keyRect(resized, null, "w"), 10, 100);
+  const wResized = resized[index] as GlideKeyRect;
+  check(
+    turned !== null &&
+      turned.x === wResized.left - 10 + wResized.width / 2 &&
+      turned.y === wResized.top - 100 + 30,
+    "a key that changed size keeps the touch at the same share of its width and height",
+  );
+
+  pending.down("e", wBefore.left - 2, wBefore.top - 3, wBefore, 3000);
+  const gap = pending.take("e", 3010, wBefore, 10, 100);
+  check(
+    gap !== null && gap.x === wBefore.left - 2 - 10 && gap.y === wBefore.top - 3 - 100,
+    "a touch in the gap the key's touch region reaches into stays outside the key",
+  );
+
+  const semicolon: GlideKeyRect = { left: 10 + 9.5 * 34, top: 148, width: 30, height: 40 };
+  const lowered: GlideKeyRect = { ...semicolon, top: semicolon.top + strip };
+  pending.down(";", semicolon.left + 5, semicolon.top + 5, semicolon, 4000);
+  const semi = pending.take(";", 4010, TouchPointPolicy.keyRect(after, lowered, ";"), 10, 100);
+  check(
+    semi !== null && semi.x === lowered.left + 5 - 10 && semi.y === lowered.top + 5 - 100,
+    "the Microsoft semicolon follows its key the same way",
+  );
+});
+
+group("the key a touch-down point is rebuilt against", () => {
+  const keys = glideKeyboard();
+  const semicolon: GlideKeyRect = { left: 333, top: 148, width: 30, height: 40 };
+  check(
+    TouchPointPolicy.keyRect(keys, semicolon, "q") === keys[GlideTypingPolicy.letterIndex("q")],
+    "a letter is its key in a..z order",
+  );
+  check(
+    TouchPointPolicy.keyRect(keys, semicolon, ";") === semicolon,
+    "the semicolon is its own key",
+  );
+  check(TouchPointPolicy.keyRect(keys, null, ";") === null, "an unmeasured semicolon is none");
+  check(
+    TouchPointPolicy.keyRect(GlideTypingPolicy.emptyKeys(), null, "a") === null,
+    "nor is an unmeasured letter",
+  );
+  check(
+    TouchPointPolicy.keyRect(keys, semicolon, "A") === null &&
+      TouchPointPolicy.keyRect(keys, semicolon, ",") === null &&
+      TouchPointPolicy.keyRect(keys, semicolon, "ab") === null,
+    "nor anything else",
   );
   const point = TouchPointPolicy.point(110, 205, 10, 100);
   check(
@@ -8640,7 +8782,7 @@ group("the key geometry is registered once per layout and session", () => {
     sent.push(json);
     return true;
   };
-  const layout = TouchPointPolicy.geometryLayout(glideKeyboard(), null, 10, 100) as string;
+  const layout = TouchPointPolicy.geometryLayout(glideKeyboard(), false, null, 10, 100) as string;
   check(
     registry.register(0, layout, accept) === 0 && sent.length === 0,
     "nothing without a session",
@@ -8654,6 +8796,7 @@ group("the key geometry is registered once per layout and session", () => {
   );
   const other = TouchPointPolicy.geometryLayout(
     glideKeyboard(),
+    true,
     { left: 0, top: 0, width: 30, height: 40 },
     10,
     100,
@@ -8686,6 +8829,17 @@ group("the key geometry is registered once per layout and session", () => {
   check(
     registry.register(6, layout, accept) === 6 && sent.length === 6,
     "once accepted it is not resent",
+  );
+  const lowered = TouchPointPolicy.geometryLayout(
+    glideKeyboard().map((key) => (key === null ? null : { ...key, top: key.top + 68 })),
+    false,
+    null,
+    10,
+    100,
+  ) as string;
+  check(
+    registry.register(6, lowered, accept) === 7 && sent.length === 7,
+    "keys that moved inside the keyboard (a strip appearing above them) are a new generation",
   );
   check(
     sent.every((json) => (JSON.parse(json) as { id: number }).id !== 0),

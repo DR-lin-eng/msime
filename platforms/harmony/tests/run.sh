@@ -292,6 +292,27 @@ if [[ $(grep -cF 'KeyboardSession.shared.pressTouch(' "$view") -ne 1 ]] \
   echo "Only the touch keyboard's 26-key shuangpin letters may reach pressTouch / msime_client_touch_character, through KeyboardView.tapLetter and touchKey (TouchPointPolicy.usesTouch with touchDesign()); press() must stay pointless" >&2
   exit 1
 fi
+# 双拼触点的按下点和几何要来自同一帧的布局（#10018 评审）。换算和几何本身由 keyboard-logic.test.ts 覆盖（`PendingTouches` 按键的当前位置重建按下点、`geometryLayout` 每键现算），这里钉住视图那一侧不能丢的接线：每个字母键的触摸都经 recordLetterTouch，按下时按被按的键（`event.target.area`）记、取消时丢掉、键面替换时清空；`;` 的位置由 recordGlideKey 记下；两处字母键的点击都经 takeTouch 按这个键现在的位置取按下点；touchLayout 每键现算，带上 `;` 是否画着，不缓存（缓存要靠作废标记，漏一处就一直报旧的几何代次）。
+glide_key_body=$(sed -n '/^  private recordGlideKey(letter: string | undefined, area: Area): void {$/,/^  }$/p' "$view")
+take_touch_body=$(sed -n '/^  private takeTouch(letter: string): TouchPoint | null {$/,/^  }$/p' "$view")
+touch_layout_body=$(sed -n '/^  private touchLayout(): string | null {$/,/^  }$/p' "$view")
+drop_gestures_body=$(sed -n '/^  private dropLetterGestures(): void {$/,/^  }$/p' "$view")
+if ! grep -qF 'this.recordLetterTouch($$.letter, event);' "$view" \
+  || ! grep -qF 'event.target.area.globalPosition.x' <<< "$record_touch_body" \
+  || ! grep -qF 'this.pendingTouches.down(letter, touch.windowX, touch.windowY, key, Date.now());' <<< "$record_touch_body" \
+  || ! grep -A1 -F 'event.type === TouchType.Cancel' <<< "$record_touch_body" | grep -qF 'this.pendingTouches.cancel(letter);' \
+  || ! grep -qF 'this.pendingTouches.clear();' <<< "$drop_gestures_body" \
+  || ! grep -qF "letter !== ';'" <<< "$glide_key_body" \
+  || ! grep -qF 'this.semicolonKey = rect;' <<< "$glide_key_body" \
+  || ! grep -qF 'TouchPointPolicy.keyRect(this.glideKeys, this.semicolonKey, letter), this.glideOriginX, this.glideOriginY);' <<< "$take_touch_body" \
+  || [[ $(grep -cF 'action: () => this.tapLetter(letter, this.takeTouch(letter))' "$view") -ne 2 ]] \
+  || [[ $(grep -cF 'this.pendingTouches.take(' "$view") -ne 1 ]] \
+  || ! grep -qF 'return TouchPointPolicy.geometryLayout(this.glideKeys, this.secondRowSemicolon(), this.semicolonKey,' <<< "$touch_layout_body" \
+  || [[ $(grep -cF 'TouchPointPolicy.geometryLayout(' "$view") -ne 1 ]] \
+  || grep -qE 'touchLayout(Cache|Dirty)' "$view"; then
+  echo "KeyboardView must record each letter's touch-down against the key it pressed, drop it on Cancel and when the face is replaced, record the semicolon key, take it through takeTouch at the key's current rect, and compute touchLayout on every key without a cache" >&2
+  exit 1
+fi
 "$tsc" --project "$here/tsconfig.json"
 # 上面已编译所有 tests/*.test.ts；逐个运行它们的输出。遍历源文件而不是输出目录，可以避免已删除测试遗留的旧 .js 被运行。
 for source in "$here"/*.test.ts; do

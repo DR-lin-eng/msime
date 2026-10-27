@@ -1,7 +1,7 @@
 /**
  * 26 键双拼的按下点和键位几何（#10018）：宿主只负责把按下点和真实键位交给引擎，距离怎么算、哪个邻键更可能由 Rust 引擎决定（`msime_client_set_key_geometry` 与 `msime_client_touch_character`，见 crates/host-api/include/msime_client.h）。
  *
- * 这里只有矩形和数字的运算，视图把 ArkUI 量到的东西交进来，所以能在 node 下测。坐标一律是窗口坐标减去键盘根区域的原点：键位来自 `recordGlideKey` 记下的 `globalPosition`，按下点来自 `TouchEvent` 的 `windowX/windowY`，两者同减一个原点，键盘整体挪动时几何不变。键的按下缩放是渲染变换，不改布局区域，键距的 `responseRegion` 也不挪动按下点，所以两边都是「没有经过键距挪动、不受按下缩放影响」的键区坐标。
+ * 这里只有矩形和数字的运算，视图把 ArkUI 量到的东西交进来，所以能在 node 下测。交给引擎的坐标一律是窗口坐标减去键盘根区域的原点。键位来自 `recordGlideKey` 记下的 `globalPosition`。按下点在按下那一刻只记成「落在被按的键里的哪个位置」（相对键的比例，`PendingTouches.down`），到点击时再按这个键当时的位置换回坐标（`PendingTouches.take`），所以按下点和几何总是同一帧的布局：按下和点击之间键盘重新排版（组字开始时工具条出现、提交后消失、改高度、转屏）时，按下点跟着键走，不会拿旧布局的点去比新布局的键。键的按下缩放是渲染变换，不改布局区域，键距的 `responseRegion` 也不挪动按下点，所以两边都是「没有经过键距挪动、不受按下缩放影响」的键区坐标；按在键距里的点比例会略小于 0 或大于 1，照样换算。
  */
 import { GlideKeyRect } from "./GlideTypingPolicy";
 
@@ -33,9 +33,10 @@ export interface TouchEligibility {
   shifted: boolean;
 }
 
+/** 按下点落在被按的键里的位置：相对键左上角、以键宽和键高为单位。 */
 interface PendingTouch {
-  x: number;
-  y: number;
+  fx: number;
+  fy: number;
   at: number;
 }
 
@@ -67,10 +68,11 @@ export class TouchPointPolicy {
   }
 
   /**
-   * 几何 JSON 里除 `id` 以外的部分：`"keys":[[cx,cy,w,h] x 26，按 a..z],"semicolon":[cx,cy,w,h] 或 null,"duplicates":[]`。鸿蒙没有分离键盘，所以没有重复键。有字母键还没量到、宽高不为正或数值不是有限数时返回 null，这时这一键不带按下点。
+   * 几何 JSON 里除 `id` 以外的部分：`"keys":[[cx,cy,w,h] x 26，按 a..z],"semicolon":[cx,cy,w,h] 或 null,"duplicates":[]`。鸿蒙没有分离键盘，所以没有重复键。`semicolonShown` 是键面这一刻画不画微软双拼的 `;`，画着时 `semicolon` 必须已量到。有键还没量到、宽高不为正或数值不是有限数时返回 null，这时这一键不带按下点。每键都按当前键位现算，不缓存：26 个矩形每键拼一次的开销可以忽略，而缓存要靠视图在每处改动键位的地方记得作废，漏一处就会一直报旧的几何代次。布局没变时字符串不变，`KeyGeometryRegistry` 据此不重复下发。
    */
   static geometryLayout(
     keys: (GlideKeyRect | null)[],
+    semicolonShown: boolean,
     semicolon: GlideKeyRect | null,
     originX: number,
     originY: number,
@@ -87,13 +89,26 @@ export class TouchPointPolicy {
       rows.push(row);
     }
     let semicolonRow: number[] | null = null;
-    if (semicolon !== null) {
+    if (semicolonShown) {
       semicolonRow = TouchPointPolicy.keyRow(semicolon, originX, originY);
       if (semicolonRow === null) {
         return null;
       }
     }
     return `"keys":${JSON.stringify(rows)},"semicolon":${JSON.stringify(semicolonRow)},"duplicates":[]`;
+  }
+
+  /** 一个带按下点的键现在的位置（窗口坐标）：字母取 `keys`（a..z），`;` 取 `semicolon`；没量到或不是这类键时为 null。 */
+  static keyRect(
+    keys: (GlideKeyRect | null)[],
+    semicolon: GlideKeyRect | null,
+    letter: string,
+  ): GlideKeyRect | null {
+    if (letter === ";") {
+      return semicolon;
+    }
+    const index: number = letter.length === 1 ? LETTERS.indexOf(letter) : -1;
+    return index < 0 || index >= keys.length ? null : keys[index];
   }
 
   /** 整份几何 JSON。 */
@@ -147,31 +162,51 @@ export class TouchPointPolicy {
 }
 
 /**
- * 各键还没被点击取走的按下点。按下时记下，点击时取走并清掉，同一键下一次按下覆盖它，触摸被取消时丢掉。按键记而不按手指记：两指交替快打时，前一键的点击常在后一键按下之后才到。
+ * 各键还没被点击取走的按下点。按下时记下，点击时取走并清掉，同一键下一次按下覆盖它，触摸被取消时丢掉。按键记而不按手指记：两指交替快打时，前一键的点击常在后一键按下之后才到。按下时只记相对被按的键的位置，点击时按这个键当时的位置换回键盘坐标，见文件头。
  */
 export class PendingTouches {
   private readonly points: Map<string, PendingTouch> = new Map<string, PendingTouch>();
 
-  down(letter: string, point: TouchPoint, at: number): void {
-    this.points.set(letter, { x: point.x, y: point.y, at: at });
+  /** `key` 是按下那一刻被按的键的区域（`event.target.area`，窗口坐标）；它宽高不为正或数值不是有限数时这一键不记按下点。 */
+  down(letter: string, windowX: number, windowY: number, key: GlideKeyRect, at: number): void {
+    const fx: number = (windowX - key.left) / key.width;
+    const fy: number = (windowY - key.top) / key.height;
+    if (!(key.width > 0) || !(key.height > 0) || !Number.isFinite(fx) || !Number.isFinite(fy)) {
+      this.points.delete(letter);
+      return;
+    }
+    this.points.set(letter, { fx: fx, fy: fy, at: at });
   }
 
   cancel(letter: string): void {
     this.points.delete(letter);
   }
 
-  /** 取走这一键的按下点；没有、或已超过 `MAX_AGE_MS`（含时钟回拨）时为 null。不论结果都清掉。 */
-  take(letter: string, now: number): TouchPoint | null {
+  /**
+   * 取走这一键的按下点，换成键盘坐标（与 `geometryLayout` 同一坐标系）：`key` 是这个键现在的位置（`TouchPointPolicy.keyRect`），`originX/originY` 是键盘根区域现在的原点。没有、已超过 `MAX_AGE_MS`（含时钟回拨）、键现在没量到或宽高不为正时为 null。不论结果都清掉。
+   */
+  take(
+    letter: string,
+    now: number,
+    key: GlideKeyRect | null,
+    originX: number,
+    originY: number,
+  ): TouchPoint | null {
     const pending: PendingTouch | undefined = this.points.get(letter);
     this.points.delete(letter);
-    if (pending === undefined) {
+    if (pending === undefined || key === null || !(key.width > 0) || !(key.height > 0)) {
       return null;
     }
     const age: number = now - pending.at;
     if (age < 0 || age > TouchPointPolicy.MAX_AGE_MS) {
       return null;
     }
-    return { x: pending.x, y: pending.y };
+    return TouchPointPolicy.point(
+      key.left + pending.fx * key.width,
+      key.top + pending.fy * key.height,
+      originX,
+      originY,
+    );
   }
 
   /** 键面被替换时全部丢掉。 */

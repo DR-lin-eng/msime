@@ -488,7 +488,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// Whether the top row shows candidates (or the reading, a diagnostic or the local mode) rather than the toolbar; set by `renderCandidateStrip`, read by `currentStripBackground`.
   private var stripShowsCandidates = false
   private var candidateCanvasActive = true
-  /// 上一次给整棵按键树换装（`applyKeyboardSkin` 里的 `recolor`）时的皮肤和 trait。`viewWillAppear` 拿它和现在的比，都没变就不再重新换装。
+  /// 上一次给整棵按键树换装（`applyKeyboardSkin` 里的 `recolor`）时的皮肤和 trait。`viewWillAppear` 和 `viewIsAppearing` 拿它和现在的比，都没变就不再重新换装。
   private var appliedKeySkin: KeyboardTheme?
   private var appliedKeySkinTraits: UITraitCollection?
   /// 有按键在窗口外经过 `decorateKey`：阴影色是静态的 CGColor，这时按默认外观解析，要等一次在窗口里的完整换装重新解析。
@@ -959,10 +959,18 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     onlineCandidates.cancel()
     renderCandidateStrip()
     scheduleCandidateGlosses()
-    // 换了季节必须整棵重新换装（见上面 `refreshSeason` 的注释）；否则只在皮肤、trait 变了或有按键在窗口外建过时才重走按键树。
+    // 换了季节必须整棵重新换装（见上面 `refreshSeason` 的注释）；否则只在皮肤变了时才在这里重走按键树，trait 和窗口外建过的按键留给 `viewIsAppearing`。
     applyKeyboardSkin(onlyIfChanged: !seasonChanged)
     synchronizeReplyKeyboard()
     startCountingKeyPresses()
+  }
+
+  /// 到这里视图已经进了窗口、trait 也定了，而第一帧还没画。`viewWillAppear` 时视图通常还不在窗口里：在那里按 trait 和「有按键在窗口外装饰过」判断，`viewDidLoad` 留下的标记会让第一次出现再整棵走一遍，在窗口外走完又把标记留给下一次，每次出现都是完整换装。所以这两项在这里判断，只有确实要补的时候才换装。
+  override func viewIsAppearing(_ animated: Bool) {
+    super.viewIsAppearing(animated)
+    if keySkinNeedsWindowPass || appliedKeySkin != KeyboardTheme.current || appliedKeySkinTraits != traitCollection {
+      applyKeyboardSkin()
+    }
   }
 
   /// 诊断日志里的耗时：从 `start`（`systemUptime`）到现在的整毫秒数。
@@ -8492,10 +8500,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return skin.design == nil ? .clear : skin.keyBackground.withAlphaComponent(0.6)
   }
 
-  /// 给键盘换上 `KeyboardTheme.current`。`onlyIfChanged` 时（每次出现由 `viewWillAppear` 调用），皮肤和 trait 都与上一次换装相同、也没有按键在窗口外建过，就跳过重画背景、重走整棵按键树重设每个按键的配置这些重活；按键状态相关的更新（回车、方案键、工具栏、候选条）照常做。
+  /// 给键盘换上 `KeyboardTheme.current`。`onlyIfChanged` 时（每次出现由 `viewWillAppear` 调用），皮肤和 trait 都与上一次换装相同、也没有按键在窗口外建过，就跳过重画背景、重走整棵按键树重设每个按键的配置这些重活；按键状态相关的更新（回车、方案键、工具栏、候选条）照常做。视图不在窗口里时只看皮肤：trait 还没定，在窗口外走的一遍也只会留下标记让 `viewIsAppearing` 再走一遍，这两项交给它判断。
   private func applyKeyboardSkin(onlyIfChanged: Bool = false) {
     let skin = KeyboardTheme.current
-    let reskinsKeys = !onlyIfChanged || keySkinNeedsWindowPass || appliedKeySkin != skin || appliedKeySkinTraits != traitCollection
+    let reskinsKeys = !onlyIfChanged || appliedKeySkin != skin
+      || (view.window != nil && (keySkinNeedsWindowPass || appliedKeySkinTraits != traitCollection))
     if reskinsKeys {
       handwriting.canvas.setNeedsDisplay()
       replyModel.objectWillChange.send()
@@ -8567,6 +8576,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     appliedKeySkinTraits = traitCollection
     // 在窗口外走完的这一遍，阴影色仍按默认外观解析，下一次出现还要再走。
     keySkinNeedsWindowPass = view.window == nil
+    // 在设备上确认出现时重走按键树的次数：皮肤没变时再出现应当一行都没有。
+    DiagnosticLog.shared.write("keys_reskinned in_window=\(keySkinNeedsWindowPass ? 0 : 1)")
   }
 
   /// 键盘画在深色下：「键盘明暗」设成深色，或者跟随时宿主是深色。

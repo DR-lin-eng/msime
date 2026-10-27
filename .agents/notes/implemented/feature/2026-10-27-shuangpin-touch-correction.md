@@ -1,0 +1,107 @@
+# Agent Note: 双拼触点旁路协议与按落点计价的纠错
+
+Status: implemented
+
+## Problem
+
+#10018 要让移动端 26 键双拼在盲打时把按错的邻键纠回来。[双拼纠错整句](2026-10-09-shuangpin-typo-sentence.md)的平面表只看按到了哪个键：一个键换成任何一个 QWERTY 邻键都付同样的 20，它不知道手指落在键的哪一边，所以按在 f 和 r 交界处的一键与按在 f 正中的一键得到同样的改正，真正该改的那个在 96 个键的规划预算里也排不到前面。宿主手里有落点，但没有任何路径把它交给引擎。
+
+[双拼触点评测](../testing/2026-10-27-shuangpin-touch-eval.md)量出了平面表的上限：σ=0.25 的 noisy 整句集里，单错的用例 13% 能在候选表里找到原句，第一页却只有 0.3%。按错之后仍找得到原句的 1105 次里，965 次排在整张表的最后一位，因为 `ordering::runner_up_order` 把第三条以后的同宽整句读法挪到表尾，纠错整句也是其中一行。方案原本假定 runtime 不用改，这个前提不成立。
+
+约束：桌面宿主和实体键盘不送落点，它们的结果必须逐字节不变（G0）；纠错整句这一期仍不抢首选。
+
+## Decision
+
+触屏宿主经一条新的旁路把键位几何和每键的按下点交给引擎；双拼纠错整句在有落点时按落点给每个变体计价、按价全局规划；落点支持的纠错整句留在引擎给的座位上，不再被挪到表尾。没有落点时每一步都走原来的代码，桌面逐字节不变。
+
+### 协议
+
+- **C ABI**（纯增量，`msime_client_abi_version` 仍是 3）：
+  - `msime_client_set_key_geometry(session, json, length)`：`{"id":u32,"keys":[[cx,cy,w,h]×26，按 a..z],"semicolon":[…]|null,"duplicates":[["g",cx,cy,w,h],…]}`，形状沿用滑行请求；拒绝未知键，上限 16 KiB；数值有限、宽高为正、26 个字母键齐全，否则整份拒绝、原几何不变。`id` 是宿主分配的非零代次；空串或 `id` 为 0 清除。只在布局变化时调用。
+  - `msime_client_touch_character(session, ascii, shift, geometry_id, x, y)`：先按当前几何把 (x, y) 换成触点交给 runtime，再照 `msime_client_character` 原路派发，派发完不论结果都清掉。代次不符、坐标不是有限数、当前不是 26 键双拼时，回应与 `msime_client_character` 逐字节相同（host-api 有测试逐字节对比）。`ascii` 仍以宿主的命中测试为准。
+  - 头文件写明：桌面宿主和实体键盘永远不调用这两个函数。
+- **Rust 类型**（`crates/engine/src/touch/mod.rs`）：
+  - `KeyGeometry` 按 26 个字母键键宽、键高的中位数归一，保存 a..z、`;` 和重复键的键心；`KeyGeometry::from_json` 是宿主 JSON 的唯一解析。
+  - `KeyTouch { dx, dy, copy }`：相对被按键中心的偏移，单位 1/20 键，在入口量化并钳到 ±30；`copy` 是这个字母的第几个实例，分离键盘上两边各有一个 G、V 时才不是 0。打分和缓存签名用同一个量化值。
+- **runtime**：`InputEngine` 加两个默认空实现的 setter（`set_key_touch`、`set_key_geometry`）。`Runtime` 自己持有几何（`Arc`），在 `replace_engine_with_touch_layout` 里紧挨 `set_rescoring_context` 重新下发，宿主空闲时重建引擎后触点照样有效。`Runtime::key_touch` 按代次和坐标算出触点，host-api 和评测都用它。没有新增 `Action` 变体。
+- **引擎内的生命周期**：`session::Session::set_key_touch` 把触点放进 `InputSession.pending_touch`。`character` 先把它取出来，只有走到 `dispatch_character` 末尾、这一键是小写字母或 `;` 时才在 `handle_key` 之前交给方案（`handle_key` 会同步刷新候选）；其余路径（改字、光标处插入、本地模式、网址、辅助码前导键、九宫格数字）都丢掉它。`command`、`select`、`grid_key`、`glide`、`punctuation` 一开头清掉它，所以被 `candidate_shortcut` 之类改道的按键不会把触点留给后面的字母。
+- **`ShuangpinScheme.touches`** 与 `raw` 逐字节对齐，一个触点都没有时保持为空，不为全 `None` 占位，桌面每键不多一次分配。`'`、大写字母（辅助码）和标记不带触点；退格截掉；`set_raw_input` 按新旧串的最长公共前缀和后缀保留触点，中间新出现的字节没有触点（`hh` 这类相同相邻字母分不清删的是哪一个，长度和其余位置仍对得上）。
+- **`QueryRequest`** 新增 `key_touches`、`key_geometry`、`touch_tuning`。只有注册了几何、至少一个触点、输入里没有 `'`、句中辅助码没有改写输入串时，`key_touches` 才非空；否则必须是空 Vec 而不是全 `None`。光标前缀查询、撤回选词后重打和模糊音的替代拼写都拿不到触点，按平面表算。
+- **`ShuangpinDictionary`** 在每次查询前收下请求的触点（`set_key_touches`，`query`、`insert_online_words`、`expand_initial_candidates` 都先调它）。只对带触点那串输入的前缀用触点；系列缓存、整句缓存、辅助码缓存的键追加这一段的触点签名（几何代次加逐位量化触点），没有触点时签名为空，键与以前相同。计价参数变了就清掉整句答案。
+
+### 计价
+
+- 罚分：`pen(j) = clamp(B + s·(d²(P, c_j) − d²(P, c_k)), P_MIN, P_MAX)`。P 是还原出的落点，c_k 是被按的那个实例，c_j 取候选键离落点最近的实例；`d² = (Δx/σx)² + ((Δy − b_y)/σy)²`。单位就是词网格边的自然对数分，纠错边从对数概率里扣它，`decode_typo_on_graph_with_policy` 不改。
+- 变体集（`collect_priced_shuangpin_typo_edges`）：平面表原有的邻键永不丢弃，只按罚分排；分离键盘上平面表说相邻、几何上相距超过 3 个键的那几对（T 和 Y、G 和 H）不算邻键；七份参考布局里不分离的那几份，平面表邻键最远相距 2.25 个键，分离布局里分在两半的相距 8 个键以上。平面表里没有的键（真实布局下的斜邻键、微软的 `;`）罚分不超过 `P_CUT` 时加进来。对调、没有触点的位置照旧付 20。同一个音节由几种改法得到时取最低价。解码用每个方案一张 27×27 的解码表，和变体表一样按方案地址缓存。
+- 规划（`quanpin::typo_edges::collect_priced_span_typo_edges`）：所有位置的所有变体按罚分全局升序排，同价时弱位置优先，再生成跨度键，直到 96 个键的预算。全拼的 `plan_keys_with` 和 `collect_span_typo_edges` 一行没改。
+- 不做：一次只换一个音节、只产出一条纠错整句，这是召回上限。
+
+### 座位
+
+- 纠错整句的分数（已扣罚分）不比字面整句低出 `show_margin`，而且它改动的每一键在落点下改过去的价都不超过 `show_penalty`（`touch_supports_correction` 按纠错读音逐音节对回两键码，查这一键的计价变体）时，这一行标上 `WordItem::touch_supported`。快照据此报 `touch_corrections`，runtime 调 `ordering::runner_up_order_with(scheme, rows, true)`：纠错行不算整句读法，留在引擎给的座位上（整句块之后），前三条字面读法照旧，其余读法照旧挪到表尾。没标上的纠错行和没有触点的表一样沉底，网页引擎和桌面不受影响。
+- 纠错整句仍不抢首选：`typo_sentence_seat`、`keep_typo_sentence_off_first_seat`、`corrections_may_lead` 都没动，评测里 clean 集的首选一次都没变（`--assert-top1-unchanged`）。
+
+### 参数（暂定）
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `base`（B） | 8 | 落点在两键正中间时的罚分 |
+| `scale`（s） | 12 | 距离平方之差每一单位加多少罚分；键心按下、换成同排邻键约付 B + s |
+| `sigma_x`、`sigma_y` | 1、1 | 横向、纵向距离的单位（键） |
+| `bias_y`（b_y） | 0 | 瞄准点往下挪多少键高 |
+| `min_penalty`、`max_penalty` | 4、28 | 罚分的上下限 |
+| `cut`（P_CUT） | 16 | 平面表外的键超过这个价就不加 |
+| `show_margin` | 4 | 纠错整句的分数不比字面整句低出这么多，才可能留在座位上 |
+| `show_penalty` | 14 | 改动的每一键在落点下的价都不超过它，才可能留在座位上 |
+
+参数在参考布局上调出，宿主接入真机几何（PR1b）之后重扫。调参覆盖只能经 Rust 侧的 `host::Session::set_touch_tuning`（`convert_eval --touch-tuning`），宿主经 FFI 设不了。
+
+### 扫参
+
+调参用 sentences-v1、sentences-particles-v1、sentences-v2（455 条能编码的用例），留出 sentences-neutral-v1（1064 条）做核对；资源、模型和种子与基线相同，几何是 `android-portrait` 和它的 `-microsoft` 版。数字都是金标准在第一页（`top9`）的比例和 clean 集被往后挤的条数。
+
+1. **只调座位的分数差**（B=12、s=8，小鹤，σ=0.25、b=0）：平面表 noisy top9 0.011、found 0.149。`show_margin` 取 −1000（等于全部沉底）、0、10、+1000（只要带触点就留座位）时，noisy top9 是 0.011、0.112、0.200、0.248，clean 被挤的条数是 0、1、1、29（/455）。纠错整句一律留座位时的 29 条就是上面那个备选方案被否掉的原因。
+2. **B × s × 分数差**（B∈{6,9,12,15}、s∈{4,8,12,16}、分数差∈{5,6,8,10,15,20}，同一条件）：B 越低召回越高、被挤的也越多；s 在 8–16 之间差别不大。前沿是 B=6、s=12、分数差 10（top9 0.262，挤 3 条）和 B=6、s=16、分数差 8（0.242，挤 1 条）。`cut`（12/16/20）、`max_penalty`（24/28/40）、`min_penalty`（0/4/8）在这个条件下 top9 都在 0.224–0.229 之间；`sigma_y` 取 0.8 或 1.25 比 1 各低或高不到一个点，没有采用。
+3. **留出集核对**（neutral，小鹤和微软，σ∈{0.15,0.25,0.35}×b∈{0,0.1}，共 12768 条 clean）：上面三组的 clean 被挤比例是 0.50%–0.55%，压线；按方案和音节、错键数的每个分桶，top1/top3/top9/found/mrr 都不低于平面表。被挤的金标准全都本来就在第 65 名以后（字面整句和金标准差得很远，模型给某条纠错整句的分接近字面整句），但门槛按条数算。σ=0.35 是被挤最多的条件：clean 集要求每键都落在本键里，σ 大时落点贴着键边，改到邻键的价接近 B。
+4. **加上每键的价的闸 `show_penalty`**（调参子集，小鹤和微软，σ∈{0.25,0.35}×b∈{0,0.1}，3640 条 clean）：B=6、s=16、分数差 8 时被挤 1.13%、noisy top9 0.182；加 `show_penalty` 14、10 后是 0.82%/0.172、0.69%/0.136。B=8、s=12、分数差 4 时，不加闸 0.44%/0.125，`show_penalty` 14 是 0.19%/0.117，10 是 0.05%/0.077；分数差 0、`show_penalty` 14 是 0.14%/0.090；B=10、分数差 4、`show_penalty` 14 是 0.08%/0.087。扫参前的起始值（B=12、s=8、分数差 0、不加闸）是 0.25%/0.085。选 B=8、s=12、分数差 4、`show_penalty` 14：在最难的 σ=0.35 条件下也给门槛留了余量，召回比起始值高出约四成。
+
+## Alternatives considered
+
+- **照方案原样，runtime 不改**：方案假定纠错整句在宽度 ≥3 时会被 `runner_up_order` 留在前三。PR0 量出它几乎总在表尾，只改引擎计价，第一页召回停在零点几个百分点，召回门槛量不出差别。
+- **双拼的纠错行一律不算整句读法**：最简单，不需要任何新状态。但桌面开着纠错时（Windows 默认开），没有触点的纠错整句也会从表尾挪到整句块之后，none 模式的候选表变了，过不了 G0。
+- **只要请求带触点，纠错行就留在座位上**：先这样实现，在调参子集上 clean 集有 29 / 455 条（6.4%）金标准被往后挤了一位。打对的输入里一半以上也有一条纠错整句（键心落点的罚分高，但 64 条 n-best 里总有一条带纠错边的路径），它挤在整句块之后，排在它后面的金标准都后退一位。按分数差留座位之后同一子集降到 1–2 条。
+- **只看分数差**：在调参子集 σ=0.25、b=0 上已经够用（被挤 1 / 455），但留出集和 σ=0.35 上压线或超线（B=6、s=16、分数差 8 时 3640 条 clean 被挤 1.13%）。σ 大时 clean 的落点贴着键边，改到邻键的价接近 B，模型又给某条纠错整句的分接近字面整句，它就坐上座位。加上逐键的价的闸能单独压住这些：B=8、s=12、分数差 4 时，`show_penalty` 14 把被挤的比例从 0.44% 降到 0.19%，noisy top9 只从 0.125 降到 0.117。
+- **runtime 按行带一列「留在座位上」**：语义最直接，但候选的每个平行数组都要在重排、在线插入、插件变换里同步一遍。一张双拼表里最多一行纠错整句，表级的一个布尔值就够，行上的标记留在 `WordItem` 里，由会话汇总。
+- **计价参数经 `host::Options`（`EngineOptions`）下发**：方案原本这样写。`EngineOptions` 刻意没有 `Default`，每个构造点都列全字段，加一个只给评测用的字段要改十几处，宿主的 JSON 也得决定要不要认它。改成 `host::Session::set_touch_tuning` 这个只在 Rust 侧可调的 setter，经请求带给词典，效果相同。
+- **`KeyTouch` 只记 (dx, dy)**：方案的写法。分离键盘上同一个字母有两个实例，只记偏移还原不出落点在哪一边，所以多记一个实例序号。
+- **平面表的邻键在任何布局下都保留**：方案说「永不丢弃」，又要求「分离布局下 t、y 不产生替换」。两者在分离键盘上冲突；按几何距离判断后，普通布局下平面表的每个邻键仍都保留，只有分在两半的那几对被去掉。阈值起初定为 2 个键，量了七份参考布局才发现微软双拼那几份第二行多一个 `;`、键距变宽，J 和 M 相距 2.14–2.25 个键，会被误删，于是放到 3。
+
+## Consequences
+
+- **收益**：整句族（1519 条能编码的用例，五个方案）按默认参数重跑，与平面表（PR0 那份基线，`--no-touch-points` 逐字节复现）比：
+  - noisy σ=0.25、b=0：第一页召回从 0.1%–0.7% 升到 14.0%–16.0%，found 从 9.5%–11.5% 升到 21.5%–24.7%，MRR 从 0.002–0.007 升到 0.036–0.041；小鹤单错的 1177 条第一页召回从 0.3% 到 17.8%，3–5 音节 1.3% 到 17.9%，6 个以上 0.1% 到 14.0%。σ=0.15 时小鹤 0.3% 到 20.6%，σ=0.35 时 0.1% 到 4.7%，b=0.1 时 0.2% 到 15.1%。
+  - realistic σ=0.25：第一页召回升 4–6 个点（小鹤 0.550 到 0.591），top1 不变。
+  - noisy 的 top1、top3 不变：纠错整句坐在整句块之后，这一期不抢首选。
+  - 按方案 × σ × 偏置 × 音节档 × 错键数档的每一个分桶，top1、top3、top9、found、mrr 都不低于平面表。
+  - clean 集 60760 条（五个方案 × 8 组 σ 和偏置）首选一条没变，被往后挤一位的 33 条（0.05%），单组最多 4 / 1519（小鹤 σ=0.35）。
+  - 词级族（2 音节）与平面表逐字节相同：纠错整句至少 3 个音节，这一期 2 音节没有纠错。
+- **代价**：每次按键多一次触点换算和请求里一份触点的复制，带触点的输入缓存键多一段签名。`rerank_latency --touch-arms`（两臂都挂模型，一臂送落点一臂不送，同样的键，sentences-v1，σ=0.25，负载 25 左右）：小鹤 p95 8.48 对 8.33 ms，逐键配对的增量均值 +0.02 ms；sentences-v1 加 particles 上，微软 p95 6.45 对 5.95 ms、配对增量 p95 0.65 ms，自然码 5.63 对 5.52 ms、配对增量 p95 0.28 ms。同一时段小鹤那一轮被机器的尖峰打乱（两臂 p95 都到了 20 ms 以上），没有采用。挂模型、送落点的小鹤 p95 9.46 ms，在 16 ms 的预算之内。机器同时在跑 CI，这些只作量级参考。
+- **已知上限**：
+  - 参数在构造的参考几何上调出，落点模型偏乐观（各向同性高斯、统一偏置、不模拟拇指的系统性偏移和同一音节两键都错），真机上的数字会更低。
+  - 纠错整句仍不坐首选，noisy 集的 top1、top3 几乎不动，收益全在第一页的后几格。
+  - 每个跨度只换一个音节，不出第二条纠错句；规划预算仍是 96 个键。
+  - 光标前缀查询、撤回选词后重打、无障碍点击和程序化点击没有触点，按平面表算。
+  - 1–2 个音节的输入还没有纠错（纠错整句至少 3 个音节），是后面一期的事。
+- **隐私**：坐标只在会话内存里用，量化后的触点只进内存里的缓存键，不落盘、不进统计、不上传。
+- **重访信号**：宿主导出真机几何之后要重扫这里的全部参数；首选规则（`confident_correction`）那一期要在这里的 `touch_supported` 之外另设更严的闸。
+
+## Verification
+
+- **单元和集成测试**（都在 Mac Studio 上经 `rbuild` 跑）：
+  - `cargo test -p msime-engine --lib`：2714 项通过。新增 `touch::tests`（量化与钳位、非有限坐标、`;` 与重复键、整份校验、JSON 清除与拒绝、罚分随落点和 σ、偏置变化、分离布局的实例与邻接）；`shuangpin::scheme` 的触点对齐（逐键、退格、被拒的键、光标处插入删除、吃掉前缀、`hh`、`'` 和句中辅助码不带触点）；`shuangpin::typo_edges` 的计价变体（平面表变体全在、只按落点排价、平面表外的键过 P_CUT 才加、分离布局去掉 t→y）；`quanpin::typo_edges` 的全局按价规划和预算；`shuangpin::tests` 的同字母不同触点不串缓存、换几何代次不读旧答案、留座位的两道闸、不抢首选；`session::tests` 的待用触点生命周期和快照里的 `touch_corrections`；`ordering::tests` 的 `runner_up_order_with`。
+  - `cargo test -p msime-input-runtime --lib`：405 项通过，含 `key_geometry_survives_an_engine_replacement`（重建引擎后几何仍有效、代次不符和坐标非有限时没有触点、清除后不带触点）。`--example convert_eval --example rerank_latency`：21 / 16 项通过，含落点落在它报告的键上、只抽键与抽落点按到的键逐个相同。
+  - `cargo test -p msime-host-api --no-fail-fast`：库测试 1008 项通过、2 项失败（`listing_reports_every_pack_and_checks_the_state_root`、`a_command_gets_the_local_time_to_the_minute`），这两项在本分支的父提交上同样失败，与这次改动无关；其余测试目标全部通过。新增的 `touch_characters_without_usable_touches_match_plain_characters` 逐字节比对代次不符、NaN、无穷大三种情况下的回应，并断言 ABI 仍为 3；`key_geometry_is_validated_at_the_host_boundary` 覆盖未知键、少键、零宽、非 JSON、超过 16 KiB、空指针和清除。
+  - `cargo test -p msime-engine --test golden`：31 项通过。`cargo clippy -p msime-engine -p msime-input-runtime -p msime-host-api --all-targets -- -D warnings` 无警告。`cargo check --manifest-path fuzz/Cargo.toml --target-dir target/fuzz --bins` 通过，`host_session` 目标新增注册几何（合法的、带 `;` 和重复键的、任意字节）和带任意坐标（含 NaN、无穷大）的触点按键；没有用 nightly 实际跑模糊测试。
+- **G0**：本分支和父提交（PR0 头）的 `convert_eval` 各跑 `verify-local.sh` 的 11 组，以及双拼 none 模式（五个方案，整句族和词级族，带 `--dump`），报告和 dump 逐字节相同；改成按方案各用一份可写目录、加 `--jobs` 之后，用最终的二进制重跑整句族 none 的报告和 dump、sentences、nine-key 三组，仍逐字节相同。父提交与 merge-base 的这 11 组在 PR0 已核对过逐字节相同。
+- **评测可复现**：最终二进制加 `--no-touch-points --jobs 5` 重跑整句族全部组合，与 PR0 提交的平面表基线逐字节相同；词级族送落点的报告与 PR0 的词级基线逐字节相同（`--jobs 5`）。两份基线由 README 里的命令生成（`--report` 写出，与 `--update-baseline` 写的字节相同），`--assert-top1-unchanged` 通过。
+- **没有做的**：`scripts/verify-local.sh` 整套没跑；没有在任何真机或模拟器上验证，宿主还没有接这两个函数（PR1b）；没有用真机几何调参。

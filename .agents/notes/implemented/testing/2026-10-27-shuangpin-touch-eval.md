@@ -21,7 +21,7 @@ Status: implemented
 - 几何文件就是将来宿主下发给引擎的 JSON 形状：`id`（非零代次）、`keys`（a 到 z 的 `[cx, cy, w, h]`）、`semicolon`、`duplicates`（分离键盘的重复键）。读入时校验数值有限、宽高为正、26 个字母齐全，不合格整份拒绝。
 - 宿主只在微软双拼下显示 `;`，第二行因此多一个键、键宽也不同，所以每个平台一份不带 `;` 的和一份 `-microsoft`；微软双拼取带 `;` 的那份，其余方案取不带的。
 - 落点服从 N(键心 + (0, b), σ²)，σ 和 b 以键为单位，按键宽、键高的中位数归一。落在矩形里就是按到它，落在键距或字母区外归最近的键。
-- 引擎收不到触点，所以每个想按的键只需要「按到各键的概率」这一行分布。它用网格积分一次算好：±5σ 的方格按 σ/8 划格，格心密度为权，按格心命中的键归类后归一。抽样只需要均匀随机数。
+- 每个想按的键有一行「按到各键的概率」，每个按到的键下面挂着落在它上面的格。它用网格积分一次算好：±5σ 的方格按 σ/8 划格，格心密度为权，按格心命中的键归类后归一。抽一键只用一个均匀随机数：先定按到哪个键，剩下的那一截再在这个键的格里定落点（格心），触点模式把它当按下点送给引擎（见[双拼触点纠错](../feature/2026-10-27-shuangpin-touch-correction.md)）。按到的键和只抽键时用的是同一个随机数、同一次比较，`--no-touch-points` 的报告因此与引擎收到触点之前的平面表基线逐字节相同。
 - 四种模式：
   - `none`：原样打；
   - `clean`：每键都按在本键上；
@@ -34,14 +34,14 @@ Status: implemented
 - 每组配置一项，按音节档（1、2、3–5、6+）和错键数档（0、1、2、3+）分桶。
 - 比例指标：`top1`、`top3`、`top9`（第一页）、`found`、`mrr`。
 - 计数指标：`top1_changed` 和 `gold_demoted`，拿同一条用例按想按的键原样打出的名次作对照。写计数而不是比例，因为首选被改这类事件要逐条看，千分之一的取整会把它抹掉。
-- 一条用例的候选表只取决于上文和送进去的按键，所以同一串按键在各组配置里只打一次（`gold_rank` 的记忆表）。`clean` 和 σ 很小的 `realistic` 因此几乎不花时间。
+- 一条用例的候选表只取决于上文、送进去的按键和引擎收到的（量化后的）触点，所以同一串按键带同样的触点在各组配置里只打一次（`gold_rank` 的记忆表）。不送落点时 `clean` 和 σ 很小的 `realistic` 因此几乎不花时间；送落点时每条用例的触点各不相同，`clean` 要实打一遍。
 - 每组配置在 JSON 里占四行，整份报告 125 组，整句族 93 KB、词级族 78 KB。
 
 ### 基线与命令
 
 - `resources/eval/baseline-shuangpin-touch-sentences.json`：sentences-v1、sentences-neutral-v1、sentences-v2、sentences-particles-v1 共 1580 条。
 - `resources/eval/baseline-shuangpin-touch-words.json`：quanpin-words-v1 的 2 音节子集，`--max-syllables 2 --limit 3000` 抽出 2772 条。词级集生成时已丢掉单字，所以没有 1 音节用例。
-- 两份都是 5 个内置方案 × {none, clean, noisy, realistic} × σ{0, 0.15, 0.25, 0.35} × b{0, 0.1}，开 `--autocorrect`，用 `android-portrait` 和 `android-portrait-microsoft` 两份几何，种子 20261027。完整命令写在 `resources/eval/README.md`「双拼与触屏误触」。
+- 两份都是 5 个内置方案 × {none, clean, noisy, realistic} × σ{0, 0.15, 0.25, 0.35} × b{0, 0.1}，开 `--autocorrect`，用 `android-portrait` 和 `android-portrait-microsoft` 两份几何，种子 20261027。完整命令写在 `resources/eval/README.md`「双拼与触屏误触」。引擎接上触点之后，两份文件存的是送落点那一臂（[双拼触点纠错](../feature/2026-10-27-shuangpin-touch-correction.md)），下面「平面表基线」一节的数字加 `--no-touch-points` 复现。
 - 资源目录只有 `desktop-dictionary.lock.json` 那一组文件加 `sentence-model.safetensors`，没有 settled 模型 `sentence-model-desktop.safetensors`（它由另一份锁 `settled-model.lock.json` 发布）。`convert_eval` 见到那个文件就挂上 settled 重排，排序会变，两份基线就对不上，并不是产品改了。所以复跑时 stderr 必须打出 `no settled model at ...`。10-09 那篇笔记的全拼验证特意加了这个文件，照它准备资源目录会得到 `eval baseline mismatch`。
 - 在 Mac Studio 上，整句族一次跑完要一到五小时，看同时跑的 CI 有多少（负载 50 左右时约一小时，负载在 300–780 之间时约五小时），词级族要 5 分钟。所以两份基线不进 `verify-local.sh`，由改双拼纠错的那一期自己跑、自己对照。
 - `rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 realistic（或 `--touch-mode` 指定的模式）合成误触。
@@ -94,7 +94,7 @@ Status: implemented
   - 落点模型偏乐观：只有各向同性的高斯加统一偏置，不模拟拇指的系统性偏移、同一音节两键都错、漏键和多键；功能键也不建模，落在大小写、删除、候选栏的点算成最近的字母。
   - 参考几何是构造的。
   - 基线绑定 `dict-v2.0.24` 和当前的 `sentence-model.safetensors`，而且是在没有 settled 模型的条件下生成的；这几样一变就要重跑。
-  - 重访信号：宿主导出真机几何之后要重跑；引擎开始消费触点（PR1a）后，`clean` 才会和 `none` 分开，记忆表的键也必须带上触点，因为那时候选表就不只取决于按键了。
+  - 重访信号：宿主导出真机几何之后要重跑。引擎开始消费触点之后，`clean` 与 `none` 分开了，记忆表的键也带上了触点；两份基线文件改存送落点那一臂，这一节的平面表数字用 `--no-touch-points` 复现。
 
 ## Verification
 

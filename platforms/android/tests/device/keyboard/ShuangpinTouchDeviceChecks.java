@@ -26,6 +26,8 @@ final class ShuangpinTouchDeviceChecks {
     private final File exported;
     private JSONObject configured;
     private long revision;
+    /** 最近一次读到的导出文件原文，原样交给 smoke.sh，不经 org.json 重新序列化。 */
+    private String exportedText;
 
     private ShuangpinTouchDeviceChecks(DeviceSmoke test) throws Exception {
         t = test;
@@ -64,7 +66,7 @@ final class ShuangpinTouchDeviceChecks {
 
             t.stage = "shuangpin touch: portrait geometry matches the keys";
             JSONObject portrait = geometry(false, 0);
-            emit("android-portrait", portrait);
+            emit("android-portrait");
 
             t.stage = "shuangpin touch: an off-centre press composes the key it lands on";
             Rect f = bounds("f");
@@ -89,6 +91,9 @@ final class ShuangpinTouchDeviceChecks {
             t.stage = "shuangpin touch: without touch-downs the correction stays off the strip";
             for (String key : new String[] {"m", "w", "g", "f", "x", "i"}) t.tap(t.key(key));
             awaitField("mwgfxi");
+            // 先确认候选条已经画出来、谓词认得出候选行，下面的「不在」才有意义。
+            t.await(node -> node.isClickable() && node.getContentDescription() != null
+                && node.getContentDescription().toString().startsWith("候选 1："));
             boolean plainShows = visible(candidate("没关系"));
             clear(6);
             if (plainShows) throw new AssertionError("没有按下点时纠错整句不该出现在候选条上（平面表把它排在表尾）");
@@ -98,7 +103,16 @@ final class ShuangpinTouchDeviceChecks {
             touch(f.left + f.width() * 0.1f, f.top + f.height() * 0.1f);
             for (String key : new String[] {"x", "i"}) center(key);
             awaitField("mwgfxi");
-            t.await(candidate("没关系"));
+            // 纠错行的注释是按下的原串（corrected_from），读屏描述里是「提示：mwgfxi」。
+            t.await(candidate("没关系").and(node -> node.getContentDescription().toString().contains("，提示：mwgfxi")));
+            clear(6);
+
+            t.stage = "shuangpin touch: plain clicks after the touched pass still leave it off the strip";
+            for (String key : new String[] {"m", "w", "g", "f", "x", "i"}) t.tap(t.key(key));
+            awaitField("mwgfxi");
+            t.await(node -> node.isClickable() && node.getContentDescription() != null
+                && node.getContentDescription().toString().startsWith("候选 1："));
+            if (visible(candidate("没关系"))) throw new AssertionError("按过带落点的那一遍之后，没有按下点的同一串不该留下纠错整句");
             clear(6);
 
             t.stage = "shuangpin touch: Microsoft double-pinyin registers its ; key";
@@ -106,8 +120,8 @@ final class ShuangpinTouchDeviceChecks {
             t.restartIme();
             editor();
             t.await(t.described("微软双拼 ing").and(AccessibilityNodeInfo::isVisibleToUser));
-            JSONObject microsoft = geometry(true, portrait.getInt("id"));
-            emit("android-portrait-microsoft", microsoft);
+            geometry(true, portrait.getInt("id"));
+            emit("android-portrait-microsoft");
             t.stage = "shuangpin touch: the ; key carries its touch-down";
             center("b");
             Rect semicolon = boundsOf(t.described("微软双拼 ing"));
@@ -154,9 +168,11 @@ final class ShuangpinTouchDeviceChecks {
         long deadline = SystemClock.uptimeMillis() + 15000;
         while (SystemClock.uptimeMillis() < deadline) {
             if (exported.isFile()) {
-                JSONObject candidate = new JSONObject(new String(Files.readAllBytes(exported.toPath()), StandardCharsets.UTF_8));
+                String text = new String(Files.readAllBytes(exported.toPath()), StandardCharsets.UTF_8);
+                JSONObject candidate = new JSONObject(text);
                 if (candidate.getInt("id") > previousId && candidate.isNull("semicolon") != semicolon) {
                     json = candidate;
+                    exportedText = text;
                     break;
                 }
             }
@@ -192,9 +208,9 @@ final class ShuangpinTouchDeviceChecks {
     }
 
     /** 把导出的几何作为 instrumentation 状态交出去，smoke.sh 存成 `target/android/device-test/key-geometry/<名字>.json`。 */
-    private void emit(String name, JSONObject json) {
+    private void emit(String name) {
         Bundle status = new Bundle();
-        status.putString("msime_key_geometry_" + name, json.toString());
+        status.putString("msime_key_geometry_" + name, exportedText);
         t.sendStatus(1, status);
     }
 
@@ -254,6 +270,7 @@ final class ShuangpinTouchDeviceChecks {
         return false;
     }
 
+    /** 候选条上的一行：读屏描述是「候选 N：文字」，后面可能跟「，提示：…」（注释）或「；…」。 */
     private static Predicate<AccessibilityNodeInfo> candidate(String text) {
         return node -> {
             if (!node.isClickable() || node.getContentDescription() == null) return false;
@@ -261,8 +278,12 @@ final class ShuangpinTouchDeviceChecks {
             int delimiter = description.indexOf('：');
             if (!description.startsWith("候选 ") || delimiter < 0) return false;
             String value = description.substring(delimiter + 1);
-            String head = value.contains("；") ? value.substring(0, value.indexOf('；')) : value;
-            return head.equals(text);
+            int end = value.length();
+            for (char mark : new char[] {'；', '，'}) {
+                int at = value.indexOf(mark);
+                if (at >= 0) end = Math.min(end, at);
+            }
+            return value.substring(0, end).equals(text);
         };
     }
 }

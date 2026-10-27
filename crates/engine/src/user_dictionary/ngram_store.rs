@@ -1121,6 +1121,44 @@ mod tests {
         );
     }
 
+    /// 外部提交发生在模型读取之后、会话放手之前：结束时的新版本不能为旧模型背书。
+    #[test]
+    fn an_idle_store_is_dropped_if_another_connection_writes_before_settling() {
+        // 同一测试进程的 release_all 会改变全局代次，遇到它就重试本轮。
+        for _ in 0..5 {
+            let dir = Dir::new();
+            let journal = dir.journal();
+            let store = detached(&journal);
+            store.record(&run(&["甲", "乙"], 2)).unwrap();
+            store.flush().unwrap();
+            store.refresh();
+            let generation = STORE_GENERATION.load(Ordering::Acquire);
+            let old_total = store.model().total();
+            Connection::open(&journal)
+                .unwrap()
+                .execute_batch(
+                    "INSERT INTO personal_bigram(previous,word,count) VALUES('丙','丁',5)",
+                )
+                .unwrap();
+            // 不能调 settle 辅助函数：它会 refresh，掩盖本用例要检查的顺序。
+            store.note_settled();
+            if STORE_GENERATION.load(Ordering::Acquire) != generation || store.stale() {
+                continue;
+            }
+            let mut stores = HashMap::new();
+            let kept = keep(&mut stores, store);
+            reclaim_idle(&mut stores, Some(&journal));
+            assert!(
+                kept.upgrade().is_none(),
+                "外部计数没读进模型，却被会话结束时的版本标成了一致"
+            );
+            let fresh = detached(&journal);
+            assert_eq!(fresh.model().total(), old_total + 5);
+            return;
+        }
+        panic!("全局代次持续变动，未能完成隔离回归");
+    }
+
     /// 只读过日志的 store 经自己的只读探测连接看 `data_version`：修改时间粒度粗的文件系统上，同样大小的原地改写只能这样看出来。
     #[cfg(not(windows))]
     #[test]

@@ -116,4 +116,6 @@ iOS 键盘每次收起都销毁会话，Android 每进一个输入框都重建�
 
 整合验证补修：资源清单重构新增 `snapshot_queue_process_with` 后，`skip_when_idle` 必须从公开处理包装器传入该函数；云端激活的直接测试调用显式使用不跳过空闲的策略。新增学习保留参数后的队列测试和状态测试也显式补齐参数，避免合并后测试仍调用旧签名。修前 Rust 工作区检查报三处编译错误，修后复用现有 `target/` 的 `cargo check --locked --workspace --all-targets --exclude msime-desktop` 通过，`cloud::snapshot_queue` 45 项和 Host API 的 `dictionary_snapshot` 47 项通过，包含空闲队列不创建目录、排队请求仍处理、云端激活保留本机学习和不保留策略的回归。Host API 和 client-core 的严格 `--lib` Clippy 通过，新增代码中的多余借用也已修正。桌面壳因没有本分支原生 bundle 和资源尚未纳入该命令，不能把 Rust 工作区检查称为完整 quick 通过。
 
+整套仓库契约 `bash scripts/run-checks.sh` 复用主工作区现有 `target/` 后通过；鸿蒙个人词库检查跟随带来源戳的有界批次入口，兼容入口仍保留批次上限，移除有界入口或批次上限的反向检查均被拒绝。该结果只覆盖仓库契约，不替代完整 quick 和 Android 设备验证。
+
 缺口：没有在任何真机上测过耗电、发热或卡顿。验证办法是在低端 Android 机上对比改动前后 `:ime` 进程的 CPU 时间增量（`adb shell top -p <pid>`、`dumpsys batterystats`）、`/proc/<pid>/io` 的写入量，以及聚焦到可打字的 trace。Windows 7 面板的 flush 改动只在 C++ 源码层面跟随，没有在 Windows 7 上运行。三条宿主 PR 的编译和宿主侧测试记在各自的笔记里，都没有装机复测。

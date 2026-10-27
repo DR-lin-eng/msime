@@ -671,6 +671,48 @@ final class CandidateTranslationTests: XCTestCase {
     XCTAssertEqual(KeyboardKeyButton.chipContentWidth(titleLine: 40, glossLine: 300, glossLines: 0, column: 110), 40)
   }
 
+  /// 释义截断按长度二分查找，结果必须和逐字删到放得下为止完全一样：先缩字号，最小字号仍放不下时留最长的、接上「…」还放得下的前缀。
+  func testFittedGlossMatchesCharacterByCharacterTruncation() {
+    let font = UIFont.systemFont(ofSize: 10)
+    func measure(_ value: String, _ candidateFont: UIFont) -> CGFloat {
+      (value as NSString).size(withAttributes: [.font: candidateFont]).width
+    }
+    func reference(_ text: String, width: CGFloat) -> (text: String, size: CGFloat) {
+      guard width > 0, !text.isEmpty else { return (text, font.pointSize) }
+      if measure(text, font) <= width { return (text, font.pointSize) }
+      var size = font.pointSize
+      while size > KeyboardKeyButton.minimumGlossFontSize {
+        size = max(size - 0.5, KeyboardKeyButton.minimumGlossFontSize)
+        if measure(text, font.withSize(size)) <= width { return (text, size) }
+      }
+      let floorFont = font.withSize(KeyboardKeyButton.minimumGlossFontSize)
+      var characters = Array(text)
+      while !characters.isEmpty {
+        characters.removeLast()
+        let shortened = String(characters) + "…"
+        if measure(shortened, floorFont) <= width { return (shortened, KeyboardKeyButton.minimumGlossFontSize) }
+      }
+      return ("", KeyboardKeyButton.minimumGlossFontSize)
+    }
+    let glosses = [
+      "", "cat", "hello, hi",
+      "sky, heaven; god, celestial; day; nature; season; weather",
+      "one; a, an; alone; whole, entire, all; once, as soon as",
+      "こんにちは、お元気ですか", "안녕하세요 반갑습니다",
+    ]
+    for gloss in glosses {
+      for width in stride(from: CGFloat(0), through: 220, by: 3.5) {
+        let fitted = KeyboardKeyButton.fittedGloss(gloss, font: font, width: width)
+        let expected = reference(gloss, width: width)
+        XCTAssertEqual(fitted.text, expected.text, "\(gloss) @ \(width)")
+        XCTAssertEqual(fitted.font.pointSize, expected.size, "\(gloss) @ \(width)")
+        if !fitted.text.isEmpty, width > 0 {
+          XCTAssertLessThanOrEqual(measure(fitted.text, fitted.font), width, "\(gloss) @ \(width)")
+        }
+      }
+    }
+  }
+
   /// The gloss sits on its own line under the candidate rather than beside it, and a candidate
   /// without one stays a single line - the expanded panel draws the same rows as the strip.
   func testGlossTakesItsOwnLineUnderTheCandidate() throws {

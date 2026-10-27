@@ -53,7 +53,7 @@ cargo run --release -p msime-input-runtime --example rerank_latency -- \
 
 ### `sentences-nine-key-v1.tsv` — 81 条九键长句
 
-手写的合成短句，4 到 12 个字每档 9 条，`verify-local.sh` 以 `--nine-key` 跑它，对照 `baseline-nine-key-sentences.json`。九键一次最多 32 个数字（`DIGIT_LIMIT`），超出的键被丢掉，而 `sentences-v1.tsv` 11 个音节以上的 7 条里有 6 条超过 32 个字母，`sentences-neutral-v1.tsv` 1105 条里也有 279 条超过，在九键上金标准根本打不出来；这份每条都在 32 个字母以内，12 个字的句子也能整串打完。金标准的取舍与 `sentences-v1.tsv` 相同，另外不收 ta 开头或句中带 他/她 的句子（#6059）。
+手写的合成短句，4 到 12 个字每档 9 条，`verify-local.sh` 以 `--nine-key` 跑它，对照 `baseline-nine-key-sentences.json`。这份集合建于九键一次最多 32 个数字的时候，每条都在 32 个字母以内，12 个字的句子也能整串打完；当时 `sentences-v1.tsv` 11 个音节以上的 7 条里有 6 条超过 32 个字母，`sentences-neutral-v1.tsv` 1105 条里也有 279 条超过，在九键上金标准打不出来。上限现在是 48 个数字（`crates/engine/src/nine_key.rs` 的 `DIGIT_LIMIT`，#9392），到上限时先选首选再接着打；按 48 算，超过的只剩 `sentences-v1.tsv` 的 1 条和 `sentences-neutral-v1.tsv` 的 30 条。金标准的取舍与 `sentences-v1.tsv` 相同，另外不收 ta 开头或句中带 他/她 的句子（#6059）。
 
 同一份集合在全键盘上打（不带 `--nine-key`）是九键要追的参照：按切分路径各自解码时（#6377），九键 top-1 0.457、found 0.556；按键之间沿用前几次的好切分、跨切分比较时每个词组多扣一份奖励之后（#6059），0.506 / 0.617；全键盘 0.691 / 0.716。九键按键延迟用 `rerank_latency --nine-key` 在这份集合上量，见上文的「延迟基准」。
 
@@ -67,22 +67,26 @@ cargo run --release -p msime-input-runtime --example rerank_latency -- \
 
 `convert_eval --grid fourteen` 打开 Runtime 的 14 键网格，把每个字母换成它所在键的组码（QW 键是 q，BN 键是 b，即每组的首字母），用宿主触屏键面用的 `GridKey` 逐键送进去，金标准不变。14 键与九键是同一套解码（`KeyGrid`），只换码表：421 个全拼音节在九键上是 218 种码，在 14 键上是 314 种，重码少了，所以同一份集合上 14 键应当不低于九键。`verify-local.sh` 以 `fourteen-key`（`quanpin-words-v1.tsv --limit 3000`）和 `fourteen-key-sentences`（`sentences-nine-key-v1.tsv`）跑它们，对照 `baseline-fourteen-key.json` 和 `baseline-fourteen-key-sentences.json`。
 
-锁定资源 dict-v2.0.24 加 `sentence-model.safetensors`，共享词网格扣除每词插入代价后的同一次 release 构建：
+同一次 release 构建、同一份代码，挂 `sentence-model.safetensors`，分别在换锁前的 dict-v2.0.24 和现在锁定的 dict-v2.0.39 上跑（[换锁笔记](../../.agents/notes/implemented/bug-fix/2026-10-27-dictionary-lock-latest.md)）：
 
-| 集合 | 九键 top-1 | 九键 top-5 | 14 键 top-1 | 14 键 top-5 |
-|---|---|---|---|---|
-| `quanpin-words-v1` 3000 条（实取 2791） | 0.574 | 0.851 | 0.660 | 0.906 |
-| `sentences-nine-key-v1` 81 条 | 0.617 | 0.654 | 0.667 | 0.691 |
+| 集合 | 词库 | 九键 top-1 | 九键 top-5 | 14 键 top-1 | 14 键 top-5 |
+|---|---|---|---|---|---|
+| `quanpin-words-v1` 3000 条（实取 2791） | dict-v2.0.24 | 0.571 | 0.847 | 0.658 | 0.903 |
+| | dict-v2.0.39 | 0.518 | 0.815 | 0.619 | 0.888 |
+| `sentences-nine-key-v1` 81 条 | dict-v2.0.24 | 0.642 | 0.667 | 0.667 | 0.691 |
+| | dict-v2.0.39 | 0.519 | 0.605 | 0.580 | 0.654 |
+
+两行用的是同一个二进制，差别全部来自词库数据：dict-v2.0.30 起词库仓库按万象词频重调单字权重，这批发布里多字词的权重也有大幅变动（摆脱 199375→80850、拜托 53420→171736；散步 101880→64915、跑步 66055→335220，两者在九键上同码），同码、同音词的先后因此被改写，九键和 14 键的重码最多，掉得也最多。共享词网格扣除每词插入代价那次改动的前后对照在 dict-v2.0.24 上量，见文末的评分决策笔记。
 
 `rerank_latency` 在同一锁定资源上交替测量修复前后三轮，挂着重排模型的 p95 中位数九键 21.65→21.22 ms、14 键 20.57→19.37 ms；全拼 8.12→7.56 ms。九键、14 键前后都超出 16 ms 的帧预算，现有长串延迟缺口仍在；本次未观察到新增退化。详细对照条件见文末的评分决策笔记。
 
-14 键的重码集中在少数几组上：bi/bu/ni/nu、xi/xu/zi/zu 这样的四重码，shi/shu，以及 sha 对 a'ga 这类跨音节的歧义。同一串组码下谁排第一只看词库权重，harness 又关掉了学习，所以这里量到的是新用户的第一次输入。BN UI GH AS OP（`bugao`）在锁定词库里首选是「不好」（权重 500381），「你好」（332885）第二；九键上两者是 28426 和 64426，不相遇。三端的手工验收以「你好」出现在候选里、点读音行的 ni 后成为首选为准。
+14 键的重码集中在少数几组上：bi/bu/ni/nu、xi/xu/zi/zu 这样的四重码，shi/shu，以及 sha 对 a'ga 这类跨音节的歧义。同一串组码下谁排第一只看词库权重，harness 又关掉了学习，所以这里量到的是新用户的第一次输入。BN UI GH AS OP（`bugao`）在锁定词库（dict-v2.0.39）里首选是「不好」（权重 1294182），「你好」（705916）第二；九键上两者是 28426 和 64426，不相遇。三端的手工验收以「你好」出现在候选里、点读音行的 ni 后成为首选为准。
 
 ### `sentences-v2.tsv` — 310 条收割，带上文
 
 从 C4 中文部分（ODC-BY，保留标点的原文，不是 `corpus/fetch.py` 剥过标点的训练语料）收割：把句子用 Engine 的拼音表转成拼音再打回去，首选与原句不同的收下来，上文取同一篇的前一句。`harvest_eval_set` 做这件事，`scripts/review-harvested-cases.py` 用 Jev 过一道评审（选中原文且无强歧义否决），再按拼音+原文去重。500 条收割 → 345 条通过 → 310 条。
 
-**它不是准确率基准，用错了会得出荒谬结论。** 用例是按「产品当前打错」筛出来的，所以 `top1` 天生偏低（0.308），拿它和 v1 相减没有任何意义。它回答的是另一个问题：**已经打错的那些里，有多少是排序够得着的**——`top5` 是 0.776，即近八成的正确答案就在前五名，剩下两成多要解码器出力。收割时要求金标准必须出现在候选列表里（`hanzi_to_pinyin` 对多音字不总是对，键错了原句永远解不出来，那种用例是废的），所以对着 C++ Engine 加 Google 整句解码器收割时 `found` 是 1.000；Google 解码器删掉后，只有它给得出的答案没了，`found` 现在是 0.901（v2）和 0.899（neutral）。
+**它不是准确率基准，用错了会得出荒谬结论。** 用例是按「产品当前打错」筛出来的，所以 `top1` 天生偏低（0.308），拿它和 v1 相减没有任何意义。它回答的是另一个问题：**已经打错的那些里，有多少是排序够得着的**——`top5` 是 0.776，即近八成的正确答案就在前五名，剩下两成多要解码器出力。收割时要求金标准必须出现在候选列表里（`hanzi_to_pinyin` 对多音字不总是对，键错了原句永远解不出来，那种用例是废的），所以对着 C++ Engine 加 Google 整句解码器收割时 `found` 是 1.000；Google 解码器删掉后，只有它给得出的答案没了，`found` 在锁定的 dict-v2.0.39 上是 0.885（v2）和 0.878（neutral），dict-v2.0.24 上是 0.939 和 0.928。
 
 想要有代表性的准确率集，得不筛成败地随机抽样，那是 `harvest_eval_set` 换一个判断条件的事，不是换一份语料。
 
@@ -199,4 +203,4 @@ TYPESAFE_API_KEY=... scripts/review-harvested-cases.py target/harvest.jsonl targ
 
 词表覆盖（词级集的金标准 99.94% 本来就在词典里）、用户学习与调频（harness 强制关闭，否则前一条会污染后一条）、双拼路径、语言模型困惑度（没有语料）。九宫格由 `--nine-key` 的两份集合覆盖，14 键由 `--grid fourteen` 的两份覆盖，见上文。
 
-共享词网格前移每词插入代价的配置、同一资源前后对照及局限见[评分决策笔记](../../.agents/notes/implemented/bug-fix/2026-10-14-lattice-phrase-insertion-cost.md)。此轮基线覆盖 `dict-v2.0.24`，没有修改评测用例。
+共享词网格前移每词插入代价的配置、同一资源前后对照及局限见[评分决策笔记](../../.agents/notes/implemented/bug-fix/2026-10-14-lattice-phrase-insertion-cost.md)。现在的基线覆盖 `dict-v2.0.39`，换锁时没有修改评测用例，前后数字见[换锁笔记](../../.agents/notes/implemented/bug-fix/2026-10-27-dictionary-lock-latest.md)。

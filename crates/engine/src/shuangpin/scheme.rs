@@ -275,21 +275,21 @@ impl ShuangpinScheme {
     }
 }
 
-/// 宿主改写了输入串（光标处插入或删除、部分选词吃掉前缀、交出光标前的部分）：新旧串的最长公共前缀和公共后缀保留原来的触点，中间新出现的字节没有触点。`hh` 这类相同的相邻字母分不清删的是哪一个，触点可能互换，影响很小。
+/// 宿主改写了输入串（光标处插入或删除、部分选词吃掉前缀、交出光标前的部分、撤销时补回前缀）：新旧串的公共后缀和公共前缀保留原来的触点，中间新出现的字节没有触点。先认后缀再在剩下的部分里认前缀：吃掉或补回前缀是确定的改动，`xpxp`（谢谢）选走第一个字剩下的 `xp` 必须对上后两键的触点，先认前缀会错拿刚选走那两键的。`hh` 这类相同的相邻字母在光标处删改时分不清是哪一个，触点可能互换，影响很小。
 fn realign_touches(touches: &mut Vec<Option<KeyTouch>>, old: &[u8], new: &[u8]) {
     if touches.is_empty() {
         return;
     }
     debug_assert_eq!(touches.len(), old.len());
-    let prefix = old
-        .iter()
-        .zip(new)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let suffix = old[prefix..]
+    let suffix = old
         .iter()
         .rev()
-        .zip(new[prefix..].iter().rev())
+        .zip(new.iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let prefix = old[..old.len() - suffix]
+        .iter()
+        .zip(&new[..new.len() - suffix])
         .take_while(|(left, right)| left == right)
         .count();
     touches.splice(
@@ -641,6 +641,17 @@ mod tests {
         // 部分选词吃掉前缀，剩下的按后缀对上。
         typed.set_raw_input("ma", "");
         assert_eq!(typed.touches(), [touch(5), touch(6)]);
+        // 叠词：选走 `xpxp`（谢谢）的第一个字，剩下的是后两键；撤销补回前缀时，补回的两键没有触点。
+        let mut repeated = scheme(ShuangpinProfileKind::Xiaohe);
+        type_touched(
+            &mut repeated,
+            "xpxp",
+            &[touch(1), touch(2), touch(3), touch(4)],
+        );
+        repeated.set_raw_input("xp", "");
+        assert_eq!(repeated.touches(), [touch(3), touch(4)]);
+        repeated.set_raw_input("xpxp", "");
+        assert_eq!(repeated.touches(), [None, None, touch(3), touch(4)]);
         // 换成完全不同的输入：一个触点都不剩，回到空。
         typed.set_raw_input("ui", "");
         assert!(typed.touches().is_empty());

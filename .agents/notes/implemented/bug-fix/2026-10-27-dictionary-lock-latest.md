@@ -17,6 +17,7 @@ Status: implemented
 - 组件锁和版本锁用 `python3 scripts/editions.py gen-locks` 从主锁生成，`resources/language-dictionaries.lock.json` 同步前进（`msime-stroke.db` 自 `dict-v2.0.30` 起从 2.3 MB 变为 3.8 MB，其余语言词库字节不变）。
 - full 资源锁的代次从 `7356c4a4…` 变为 `576494c48ac513d15b9920111a73cf149fb79aedcb8cc6947d0799cf36006553`，`crates/client-core/src/edition.rs` 里钉住代次的测试一起更新。已装的用户词库按代次分目录，升级后照常从回放日志重建。
 - `resources/eval` 下 `verify-local.sh` 覆盖的十一份基线在新锁上以 `--update-baseline` 重新生成。`baseline-web-articles.json` 的输入不在本仓库（TapTapGo 的文章分句），`voice-baseline.json` 与词库无关，两者不动。
+- iOS `HelpcodeSettingsTests` 对自然码 `shi` 加 Shift `Y` 检查讠旁候选仍在且「是」被过滤，不固定「识」「试」「诗」的首选顺序；删除导入码表后，与同一会话导入前保存的完整候选数组比较。新词库把首选从「识」改为「诗」，不改变设置重载和码表回退的验收目标。导入后首选必须为合成码表指定的「是」、关闭辅助码后 Shift 字母成为大写字面片段，这两项精确断言保留。
 
 ### 两个版本之间换了什么
 
@@ -66,6 +67,7 @@ Status: implemented
 
 ## Verification
 
+- iOS 辅助码断言修正后，`xcrun swiftc -frontend -parse platforms/ios/KeyboardTests/settings/HelpcodeSettingsTests.swift`、笔记目录/格式/归档封印三项校验和 `git diff --check` 通过。这一轮未运行 Xcode 构建、iOS 会话测试或完整 quick 门禁，设置重载与导入回退的运行时结果仍需 CI 或设备复验；安装包预算缺口不变。
 - `python3 scripts/editions.py gen-locks --check`、`scripts/test-editions.py`、`scripts/test-macos-package-resources.py`、`scripts/test-fetch-language-dictionaries-bounds.py`、`scripts/test-language-data-notices.py`、`scripts/test-linux-setup-download-links.py`、`scripts/test-reference-feature-log.py` 等与锁相关的检查通过。
 - 在 Mac Studio 上 `cargo run --release -q -p msime-client-core --example install_resources --locked -- target/resources` 下载并校验了新锁全部资源，目录名即新代次。
 - 评测：`convert_eval` 按 `verify-local.sh` 的十一组参数，先以 `--resource-lock` 指向旧锁在 `dict-v2.0.24` 上跑，再在新锁资源上以 `--update-baseline` 跑，结果见上表。完整 25,119 条全拼词级在新锁上 top-1 0.756、top-5 0.945；完整九键词级因构建机过载没有跑完。

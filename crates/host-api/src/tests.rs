@@ -17083,6 +17083,44 @@ fn statistics_record_reports_the_milestone_field() {
     assert!(quiet["value"].get("milestone").is_some());
 }
 
+/// `record` 把上屏攒在进程里，宿主在键盘收起、失焦和退出前调 `flush` 把它们写进文件。
+#[test]
+fn statistics_flush_writes_what_record_held() {
+    let directory = tempfile::tempdir().unwrap();
+    let call = |action: Value| {
+        let request =
+            serde_json::to_vec(&json!({"directory": directory.path(), "action": action})).unwrap();
+        read(unsafe { msime_client_typing_statistics(request.as_ptr(), request.len()) })
+    };
+    call(json!({"operation": "set_enabled", "enabled": true}));
+    let recorded = call(
+        json!({"operation": "record", "text": "合成", "source": "quanpin", "day": "2026-10-01", "hour": 9}),
+    );
+    assert_eq!(recorded["value"]["recorded"], 2, "{recorded}");
+    let flushed = call(json!({"operation": "flush"}));
+    assert_eq!(flushed["ok"], true, "{flushed}");
+    assert_eq!(flushed["value"], Value::Null);
+    let persisted: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("typing-statistics.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["total"], 2);
+    assert_eq!(persisted["dailyHours"]["2026-10-01"][9], 2);
+    // 没有攒着的上屏时照样答 null，不碰磁盘。
+    assert_eq!(call(json!({"operation": "flush"}))["value"], Value::Null);
+    // flush 不回答设置页的状态。
+    let request = serde_json::to_vec(&json!({
+        "directory": directory.path(),
+        "action": {"operation": "flush"},
+        "status": true,
+    }))
+    .unwrap();
+    assert_eq!(
+        read(unsafe { msime_client_typing_statistics(request.as_ptr(), request.len()) })["ok"],
+        false
+    );
+}
+
 #[test]
 fn pronunciation_request_reads_the_table_beside_resources() {
     let root = tempfile::tempdir().unwrap();

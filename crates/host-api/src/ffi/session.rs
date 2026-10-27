@@ -222,6 +222,15 @@ pub extern "C" fn msime_client_focus(handle: u64, focused: bool) -> *mut c_char 
     response(|| focus_session(handle, focused))
 }
 
+/// 失焦时是否顺带写出本进程攒着的打字统计上屏（`record` 的批次）。
+///
+/// 桌面宿主（Windows、macOS、Linux）在常驻进程里从后台线程调 `record`，没有接 `flush`：不在这里写，停下不打字以后最后一批要等到下一次上屏满间隔才写，设置页一直看不到。移动宿主不在这里写，它们按约定在键盘收起、输入框失焦时自己在统计工作线程上调 `flush`；会话调用可能在 UI 线程上（鸿蒙），在这里写会把读写和 fsync 放回 UI 线程。
+const FLUSHES_TYPING_STATISTICS_ON_FOCUS_OUT: bool = !cfg!(any(
+    target_os = "android",
+    target_env = "ohos",
+    target_os = "ios"
+));
+
 /// `msime_client_focus` 的本体。
 pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String> {
     with_session(handle, |session| {
@@ -230,6 +239,9 @@ pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String>
         // Focus-out is where a host's field ends, so selections counted in it are written here rather than waiting for a batch to fill. The same goes for the engine's delayed context learning: the iOS keyboard extension and the Android IME process can be killed without ever destroying their sessions, and the engine no longer writes that queue at process exit.
         if !focused {
             session.flush_selections();
+            if FLUSHES_TYPING_STATISTICS_ON_FOCUS_OUT {
+                msime_client_services::typing_statistics::flush_pending_commits();
+            }
             msime_engine::flush_personal_learning();
         } else {
             session.refresh_plugin_tables();

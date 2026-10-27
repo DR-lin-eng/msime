@@ -31,6 +31,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var englishCorrectionRejectedDocument: UUID?
   /// 候选条内容每换一次加一，在途的英文建议回来时拿它判断自己是否已过时。
   private var englishSuggestionStripGeneration: UInt64 = 0
+  /// 当前可点的英文建议所属的词和输入框；点击时再次核对，不能拿旧答案替换新词。
+  private var englishSuggestionPrefix = ""
+  private var englishSuggestionDocument: UUID?
   /// 引擎会话刚建好时的内存读数，紧跟在 `session` 后面声明，`keyboard_loaded` 记成 `session=`。
   private let sessionMemory = DiagnosticLog.MemorySample.current()
   /// 「全角输入」 for the running keyboard: starts from the shared `character_width`, then the 全角 card switches it.
@@ -3737,10 +3740,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     render(session.handleCharacter(key))
   }
 
-  /// Read the current word from the host document instead of maintaining a shadow
-  /// buffer; autocorrect, cursor movement and external edits then stay truthful.
+  /// 从宿主读取当前词，跟随光标和外部编辑；非空选区不参与纠错，避免退格删掉用户选中的内容。
   private var englishWordBeforeCursor: String {
-    guard englishCorrectionsEnabled else { return "" }
+    guard englishCorrectionsEnabled, textDocumentProxy.selectedText?.isEmpty != false else { return "" }
     let before = textDocumentProxy.documentContextBeforeInput ?? ""
     return EnglishSuggestionPolicy.currentWord(before: before)
   }
@@ -3755,15 +3757,27 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       updateCandidateStrip(preedit: "", candidates: [])
       return
     }
-    // 纠错要在词典里搜一遍，词越长越慢，低端机上每个字母都会卡主线程，所以放到输入线程上算。结果回来之前候选条保持原样，不先清空再补上，免得每个字母闪一下。回来时候选条已被别的路径改过、换了输入框或光标前的词已经变了，这次结果就作废。
+    let document = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
+    // 新词先显示自己的原文，避免异步查询期间留下上一词的可点纠错或旧邮箱后缀；同一词已有的答案可以保留。
+    if englishSuggestionPrefix != prefix || englishSuggestionDocument != document {
+      updateCandidateStrip(preedit: "", candidates: [prefix])
+      if visibleEmailSuffixes.isEmpty {
+        englishSuggestionPrefix = prefix
+        englishSuggestionDocument = document
+      }
+    }
+    // 纠错在输入线程上算。回来时候选条已被别的路径改过、换了输入框或光标前的词已变，这次结果就作废。
     englishSuggestionStripGeneration &+= 1
     let generation = englishSuggestionStripGeneration
-    let document = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
     session.englishCorrections(forPrefix: prefix) { [weak self] items in
       guard let self, generation == englishSuggestionStripGeneration,
             document == KeyboardHostContext.documentIdentifier(for: textDocumentProxy),
             prefix == englishWordBeforeCursor else { return }
       updateCandidateStrip(preedit: "", candidates: items)
+      if visibleEmailSuffixes.isEmpty {
+        englishSuggestionPrefix = prefix
+        englishSuggestionDocument = document
+      }
     }
   }
 
@@ -3800,6 +3814,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func useEnglishSuggestion(at index: Int) {
     guard visibleCandidates.indices.contains(index) else { return }
     let typed = englishWordBeforeCursor
+    guard !typed.isEmpty, typed == englishSuggestionPrefix,
+          englishSuggestionDocument == KeyboardHostContext.documentIdentifier(for: textDocumentProxy) else {
+      updateCandidateStrip(preedit: "", candidates: [])
+      return
+    }
     let startedCapitalized = typed.first?.isUppercase ?? false
     guard let replacement = EnglishSuggestionPolicy.replacement(
       typed: typed, candidate: visibleCandidates[index], startedCapitalized: startedCapitalized)
@@ -6932,6 +6951,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 光标前打到 `xxx@` 时邮箱后缀占候选条，排在英文建议之前，与 Android 一样；它们不是 Engine 的候选，不带编码、释义和来源。
     // 还在输入线程上算的英文建议不能再盖掉这次的内容。
     englishSuggestionStripGeneration &+= 1
+    englishSuggestionPrefix = ""
+    englishSuggestionDocument = nil
     let emailSuffixes = emailSuffixesForStrip(preedit: preedit)
     visibleEmailSuffixes = emailSuffixes
     let showsEmailSuffixes = !emailSuffixes.isEmpty

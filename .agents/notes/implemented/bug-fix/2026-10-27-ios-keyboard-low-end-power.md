@@ -20,12 +20,12 @@ Status: implemented
 
 - 键盘出现时不再强制同步个人词库，改为立即跑一轮现有的空闲维护（`startIdleMaintenance`）：两份队列文件在后台读，个人词库只在有待应用的编辑、导出、设置页的刷新请求，或 `sync.json` 超过 `PersonalDictionaryStore.listingLifetime`（15 分钟）没被写过时才回主线程同步。个人词库页、词库设置页和统计页打开时调 `PersonalDictionaryStore.requestRefresh()` 要一次刷新。陈旧判断用文件修改时间而不用 `snapshotDate`：列出失败时 `snapshotDate` 不变，按它判断会每轮空闲都重试，而键盘每次同步无论成败都会重写这个文件。
 - `applyKeyboardSkin(onlyIfChanged:)` 把背景重画、按键树重走和回车键配置收进 `recolorKeys`，记下这一遍用的皮肤和 trait。`viewWillAppear` 只按皮肤是否变了决定要不要重走；trait 变了、有按键在窗口外经过 `decorateKey`（阴影色按默认外观解析）这两项交给 `viewIsAppearing` 补走，那时视图已在窗口里、trait 已定、第一帧还没画。按状态更新的部分（回车、方案键、工具栏、空格、候选条）每次照做；换季仍强制整棵重走。`decorateKey` 复用已有按键表面。`viewWillAppear` 不再清候选皮肤请求键，键里已有开关、明暗、主题、皮肤目录和清单的修改时间与大小，内存警告照旧清键。
-- 大千注音、14 键、18 键的各排由 `ensureAlternateLetterRows` 在第一次要画时建，插在按键列原来的位置，建好后一直留着。
+- 大千注音、14 键、18 键的各排由 `ensureAlternateLetterRows` 在第一次要画时建，插在按键列原来的位置，建好后一直留着。布局重载测试在切换前检查行尚未创建，切换后再条件等待真实按键出现，不要求启动时存在隐藏的备用行。
 - 引擎会话仍在每次收起时销毁（不能带着 App Group 文件锁被挂起，否则 0xdead10cc）。重建时不再整表重读个人上下文模型由本 PR 叠着的共享 Rust PR 负责：会话放手时记下日志的文件身份和 `PRAGMA data_version`，下一个会话打开同一日志、期间没有别的连接改过时沿用模型（细节见 [共享 Rust 层空闲 I/O](2026-10-27-shared-rust-idle-io-hot-path.md)）。iOS 的日志不进 WAL，只读过日志的 store 留下的那条只读探测连接在回滚日志模式下空闲时不持锁。本 PR 在诊断日志里补 `dictionary_resumed ms=`、`dictionary_suspended ms=`、`keys_reskinned in_window=`，供真机确认重建花多久、沿用是否生效。
 
 每次按键：
 
-- 英文逐字母纠错走 `englishCorrections(forPrefix:completion:)`，在 `MSIMEInputThread` 上算、结果回主线程，被新请求取代的排队查询直接跳过；回来时候选条已被别的路径改过、换了输入框或光标前的词已变就丢弃。同步版本也在输入线程上算并复用最后一个字母的结果，空格自动纠错（`commitEnglishBoundary`）仍同步取，行为不变。
+- 英文逐字母纠错走 `englishCorrections(forPrefix:completion:)`，在 `MSIMEInputThread` 上算、结果回主线程，被新请求取代的排队查询直接跳过；回来时候选条已被别的路径改过、换了输入框或光标前的词已变就丢弃。同步版本也在输入线程上算并复用最后一个字母的结果，空格自动纠错（`commitEnglishBoundary`）仍同步取，行为不变。新词查询排队前先展示当前原文，旧纠错和已不匹配的邮箱后缀立即撤下，候选条不闪回工具栏；同一输入框同一词已有的答案保留。可点的英文建议记住原文和 `documentIdentifier`，点选时重新核对，外部编辑或换输入框后的旧答案只收起，不能替换当前文档。任何非英文路径重写候选条都会清掉这份身份。读取当前英文词时拒绝非空选区，点击旧建议和边界自动纠错都不会把选区当作词尾退格删除。
 - 桥记下当前会话最后一次已生效（`deferred` 为 false）的偏好和隐私会话标记，完全相同的请求直接报告成功、不跨 FFI。组字中被推迟的那次不记，组字结束后照旧再发一次。会话重建、`applyAppEditedPreferences` 都重新记。
 - 交给 Rust 会话和词库的偏好都经 `MetasequoiaInputSessionBridge.engineBound` 去掉 `custom_theme.keyboard.photo`（`photoShade`、`photoPosition` 保留）；`options["preferences"]` 和 `sharedPreferences` 仍是完整文档，皮肤照旧读得到照片，写回共享文档的路径都先从磁盘重读。`ResolvedTheme.resolve` 的缓存键里照片换成长度加哈希。
 - `appGroupDefaults` 改为 `static let`。CFPreferences 的值缓存按进程和 suite 共享，不跟着实例走，读到的值和看到的设置 App 写入与每次新建时相同。
@@ -45,6 +45,7 @@ Status: implemented
 ## Alternatives considered
 
 - **出现时保留强制同步个人词库**：[出现时列表不再重建会话](2026-10-22-ios-appear-list-without-session-rebuild.md) 当时为保住设置页数据的新鲜度留着它，理由是 App 前台时键盘一般不在，去掉之后各页会停在上一份快照上。不再保留：每次点输入框、切 App 都在用户开始打字的那一刻读写共享文件、查询引擎，而这几页数据的新鲜度可以由页面打开时的刷新请求加 15 分钟陈旧上限兜住，陈旧程度有上限，不再取决于用户多久没开过这些页面。
+- **异步英文查询期间保留上一词的候选**：候选条内容不变，能避免每一键先闪回工具栏；但旧纠错仍可点击，若编辑器已换词便可能删掉新词，邮箱后缀也会拖到查询返回才撤下。新词先展示自己的原文也能保持候选条，不保留旧词答案；点击时的原文和输入框身份核对进一步兜住编辑器尚未回报的外部改动。
 - **异步建会话，把 `msime_client_create`/`focus` 移出主线程**：能让 `viewWillAppear` 立即返回。没有做：主线程上读 `handle` 的地方（视图、组字判断、偏好重载回调）都要处理「正在创建」，快速收起时挂起和在途创建会竞争，多项测试要求 `resume` 之后立即有句柄；沿用磁盘上没变的个人模型已经去掉重建里随用户数据增长的那一块，先看真机 `dictionary_resumed ms=` 再决定值不值得承担这些时序风险。
 - **收起时只交还词库租约和 SQLite 连接、保留整个 Runtime**：各词库连接分散在 `QuanpinDictionary`、`WubiProvider` 和各个 store 里，改成可关可重开是跨 crate 的大改，出错就是 0xdead10cc 被杀，比卡一下更糟。
 - **把 `prepare_host` 移出第一帧路径**：`viewDidLoad` 同步读 `sharedPreferences` 和会话状态，按键在会话就绪前还要排队或丢弃，改动面大，这次只做了按需建按键行和跳过重复换装两项低风险的。
@@ -67,5 +68,6 @@ Status: implemented
 
 - 单元测试：KeyboardTests 新增或扩展了 `VoiceSessionTests`（时限不超过一分钟及与心跳、失效判定的大小关系）、`EighteenKeyKeyboardTests`（26 键不带备用行、切到 18 键才建、切回不重建）、`DictionarySnapshotQueueTests`/`DictionarySnapshotWorkerTests`（同版本不写文件、版本没变不回主线程、失败节流、已有版本后 30 秒不读满一分钟才读）、`PersonalDictionaryStoreTests`（超过 15 分钟没列过即使记住身份也要同步、列出失败不反复重试）、`KeyboardSkinTests`/`CandidateCanvasTests`（皮肤没变时再出现不重走按键树、窗口外的出现由 `viewIsAppearing` 补走、收起再出现沿用同一解码快照）、`EnglishSuggestionPolicyTests`、`InputBridgeResponseTests`、`KeyboardSkinDocumentTests`、`CandidateTranslationTests`（二分截断与逐字删在多种宽度下结果相同）、`HandwritingTests`（脏区重画与整块重画逐像素比较）和 `testCommitsAreHeldInMemoryUntilFlush`（record 之后文件里的总数不变，flush 之后才写进去）。个人上下文模型沿用和预览版本缓存的 Rust 用例随实现挪进了共享 Rust PR。
 - 编译：在 Mac Studio（Xcode 27.0）上 `platforms/ios/build-native.sh simulator` 产出 arm64 模拟器 `libmsime_host_api.a`，`xcodegen generate` 后 `xcodebuild build-for-testing -scheme MSIMEClientTests -destination 'generic/platform=iOS Simulator'`（键盘扩展、测试宿主和三个测试包）与 `xcodebuild build -scheme MSIMEApp` 都通过，告警全是改动之前就有的。iOS 测试套件要启动模拟器，这一轮没有运行，上面列的 Swift 用例只保证编译通过。
+- 审查回归：CI 在异步化后检出邮箱后缀残留和三项备用布局预建假设。`EmailSuffixKeyboardTests` 补充旧纠错不替换另一词、相同词不跨输入框、下一次查询返回前只显示当前原文、非空选区时旧建议不改文本、空格只替换选区的真实控制器用例；本轮尚未执行，不能以新增测试代替通过证据。
 - 没有做的：没有在任何低端真机上测量耗电、温度或帧率，也没有用 Instruments 复测出现路径的耗时；收益都是按代码路径和早先 XR 上的采样推算的。真机上可以先看诊断日志里的 `dictionary_resumed ms=`、`keys_reskinned in_window=`，再用 Energy Log 对比打字和停留时的 CPU。
 - 安卓同一批问题的处理见 [Android 键盘只在窗口显示时每秒重读偏好](2026-10-27-android-preference-poll-only-while-visible.md)。

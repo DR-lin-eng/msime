@@ -309,14 +309,18 @@ final class EighteenKeyKeyboardTests: XCTestCase {
     let height = try XCTUnwrap(controller.view.constraints.first { $0.identifier == "keyboardHeight" })
     let fourteenHeight = height.constant
     XCTAssertTrue(shown(try button("fourteenKeyQW", in: controller)))
-    let we = try button("eighteenKeyWE", in: controller)
-    XCTAssertFalse(shown(we))
+    XCTAssertFalse(descendants(controller.view).contains { $0.accessibilityIdentifier == "eighteenKeyWE" },
+                   "14 键启动不预建尚未使用的 18 键行")
 
     XCTAssertTrue(TouchShuangpinLayoutPreference.save(.eighteenKey))
     controller.viewWillAppear(false)
     let deadline = Date().addingTimeInterval(15)
-    while !shown(we) && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    while !descendants(controller.view).contains(where: { $0.accessibilityIdentifier == "eighteenKeyWE" && shown($0) })
+      && Date() < deadline {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
     controller.view.layoutIfNeeded()
+    let we = try button("eighteenKeyWE", in: controller)
     XCTAssertTrue(shown(we))
     XCTAssertFalse(shown(try button("fourteenKeyQW", in: controller)))
     XCTAssertEqual(height.constant, fourteenHeight)

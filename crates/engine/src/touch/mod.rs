@@ -262,18 +262,19 @@ pub struct TouchTuning {
 }
 
 impl Default for TouchTuning {
+    /// 在参考布局（`resources/eval/key-geometry/android-portrait*.json`）上扫参得到，暂定；扫参表见模块注释里的笔记。
     fn default() -> Self {
         Self {
-            base: 12.0,
-            scale: 8.0,
+            base: 8.0,
+            scale: 12.0,
             sigma_x: 1.0,
             sigma_y: 1.0,
             bias_y: 0.0,
             min_penalty: 4.0,
             max_penalty: 28.0,
             cut: 16.0,
-            show_margin: 0.0,
-            show_penalty: f64::INFINITY,
+            show_margin: 4.0,
+            show_penalty: 14.0,
         }
     }
 }

@@ -715,6 +715,9 @@ impl<E: InputEngine> Runtime<E> {
             if snapshot.candidate_static_evidence.len() == order.len() {
                 snapshot.candidate_static_evidence.swap(left, right);
             }
+            if snapshot.candidate_touch_supported.len() == order.len() {
+                snapshot.candidate_touch_supported.swap(left, right);
+            }
             engine_order.swap(left, right);
         });
     }
@@ -2809,6 +2812,9 @@ impl<E: InputEngine> Runtime<E> {
         if snapshot.candidate_static_evidence.len() == count {
             rotate_to_front(&mut snapshot.candidate_static_evidence, promote);
         }
+        if snapshot.candidate_touch_supported.len() == count {
+            rotate_to_front(&mut snapshot.candidate_touch_supported, promote);
+        }
         rotate_to_front(&mut self.engine_order, promote);
         true
     }
@@ -2835,7 +2841,7 @@ impl<E: InputEngine> Runtime<E> {
         let Some(order) = runner_up_order_with(
             snapshot.scheme,
             &order_rows(snapshot),
-            snapshot.touch_corrections,
+            &snapshot.candidate_touch_supported,
         ) else {
             return false;
         };
@@ -2929,6 +2935,7 @@ impl<E: InputEngine> Runtime<E> {
                     candidate_corrected: Vec::new(),
                     candidate_answers_key: Vec::new(),
                     candidate_static_evidence: Vec::new(),
+                    candidate_touch_supported: Vec::new(),
                     candidate_list_open: false,
                     microsoft_shuangpin: false,
                     shuangpin_profile: String::new(),
@@ -2949,7 +2956,6 @@ impl<E: InputEngine> Runtime<E> {
                     conversion_focus_end: 0,
                     caret_edit_suffix: false,
                     caret_edit_prefix: String::new(),
-                    touch_corrections: false,
                 };
                 // 失败占位快照已经没有候选，旧插件操作不能在下一次旁路刷新时复活。
                 self.transform_candidates();
@@ -2981,7 +2987,8 @@ impl<E: InputEngine> Runtime<E> {
                 && self.cached.candidate_positions == previous.candidate_positions
                 && self.cached.candidate_corrected == previous.candidate_corrected
                 && self.cached.candidate_answers_key == previous.candidate_answers_key
-                && self.cached.candidate_static_evidence == previous.candidate_static_evidence;
+                && self.cached.candidate_static_evidence == previous.candidate_static_evidence
+                && self.cached.candidate_touch_supported == previous.candidate_touch_supported;
             if candidates_held {
                 self.highlighted = previous_highlight.min(self.visible_len().saturating_sub(1));
             } else if previous_highlight > 0 {

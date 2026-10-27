@@ -1576,11 +1576,6 @@ impl InputSession {
         &self.mixed_candidates
     }
 
-    /// 列出的候选里有落点支持的纠错整句（`WordItem::touch_supported`），见 `SessionSnapshot::touch_corrections`。
-    pub fn touch_corrections(&self) -> bool {
-        self.candidates().iter().any(|item| item.touch_supported)
-    }
-
     /// Discards the composition. A scheme whose dictionary cannot be opened is unavailable: the error is returned and the session stays in its scheme with its composition untouched.
     pub fn switch_scheme(&mut self, scheme: SchemeType) -> Result<()> {
         // Opening the dictionary first leaves nothing changed when it fails; the switch after it then cannot fail. Resetting must come before the switch, because leaving temporary Japanese switches back to the scheme it was entered from.

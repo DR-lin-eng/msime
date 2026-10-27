@@ -748,7 +748,6 @@ impl Session {
                 .map_or((0, 0), |edit| edit.focus_span()),
             caret_edit_suffix,
             caret_edit_prefix,
-            touch_corrections: input.touch_corrections(),
             candidates,
         }
     }

@@ -4783,7 +4783,20 @@ fn key_geometry_survives_an_engine_replacement() {
                 .unwrap();
             runtime.set_key_touch(None);
         }
-        runtime.cached.touch_corrections
+        // 落点支持的那一行在运行时重排之后仍然对得上自己的标记。
+        let cached = &runtime.cached;
+        let supported: Vec<&str> = cached
+            .candidate_touch_supported
+            .iter()
+            .zip(&cached.candidates)
+            .filter(|(supported, _)| **supported)
+            .map(|(_, text)| text.as_str())
+            .collect();
+        assert!(
+            cached.candidate_touch_supported.is_empty()
+                || cached.candidate_touch_supported.len() == cached.candidates.len()
+        );
+        supported == ["没关系"]
     };
 
     runtime

@@ -1095,7 +1095,7 @@ fn qwerty_geometry() -> Arc<crate::touch::KeyGeometry> {
     Arc::new(crate::touch::KeyGeometry::new(5, &keys, None, &[]).unwrap())
 }
 
-/// 落点支持的纠错整句在快照里报 `touch_corrections`，runtime 才不把它挪到表尾；同一串键不带触点（平面表）时为假。
+/// 落点支持的纠错整句在快照里标上 `touch_supported`，runtime 才不把这一行挪到表尾；同一串键不带触点（平面表）时一行都没有。
 #[test]
 fn a_supported_touch_correction_is_reported_in_the_snapshot() {
     let fixture = Fixture::new(TOUCH_TYPO_FIXTURE);
@@ -1118,7 +1118,7 @@ fn a_supported_touch_correction_is_reported_in_the_snapshot() {
     typed(&mut flat, false);
     let snapshot = flat.snapshot();
     assert!(snapshot.candidates.iter().any(|item| item.word == "没关系"));
-    assert!(!snapshot.touch_corrections);
+    assert!(snapshot.candidates.iter().all(|item| !item.touch_supported));
 
     let mut touched = fixture.session_with(shuangpin);
     touched.set_key_geometry(Some(qwerty_geometry()));
@@ -1130,7 +1130,12 @@ fn a_supported_touch_correction_is_reported_in_the_snapshot() {
         .find(|item| item.word == "没关系")
         .unwrap();
     assert!(row.touch_supported);
-    assert!(snapshot.touch_corrections);
+    // 只有这一条纠错整句被标上，别的行（包括别的纠错行）不受影响。
+    assert!(snapshot
+        .candidates
+        .iter()
+        .filter(|item| item.word != "没关系")
+        .all(|item| !item.touch_supported));
     assert!(snapshot.candidates[0].corrected_from.is_empty());
 }
 

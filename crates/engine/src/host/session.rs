@@ -115,6 +115,8 @@ pub struct EngineSnapshot {
     pub candidate_answers_key: Vec<bool>,
     /// 与候选同步排列的词网格逐字评分证据；非词网格行为空，证据缺失或长度不符时沿用原模型决策。
     pub candidate_static_evidence: Vec<Option<crate::ordering::StaticEvidence>>,
+    /// 与候选同步排列：这一行是 26 键双拼按触点计过价、落点支持留在引擎座位上的纠错整句（`WordItem::touch_supported`），runtime 不把它当作次选读法挪到表尾（`ordering::runner_up_order_with`）。一行都没有时为空，没有触点的请求（桌面、实体键盘）永远为空；按行而不是按整张表，因为同一张表里别的纠错行（模糊音替代读法按平面表查出的）没过落点的闸。
+    pub candidate_touch_supported: Vec<bool>,
     /// The scheme's openable candidate list is showing (the Korean Hanja list, the Zhuyin conversion list); candidates are its rows while it is.
     pub candidate_list_open: bool,
     /// 整句改字时改好的整句，否则为空（`SessionSnapshot::conversion`）。
@@ -127,8 +129,6 @@ pub struct EngineSnapshot {
     pub caret_edit_suffix: bool,
     /// 首选前面固定的那段文字（`SessionSnapshot::caret_edit_prefix`），首选显示为它接上 `candidates[0]`；模式不生效时为空。
     pub caret_edit_prefix: String,
-    /// 纠错行是 26 键双拼按触点计过价、落点支持留在引擎座位上的那种（`SessionSnapshot::touch_corrections`）；runtime 不把它当作次选读法挪到表尾。
-    pub touch_corrections: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -246,6 +246,8 @@ impl Session {
             self.helpcode_enabled && helpcode_scheme && !value.local_mode.annotates_rows()
         });
         let count = value.candidates.len();
+        // 一行都没有落点支持时整列留空，桌面每次快照不多一次分配。
+        let touch_supported = value.candidates.iter().any(|row| row.touch_supported);
         let display_reading = if !value.scheme.draws_reading() {
             String::new()
         } else if value.scheme == SchemeType::JapaneseRomaji
@@ -309,13 +311,17 @@ impl Session {
             candidate_corrected: Vec::with_capacity(count),
             candidate_answers_key: Vec::with_capacity(count),
             candidate_static_evidence: Vec::with_capacity(count),
+            candidate_touch_supported: if touch_supported {
+                Vec::with_capacity(count)
+            } else {
+                Vec::new()
+            },
             candidate_list_open: value.candidate_list_open,
             conversion: value.conversion,
             conversion_focus_start: value.conversion_focus.0,
             conversion_focus_end: value.conversion_focus.1,
             caret_edit_suffix: value.caret_edit_suffix,
             caret_edit_prefix: value.caret_edit_prefix,
-            touch_corrections: value.touch_corrections,
         };
         let mut annotations = value.candidate_annotations.into_iter();
         for (index, candidate) in value.candidates.into_iter().enumerate() {
@@ -369,6 +375,11 @@ impl Session {
             output
                 .candidate_static_evidence
                 .push(candidate.static_evidence());
+            if touch_supported {
+                output
+                    .candidate_touch_supported
+                    .push(candidate.touch_supported);
+            }
             output.candidate_codes.push(candidate.pinyin.into_string());
             output.candidates.push(candidate.word.into_string());
         }

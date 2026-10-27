@@ -1685,6 +1685,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     return true
   }
 
+  /// 会话在收起时销毁、还没在下一次出现时重建：这时 `resumeDictionarySession` 要同步建一整个会话。
+  var dictionarySessionSuspended: Bool { suspended }
+
   // Recreated from the options prepared when this process started. Preparation streams every pinned
   // resource through SHA-256, so repeating it for each presentation would cost far more than the
   // session itself; the options stay valid for the life of the process.

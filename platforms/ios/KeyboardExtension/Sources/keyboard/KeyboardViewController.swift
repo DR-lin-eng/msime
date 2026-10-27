@@ -887,7 +887,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     configureDiagnosticLog()
     DiagnosticLog.shared.write("focus_in \(DiagnosticLog.MemorySample.current().fields)")
     KeyboardUsageReporting.presented(fullAccess: hasFullAccess)
-    do { try session.resumeDictionarySession() }
+    // 收起时销毁的会话在这里同步重建，挡在这次出现的第一帧前面；记下耗时，在设备上看它有多重。
+    let rebuildsSession = session.dictionarySessionSuspended
+    let resumeStart = ProcessInfo.processInfo.systemUptime
+    do {
+      try session.resumeDictionarySession()
+      if rebuildsSession { DiagnosticLog.shared.write("dictionary_resumed ms=\(Self.elapsedMilliseconds(since: resumeStart))") }
+    }
     catch {
       DiagnosticLog.shared.write("dictionary_resume_failed")
       showDiagnostic(error.localizedDescription)
@@ -943,6 +949,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     applyKeyboardSkin()
     synchronizeReplyKeyboard()
     startCountingKeyPresses()
+  }
+
+  /// 诊断日志里的耗时：从 `start`（`systemUptime`）到现在的整毫秒数。
+  private static func elapsedMilliseconds(since start: TimeInterval) -> Int {
+    Int(((ProcessInfo.processInfo.systemUptime - start) * 1000).rounded())
   }
 
   /// iOS ends a keyboard extension that keeps using too much memory, so a warning is worth a line when a report says the keyboard vanished.
@@ -1129,7 +1140,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // prepareForDeactivation: for the same reason: the user typed those letters and never asked to
     // throw them away.
     render(session.finishComposition())
-    _ = session.suspendDictionarySession()
+    let releasesSession = !session.dictionarySessionSuspended
+    let suspendStart = ProcessInfo.processInfo.systemUptime
+    // 销毁会话时引擎同步写完选词计数和个人上下文，也在主线程上。
+    if session.suspendDictionarySession() && releasesSession {
+      DiagnosticLog.shared.write("dictionary_suspended ms=\(Self.elapsedMilliseconds(since: suspendStart))")
+    }
     ownEditEcho.reset()
     cancelBackspacePress()
     diagnosticDismissTimer?.invalidate()

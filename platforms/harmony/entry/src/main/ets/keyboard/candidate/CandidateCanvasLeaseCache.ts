@@ -12,7 +12,7 @@ export interface CandidateCanvasLease {
  */
 export class CandidateCanvasLeaseCache<T extends CandidateCanvasLease> {
   private live: Map<string, T> = new Map<string, T>();
-  private parkedKey: string = '';
+  private parkedKey: string = "";
   private parked: T | null = null;
   private parking: boolean = true;
   private readonly free: (lease: T) => void;
@@ -29,7 +29,7 @@ export class CandidateCanvasLeaseCache<T extends CandidateCanvasLease> {
       if (this.parked !== null && this.parkedKey === key) {
         lease = this.parked;
         this.parked = null;
-        this.parkedKey = '';
+        this.parkedKey = "";
       } else {
         this.dropParked();
         lease = create();
@@ -62,7 +62,7 @@ export class CandidateCanvasLeaseCache<T extends CandidateCanvasLease> {
   private dropParked(): void {
     const parked: T | null = this.parked;
     this.parked = null;
-    this.parkedKey = '';
+    this.parkedKey = "";
     if (parked !== null) this.free(parked);
   }
 }

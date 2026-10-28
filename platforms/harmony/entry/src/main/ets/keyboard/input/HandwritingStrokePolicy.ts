@@ -48,7 +48,9 @@ export class HandwritingStrokePolicy {
       Number.isFinite(height) && height > 0 ? height : HANDWRITING_CANVAS_SIZE;
     const scale: number = HANDWRITING_CANVAS_SIZE / Math.max(canvasWidth, canvasHeight);
     return HandwritingStrokePolicy.point(
-      (Number.isFinite(x) ? x : 0) * scale, (Number.isFinite(y) ? y : 0) * scale);
+      (Number.isFinite(x) ? x : 0) * scale,
+      (Number.isFinite(y) ? y : 0) * scale,
+    );
   }
 
   /**

@@ -46,9 +46,7 @@ def main() -> int:
         "two-second yield": "IDLE_DICTIONARY_RETRY_MS: number = 2000" in session
         or "IDLE_DICTIONARY_RETRY_MS: number = 2000" in retry_policy
         and "IdleDictionaryRetryPolicy.delay(this.personalDictionaryStalls)" in scheduler,
-        # Keep the queue out of both an active composition and a local Engine mode. The old
-        # helper name was removed from KeyboardSession; checking the actual state also lets the
-        # ArkTS compiler catch stale method calls instead of preserving one for this guard.
+        # 组合输入和本地引擎模式都不能排空队列；直接检查实际状态，让 ArkTS 编译器也能发现已移除的方法调用。
         "composition and local-mode guard": "this.composing() || this.localMode !== 'none'" in scheduler,
         "Engine session release": "this.restartIdleSession('personal dictionary queue')" in scheduler,
         "mode restoration": "client.setEnglishMode" in scheduler

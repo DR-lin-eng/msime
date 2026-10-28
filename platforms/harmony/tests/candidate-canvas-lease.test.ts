@@ -63,7 +63,10 @@ const live = retain("4:skin:light");
 cache.trim();
 check(freed.length === 3 && live.readers === 1, "trim 不动还有读者的解码结果");
 cache.release("4:skin:light", live);
-check(freed.join(",") === "1:skin:light,2:skin:dark,toolbar:3,4:skin:light", "trim 之后离开的读者直接释放");
+check(
+  freed.join(",") === "1:skin:light,2:skin:dark,toolbar:3,4:skin:light",
+  "trim 之后离开的读者直接释放",
+);
 const reopened = retain("4:skin:light");
 check(reopened !== live && created.length === 5, "已释放的不会被接回");
 

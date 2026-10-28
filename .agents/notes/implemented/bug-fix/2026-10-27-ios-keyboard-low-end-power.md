@@ -76,3 +76,5 @@ Status: implemented
 
 - **英文候选集成用例的查询前置条件**：Xcode 26.3 的 CI 在五条 `EmailSuffixKeyboardTests` 用例里等不到 `language` 候选。夹具把完整的 `languge` 文档挂到控制器上后只切换模式，没有走实际输入字符的查询入口。补一次 `textDidChange` 仍不足：它只经 `refreshEmailSuffixes` 刷新，邮箱后缀从空到空时提前返回。夹具现在从 `langug` 开始，切到英文并同步上下文后，通过可见的 E 键输入末尾字母，先断言文档确实成为 `languge`，再等待真实纠错出现。五条保护旧文档和选区的断言与原有超时保持不变，不修改生产查询触发策略。
 - **本轮本机验证范围**：真实按键夹具补修后的完整 `bash scripts/verify-local.sh --quick` 退出 0；202 项 Windows 可移植用例、仓库契约与笔记、Rust workspace、Android 目标与 Java 宿主、WASM、Linux 设置应用和原生门禁（112 项，其中 `linux-ibus-demand-activation` 环境跳过，0 失败）、macOS 原生编译及 Apple 桥均通过。缺 MinGW 的 Windows 原生/pipe-only、缺暂存输入的鸿蒙 HAP 按规则跳过。Swift 语法解析通过。本机空闲低于仓库规定的 50 GB，因此没有启动新的 Xcode 构建；前次仅补回调的 `ac2c9a2b22` 新 CI 仍有相同五项失败，本次夹具的 iOS 运行时结果仍待新提交 CI 实跑确认。专用模拟器和生成工程已清理，以上本地检查不计设备验收。
+
+英文建议的控制器回归另覆盖两条交互：`eng` 展示 `English` 前缀补全时点原文，只收起候选，不记录拒绝纠错；按空格仍输入 `eng `，不能把展示用补全当成唯一纠错自动上屏。用例通过真实字母键触发查询，等待真实候选再点按钮；既有测试辅助方法允许指定末尾字母和期望原文。沿用 #10067 已合入的异步展示与边界查询实现，本补修不改生产缓存或候选策略。对固定上游提交提取的实际桥与控制器方法，合成 C ABI/UI 适配器已执行 34 条断言；它只验证合成环境，新增 UIKit XCTest 的实际执行以本 PR CI 为准。冻结上述两个文件后运行完整本地 `bash scripts/verify-local.sh --quick`，正式退出 0，未在运行期间改写源码。新增两条 UIKit XCTest 仍待 iOS CI 执行，不把本地 quick 视为原生测试验收。

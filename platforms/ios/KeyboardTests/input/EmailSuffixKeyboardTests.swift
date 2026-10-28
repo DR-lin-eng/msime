@@ -174,7 +174,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
   func testEnglishCorrectionDoesNotReplaceADifferentCurrentWord() throws {
     let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
-    try waitForCorrection("language", in: controller)
+    try waitForEnglishCandidate("language", in: controller)
     let correction = try button("candidate-2", in: controller)
 
     document.text = "hello"
@@ -187,7 +187,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
   func testEnglishCorrectionDoesNotCrossDocumentIdentity() throws {
     let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
-    try waitForCorrection("language", in: controller)
+    try waitForEnglishCandidate("language", in: controller)
     let correction = try button("candidate-2", in: controller)
 
     document.documentIdentifier = UUID()
@@ -200,7 +200,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
   func testEnglishCorrectionDoesNotReplaceSelectedText() throws {
     let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
-    try waitForCorrection("language", in: controller)
+    try waitForEnglishCandidate("language", in: controller)
     let correction = try button("candidate-2", in: controller)
     document.text = "languge other"
     document.selectedRange = NSRange(location: 7, length: 6)
@@ -215,7 +215,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
   func testEnglishBoundaryDoesNotCorrectTheWordBeforeSelectedText() throws {
     let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
-    try waitForCorrection("language", in: controller)
+    try waitForEnglishCandidate("language", in: controller)
     document.text = "languge other"
     document.selectedRange = NSRange(location: 7, length: 6)
 
@@ -229,7 +229,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
   func testEnglishQueryImmediatelyReplacesThePreviousWordsSuggestions() throws {
     let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
-    try waitForCorrection("language", in: controller)
+    try waitForEnglishCandidate("language", in: controller)
     let x = try XCTUnwrap(descendants(controller.view).first {
       $0.accessibilityLabel == "字母 X" && shown($0, in: controller)
     } as? UIButton)
@@ -241,7 +241,34 @@ final class EmailSuffixKeyboardTests: XCTestCase {
                    "查询结果回来前只给当前原文，不保留旧词的纠错")
   }
 
-  private func makeEnglishKeyboard(_ document: Document) throws -> KeyboardViewController {
+  /// 真实候选条展示的是前缀补全时，点原文只收起，不生成拒绝纠错记录。
+  func testChoosingOriginalPrefixDoesNotRejectACompletion() throws {
+    let document = Document("en")
+    let controller = try makeEnglishKeyboard(document, finalLetter: "G", expectedWord: "eng")
+    try waitForEnglishCandidate("English", in: controller)
+
+    try button("candidate-1", in: controller).sendActions(for: .primaryActionTriggered)
+
+    XCTAssertEqual(document.text, "eng")
+    let rejectedPrefix = try XCTUnwrap(Mirror(reflecting: controller).children.first {
+      $0.label == "englishCorrectionRejectedPrefix"
+    }?.value as? String)
+    XCTAssertEqual(rejectedPrefix, "", "前缀补全的原文不能被记成拒绝纠错")
+  }
+
+  /// 空格不得把展示栏中的第二个前缀补全当成唯一纠错自动上屏。
+  func testEnglishBoundaryDoesNotCommitDisplayedPrefixCompletion() throws {
+    let document = Document("en")
+    let controller = try makeEnglishKeyboard(document, finalLetter: "G", expectedWord: "eng")
+    try waitForEnglishCandidate("English", in: controller)
+
+    try button("spaceKey", in: controller).sendActions(for: .primaryActionTriggered)
+
+    XCTAssertEqual(document.text, "eng ")
+  }
+
+  private func makeEnglishKeyboard(_ document: Document, finalLetter: String = "E",
+                                   expectedWord: String = "languge") throws -> KeyboardViewController {
     let previous = EnglishSuggestionsPreference.isEnabled
     EnglishSuggestionsPreference.isEnabled = true
     addTeardownBlock { EnglishSuggestionsPreference.isEnabled = previous }
@@ -255,21 +282,21 @@ final class EmailSuffixKeyboardTests: XCTestCase {
     }
     controller.textDidChange(nil)
     // 无邮箱后缀时，文档回调和模式切换都不启动英文查询；通过真实字母键补全待纠错原文。
-    let e = try XCTUnwrap(descendants(controller.view).first {
-      $0.accessibilityLabel == "字母 E" && shown($0, in: controller)
+    let letter = try XCTUnwrap(descendants(controller.view).first {
+      $0.accessibilityLabel == "字母 " + finalLetter && shown($0, in: controller)
     } as? UIButton)
-    e.sendActions(for: .primaryActionTriggered)
-    XCTAssertEqual(document.text, "languge", "必须实际输入末尾字母，触发本次英文查询")
+    letter.sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(document.text, expectedWord, "必须实际输入末尾字母，触发本次英文查询")
     return controller
   }
 
-  private func waitForCorrection(_ correction: String, in controller: KeyboardViewController) throws {
+  private func waitForEnglishCandidate(_ candidate: String, in controller: KeyboardViewController) throws {
     let deadline = Date().addingTimeInterval(10)
-    while !chips(in: controller).contains(where: { $0.configuration?.title == correction }) && Date() < deadline {
+    while !chips(in: controller).contains(where: { $0.configuration?.title == candidate }) && Date() < deadline {
       RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
-    _ = try XCTUnwrap(chips(in: controller).first { $0.configuration?.title == correction },
-                      "英文查询必须先实际返回纠错，才能验证旧答案的处理")
+    _ = try XCTUnwrap(chips(in: controller).first { $0.configuration?.title == candidate },
+                      "英文查询必须先实际返回候选，才能验证点击与过期结果的处理")
   }
 
   /// 让自己改动文档后排在下一轮的重新匹配跑完。

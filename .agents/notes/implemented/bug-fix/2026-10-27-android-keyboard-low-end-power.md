@@ -34,6 +34,7 @@ Status: implemented
 - 改用共享 Rust PR 新增的 `Runtime::candidate_range(start, count)` 与 C ABI `msime_client_candidate_range`（见 [共享 Rust 层空闲 I/O](2026-10-27-shared-rust-idle-io-hot-path.md)），本 PR 补 JNI、`NativeClient.candidateRange` 和 `verify-native.sh` 清单。它只复制座位 `start` 起的一段，身份与 `all_candidates` 同一座位相同；暂扣尾部只在 `start` 走到已放出的末尾时才放，放出照旧换一代。`all_candidates` 不变，展开面板、九键面板仍用它。
 - `ImeCandidateStrip` 每键只取第一批，滚近尾部再取下一批。英文释义和音标改走 `displayedCandidateSnapshot`：展开面板开着时取整代，否则从 0 起取已放出的那一段（上限沿用释义请求的 4096 条），不放尾部、不换代。
 - 候选按钮放进按位置复用的池子，`bindStripCandidateButton` 每次重绑点击、长按并重设全部逐候选状态；样式按按钮记下上次装上的底，外观（`styleCacheKey`）和密度都没变时不再新建 Drawable。
+- 安装产品的旧候选设备回归使用同一个创建、重绑入口：旧代次点击仍忽略，把同一按钮重绑到新候选后必须正常上屏。测试不再反射已移除的逐次创建方法。
 - `ImeStyler.applySkin` 跳过 GONE 子树并记下来；表情面板和手写键区只按各自皮肤走一遍。兜底：键盘根视图挂画帧前监听，记下的子树被直接显示出来却没换肤时，在画下一帧前补一遍。
 
 ### 英文直输（idx 2）

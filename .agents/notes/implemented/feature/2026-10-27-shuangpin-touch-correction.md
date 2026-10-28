@@ -25,7 +25,7 @@ Status: implemented
   - `KeyTouch { dx, dy, copy }`：相对被按键中心的偏移，单位 1/20 键，在入口量化并钳到 ±30；`copy` 是这个字母的第几个实例，分离键盘上两边各有一个 G、V 时才不是 0。打分和缓存签名用同一个量化值。
 - **runtime**：`InputEngine` 加两个默认空实现的 setter（`set_key_touch`、`set_key_geometry`）。`Runtime` 自己持有几何（`Arc`），在 `replace_engine_with_touch_layout` 里紧挨 `set_rescoring_context` 重新下发，宿主空闲时重建引擎后触点照样有效。`Runtime::key_touch` 按代次和坐标算出触点，host-api 和评测都用它。没有新增 `Action` 变体。
 - **引擎内的生命周期**：`session::Session::set_key_touch` 把触点放进 `InputSession.pending_touch`。`character` 先把它取出来，只有走到 `dispatch_character` 末尾、这一键是小写字母或 `;` 时才在 `handle_key` 之前交给方案（`handle_key` 会同步刷新候选）；其余路径（改字、光标处插入、本地模式、网址、辅助码前导键、九宫格数字）都丢掉它。`command`、`select`、`grid_key`、`glide`、`punctuation` 一开头清掉它，所以被 `candidate_shortcut` 之类改道的按键不会把触点留给后面的字母。
-- **`ShuangpinScheme.touches`** 与 `raw` 逐字节对齐，一个触点都没有时保持为空，不为全 `None` 占位，桌面每键不多一次分配。`'`、大写字母（辅助码）和标记不带触点；退格截掉；`set_raw_input` 先认新旧串的公共后缀、再在剩下的部分里认公共前缀，这两段保留触点，中间新出现的字节没有触点。先认后缀是因为部分选词吃掉前缀、撤销补回前缀是确定的改动：叠词 `xpxp`（谢谢）选走第一个字剩下 `xp`，先认前缀会让它拿到刚选走那两键的触点，按别的按键的落点给剩下的音节计价。光标处删改相同的相邻字母（`hh`）分不清是哪一个，触点可能互换，长度和其余位置仍对得上。
+- **`ShuangpinScheme.touches`** 与 `raw` 逐字节对齐，一个触点都没有时保持为空，不为全 `None` 占位，桌面每键不多一次分配。`'`、大写字母（辅助码）和标记不带触点；退格截掉；`set_raw_input` 先认新旧串的公共后缀、再在剩下的部分里认公共前缀，这两段保留触点，中间新出现的字节没有触点。先认后缀是因为部分选词吃掉前缀、撤销补回前缀是确定的改动：叠词 `xpxp`（谢谢）选走第一个字剩下 `xp`，先认前缀会让它拿到刚选走那两键的触点，按别的按键的落点给剩下的音节计价。光标处删改相同的相邻字母（`hh`）分不清是哪一个，触点可能互换，长度和其余位置仍对得上。几何的布局或代次变化（包括注册和清除）会清掉已记录触点和待用触点，保留 `raw`；没有所属布局的旧偏移不能交给新几何解释。相同几何重复下发保留触点，避免会话重复绑定方案时丢失当前输入的落点。
 - **`QueryRequest`** 新增 `key_touches`、`key_geometry`、`touch_tuning`。只有注册了几何、至少一个触点、输入里没有 `'`、句中辅助码没有改写输入串时，`key_touches` 才非空；否则必须是空 Vec 而不是全 `None`。光标前缀查询、撤回选词后重打和模糊音的替代拼写都拿不到触点，按平面表算。
 - **`ShuangpinDictionary`** 在每次查询前收下请求的触点（`set_key_touches`，`query`、`insert_online_words`、`expand_initial_candidates` 都先调它）。只对带触点那串输入的前缀用触点；系列缓存、整句缓存、辅助码缓存的键追加这一段的触点签名（几何代次加逐位量化触点），没有触点时签名为空，键与以前相同。计价参数变了就清掉整句答案。
 
@@ -39,7 +39,7 @@ Status: implemented
 ### 座位
 
 - 纠错整句的分数（已扣罚分）不比字面整句低出 `show_margin`，而且它改动的每一键在落点下改过去的价都不超过 `show_penalty`（`touch_supports_correction` 按纠错读音逐音节对回两键码，查这一键的计价变体）时，这一行标上 `WordItem::touch_supported`。快照带一列与候选同步排列的 `candidate_touch_supported`（一行都没有时为空），runtime 调 `ordering::runner_up_order_with(scheme, rows, &candidate_touch_supported)`：标上的纠错行不算整句读法，留在引擎给的座位上（整句块之后），前三条字面读法照旧，其余读法照旧挪到表尾。没标上的纠错行和没有触点的表一样沉底，网页引擎和桌面不受影响。按行而不是按整张表：开了模糊音时，替代拼写按平面表查出的纠错整句也带 `corrected_from`，却没有触点、没过闸；整张表一个标志会让它跟着主纠错行一起逃过沉底。
-- 纠错整句仍不抢首选：`typo_sentence_seat`、`keep_typo_sentence_off_first_seat`、`corrections_may_lead` 都没动，评测里 clean 集的首选一次都没变（`--assert-top1-unchanged`）。
+- 纠错整句仍不抢首选：`typo_sentence_seat`、`keep_typo_sentence_off_first_seat`、`corrections_may_lead` 都没动，旧评测的 `top1_changed` 为 0，只能说明原本排第一的金标准没有降位；实际首选是否变化由单独比较候选文本的 `--assert-top1-unchanged` 检查。
 
 ### 参数（暂定）
 
@@ -83,7 +83,7 @@ Status: implemented
   - realistic σ=0.25：第一页召回升 4–6 个点（小鹤 0.550 到 0.591），top1 不变。
   - noisy 的 top1、top3 不变：纠错整句坐在整句块之后，这一期不抢首选。
   - 按方案 × σ × 偏置 × 音节档 × 错键数档的每一个分桶，top1、top3、top9、found、mrr 都不低于平面表。
-  - clean 集 60760 条（五个方案 × 8 组 σ 和偏置）首选一条没变，被往后挤一位的 33 条（0.05%），单组最多 4 / 1519（小鹤 σ=0.35）。
+  - clean 集 60760 条（五个方案 × 8 组 σ 和偏置）中，原本排第一的金标准没有降位，被往后挤一位的金标准有 33 条（0.05%），单组最多 4 / 1519（小鹤 σ=0.35）。旧门禁没有保存实际首选文本，不能据此断言全部首选不变；修正门禁后尚未重跑这份完整评测。
   - 词级族（2 音节）与平面表逐字节相同：纠错整句至少 3 个音节，这一期 2 音节没有纠错。
 - **代价**：每次按键多一次触点换算和请求里一份触点的复制，带触点的输入缓存键多一段签名。
   - 门槛「每键 p95 增量 ≤ 0.5 ms」的量法：`rerank_latency --touch-arms`，两臂都挂模型，一臂送落点、一臂不送，打同样的键；集合是 sentences-v1 加 particles，σ=0.25，用两份 Android 参考几何。取两臂 p95 之差，每个方案用同一条命令重复 5 轮，取中位数。每轮紧接着再跑一次加 `--no-touch-points` 的 A/A（两臂都不送），作为噪声底。
@@ -114,6 +114,15 @@ Status: implemented
   - `cargo test -p msime-host-api --no-fail-fast`：库测试 1008 项通过、2 项失败（`listing_reports_every_pack_and_checks_the_state_root`、`a_command_gets_the_local_time_to_the_minute`），这两项在本分支的父提交上同样失败，与这次改动无关；其余测试目标全部通过。新增的 `touch_characters_without_usable_touches_match_plain_characters` 逐字节比对代次不符、NaN、无穷大三种情况下的回应，并断言 ABI 仍为 3；`key_geometry_is_validated_at_the_host_boundary` 覆盖未知键、少键、零宽、归一后溢出、键心过远、非 JSON、超过 16 KiB、空指针和清除。
   - `cargo test -p msime-engine --test golden`：31 项通过。`cargo clippy -p msime-engine -p msime-input-runtime -p msime-host-api --all-targets -- -D warnings` 无警告。`cargo check --manifest-path fuzz/Cargo.toml --target-dir target/fuzz --bins` 通过，`host_session` 目标新增注册几何（合法的、带 `;` 和重复键的、任意字节）和带任意坐标（含 NaN、无穷大）的触点按键；没有用 nightly 实际跑模糊测试。
 - **G0**：本分支和父提交（PR0 头）的 `convert_eval` 各跑 `verify-local.sh` 的 11 组，以及双拼 none 模式（五个方案，整句族和词级族，带 `--dump`），报告和 dump 逐字节相同；改成按方案各用一份可写目录、加 `--jobs` 之后，用最终的二进制重跑整句族 none 的报告和 dump、sentences、nine-key 三组，仍逐字节相同。父提交与 merge-base 的这 11 组在 PR0 已核对过逐字节相同。
-- **评测可复现**：最终二进制加 `--no-touch-points --jobs 5` 重跑整句族全部组合，与 PR0 提交的平面表基线逐字节相同；词级族送落点的报告与 PR0 的词级基线逐字节相同（`--jobs 5`）。两份基线由 README 里的命令生成（`--report` 写出，与 `--update-baseline` 写的字节相同），`--assert-top1-unchanged` 通过。
-- **评审后的修正**：评审之后改了三处。一是触点重新对齐时先认后缀；二是快照里的落点支持改成逐行的一列；三是拒绝归一后会溢出的几何。这三处在没有触点、只有一条纠错行、几何正常时都不改变结果。改完以后用最终二进制按 README 的参数重跑了整句族的一个子集：小鹤和微软 × none、clean、noisy、realistic，σ=0.25，b=0。8 组报告与提交的基线里对应的 8 组逐项相同，`--assert-top1-unchanged` 也通过。完整的 125 组没有重跑。
-- **没有做的**：`scripts/verify-local.sh` 整套没跑；没有在任何真机或模拟器上验证，宿主还没有接这两个函数（PR1b）；没有用真机几何调参。
+- **评测可复现**：最终二进制加 `--no-touch-points --jobs 5` 重跑整句族全部组合，与 PR0 提交的平面表基线逐字节相同；词级族送落点的报告与 PR0 的词级基线逐字节相同（`--jobs 5`）。两份基线由 README 里的命令生成（`--report` 写出，与 `--update-baseline` 写的字节相同），旧 `--assert-top1-unchanged` 通过（只检查原本排第一的金标准未降位）。
+- **评审后的修正**：评审之后改了三处。一是触点重新对齐时先认后缀；二是快照里的落点支持改成逐行的一列；三是拒绝归一后会溢出的几何。这三处在没有触点、只有一条纠错行、几何正常时都不改变结果。改完以后用最终二进制按 README 的参数重跑了整句族的一个子集：小鹤和微软 × none、clean、noisy、realistic，σ=0.25，b=0。8 组报告与提交的基线里对应的 8 组逐项相同，旧 `--assert-top1-unchanged` 也通过（同样不能证明实际首选文本不变）。完整的 125 组没有重跑。
+- **原实现阶段没有做的**：`scripts/verify-local.sh` 整套没跑；没有在任何真机或模拟器上验证，宿主还没有接这两个函数（PR1b）；没有用真机几何调参。
+
+### 本轮评审修正的验证
+
+- 几何变化回归在原 setter 上失败，修正后方案层 13 项通过：代次变化、同代次布局变化、清除都丢弃旧触点和待用触点；相同几何重复下发保留触点；新按键仍与保留的输入串逐字节对齐。
+- 引擎库测试 2717 项通过、57 项忽略，golden 31 项通过；运行时库 405 项、`convert_eval` 23 项、`rerank_latency` 16 项通过。两个新首选门禁回归在旧统计规则上失败，修正后覆盖金标准名次不变或未命中时首选互换、空表转换和仅后排变化。
+- `cargo clippy -p msime-engine -p msime-input-runtime --all-targets -- -D warnings`、格式和笔记校验通过。
+- 将本轮资源目录的全部文件逐项按本分支 `desktop-dictionary.lock.json` 校验大小与 SHA-256 后，使用 `sentences-v1 --limit 12`、小鹤和微软、none/clean、σ=0.25、b=0、种子 20261027 实跑；两方案各 12 条，修正后的 `--assert-top1-unchanged` 通过。这里只验证 24 条 clean 用例，没有重跑完整的 60760 条。
+
+- 本轮完整 `bash scripts/verify-local.sh --quick` 退出 0：Windows 可移植用例、仓库契约与笔记、Rust workspace、Android 目标及 Java 宿主、WASM、Linux 设置应用和原生门禁（112 项、0 失败）、macOS 原生编译及 Apple 桥通过。缺 MinGW 的 Windows 原生/pipe-only 与缺暂存输入的鸿蒙 HAP 按规则跳过，不计设备验收；本轮没有补跑 iOS 原生套件或完整触点基线。

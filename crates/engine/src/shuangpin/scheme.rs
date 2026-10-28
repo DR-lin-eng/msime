@@ -38,8 +38,12 @@ impl ShuangpinScheme {
         }
     }
 
-    /// 宿主注册或清除的键位几何（会话转交）；已经记下的触点留着，换几何不重打。
+    /// 宿主注册或清除的键位几何（会话转交）；布局或代次变化后旧触点失效，原按键串保留。
     pub fn set_key_geometry(&mut self, geometry: Option<Arc<KeyGeometry>>) {
+        if self.key_geometry != geometry {
+            self.touches.clear();
+            self.pending_touch = None;
+        }
         self.key_geometry = geometry;
     }
 
@@ -573,6 +577,56 @@ mod tests {
     }
 
     #[test]
+    fn changed_geometry_discards_old_and_pending_touches() {
+        let original = geometry();
+        let mut keys = [[0.0f32; 4]; 26];
+        for (index, key) in keys.iter_mut().enumerate() {
+            *key = [index as f32 * 10.0, 0.0, 10.0, 10.0];
+        }
+        let next_generation = Arc::new(KeyGeometry::new(6, &keys, None, &[]).unwrap());
+        keys[0][0] += 5.0;
+        let changed_layout = Arc::new(KeyGeometry::new(5, &keys, None, &[]).unwrap());
+        for replacement in [Some(next_generation), Some(changed_layout), None] {
+            let mut typed = scheme(ShuangpinProfileKind::Xiaohe);
+            typed.set_key_geometry(Some(Arc::clone(&original)));
+            type_touched(
+                &mut typed,
+                "nihc",
+                &[touch(1), touch(2), touch(3), touch(4)],
+            );
+            typed.set_pending_touch(touch(5));
+            typed.set_key_geometry(replacement);
+            assert_eq!(typed.preedit(), "nihc");
+            assert!(typed.build_request().key_touches.is_empty());
+            assert!(typed.touches().is_empty());
+            typed.handle_key(SchemeKey::Letter(b'm'));
+            assert!(typed.touches().is_empty());
+            typed.set_key_geometry(Some(Arc::clone(&original)));
+            assert!(typed.build_request().key_touches.is_empty());
+            type_touched(&mut typed, "a", &[touch(6)]);
+            assert_eq!(
+                typed.build_request().key_touches,
+                [None, None, None, None, None, touch(6)]
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_geometry_preserves_recorded_and_pending_touches() {
+        let mut typed = scheme(ShuangpinProfileKind::Xiaohe);
+        typed.set_key_geometry(Some(geometry()));
+        type_touched(&mut typed, "ni", &[touch(1), touch(2)]);
+        typed.set_pending_touch(touch(3));
+        // 独立分配但值相同的几何也属于重复下发。
+        typed.set_key_geometry(Some(geometry()));
+        typed.handle_key(SchemeKey::Letter(b'h'));
+        assert_eq!(
+            typed.build_request().key_touches,
+            [touch(1), touch(2), touch(3)]
+        );
+    }
+
+    #[test]
     fn touches_follow_the_raw_input_key_by_key() {
         let mut typed = scheme(ShuangpinProfileKind::Microsoft);
         typed.set_key_geometry(Some(geometry()));
@@ -673,6 +727,10 @@ mod tests {
         assert!(request.key_touches.is_empty());
         assert!(request.key_geometry.is_none());
         typed.set_key_geometry(Some(Arc::clone(&geometry)));
+        // 注册前记下的触点没有所属布局，不能配上新几何使用。
+        assert!(typed.build_request().key_touches.is_empty());
+        typed.reset();
+        type_touched(&mut typed, "nihc", &[touch(1), None, touch(3), touch(4)]);
         let request = typed.build_request();
         assert_eq!(request.key_touches, [touch(1), None, touch(3), touch(4)]);
         assert_eq!(request.key_geometry.as_deref(), Some(&*geometry));

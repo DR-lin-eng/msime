@@ -241,7 +241,6 @@ impl Session {
     }
 
     pub fn command(&mut self, command: Command) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             self.prediction.clear();
             return if command == Command::Cancel {
@@ -342,7 +341,6 @@ impl Session {
     }
 
     pub fn select(&mut self, index: usize) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             let Some((row, word, pinyin)) = self.prediction.selected(index) else {
                 return KeyResult::unhandled();
@@ -369,7 +367,6 @@ impl Session {
 
     /// Commit the first or last Han character of a candidate and drop the rest of the composition.
     pub fn select_edge(&mut self, index: usize, edge: CandidateEdge) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             return KeyResult::unhandled();
         }
@@ -381,7 +378,6 @@ impl Session {
 
     /// Promote a dictionary candidate without committing; unsupported rows are unhandled, persistence failures carry a diagnostic.
     pub fn pin(&mut self, index: usize) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             return KeyResult::unhandled();
         }
@@ -393,7 +389,6 @@ impl Session {
 
     /// Remove a dictionary phrase without committing; single-character non-English rows are protected.
     pub fn remove(&mut self, index: usize) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             return KeyResult::unhandled();
         }
@@ -405,7 +400,6 @@ impl Session {
 
     /// Fix a dictionary candidate to slot 1..=5 in this input context; unhandled for any other slot.
     pub fn fix_position(&mut self, index: usize, position: i32) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             return KeyResult::unhandled();
         }
@@ -419,7 +413,6 @@ impl Session {
     }
 
     pub fn clear_position(&mut self, index: usize) -> KeyResult {
-        self.input.pending_touch = None;
         if self.prediction.active() {
             return KeyResult::unhandled();
         }

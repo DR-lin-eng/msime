@@ -75,7 +75,7 @@ import {
   ResolvedTypingEffectDocument, TYPING_EFFECT_COMMIT, TYPING_EFFECTS_OFF, TypingEffect, TypingEffectPolicy,
   TypingEffectSettings
 } from './TypingEffectPolicy';
-import { EnglishCompletions, EnglishReplacement, EnglishSuggestionPolicy }
+import { EnglishCompletions, EnglishRefresh, EnglishReplacement, EnglishSuggestionPolicy }
   from './input/EnglishSuggestionPolicy';
 import { EmailSuffixMatch, EmailSuffixPolicy, EmailSuffixReplacement } from './input/EmailSuffixPolicy';
 import { ImeModeScopePolicy } from './input/ImeModeScopePolicy';
@@ -405,6 +405,7 @@ interface EnglishCompletionRequest {
   prefix: string;
   limit: number;
   correction?: boolean;
+  completions?: boolean;
 }
 
 interface EmojiQuery {
@@ -1315,6 +1316,8 @@ export class KeyboardSession implements HardwareKeyTarget {
   // makes every earlier answer stale. A reply that arrives after the word moved on is discarded.
   private englishSuggestions: string[] = [];
   private englishSuggestionPrefix: string = '';
+  /** 候选栏当前的英文建议第二行是否为纠错；只有补全时点原文不算拒绝纠错。 */
+  private englishSuggestionCorrected: boolean = false;
   private englishSuggestionEpoch: number = 0;
   private englishSuggestionRequested: string = '';
   // 候选栏上正在给的邮箱后缀，以及它们接上的那个 `@` 之后已打的域名；没有时为 null。
@@ -1521,6 +1524,14 @@ export class KeyboardSession implements HardwareKeyTarget {
   onReplyContextChanged: (() => void) | undefined = undefined;
   /** Putting the keyboard away belongs to the panel, which the view has no handle on. */
   onDismiss: (() => void) | undefined = undefined;
+  /** 同一编辑框收起后可直接重新显示，不一定再次触发 `inputStart`；恢复空闲任务且不重建已有计时器。 */
+  keyboardShown(): void {
+    if (this.handle === 0 || this.inputClient === undefined) return;
+    this.idleDictionaryVisible = true;
+    this.scheduleDictionarySnapshotPoll();
+    this.schedulePersonalDictionaryDrain();
+  }
+
   /** 键盘收起（系统的 keyboardHide，或 inputStop 时宿主隐藏面板）。面板收起时视图不会销毁，视图靠它停掉键盘内的语音识别。 */
   onPanelHidden: (() => void) | undefined = undefined;
 
@@ -3783,9 +3794,14 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   /** A selection move changes contextual UI but does not itself discard an active composition. */
-  editorSelectionChanged(): void {
+  editorSelectionChanged(collapsed: boolean = true): void {
     this.invalidateReplyContext();
-    this.clearEnglishSuggestions();
+    // 编辑器在每次 insertTextSync 之后也回报一次选区变化，这里只按光标前的当前词重新核对：词没变就保留建议，光标移开或词变了才重新查询或收起。直接清空会让手机纠错模式下每一键刚出的建议马上消失，用户看不到候选，也无法点原文拒绝纠错。选中了一段文字时没有可替换的当前词，照旧收起。
+    if (collapsed) {
+      this.refreshEnglishSuggestions();
+    } else {
+      this.clearEnglishSuggestions();
+    }
     // 与 Android 在 `onUpdateSelection` 里重新匹配相同：无论 `@` 从哪里上屏（字母键、符号层、符面板、九键常用标点、引擎上屏），编辑器随后都会回报一次选区变化。
     // 这次回报只是输入法自己同步上屏的回声、上屏后已经按新的上文匹配过时不再读：直接英文里每个字母都会走到这里，每读一次就是一次等宿主 UI 线程作答的同步跨进程调用。
     const current: boolean = this.caretContextEcho.selectionChanged(this.ownEdits.pending(Date.now()) === 0);
@@ -6956,17 +6972,21 @@ export class KeyboardSession implements HardwareKeyTarget {
   private suggestEnglish(prefix: string): void {
     if (prefix !== this.englishCorrectionRejectedPrefix) this.englishCorrectionRejectedPrefix = '';
     const correction: boolean = this.englishCorrectionEnabled();
-    if (!EnglishSuggestionPolicy.suggestible(prefix, correction)) {
+    const action: EnglishRefresh =
+      EnglishSuggestionPolicy.refresh(prefix, this.englishSuggestionRequested, correction);
+    if (action === EnglishRefresh.CLEAR) {
       this.clearEnglishSuggestions();
       return;
     }
-    if (prefix === this.englishSuggestionRequested) {
+    if (action === EnglishRefresh.KEEP) {
       return;
     }
     const epoch: number = ++this.englishSuggestionEpoch;
     this.englishSuggestionRequested = prefix;
+    // 手机纠错模式请求共享引擎的合并展示：有纠错时只有原文与纠错，原文已是完整的词时只有原文，否则原文后接前缀补全；空格和标点边界仍只查询唯一纠错。
     const request: EnglishCompletionRequest = {
-      prefix: prefix, limit: correction ? 2 : EnglishSuggestionPolicy.LIMIT, correction: correction
+      prefix: prefix, limit: correction ? EnglishSuggestionPolicy.DISPLAY_LIMIT : EnglishSuggestionPolicy.LIMIT,
+      correction: correction, completions: correction
     };
     const resources: string = this.resourceDirectory;
     // A promise rather than a direct call: the lookup waits until the key that asked for it has finished its own work. It still runs on this thread.
@@ -6991,6 +7011,7 @@ export class KeyboardSession implements HardwareKeyTarget {
       return;
     }
     this.englishSuggestions = completions.items;
+    this.englishSuggestionCorrected = completions.corrected;
     this.englishSuggestionPrefix = prefix;
     this.publishEnglishSuggestions();
   }
@@ -6999,6 +7020,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     this.englishCorrectionRejectedPrefix = '';
     this.englishSuggestionEpoch++;
     this.englishSuggestionRequested = '';
+    this.englishSuggestionCorrected = false;
     if (this.englishSuggestions.length === 0 && this.englishSuggestionPrefix.length === 0) {
       return;
     }
@@ -7045,8 +7067,10 @@ export class KeyboardSession implements HardwareKeyTarget {
       typed, this.englishSuggestions[index],
       EnglishSuggestionPolicy.startedCapitalized(typed));
     if (replacement === null) {
+      // 只有展示了纠错时点原文才是拒绝纠错；只有补全时点原文仅收起候选。
+      const rejected: boolean = this.englishSuggestionCorrected;
       this.clearEnglishSuggestions();
-      this.englishCorrectionRejectedPrefix = typed;
+      if (rejected) this.englishCorrectionRejectedPrefix = typed;
       return;
     }
     try {

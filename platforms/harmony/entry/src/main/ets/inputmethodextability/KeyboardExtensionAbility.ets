@@ -129,8 +129,8 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
   /** The editor changed its selection, invalidating everything derived from the old caret. */
   private readonly selectionChanged: (oldBegin: number, oldEnd: number,
                                       newBegin: number, newEnd: number) => void =
-    (_oldBegin: number, _oldEnd: number, _newBegin: number, _newEnd: number): void => {
-      KeyboardSession.shared.editorSelectionChanged();
+    (_oldBegin: number, _oldEnd: number, newBegin: number, newEnd: number): void => {
+      KeyboardSession.shared.editorSelectionChanged(newBegin === newEnd);
     };
 
   /** The editor changed its document, either as our edit echo or independently of the keyboard. */
@@ -609,6 +609,10 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     });
   }
 
+  private readonly keyboardShown: () => void = (): void => {
+    KeyboardSession.shared.keyboardShown();
+  };
+
   // 系统收起键盘（返回手势、点空白处）时编辑框不一定失去焦点，等不到 inputStop；会话在这里停掉键盘内的语音识别，把攒着的打字统计写盘，关掉缓存的释义词库。候选皮肤停放的位图也在这里释放，隐藏的键盘不留着它们。
   private readonly keyboardHidden: () => void = (): void => {
     KeyboardSession.shared.keyboardHidden();
@@ -941,6 +945,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       }
       engine.on('inputStart', this.started);
       engine.on('inputStop', this.stopped);
+      engine.on('keyboardShow', this.keyboardShown);
       engine.on('keyboardHide', this.keyboardHidden);
       inputMethodEngine.getKeyboardDelegate().on('selectionChange', this.selectionChanged);
       inputMethodEngine.getKeyboardDelegate().on('textChange', this.textChanged);
@@ -1099,6 +1104,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     this.pending = undefined;
     engine.off('inputStart', this.started);
     engine.off('inputStop', this.stopped);
+    engine.off('keyboardShow', this.keyboardShown);
     engine.off('keyboardHide', this.keyboardHidden);
     inputMethodEngine.getKeyboardDelegate().off('selectionChange', this.selectionChanged);
     inputMethodEngine.getKeyboardDelegate().off('textChange', this.textChanged);

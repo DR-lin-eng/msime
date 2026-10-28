@@ -1232,6 +1232,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     private var latestRequest: UInt64 = 0
     /// 只在输入线程上读写：最近一次算出的结果。打完一个词按空格或标点时，同一个词刚在最后一个字母上算过，这里直接取用，不再算第二遍。
     var memo: (resources: String, prefix: String, items: [String])?
+    var suggestionMemo: (resources: String, prefix: String, items: [String], corrected: Bool)?
 
     func begin() -> UInt64 {
       lock.lock()
@@ -1291,8 +1292,58 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   }
 
   private static func englishCorrections(prefix: String, resources: String) -> [String] {
+    englishSuggestionRequest(prefix: prefix, resources: resources, completions: false)?.items ?? []
+  }
+
+  /// 候选栏的合并展示上限：原文加至多十一个前缀补全，与 Android、HarmonyOS 相同。
+  static let englishSuggestionDisplayLimit = 12
+
+  /// 完整展示仍在同一输入线程上计算，保持共享引擎的纠错与补全规则。
+  func englishSuggestions(forPrefix prefix: String) -> (items: [String], corrected: Bool) {
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else { return ([], false) }
+    let work = englishCorrectionWork
+    return MSIMEInputThread.shared.sync { Self.englishSuggestions(prefix: prefix, resources: resources, work: work) }
+  }
+
+  /// 异步候选展示保留纠错标记；过期请求在计算前和回主线程后均丢弃。
+  func englishSuggestions(forPrefix prefix: String,
+                          completion: @escaping ((items: [String], corrected: Bool)) -> Void) {
+    precondition(Thread.isMainThread)
+    let work = englishCorrectionWork
+    let request = work.begin()
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else {
+      completion(([], false))
+      return
+    }
+    MSIMEInputThread.shared.async {
+      guard work.isLatest(request) else { return }
+      let result = Self.englishSuggestions(prefix: prefix, resources: resources, work: work)
+      DispatchQueue.main.async {
+        guard work.isLatest(request) else { return }
+        completion(result)
+      }
+    }
+  }
+
+  /// 仅输入线程访问缓存；候选展示的唯一纠错也供随后的空格、标点边界复用。
+  private static func englishSuggestions(prefix: String, resources: String,
+                                        work: EnglishCorrectionWork) -> (items: [String], corrected: Bool) {
+    if let memo = work.suggestionMemo, memo.resources == resources, memo.prefix == prefix {
+      return (memo.items, memo.corrected)
+    }
+    let result = englishSuggestionRequest(prefix: prefix, resources: resources, completions: true) ?? ([], false)
+    work.suggestionMemo = (resources, prefix, result.0, result.1)
+    work.memo = (resources, prefix, result.0.isEmpty ? [] : (result.1 ? result.0 : [prefix]))
+    return result
+  }
+
+  private static func englishSuggestionRequest(prefix: String, resources: String,
+                                              completions: Bool) -> (items: [String], corrected: Bool)? {
+    let limit = completions ? englishSuggestionDisplayLimit : 2
+    var fields: [String: Any] = ["prefix": prefix, "limit": limit, "correction": true]
+    if completions { fields["completions"] = true }
     do {
-      let request = try JSONSerialization.data(withJSONObject: ["prefix": prefix, "limit": 2, "correction": true])
+      let request = try JSONSerialization.data(withJSONObject: fields)
       let resourceData = Data(resources.utf8)
       let response = try request.withUnsafeBytes { requestBytes in
         try resourceData.withUnsafeBytes { resourceBytes in
@@ -1302,9 +1353,11 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
         }
       }
       guard let value = response as? [String: Any], value["prefix"] as? String == prefix,
-            let items = value["items"] as? [String], items.first == prefix, items.count <= 2 else { return [] }
-      return items
-    } catch { return [] }
+            let items = value["items"] as? [String], items.first == prefix, items.count <= limit else { return nil }
+      let corrected = completions && value["corrected"] as? Bool == true
+      if corrected && items.count != 2 { return nil }
+      return (items, corrected)
+    } catch { return nil }
   }
 
   func candidateGlossResources() -> String? {

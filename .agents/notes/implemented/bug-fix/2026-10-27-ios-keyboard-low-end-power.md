@@ -42,6 +42,8 @@ Status: implemented
 
 打字统计：共享 Rust PR 把 `record` 改成在进程里攒批（距上次写满 30 秒的下一次上屏才写，不再每次上屏整份重写加 `F_FULLFSYNC`），新增 `{"operation":"flush"}`，并在会话失焦和销毁时交给后台线程写出一次。本 PR 的 `TypingStatisticsStore.flush()` 在 `viewWillDisappear`、换输入框、`NSExtensionHostWillResignActive` 和原有的 30 秒按键定时器上调 flush，排在同一个统计串行队列上已交出的 `record` 之后，只有交过 `record` 才调；flush 失败只记诊断日志。本 PR 叠在那条 Rust PR 上，在它之后合入。
 
+合入共享英文补全后，逐字母异步查询使用完整候选展示接口并保留 `corrected` 标记，不退回仅纠错的旧接口；按边界同步纠错复用完整展示中的唯一纠错结果，不把补全当作自动纠错。集成回归覆盖前缀补全、纠错标记、最后请求生效与边界查询。
+
 ## Alternatives considered
 
 - **出现时保留强制同步个人词库**：[出现时列表不再重建会话](2026-10-22-ios-appear-list-without-session-rebuild.md) 当时为保住设置页数据的新鲜度留着它，理由是 App 前台时键盘一般不在，去掉之后各页会停在上一份快照上。不再保留：每次点输入框、切 App 都在用户开始打字的那一刻读写共享文件、查询引擎，而这几页数据的新鲜度可以由页面打开时的刷新请求加 15 分钟陈旧上限兜住，陈旧程度有上限，不再取决于用户多久没开过这些页面。

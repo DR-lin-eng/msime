@@ -34,6 +34,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 当前可点的英文建议所属的词和输入框；点击时再次核对，不能拿旧答案替换新词。
   private var englishSuggestionPrefix = ""
   private var englishSuggestionDocument: UUID?
+  /// 候选栏当前的英文建议第二行是否为纠错；只有补全时点原文不算拒绝纠错。
+  private var englishSuggestionCorrected = false
   /// 引擎会话刚建好时的内存读数，紧跟在 `session` 后面声明，`keyboard_loaded` 记成 `session=`。
   private let sessionMemory = DiagnosticLog.MemorySample.current()
   /// 「全角输入」 for the running keyboard: starts from the shared `character_width`, then the 全角 card switches it.
@@ -3760,12 +3762,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       englishCorrectionRejectedDocument = nil
     }
     guard !prefix.isEmpty else {
+      englishSuggestionCorrected = false
       updateCandidateStrip(preedit: "", candidates: [])
       return
     }
     let document = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
     // 新词先显示自己的原文，避免异步查询期间留下上一词的可点纠错或旧邮箱后缀；同一词已有的答案可以保留。
     if englishSuggestionPrefix != prefix || englishSuggestionDocument != document {
+      englishSuggestionCorrected = false
       updateCandidateStrip(preedit: "", candidates: [prefix])
       if visibleEmailSuffixes.isEmpty {
         englishSuggestionPrefix = prefix
@@ -3775,11 +3779,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 纠错在输入线程上算。回来时候选条已被别的路径改过、换了输入框或光标前的词已变，这次结果就作废。
     englishSuggestionStripGeneration &+= 1
     let generation = englishSuggestionStripGeneration
-    session.englishCorrections(forPrefix: prefix) { [weak self] items in
+    session.englishSuggestions(forPrefix: prefix) { [weak self] suggestions in
       guard let self, generation == englishSuggestionStripGeneration,
             document == KeyboardHostContext.documentIdentifier(for: textDocumentProxy),
             prefix == englishWordBeforeCursor else { return }
-      updateCandidateStrip(preedit: "", candidates: items)
+      englishSuggestionCorrected = suggestions.corrected
+      updateCandidateStrip(preedit: "", candidates: suggestions.items)
       if visibleEmailSuffixes.isEmpty {
         englishSuggestionPrefix = prefix
         englishSuggestionDocument = document
@@ -3829,8 +3834,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     guard let replacement = EnglishSuggestionPolicy.replacement(
       typed: typed, candidate: visibleCandidates[index], startedCapitalized: startedCapitalized)
     else {
-      englishCorrectionRejectedPrefix = typed
-      englishCorrectionRejectedDocument = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
+      // 只有展示了纠错时点原文才是拒绝纠错；只有补全时点原文仅收起候选。
+      if englishSuggestionCorrected {
+        englishCorrectionRejectedPrefix = typed
+        englishCorrectionRejectedDocument = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
+      }
+      englishSuggestionCorrected = false
       updateCandidateStrip(preedit: "", candidates: [])
       finishTemporaryEnglish()
       return

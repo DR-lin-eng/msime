@@ -25,7 +25,7 @@ Status: implemented
 
 收起时停下空闲工作：
 
-- 快照队列只在键盘显示（`attach`）时排一次检查，查到没有待处理请求就停，不自己续排；失焦（`detach`）和系统收起（`keyboardHidden`）经 `pauseIdleDictionaryWork` 取消检查，上一次个人词库排空没有进展时也停下重试，`attach` 时按退避接着排。有进展的排空照常在后台跑完。
+- 快照队列只在键盘显示（`attach`）时排一次检查，查到没有待处理请求就停，不自己续排；失焦（`detach`）和系统收起（`keyboardHidden`）经 `pauseIdleDictionaryWork` 取消检查，上一次个人词库排空没有进展时也停下重试，`attach` 或 `keyboardShow` 时按退避接着排。有进展的排空照常在后台跑完。
 - 建会话之前先排空个人词库队列，再同步设置应用的词条镜像；只有排空返回 `settled` 且镜像同步完成时才停止空闲重试。三态排空继续决定退避，镜像未完成不能被排空成功掩盖。
 - 两个重建会话的重试由 `IdleDictionaryRetryPolicy` 定间隔：有进展（送出新一批、剩余条数减少）两秒后接着处理，连续没有进展按 2、4、8 秒翻倍，最多五分钟；队列查空或排空、用户在键盘里新排入词条时复位。
 - 显示后的那次查询（`state`）和构建会话时的处理（`process`）都带 `skip_when_idle: true`：队列里没有排队或准备中的请求时 Rust 只读状态返回，不算本机版本、不写 `state.json`、不建队列目录。真有请求时照旧先发布本机版本再处理。这个字段由共享 Rust PR 提供，默认 false，其他宿主不带，行为不变；同一条 PR 里 `publish_local_version` 在版本没变时也不再重写 `state.json`。
@@ -43,7 +43,7 @@ Status: implemented
 
 ## 可见性与排程
 
-键盘可见性由 `idleDictionaryVisible` 单独记录：`attach` 置真，收起或失焦时置假。`keyboardHide` 不一定清除编辑框连接，不能把 `inputClient` 仍存在当成键盘仍显示。隐藏时有进展的个人词库排空可以继续；后续批次一旦停滞，排程入口立即停止重试，后台重建会话也不能重新开启快照查询。`idle-dictionary-lifecycle.test.cjs` 执行会话的真实排程方法，用受控计时器覆盖「显示时推进 → 隐藏 → 首次停滞 → 不再排程 → 再显示恢复」以及隐藏前已经停滞的情况；`run.sh` 同时检查显示和隐藏事件对可见状态的接线。
+键盘可见性由 `idleDictionaryVisible` 单独记录：`attach` 和系统 `keyboardShow` 置真，收起或失焦时置假。`keyboardHide` 不一定清除编辑框连接，不能把 `inputClient` 仍存在当成键盘仍显示。隐藏时有进展的个人词库排空可以继续；后续批次一旦停滞，排程入口立即停止重试，后台重建会话也不能重新开启快照查询。`idle-dictionary-lifecycle.test.cjs` 执行会话的真实排程方法，通过真实 `keyboardShown` 恢复方法和扩展回调接线，用受控计时器覆盖「显示时推进 → 隐藏 → 首次停滞 → 不再排程 → 再显示恢复」以及隐藏前已经停滞的情况；`run.sh` 同时检查显示和隐藏事件对可见状态的接线。
 
 ## 与共享 Rust PR 的关系
 
@@ -78,3 +78,5 @@ Status: implemented
 - `build-native.sh arm64-v8a` 在编译机上用 OpenHarmony NDK 交叉构建通过，NAPI 库按 `-Werror -Wl,--no-undefined` 链接成功，新的 `releaseGlossCaches` 与 `msime_client_release_gloss_caches` 都在产物里。用这份原生库在本机 `ohpm install` 后 `hvigorw clean assembleHap --no-daemon`（command-line-tools 6.1.1，API 24）通过，`CompileArkTS` 实际执行，产出未签名 HAP；19 条 ArkTS 警告都在本分支没改动的行上（`px2vp` 弃用等）。没有暂存引擎资源和设置页，HAP 只用来证明编译，不能装机使用。
 - Rust：释义缓存（改写、删除、替换各类文件后与重新打开一致、释放后再查不变）、`skip_when_idle`（空队列 `state`、`process` 不动、排着的请求照样处理）和版本不变时不重写 `state.json` 的用例随实现挪进了共享 Rust PR，在那里的全量 `cargo test` 里跑，结果记在那篇笔记。
 - 没有做的：没有在任何鸿蒙真机或模拟器上运行，没有测量耗电、发热、CPU 时间或帧率，收益只来自代码路径分析。验证办法是在低端真机上收起键盘让输入框保持焦点，用 `hidumper --cpuusage` 或 `top` 对比扩展进程的 CPU 时间增量，并在打字、手写、Canvas 皮肤下对比 UI 线程 trace。`panel.on('hide')` 没有接，系统收起依赖 `keyboardHide`，各 API 版本的事件时序未在设备上确认。
+
+同一编辑框收起后重新显示不保证再次触发 `inputStart`，因此扩展对称订阅和取消订阅 `keyboardShow`，恢复方法只在会话和编辑框仍存在时置为可见并重新排程。重复显示复用已有计时器，失焦或销毁后迟到的显示事件不排任务。官方框架的 `ShowKeyboardImplWithoutLock` 仅发键盘状态通知，没有调用 `OnInputStart`，不能把恢复只放在 `attach`。参见 [OpenHarmony 框架实现](https://github.com/openharmony/inputmethod_imf/blob/master/frameworks/native/inputmethod_ability/src/input_method_ability.cpp) 和 [IME Kit 显示事件](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-ime-kit/js-apis-inputmethodengine.md#onkeyboardshowkeyboardhide9)。

@@ -752,7 +752,7 @@ fn run_profile(
     result.encoding = (profile.name(), cases.len(), encoded);
     // 一条用例的候选表只取决于它的上文、送进去的按键和引擎收到的（量化后的）触点，所以同一串按键带同样的触点在各组配置里只打一次。
     let mut ranks: Ranks = HashMap::new();
-    let mut reference = vec![None; cases.len()];
+    let mut reference = vec![CandidateResult::default(); cases.len()];
     for (index, keys) in intended.iter().enumerate() {
         if let Some(keys) = keys {
             let typed: Vec<TypedKey> = keys.iter().map(|&key| (key, None)).collect();
@@ -843,12 +843,10 @@ fn run_profile(
                 report.observe(TouchObservation {
                     syllables: case.syllables,
                     errors,
-                    rank,
-                    reference: reference[index],
+                    rank: rank.rank,
+                    reference: reference[index].rank,
                 });
-            }
-            if mode == TouchMode::Clean {
-                result.clean_top1_changed += report.overall.top1_changed;
+                result.observe_top1(mode, &reference[index], &rank);
             }
             result.runs.push(render_touch_run(
                 profile,
@@ -864,10 +862,41 @@ fn run_profile(
     Ok(result)
 }
 
-/// `gold_rank` 的记忆表：（用例序号，按键，引擎收到的触点）到名次。
-type Ranks = HashMap<(usize, Vec<u8>, Vec<Option<KeyTouch>>), Option<usize>>;
+#[derive(Clone, Default, Debug)]
+struct CandidateResult {
+    rank: Option<usize>,
+    first: Option<String>,
+}
 
-/// 金标准在 `typed` 打出的候选表里的名次（从 1 起）。带落点的键先按代次 `geometry_id` 换成引擎收到的触点；同一条用例的同一串按键带同样的触点只打一次。`dumped` 给了时把这次打出的整张表追加一行 JSONL。
+impl CandidateResult {
+    fn from_candidates(candidates: &[(String, u8)], gold: &str) -> Self {
+        Self {
+            rank: candidates
+                .iter()
+                .position(|(text, _)| text == gold)
+                .map(|position| position + 1),
+            first: candidates.first().map(|(text, _)| text.clone()),
+        }
+    }
+}
+
+impl ProfileRun {
+    fn observe_top1(
+        &mut self,
+        mode: TouchMode,
+        reference: &CandidateResult,
+        actual: &CandidateResult,
+    ) {
+        if mode == TouchMode::Clean && reference.first != actual.first {
+            self.clean_top1_changed += 1;
+        }
+    }
+}
+
+/// `gold_rank` 的记忆表：（用例序号，按键，引擎收到的触点）到金标准名次及实际首选。
+type Ranks = HashMap<(usize, Vec<u8>, Vec<Option<KeyTouch>>), CandidateResult>;
+
+/// 金标准在 `typed` 打出的候选表里的名次（从 1 起）及实际首选。带落点的键先按代次 `geometry_id` 换成引擎收到的触点；同一条用例的同一串按键带同样的触点只打一次。`dumped` 给了时把这次打出的整张表追加一行 JSONL。
 fn gold_rank(
     runtime: &mut Runtime<Session>,
     ranks: &mut Ranks,
@@ -876,7 +905,7 @@ fn gold_rank(
     geometry_id: u32,
     profile: ShuangpinProfileKind,
     dumped: Option<&mut String>,
-) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+) -> Result<CandidateResult, Box<dyn std::error::Error>> {
     let keys: Vec<u8> = typed.iter().map(|(key, _)| *key).collect();
     let touches: Vec<Option<KeyTouch>> = typed
         .iter()
@@ -886,7 +915,7 @@ fn gold_rank(
         .collect();
     let memo = (index, keys, touches);
     if let Some(rank) = ranks.get(&memo) {
-        return Ok(*rank);
+        return Ok(rank.clone());
     }
     let (_, keys, touches) = &memo;
     let candidates = type_case(
@@ -902,10 +931,7 @@ fn gold_rank(
             )
         }),
     )?;
-    let rank = candidates
-        .iter()
-        .position(|(text, _)| *text == case.gold)
-        .map(|position| position + 1);
+    let rank = CandidateResult::from_candidates(&candidates, &case.gold);
     if let Some(dumped) = dumped {
         let rows: Vec<serde_json::Value> = candidates
             .iter()
@@ -930,7 +956,7 @@ fn gold_rank(
         dumped.push_str(&line.to_string());
         dumped.push('\n');
     }
-    ranks.insert(memo, rank);
+    ranks.insert(memo, rank.clone());
     Ok(rank)
 }
 
@@ -1078,5 +1104,47 @@ fn key_action(grid: Option<KeyGrid>, byte: u8) -> Action {
             value: byte,
             shift: false,
         },
+    }
+}
+
+#[cfg(test)]
+mod top1_tests {
+    use super::*;
+
+    fn result(texts: &[&str], gold: &str) -> CandidateResult {
+        CandidateResult::from_candidates(
+            &texts
+                .iter()
+                .map(|text| ((*text).to_string(), 0))
+                .collect::<Vec<_>>(),
+            gold,
+        )
+    }
+
+    #[test]
+    fn clean_gate_compares_actual_top1_even_when_gold_rank_is_unchanged() {
+        for gold in ["金标准", "未出现"] {
+            let reference = result(&["候选甲", "候选乙", "金标准"], gold);
+            let actual = result(&["候选乙", "候选甲", "金标准"], gold);
+            assert_eq!(reference.rank, actual.rank);
+            let mut run = ProfileRun::default();
+            run.observe_top1(TouchMode::Clean, &reference, &actual);
+            assert_eq!(run.clean_top1_changed, 1);
+        }
+    }
+
+    #[test]
+    fn clean_gate_counts_empty_transitions_and_ignores_lower_rank_changes() {
+        let reference = result(&["候选甲", "金标准", "候选乙"], "金标准");
+        let same_first = result(&["候选甲", "候选乙", "金标准"], "金标准");
+        let empty = result(&[], "金标准");
+        let mut run = ProfileRun::default();
+        run.observe_top1(TouchMode::Clean, &reference, &same_first);
+        run.observe_top1(TouchMode::Clean, &empty, &empty);
+        run.observe_top1(TouchMode::Noisy, &reference, &empty);
+        assert_eq!(run.clean_top1_changed, 0);
+        run.observe_top1(TouchMode::Clean, &reference, &empty);
+        run.observe_top1(TouchMode::Clean, &empty, &reference);
+        assert_eq!(run.clean_top1_changed, 2);
     }
 }

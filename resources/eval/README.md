@@ -141,6 +141,8 @@ cargo run --release -p msime-input-runtime --example convert_eval -- \
 
 词级那一份把四个 `--set` 换成 `--set resources/eval/quanpin-words-v1.tsv --max-syllables 2 --limit 3000`，对照 `baseline-shuangpin-touch-words.json`。两份基线各跑一次完整的组合（5 个方案 × 4 种模式 × 4 个 σ × 2 个偏置，none 模式不分 σ 和偏置），送落点、用引擎默认的计价参数。送落点时每条用例的触点各不相同，记忆表帮不上忙，所以加 `--jobs 5` 让五个方案各开一个线程同时跑（输出与一个一个跑逐字节相同），再加 `--assert-top1-unchanged`。在同时跑着 CI 的 Mac Studio 上整句那份要几个小时（看负载）、词级那份十分钟上下，没有放进 `verify-local.sh`。引擎收到触点之前的平面表数字用同样的命令加 `--no-touch-points` 复现。
 
+`--assert-top1-unchanged` 逐条比较 clean 与原样输入的实际首选文本，候选表从空到非空也算变化。报告里的 `top1_changed` 保留平面表基线的定义，只计原本排第一的金标准降位；它为 0 不代表所有实际首选都相同。
+
 **基线只用 `desktop-dictionary.lock.json` 那一组文件加 `sentence-model.safetensors` 生成，资源目录里不放 settled 模型 `sentence-model-desktop.safetensors`。** 那个文件由另一份锁 `settled-model.lock.json` 发布，`convert_eval` 见到它就挂上 settled 重排，排序会变，两份双拼基线就对不上了，并不是产品改了。跑的时候 stderr 必须打出 `no settled model at ...`；打出 `settling with ...` 时先把那个文件挪出资源目录。
 
 **编码。** 用例的输入是不带分隔的全拼，先按 TSV 里的音节数切成音节，只认只有一种切法的（`fangan` 两个音节可以是 fang'an 也可以是 fan'gan，金标准是哪一个说不清，不打）。切音节按与方案无关的音节表（`host::is_shuangpin_syllable`），不按某个方案编不编得出来，所以有没有歧义在五个方案上判断得一样。再用引擎自己的表（`host::encode_shuangpin`）逐音节编成两键码。切不开、有歧义或有音节在这个方案里编不出来的用例丢掉，每个方案编出来的条数写在报告的 `encoding` 里。纠错整句不接受手打的 `'`，所以按键里不带它。

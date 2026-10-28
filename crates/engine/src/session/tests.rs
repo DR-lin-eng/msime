@@ -1077,11 +1077,98 @@ fn a_pending_touch_reaches_only_the_next_shuangpin_letter() {
     assert!(quanpin.input.engine.request().key_touches.is_empty());
 }
 
+/// 以词定字、结束组字、移光标这些不派发字符的入口同样一开头丢掉待用触点：设了触点之后先调它们，下一个字母不带触点。
+#[test]
+fn non_character_entries_discard_the_pending_touch() {
+    let touch = Some(crate::touch::KeyTouch {
+        dx: 1,
+        dy: 0,
+        copy: 0,
+    });
+    let fixture = Fixture::new(CARET_PREFIX_FIXTURE);
+    let mut session = fixture.session_with(|options| options.scheme = SchemeType::Shuangpin);
+    session.set_key_geometry(Some(touch_geometry()));
+    type Entry = (&'static str, fn(&mut Session));
+    let entries: [Entry; 17] = [
+        ("select_edge", |session| {
+            session.select_edge(0, CandidateEdge::FirstHan);
+        }),
+        ("finish", |session| {
+            session.finish(0);
+        }),
+        ("set_caret", |session| session.set_caret(None)),
+        ("candidate_key", |session| {
+            session.candidate_key(b'1');
+        }),
+        ("conversion_left_from", |session| {
+            session.conversion_left_from(0);
+        }),
+        ("pin", |session| {
+            session.pin(0);
+        }),
+        ("remove", |session| {
+            session.remove(5);
+        }),
+        ("fix_position", |session| {
+            session.fix_position(0, 1);
+        }),
+        ("clear_position", |session| {
+            session.clear_position(0);
+        }),
+        ("choose_nine_key_spelling", |session| {
+            session.choose_nine_key_spelling(0);
+        }),
+        ("set_nine_key_filter", |session| {
+            session.set_nine_key_filter(false, "");
+        }),
+        ("expand_initial_candidates", |session| {
+            session.expand_initial_candidates();
+        }),
+        ("reset_context", Session::reset_context),
+        ("set_key_grid", |session| session.set_key_grid(None)),
+        ("set_dedicated_english", |session| {
+            session.set_dedicated_english(false)
+        }),
+        ("switch_scheme", |session| {
+            session.switch_scheme(SchemeType::Shuangpin).unwrap();
+        }),
+        ("set_key_geometry", |session| {
+            session.set_key_geometry(Some(touch_geometry()))
+        }),
+    ];
+    for (name, entry) in entries {
+        session.command(Command::Cancel);
+        // 先打一段不带触点的组字，选词、结束、移光标才有东西可动。
+        session.character(b'n', false);
+        session.character(b'i', false);
+        session.set_key_touch(touch);
+        entry(&mut session);
+        session.character(b'h', false);
+        assert!(
+            request_touches(&session).iter().all(Option::is_none),
+            "{name}: {:?}",
+            request_touches(&session)
+        );
+    }
+    // 对照：中间不调别的入口时，触点交给下一个字母。
+    session.command(Command::Cancel);
+    session.character(b'n', false);
+    session.character(b'i', false);
+    session.set_key_touch(touch);
+    session.character(b'h', false);
+    assert_eq!(request_touches(&session), [None, None, touch]);
+}
+
 /// 合成词库：小鹤 mw gr xi 是没关系，r 按成邻键 f 就成了 gen（跟）。
 const TOUCH_TYPO_FIXTURE: &str = "CREATE TABLE tbl_1_m(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_m VALUES('mei','m','没',1000);CREATE TABLE tbl_1_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_g VALUES('gen','g','跟',1000),('guan','g','关',500);CREATE TABLE tbl_1_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_x VALUES('xi','x','系',1000);CREATE TABLE tbl_2_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);";
 
 /// QWERTY 字母键，键宽 10、键高 14，每排比上一排右移半个键。
 fn qwerty_geometry() -> Arc<crate::touch::KeyGeometry> {
+    qwerty_geometry_moving(&[])
+}
+
+/// 同一个代次（5）的 QWERTY 字母键，`moved` 里的键挪到给定的键心。
+fn qwerty_geometry_moving(moved: &[(u8, f32, f32)]) -> Arc<crate::touch::KeyGeometry> {
     let mut keys = [[0.0f32; 4]; 26];
     for (letters, left, y) in [
         ("qwertyuiop", 5.0, 7.0),
@@ -1091,6 +1178,9 @@ fn qwerty_geometry() -> Arc<crate::touch::KeyGeometry> {
         for (column, letter) in letters.bytes().enumerate() {
             keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
         }
+    }
+    for &(key, x, y) in moved {
+        keys[usize::from(key - b'a')][..2].copy_from_slice(&[x, y]);
     }
     Arc::new(crate::touch::KeyGeometry::new(5, &keys, None, &[]).unwrap())
 }
@@ -1137,6 +1227,49 @@ fn a_supported_touch_correction_is_reported_in_the_snapshot() {
         .filter(|item| item.word != "没关系")
         .all(|item| !item.touch_supported));
     assert!(snapshot.candidates[0].corrected_from.is_empty());
+}
+
+/// 宿主用同一个代次下发挪过键的几何：同样的量化触点在新布局下计价不同，词典缓存不能把旧布局算出的行交出来。r 挪到键盘最右边之后不再是 f 的邻键，f 改成 r 的那条纠错整句就不该再出现、更不该带着落点支持的标记。
+#[test]
+fn a_same_id_geometry_with_moved_keys_does_not_reuse_cached_touch_rows() {
+    let fixture = Fixture::new(TOUCH_TYPO_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.autocorrect_types = crate::types::autocorrect_type::TRANSPOSITION
+            | crate::types::autocorrect_type::NEIGHBOR;
+    });
+    let typed = |session: &mut Session| {
+        for (index, byte) in b"mwgfxi".iter().enumerate() {
+            // f 那一键落在 f 和左上方的 r 之间。
+            let (dx, dy) = if index == 3 { (-5, -10) } else { (0, 0) };
+            session.set_key_touch(Some(crate::touch::KeyTouch { dx, dy, copy: 0 }));
+            session.character(*byte, false);
+        }
+    };
+    let supported = |session: &Session| {
+        session
+            .snapshot()
+            .candidates
+            .iter()
+            .any(|item| item.word == "没关系" && item.touch_supported)
+    };
+    session.set_key_geometry(Some(qwerty_geometry()));
+    typed(&mut session);
+    assert!(supported(&session));
+    session.command(Command::Cancel);
+
+    let moved = qwerty_geometry_moving(&[(b'r', 205.0, 7.0)]);
+    assert_eq!(moved.id(), qwerty_geometry().id());
+    assert_ne!(moved.fingerprint(), qwerty_geometry().fingerprint());
+    session.set_key_geometry(Some(moved));
+    typed(&mut session);
+    assert!(!supported(&session));
+    session.command(Command::Cancel);
+
+    // 换回原来的布局，答案照旧。
+    session.set_key_geometry(Some(qwerty_geometry()));
+    typed(&mut session);
+    assert!(supported(&session));
 }
 
 #[test]

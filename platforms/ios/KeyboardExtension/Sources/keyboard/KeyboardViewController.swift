@@ -1030,8 +1030,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func configureDiagnosticLog() {
     let preferences = session.sharedPreferences ?? MetasequoiaInputSessionBridge.loadSharedPreferences()
     diagnosticLogSuppressed = !privacyGate.allows(.diagnosticLog)
-    DiagnosticLog.shared.configure(directory: session.stateDirectory ?? MetasequoiaInputSessionBridge.sharedStateDirectory,
-                                   enabled: DiagnosticLog.isEnabled(in: preferences) && !diagnosticLogSuppressed)
+    let directory = session.stateDirectory ?? MetasequoiaInputSessionBridge.sharedStateDirectory
+    let enabled = DiagnosticLog.isEnabled(in: preferences) && !diagnosticLogSuppressed
+    DiagnosticLog.shared.configure(directory: directory, enabled: enabled)
+    // 键位几何的调试导出跟着诊断日志开关走（#10018）；刚打开时把已注册的那份补写出来，不必等布局再变。
+    keyGeometryExportDirectory = enabled && directory.hasPrefix("/")
+      ? URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent("debug", isDirectory: true) : nil
+    exportKeyGeometry()
   }
 
   /// 读取本机手势开关；字母键和根手势使用缓存，按键时不再读 App Group。
@@ -1522,8 +1527,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 字母键此刻是不是 26 键双拼：中文模式、双拼方案、不画 14/18 键网格、不在本地模式。
   private var typesShuangpinLetters: Bool { isChineseMode && usesShuangpin && !usesLetterGrid && !isInLocalMode }
 
-  /// 已注册给会话的键位几何（#10018）。
-  private var keyGeometryRegistration = TouchPointPolicy.Registration()
+  /// 已注册给会话的键位几何（#10018）。代次每注册一次加一，测试据此数注册了几次。
+  private(set) var keyGeometryRegistration = TouchPointPolicy.Registration()
+
+  /// 带着按下点交给引擎（`msime_client_touch_character`）的按键数，测试据此分辨一键走的是哪个入口。
+  private(set) var touchCharacterCount = 0
+
+  /// 此刻是否开着 VoiceOver：读屏的双击落在键的激活点，不是手指的落点。测试替换它来模拟读屏。
+  var isVoiceOverRunning: () -> Bool = { UIAccessibility.isVoiceOverRunning }
 
   /// 键区里此刻 26 个字母键和微软双拼 `;` 的布局矩形，坐标系与按键记下的按下点相同；字母行没在显示时为 nil。
   private var currentKeyLayout: TouchPointPolicy.Layout? {
@@ -1545,10 +1556,35 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       keyGeometryRegistration.reset()
       return nil
     }
+    registeredKeyGeometryRequest = request
+    exportKeyGeometry()
     return id
   }
 
-  /// 调试导出（#10018）：键区此刻会注册给引擎的键位几何 JSON（代次记为 1），评测拿它替换参考布局。字母行没在显示时为 nil。
+  /// 最近一次注册成功的几何 JSON，原样留给调试导出。
+  private var registeredKeyGeometryRequest: Data?
+  /// 上次写进导出文件的内容，没变就不重写。
+  private var exportedKeyGeometryRequest: Data?
+
+  /// 键位几何调试导出的目录：诊断日志（`diagnostic_log.server`）开着时是共享状态目录下的 `debug`，关着时为 nil（`configureDiagnosticLog` 设它，测试可以直接指向临时目录）。
+  var keyGeometryExportDirectory: URL?
+  /// 导出文件名，与 Android 的 `debug/key-geometry.json` 相同。
+  static let keyGeometryExportFile = "key-geometry.json"
+
+  /// 调试导出（#10018）：把键盘真正注册给引擎的几何 JSON 原样写进 `keyGeometryExportDirectory`，评测拿它替换参考布局。只在注册成功或刚打开诊断日志时写，内容没变不重写；写不了（没有完全访问权限进不了 App Group）只记一行日志，不影响打字。
+  private func exportKeyGeometry() {
+    guard let directory = keyGeometryExportDirectory, let request = registeredKeyGeometryRequest,
+          request != exportedKeyGeometryRequest else { return }
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try request.write(to: directory.appendingPathComponent(Self.keyGeometryExportFile), options: .atomic)
+      exportedKeyGeometryRequest = request
+    } catch {
+      DiagnosticLog.shared.write("key_geometry_export_failed")
+    }
+  }
+
+  /// 键区此刻会注册给引擎的键位几何 JSON（代次记为 1），XCTest 据此在模拟器上按指定宽度和特征导出几何；键盘真正注册的那份由 `exportKeyGeometry` 写出。字母行没在显示时为 nil。
   var keyGeometryExport: Data? {
     currentKeyLayout.flatMap { TouchPointPolicy.request(id: 1, layout: $0) }
   }
@@ -3891,8 +3927,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       // 26 键双拼的字母和 `;` 带上按下点，引擎按落点给按错邻键的纠错计价（#10018）。拿不到几何时退回不带落点，与 `sendActions` 和读屏的激活一样。
       if let touchDown,
          TouchPointPolicy.sendsTouch(character: character, shuangpinLetters: typesShuangpinLetters, hasTouchDown: true,
-                                     voiceOver: UIAccessibility.isVoiceOverRunning),
+                                     voiceOver: isVoiceOverRunning()),
          let geometryID = registeredKeyGeometryID() {
+        touchCharacterCount += 1
         render(session.handleTouchCharacter(character, geometryID: geometryID, x: Float(touchDown.x), y: Float(touchDown.y)))
         return
       }

@@ -172,6 +172,43 @@ final class TouchPointTests: XCTestCase {
     XCTAssertNil(other.touchDownLocation)
   }
 
+  /// 手指位置固定的触摸，用来驱动按键的跟踪：`location(in:)` 不论问哪个视图都回答同一个点。
+  private final class PinnedTouch: UITouch {
+    var point: CGPoint
+    init(_ point: CGPoint) {
+      self.point = point
+      super.init()
+    }
+    override func location(in view: UIView?) -> CGPoint { point }
+  }
+
+  /// 上滑改输角标的那一刻按下点就清掉，松手时动作也拿不到它；按键离开窗口（键盘收起、键区重建）时同样清掉。
+  func testTheCornerHintAndLeavingTheWindowDropTheTouchDown() {
+    let (area, key) = keyInArea { _ in }
+    key.recordsTouchDown = true
+    key.cornerHint = "1"
+    key.swipesCornerHint = true
+    key.cornerHintSwipeDirection = .up
+    let touch = PinnedTouch(CGPoint(x: 20, y: 100))
+    XCTAssertTrue(key.beginTracking(touch, with: nil))
+    XCTAssertEqual(key.touchDownLocation, CGPoint(x: 20, y: 100))
+    touch.point.y = 100 - SwipeHintPolicy.threshold / 2
+    _ = key.continueTracking(touch, with: nil)
+    XCTAssertNotNil(key.touchDownLocation, "没滑到阈值，还是这个字母的按下点")
+    touch.point.y = 100 - SwipeHintPolicy.threshold - 1
+    _ = key.continueTracking(touch, with: nil)
+    XCTAssertNil(key.touchDownLocation, "改输角标，按下点不再有用")
+
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+    window.addSubview(area)
+    XCTAssertTrue(key.beginTracking(PinnedTouch(CGPoint(x: 30, y: 20)), with: nil))
+    XCTAssertNotNil(key.touchDownLocation)
+    area.removeFromSuperview()
+    XCTAssertNil(key.window)
+    XCTAssertNil(key.touchDownLocation, "离开窗口的按键不留按下点")
+    withExtendedLifetime(area) {}
+  }
+
   // MARK: - 会话
 
   private func shuangpinBridge() -> MetasequoiaInputSessionBridge {
@@ -379,11 +416,256 @@ final class TouchPointTests: XCTestCase {
       XCTAssertNil(key.touchDownLocation, "\(letter)")
       try letterKey(letter, in: plain).sendActions(for: .primaryActionTriggered)
     }
-    let preedit = { (controller: KeyboardViewController) in
-      (self.nodes(controller.view).first { $0.accessibilityIdentifier == "preeditButton" } as? UIButton)?
-        .accessibilityValue?.filter(\.isLetter)
-    }
     XCTAssertEqual(preedit(touched), "womf")
     XCTAssertEqual(preedit(plain), "womf")
+    XCTAssertEqual(touched.touchCharacterCount, 4, "四键都带着按下点进了引擎")
+    XCTAssertEqual(plain.touchCharacterCount, 0, "sendActions 没有按下点，走 msime_client_character")
+  }
+
+  /// 像松手输入那样按 `letter`：`touched` 时先给它一个偏离键心 0.3 个键宽的按下点，`sendActions` 本身没有。按键的动作总会取走按下点。
+  private func press(_ letter: Character, in controller: KeyboardViewController, touched: Bool = true) throws {
+    try press(try letterKey(letter, in: controller), in: controller, touched: touched)
+  }
+
+  private func press(_ key: KeyboardKeyButton, in controller: KeyboardViewController, touched: Bool = true) throws {
+    if touched {
+      let frame = KeyAreaStackView.layoutFrame(of: key, in: try keyArea(controller))
+      key.touchDownLocation = CGPoint(x: frame.midX + frame.width * 0.3, y: frame.midY)
+    }
+    key.sendActions(for: .primaryActionTriggered)
+    XCTAssertNil(key.touchDownLocation, key.accessibilityLabel ?? "")
+  }
+
+  /// 组字区里还没上屏的拉丁字母；组字全部提交后为空。
+  private func preedit(_ controller: KeyboardViewController) -> String {
+    (nodes(controller.view).first { $0.accessibilityIdentifier == "preeditButton" } as? UIButton)?
+      .accessibilityValue?.filter { $0.isASCII && $0.isLetter } ?? ""
+  }
+
+  private func control(_ identifier: String, in controller: KeyboardViewController) throws -> UIControl {
+    try XCTUnwrap(nodes(controller.view).first { $0.accessibilityIdentifier == identifier } as? UIControl, identifier)
+  }
+
+  /// 26 键双拼里带按下点的字母先注册一次几何再走触点入口，同一布局不再注册；没有按下点、开着 VoiceOver、Shift 让字母成为辅助码时走原来的入口，之后的字母照常带按下点。
+  func testShuangpinLettersRegisterTheGeometryOnceAndTypeWithTheTouch() throws {
+    let previous = InputSchemePreference.scheme
+    let previousOneHanded = KeyboardLayoutPreference.oneHanded
+    defer {
+      InputSchemePreference.scheme = previous
+      KeyboardLayoutPreference.oneHanded = previousOneHanded
+    }
+    KeyboardLayoutPreference.oneHanded = .off
+    let controller = keyboard(.shuangpin)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 0, "键盘出现时不注册，等第一个带按下点的字母")
+    XCTAssertEqual(controller.touchCharacterCount, 0)
+
+    try press("w", in: controller)
+    XCTAssertEqual(controller.touchCharacterCount, 1)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 1, "第一键之前注册几何")
+    let registered = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+    XCTAssertEqual(try XCTUnwrap(controller.keyGeometryExport), TouchPointPolicy.request(id: 1, layout: registered),
+                   "注册的是键区此刻的布局矩形")
+    try press("o", in: controller)
+    XCTAssertEqual(controller.touchCharacterCount, 2)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 1, "布局没变，不再注册")
+
+    try press("m", in: controller, touched: false)
+    XCTAssertEqual(controller.touchCharacterCount, 2, "没有按下点的激活走 msime_client_character")
+    controller.isVoiceOverRunning = { true }
+    try press("f", in: controller)
+    XCTAssertEqual(controller.touchCharacterCount, 2, "读屏的激活不带落点")
+    controller.isVoiceOverRunning = { false }
+
+    // 组字中按 Shift，下一个字母是辅助码的大写，不带落点；辅助码之后 Shift 复原，字母又带按下点。Shift 之后键面读作「大写 J」，所以先拿住这个键。
+    let j = try letterKey("j", in: controller)
+    try control("shiftButton", in: controller).sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(j.accessibilityLabel, "大写 J", "Shift 让下一个字母成为辅助码")
+    try press(j, in: controller)
+    XCTAssertEqual(controller.touchCharacterCount, 2, "辅助码的大写不带落点")
+    try press("b", in: controller)
+    XCTAssertEqual(controller.touchCharacterCount, 3)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 1)
+  }
+
+  /// 单手换边、退出单手、键盘变宽（旋转）、微软双拼显示 `;` 都挪动字母键：下一个带按下点的字母之前换一个代次重新注册，注册的是挪动后的布局。
+  func testALayoutChangeRegistersANewGeometryBeforeTheNextTouch() throws {
+    let previous = InputSchemePreference.scheme
+    let previousOneHanded = KeyboardLayoutPreference.oneHanded
+    defer {
+      InputSchemePreference.scheme = previous
+      KeyboardLayoutPreference.oneHanded = previousOneHanded
+    }
+    KeyboardLayoutPreference.oneHanded = .right
+    let controller = keyboard(.shuangpin, width: 390)
+    try press("w", in: controller)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 1)
+    let right = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+
+    try control("oneHandSwap", in: controller).sendActions(for: .primaryActionTriggered)
+    controller.view.layoutIfNeeded()
+    try press("o", in: controller)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 2, "单手换到另一侧")
+    let left = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+    XCTAssertLessThan(left.letters[0].minX, right.letters[0].minX)
+
+    try control("oneHandExit", in: controller).sendActions(for: .primaryActionTriggered)
+    controller.view.layoutIfNeeded()
+    try press("m", in: controller)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 3, "退出单手")
+    let full = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+    XCTAssertGreaterThan(full.letters[0].width, left.letters[0].width)
+
+    controller.view.frame.size.width = 844
+    controller.view.layoutIfNeeded()
+    try press("f", in: controller)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 4, "键盘变宽")
+    XCTAssertGreaterThan(try XCTUnwrap(controller.keyGeometryRegistration.layout).letters[0].width, full.letters[0].width)
+    XCTAssertEqual(controller.touchCharacterCount, 4)
+
+    // 组字提交以后才换方案：不带按下点的一键让键盘读到微软双拼，排版之后下一个带按下点的字母注册带 `;` 的几何。
+    for _ in 0..<8 where !preedit(controller).isEmpty {
+      try control("spaceKey", in: controller).sendActions(for: .primaryActionTriggered)
+    }
+    XCTAssertEqual(preedit(controller), "", "组字已提交")
+    InputSchemePreference.scheme = .microsoft
+    try press("w", in: controller, touched: false)
+    controller.view.layoutIfNeeded()
+    let semicolonKey = try XCTUnwrap(nodes(controller.view).first { $0.accessibilityIdentifier == "microsoftFinalKey" })
+    XCTAssertFalse(semicolonKey.isHidden)
+    try press("o", in: controller)
+    XCTAssertEqual(controller.keyGeometryRegistration.id, 5, "微软双拼显示 `;`")
+    let microsoft = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+    XCTAssertEqual(microsoft.semicolon, KeyAreaStackView.layoutFrame(of: semicolonKey, in: try keyArea(controller)))
+    XCTAssertEqual(controller.touchCharacterCount, 5)
+  }
+
+  /// 全拼、双拼 14 键、本地模式下字母键的按下点不进引擎，也不注册几何。
+  func testOtherKeyboardsNeverTakeTheTouchEntry() throws {
+    let document = try XCTUnwrap(MetasequoiaInputSessionBridge.loadSharedPreferences())
+    let previous = InputSchemePreference.scheme
+    let previousLayout = TouchShuangpinLayoutPreference.layout
+    defer {
+      _ = MetasequoiaInputSessionBridge.updateSharedPreferences { $0 = document }
+      TouchShuangpinLayoutPreference.layout = previousLayout
+      InputSchemePreference.scheme = previous
+    }
+    XCTAssertTrue(TouchShuangpinLayoutPreference.save(.twentySixKey))
+
+    let quanpin = keyboard(.quanpin)
+    for letter in "nihao" { try press(letter, in: quanpin) }
+    XCTAssertEqual(quanpin.touchCharacterCount, 0, "全拼")
+    XCTAssertEqual(quanpin.keyGeometryRegistration.id, 0)
+
+    let local = keyboard(.shuangpin)
+    local.openLocalInputMode("U")
+    local.view.layoutIfNeeded()
+    for letter in "abc" { try press(letter, in: local) }
+    XCTAssertEqual(local.touchCharacterCount, 0, "本地模式")
+    XCTAssertEqual(local.keyGeometryRegistration.id, 0)
+
+    // 14 键画的是字母网格，切换之前按下的 26 键字母不开始组字，更不带落点。
+    XCTAssertTrue(TouchShuangpinLayoutPreference.save(.fourteenKey))
+    let fourteen = keyboard(.shuangpin)
+    XCTAssertNil(fourteen.keyGeometryExport, "14 键没有 26 键字母的几何")
+    for letter in "wo" { try press(letter, in: fourteen) }
+    XCTAssertEqual(fourteen.touchCharacterCount, 0, "双拼 14 键")
+    XCTAssertEqual(fourteen.keyGeometryRegistration.id, 0)
+  }
+
+  /// 调试导出：诊断日志开着时导出目录是共享状态目录下的 `debug`，关着时没有；每注册一次就把注册给引擎的那份 JSON 原样写成 `key-geometry.json`，布局没变不重写。
+  func testTheRegisteredGeometryIsExportedWhileTheDiagnosticLogIsOn() throws {
+    let document = try XCTUnwrap(MetasequoiaInputSessionBridge.loadSharedPreferences())
+    let previous = InputSchemePreference.scheme
+    let previousOneHanded = KeyboardLayoutPreference.oneHanded
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("msime-geometry-\(UUID().uuidString)")
+    defer {
+      _ = MetasequoiaInputSessionBridge.updateSharedPreferences { $0 = document }
+      DiagnosticLog.shared.configure(directory: nil, enabled: false)
+      InputSchemePreference.scheme = previous
+      KeyboardLayoutPreference.oneHanded = previousOneHanded
+      try? FileManager.default.removeItem(at: directory)
+    }
+    KeyboardLayoutPreference.oneHanded = .off
+    func setDiagnosticLog(_ on: Bool) {
+      XCTAssertTrue(MetasequoiaInputSessionBridge.updateSharedPreferences {
+        var diagnostic = $0["diagnostic_log"] as? [String: Any] ?? [:]
+        diagnostic["server"] = on
+        $0["diagnostic_log"] = diagnostic
+      })
+    }
+    setDiagnosticLog(false)
+    XCTAssertNil(keyboard(.shuangpin).keyGeometryExportDirectory, "诊断日志关着时不导出")
+    setDiagnosticLog(true)
+    XCTAssertEqual(keyboard(.shuangpin).keyGeometryExportDirectory?.path,
+                   URL(fileURLWithPath: MetasequoiaInputSessionBridge.sharedStateDirectory).appendingPathComponent("debug").path)
+
+    let controller = keyboard(.shuangpin)
+    controller.keyGeometryExportDirectory = directory
+    let file = directory.appendingPathComponent(KeyboardViewController.keyGeometryExportFile)
+    try press("w", in: controller)
+    let layout = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+    XCTAssertEqual(try Data(contentsOf: file), TouchPointPolicy.request(id: controller.keyGeometryRegistration.id, layout: layout),
+                   "写出的就是注册给引擎的那份")
+    try FileManager.default.removeItem(at: file)
+    try press("o", in: controller)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "没有重新注册就不重写")
+    controller.view.frame.size.width += 40
+    controller.view.layoutIfNeeded()
+    try press("m", in: controller)
+    let moved = try XCTUnwrap(controller.keyGeometryRegistration.layout)
+    XCTAssertEqual(try Data(contentsOf: file), TouchPointPolicy.request(id: controller.keyGeometryRegistration.id, layout: moved))
+  }
+
+  /// 带按下点和不带按下点打同一串双拼，量逐键耗时（按键动作加排版），以及每键核对几何时量一遍 26 个键的布局矩形要多久。只报数，与 KeystrokeLatencyTests 一样。
+  func testWhatTheTouchPathCosts() throws {
+    let previous = InputSchemePreference.scheme
+    let previousOneHanded = KeyboardLayoutPreference.oneHanded
+    defer {
+      InputSchemePreference.scheme = previous
+      KeyboardLayoutPreference.oneHanded = previousOneHanded
+    }
+    KeyboardLayoutPreference.oneHanded = .off
+    var samples: [Bool: [Double]] = [true: [], false: []]
+    for touched in [false, true, false, true] {
+      let controller = keyboard(.shuangpin)
+      let area = try keyArea(controller)
+      let keys = try "womfjbtm".map { letter in
+        let key = try letterKey(letter, in: controller)
+        let frame = KeyAreaStackView.layoutFrame(of: key, in: area)
+        return (key, CGPoint(x: frame.midX + frame.width * 0.3, y: frame.midY))
+      }
+      let space = try control("spaceKey", in: controller)
+      for _ in 0..<20 {
+        for (key, point) in keys {
+          if touched { key.touchDownLocation = point }
+          let start = CACurrentMediaTime()
+          key.sendActions(for: .primaryActionTriggered)
+          controller.view.layoutIfNeeded()
+          samples[touched, default: []].append((CACurrentMediaTime() - start) * 1000)
+        }
+        space.sendActions(for: .primaryActionTriggered)
+        controller.view.layoutIfNeeded()
+      }
+      XCTAssertEqual(controller.touchCharacterCount, touched ? 160 : 0)
+      XCTAssertEqual(controller.keyGeometryRegistration.id, touched ? 1 : 0, "整段只注册一次")
+    }
+    report("shuangpin-plain-letter", samples[false] ?? [])
+    report("shuangpin-touch-letter", samples[true] ?? [])
+
+    let controller = keyboard(.shuangpin)
+    var layout: [Double] = []
+    for _ in 0..<500 {
+      let start = CACurrentMediaTime()
+      _ = controller.keyGeometryExport
+      layout.append((CACurrentMediaTime() - start) * 1000)
+    }
+    report("key-geometry-measure-and-encode", layout)
+  }
+
+  private func report(_ label: String, _ samples: [Double]) {
+    let sorted = samples.sorted()
+    let at = { (q: Double) in sorted[Int((Double(sorted.count - 1) * q).rounded())] }
+    print(String(format: "LATENCY %@ n=%d mean=%.3fms p50=%.3fms p95=%.3fms max=%.3fms",
+                 label, samples.count, samples.reduce(0, +) / Double(samples.count), at(0.5), at(0.95), at(1.0)))
   }
 }

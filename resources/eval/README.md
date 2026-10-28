@@ -147,9 +147,9 @@ cargo run --release -p msime-input-runtime --example convert_eval -- \
 
 **编码。** 用例的输入是不带分隔的全拼，先按 TSV 里的音节数切成音节，只认只有一种切法的（`fangan` 两个音节可以是 fang'an 也可以是 fan'gan，金标准是哪一个说不清，不打）。切音节按与方案无关的音节表（`host::is_shuangpin_syllable`），不按某个方案编不编得出来，所以有没有歧义在五个方案上判断得一样。再用引擎自己的表（`host::encode_shuangpin`）逐音节编成两键码。切不开、有歧义或有音节在这个方案里编不出来的用例丢掉，每个方案编出来的条数写在报告的 `encoding` 里。纠错整句不接受手打的 `'`，所以按键里不带它。
 
-**几何。** `key-geometry/` 下是宿主下发给引擎的同一种 JSON：`id` 是非零代次，`keys` 是 a 到 z 的 `[cx, cy, w, h]`，`semicolon` 是微软双拼显示的 `;` 键（没有为 `null`），`duplicates` 是分离键盘里重复的字母键 `["g", cx, cy, w, h]`。坐标是各平台自己的单位（dp、pt、vp），y 向下。宿主只在微软双拼下显示 `;`，第二行因此多一个键、键宽也不同，所以每个平台有一份不带 `;` 的和一份 `-microsoft`：给多份 `--key-geometry` 时，微软双拼取带 `;` 的那份，其余方案取不带的。这几份是按常量构造的参考布局，不是真机导出的：Android 按 `KeyboardGeometry` 的 `DESIGN_*` 常量（411 dp 宽、左右各留 6、键距 5、键高 46、行距 8）、第二行铺满宽度（`ImeLetterRows`）、末行大小写和删除各 1.4 个键宽（`KeyboardActionRow.DESIGN_LETTER_EDGE_WEIGHT`）；iPhone 按 390 pt 宽、键距 6、键高 42、行距 7，不显示 `;` 时第二行和第一行同宽同距、两端各缩进按键区宽度的 5%（`KeyboardLayoutPreference` 的 `letterInsetRatio`，恰好半个键距）；HarmonyOS 按 360 vp 宽、`KeyboardMetrics` 的键距 6、键高 44（`ROW_HEIGHT_VP`，默认高度调整为 0）和行距 7、不显示 `;` 时第二行两端各缩进半个键；`ipad-split` 是 iPad 横屏两个 360 pt 的半边、右半边内侧重复 G 和 V，没有微软双拼的版本。宿主接入触点的那一期会换成真机导出的几何，基线随之重跑。
+**几何。** `key-geometry/` 下是宿主下发给引擎的同一种 JSON：`id` 是非零代次，`keys` 是 a 到 z 的 `[cx, cy, w, h]`，`semicolon` 是微软双拼显示的 `;` 键（没有为 `null`），`duplicates` 是分离键盘里重复的字母键 `["g", cx, cy, w, h]`。坐标是各平台自己的单位（dp、pt、vp），y 向下。宿主只在微软双拼下显示 `;`，第二行因此多一个键、键宽也不同，所以每个平台有一份不带 `;` 的和一份 `-microsoft`：给多份 `--key-geometry` 时，用 `;` 键的方案（按引擎的判据，内置方案里只有微软双拼）取带 `;` 的那份，其余方案取不带的。带 `;` 和不带 `;` 的各最多给一份，同一种给了两份会报错；报告的 `geometry` 只列实际用上的几何。这几份是按常量构造的参考布局，不是真机导出的：Android 按 `KeyboardGeometry` 的 `DESIGN_*` 常量（411 dp 宽、左右各留 6、键距 5、键高 46、行距 8）、第二行铺满宽度（`ImeLetterRows`）、末行大小写和删除各 1.4 个键宽（`KeyboardActionRow.DESIGN_LETTER_EDGE_WEIGHT`）；iPhone 按 390 pt 宽、键距 6、键高 42、行距 7，不显示 `;` 时第二行和第一行同宽同距、两端各缩进按键区宽度的 5%（`KeyboardLayoutPreference` 的 `letterInsetRatio`，恰好半个键距）；HarmonyOS 按 360 vp 宽、`KeyboardMetrics` 的键距 6、键高 44（`ROW_HEIGHT_VP`，默认高度调整为 0）和行距 7、不显示 `;` 时第二行两端各缩进半个键；`ipad-split` 是 iPad 横屏两个 360 pt 的半边、右半边内侧重复 G 和 V，没有微软双拼的版本。宿主接入触点的那一期会换成真机导出的几何，基线随之重跑。
 
-**落点。** 落点服从 N(键心 + (0, b), σ²)，σ 和 b 以键为单位：横向按键宽的中位数、纵向按键高的中位数归一。落在键的矩形里就是按到了它，落在键距或字母区外归最近的键，模拟宿主把键距让给相邻键。大小写、删除、候选栏这些功能键不建模，落在那里的点也归最近的字母键，所以按错率偏低。用户想按的键换成按到的键送进去，落点（积分方格的格心，σ/8 一格）作为按下点一起送。抽一键只用一个均匀随机数，先定按到哪个键、再在这个键的格里定落点，所以同一个种子按到的键与 `--no-touch-points` 逐个相同，`--no-touch-points` 的报告与引擎收到触点之前的平面表基线逐字节相同。
+**落点。** 落点服从 N(键心 + (0, b), σ²)，σ 和 b 以键为单位（σ 不小于 0；b 为正表示落点普遍偏下，可以为负）：横向按键宽的中位数、纵向按键高的中位数归一。落在键的矩形里就是按到了它，落在键距或字母区外归最近的键，模拟宿主把键距让给相邻键。大小写、删除、候选栏这些功能键不建模，落在那里的点也归最近的字母键，所以按错率偏低。用户想按的键换成按到的键送进去，落点（积分方格的格心，σ/8 一格）作为按下点一起送。抽一键只用一个均匀随机数，先定按到哪个键、再在这个键的格里定落点，所以同一个种子按到的键与 `--no-touch-points` 逐个相同，`--no-touch-points` 的报告与引擎收到触点之前的平面表基线逐字节相同。
 
 四种模式：
 
@@ -162,7 +162,7 @@ cargo run --release -p msime-input-runtime --example convert_eval -- \
 
 **调参。** `--touch-tuning base=12,scale=8,...` 覆盖引擎的触点计价参数（`base`、`scale`、`sigma_x`、`sigma_y`、`bias_y`、`min`、`max`、`cut`、`show`，意思见 `msime_engine::touch::TouchTuning`），只覆盖给出的几项，报告头里多一行 `touch_tuning`。它经 `host::Session::set_touch_tuning` 设进引擎，只有 Rust 示例能设，宿主经 FFI 设不了。
 
-`rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile <方案> --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 `realistic`（或 `--touch-mode` 指定的模式）合成误触和落点，像宿主一样每键带上按下点，量带着按错的键时每次按键的开销；`--no-touch-points` 只送按到的键。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少；再加 `--no-touch-points` 两臂都不送（A/A），量的是同一台机器上配对增量本身的噪声。配对增量的 p95 在 A/A 下也不是 0（两次相同的按键各自抖动），所以触点的代价看「with touches 与 flat table 两臂 p95 之差」，并且同一条命令重复至少 5 轮、取中位数并报出各轮的范围，单轮的数字不作数。
+`rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile <方案> --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 `realistic`（或 `--touch-mode` 指定的模式）合成误触和落点，像宿主一样每键带上按下点，量带着按错的键时每次按键的开销；`--no-touch-points` 只送按到的键。`--touch-arms` 把两臂换成都挂模型、一臂送落点一臂不送，配对量出触点计价本身每键多花多少；再加 `--no-touch-points` 两臂都不送（A/A），量的是同一台机器上配对增量本身的噪声。配对增量的 p95 在 A/A 下也不是 0（两次相同的按键各自抖动），所以触点的代价看「with touches 与 flat table 两臂 p95 之差」，并且同一条命令重复至少 5 轮、取中位数并报出各轮的范围，单轮的数字不作数。几何的挑法和 σ、偏置的校验与 `convert_eval` 相同。在这个方案里编不出来的用例不计时，noisy 下没有一键可能按错、只能原样打的用例照样计时，两者的条数都打在 stderr。
 
 ## 往整句集里加用例
 

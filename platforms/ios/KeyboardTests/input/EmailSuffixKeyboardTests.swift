@@ -172,7 +172,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
 
   /// 编辑器改了上文、变化回报尚未到达时，点击旧答案也不能替换另一词。
   func testEnglishCorrectionDoesNotReplaceADifferentCurrentWord() throws {
-    let document = Document("languge")
+    let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
     try waitForCorrection("language", in: controller)
     let correction = try button("candidate-2", in: controller)
@@ -185,7 +185,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
 
   /// 两个输入框恰好有相同拼写，也不能沿用上一输入框的答案。
   func testEnglishCorrectionDoesNotCrossDocumentIdentity() throws {
-    let document = Document("languge")
+    let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
     try waitForCorrection("language", in: controller)
     let correction = try button("candidate-2", in: controller)
@@ -198,7 +198,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
 
   /// 光标前的词没有变化，但用户已经选中后面的文本，旧答案不能退格删选区。
   func testEnglishCorrectionDoesNotReplaceSelectedText() throws {
-    let document = Document("languge")
+    let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
     try waitForCorrection("language", in: controller)
     let correction = try button("candidate-2", in: controller)
@@ -213,7 +213,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
 
   /// 空格可以按编辑器规则替换选区，但不能先纠正选区前的词并多删字符。
   func testEnglishBoundaryDoesNotCorrectTheWordBeforeSelectedText() throws {
-    let document = Document("languge")
+    let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
     try waitForCorrection("language", in: controller)
     document.text = "languge other"
@@ -227,7 +227,7 @@ final class EmailSuffixKeyboardTests: XCTestCase {
 
   /// 新查询尚未回到主线程时先展示这一键之后的原文，上一词的答案不再可点。
   func testEnglishQueryImmediatelyReplacesThePreviousWordsSuggestions() throws {
-    let document = Document("languge")
+    let document = Document("langug")
     let controller = try makeEnglishKeyboard(document)
     try waitForCorrection("language", in: controller)
     let x = try XCTUnwrap(descendants(controller.view).first {
@@ -253,8 +253,13 @@ final class EmailSuffixKeyboardTests: XCTestCase {
     addTeardownBlock {
       if !startedInEnglish { language.sendActions(for: .primaryActionTriggered) }
     }
-    // 文档在创建控制器后才挂上；模式切换本身不读取它，需模拟宿主的上下文变化回调。
     controller.textDidChange(nil)
+    // 无邮箱后缀时，文档回调和模式切换都不启动英文查询；通过真实字母键补全待纠错原文。
+    let e = try XCTUnwrap(descendants(controller.view).first {
+      $0.accessibilityLabel == "字母 E" && shown($0, in: controller)
+    } as? UIButton)
+    e.sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(document.text, "languge", "必须实际输入末尾字母，触发本次英文查询")
     return controller
   }
 

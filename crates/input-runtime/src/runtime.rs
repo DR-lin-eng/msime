@@ -1406,8 +1406,9 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.set_key_geometry(self.key_geometry.clone());
     }
 
-    /// 当前注册的几何代次，没有几何时为 `None`。
-    pub fn key_geometry_id(&self) -> Option<u32> {
+    /// 当前注册的几何代次，没有几何时为 `None`。只有测试用来核对注册和清除。
+    #[cfg(test)]
+    pub(crate) fn key_geometry_id(&self) -> Option<u32> {
         self.key_geometry.as_ref().map(|geometry| geometry.id())
     }
 

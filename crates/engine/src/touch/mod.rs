@@ -258,7 +258,7 @@ impl KeyGeometry {
     }
 }
 
-/// 计价参数，单位是词网格的自然对数分。`sigma_*`、`bias_y` 以键为单位。默认值在参考布局上扫参得到，宿主接入真机几何后重扫（见模块注释里的笔记）。
+/// 计价参数，单位是词网格的自然对数分。`sigma_*`、`bias_y` 以键为单位。默认值在三端宿主导出的几何上扫参得到（见模块注释里的笔记）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TouchTuning {
     /// B：落点在两键正中间时的罚分。
@@ -282,7 +282,7 @@ pub struct TouchTuning {
 }
 
 impl Default for TouchTuning {
-    /// 在参考布局（`resources/eval/key-geometry/android-portrait*.json`）上扫参得到，暂定；扫参表见模块注释里的笔记。
+    /// 在 Android 模拟器导出的几何（`resources/eval/key-geometry/android-portrait*.json`）上扫参得到；扫参表见模块注释里的笔记。
     fn default() -> Self {
         Self {
             base: 8.0,
@@ -293,7 +293,7 @@ impl Default for TouchTuning {
             min_penalty: 4.0,
             max_penalty: 28.0,
             cut: 16.0,
-            show_margin: 4.0,
+            show_margin: 6.0,
             show_penalty: 14.0,
         }
     }

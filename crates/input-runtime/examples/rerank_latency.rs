@@ -224,18 +224,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--shuangpin-profile" => {
-                let name = take(&mut index)?;
-                profile = Some(
-                    ShuangpinProfileKind::from_name(&name)
-                        .filter(|kind| *kind != ShuangpinProfileKind::Custom)
-                        .ok_or_else(|| format!("unknown shuangpin profile: {name}"))?,
-                );
+                profile = Some(touch_noise::parse_profile(&take(&mut index)?)?)
             }
             "--autocorrect" => autocorrect = true,
             "--key-geometry" => geometry.push(PathBuf::from(take(&mut index)?)),
             "--touch-mode" => touch_mode = Some(TouchMode::parse(&take(&mut index)?)?),
-            "--touch-sigma" => sigma = Some(take(&mut index)?.parse()?),
-            "--touch-bias-y" => bias = take(&mut index)?.parse()?,
+            "--touch-sigma" => sigma = Some(touch_noise::parse_sigma(&take(&mut index)?)?),
+            "--touch-bias-y" => bias = touch_noise::parse_bias_y(&take(&mut index)?)?,
             "--seed" => seed = take(&mut index)?.parse()?,
             "--no-touch-points" => touch_points = false,
             "--touch-arms" => touch_arms = true,
@@ -271,17 +266,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None,
     };
-    // 双拼加误触时用哪份几何、哪种模式；只有带 `;` 的那份配微软双拼，同 `convert_eval`。
+    // 双拼加误触时用哪份几何、哪种模式；按方案用不用 `;` 键挑几何，同 `convert_eval`。
     let touch = match (shuangpin, sigma) {
         (Some(profile), Some(sigma)) => {
-            let semicolon = profile == ShuangpinProfileKind::Microsoft;
-            let layout = geometry
+            let layouts = geometry
                 .iter()
                 .map(|path| KeyLayout::load(path))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .find(|layout| layout.has_semicolon() == semicolon)
-                .ok_or("--touch-sigma needs a --key-geometry that matches the profile's ; key")?;
+                .collect::<Result<Vec<_>, _>>()?;
+            let layout = &layouts[touch_noise::layout_for(&layouts, profile)?];
             let mode = touch_mode.unwrap_or(TouchMode::Realistic);
             eprintln!(
                 "typing {} keys with {} touches on {} at sigma {sigma}, bias {bias}",
@@ -291,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let geometry = KeyGeometry::from_json(&layout.json)?
                 .ok_or("a reference geometry needs a non-zero id")?;
-            Some((TouchNoise::new(&layout, sigma, bias), mode, geometry))
+            Some((TouchNoise::new(layout, sigma, bias), mode, geometry))
         }
         (Some(_), None) if touch_mode.is_some() || !geometry.is_empty() => {
             return Err("--key-geometry and --touch-mode need --touch-sigma".into())
@@ -314,13 +306,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stride = cases.len().div_ceil(limit.max(1));
         cases = cases.into_iter().step_by(stride.max(1)).collect();
     }
-    // 两臂打同样的键，所以按键在开始计时前算好。给了 `grid` 时把字母换成它所在键的组码再输入（`'` 不输入），与 `convert_eval --grid` 相同；九键双拼和 26 键双拼按音节最少的切法编码，切不开的用例打空串。
-    for (position, case) in cases.iter_mut().enumerate() {
+    // 两臂打同样的键，所以按键在开始计时前算好。给了 `grid` 时把字母换成它所在键的组码再输入（`'` 不输入），与 `convert_eval --grid` 相同；九键双拼按音节最少的切法编码，切不开的用例打空串。
+    //
+    // 26 键双拼编不出来的用例（切不开，或有音节在这个方案里编不出来）不计时：打空串只量到一次 `Cancel`，会把每键的开销往下拉。noisy 下没有一键可能按错的用例（σ 太小，按错的概率在积分里为 0）只能按想按的键原样打，照样计时但要计数，否则 noisy 的数字里混着没按错的用例却看不出来。随机数流仍按抽子集后的序号取，去掉编不出来的用例不会挪动其余用例的流。
+    let mut unencodable = 0usize;
+    let mut unmissable = 0usize;
+    let mut typed = Vec::with_capacity(cases.len());
+    for (position, mut case) in cases.into_iter().enumerate() {
         case.keys = match (shuangpin, grid) {
             (Some(profile), _) => {
-                let intended = grid_keys::shuangpin_keys(profile.name(), &case.input, None)
-                    .unwrap_or_default()
-                    .into_bytes();
+                let Some(intended) = grid_keys::shuangpin_keys(profile.name(), &case.input, None)
+                else {
+                    unencodable += 1;
+                    continue;
+                };
+                let intended = intended.into_bytes();
                 match &touch {
                     Some((noise, mode, _)) => {
                         let mut rng = touch_noise::case_rng(seed, &[position as u64]);
@@ -331,7 +331,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 touches.into_iter().map(|(key, _)| key).collect()
                             }
-                            None => intended,
+                            None => {
+                                unmissable += 1;
+                                intended
+                            }
                         }
                     }
                     None => intended,
@@ -342,7 +345,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into_bytes(),
             (None, None) => case.input.bytes().collect(),
         };
+        typed.push(case);
     }
+    if let Some(profile) = shuangpin {
+        eprintln!(
+            "{}: {unencodable} of {} cases do not encode and are not timed",
+            profile.name(),
+            typed.len() + unencodable
+        );
+    }
+    if let Some((_, TouchMode::Noisy, _)) = &touch {
+        eprintln!(
+            "noisy: {unmissable} of {} timed cases have no key that can be missed and are typed as aimed",
+            typed.len()
+        );
+    }
+    let cases = typed;
 
     let state = tempfile::tempdir()?;
     let mut options = msime_engine::host::prepare_options(

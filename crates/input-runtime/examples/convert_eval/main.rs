@@ -22,16 +22,8 @@ use msime_engine::{KeyGrid, SchemeType, ShuangpinProfileKind};
 use msime_input_runtime::{Action, Reranker, Runtime, SentenceModel};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use touch_noise::{KeyLayout, Point, TouchMode, TouchNoise};
-
-/// 26 键双拼的内置方案，按 `ShuangpinProfileKind` 的序号；`custom` 没有内置的表，评测不了。
-const SHUANGPIN_PROFILES: [ShuangpinProfileKind; 5] = [
-    ShuangpinProfileKind::Xiaohe,
-    ShuangpinProfileKind::Ziranma,
-    ShuangpinProfileKind::Shoudao,
-    ShuangpinProfileKind::Microsoft,
-    ShuangpinProfileKind::SmartAbc,
-];
 
 /// `--seed` 的默认值。
 const DEFAULT_SEED: u64 = 20261027;
@@ -39,6 +31,7 @@ const DEFAULT_SEED: u64 = 20261027;
 /// `--scheme shuangpin` 的参数。
 struct ShuangpinEval {
     profiles: Vec<ShuangpinProfileKind>,
+    /// 只留方案用得到的几何，按 `--key-geometry` 给出的顺序；报告的 `geometry` 照它列。
     layouts: Vec<KeyLayout>,
     modes: Vec<TouchMode>,
     sigmas: Vec<f64>,
@@ -140,12 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-syllables" => max_syllables = Some(take(&mut index)?.parse()?),
             "--shuangpin-profile" => {
                 for name in take(&mut index)?.split(',') {
-                    profiles.push(
-                        SHUANGPIN_PROFILES
-                            .into_iter()
-                            .find(|kind| kind.name() == name)
-                            .ok_or_else(|| format!("unknown shuangpin profile: {name} (expected xiaohe, ziranma, shoudao, microsoft or smart_abc)"))?,
-                    );
+                    profiles.push(touch_noise::parse_profile(name)?);
                 }
             }
             "--key-geometry" => geometry.push(PathBuf::from(take(&mut index)?)),
@@ -154,8 +142,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     modes.push(TouchMode::parse(name)?);
                 }
             }
-            "--touch-sigma" => sigmas.extend(parse_list(&take(&mut index)?, "--touch-sigma")?),
-            "--touch-bias-y" => biases.extend(parse_list(&take(&mut index)?, "--touch-bias-y")?),
+            "--touch-sigma" => {
+                sigmas.extend(parse_list(&take(&mut index)?, touch_noise::parse_sigma)?)
+            }
+            "--touch-bias-y" => {
+                biases.extend(parse_list(&take(&mut index)?, touch_noise::parse_bias_y)?)
+            }
             "--seed" => seed = Some(take(&mut index)?.parse()?),
             "--no-touch-points" => touch_points = false,
             "--touch-tuning" => tuning = Some(parse_tuning(&take(&mut index)?)?),
@@ -191,15 +183,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if biases.is_empty() {
             biases.push(0.0);
         }
-        let layouts = geometry
+        let mut layouts = geometry
             .iter()
             .map(|path| KeyLayout::load(path))
             .collect::<Result<Vec<_>, _>>()?;
+        // 先按全部几何给每个方案挑一份，同一种给了几份的在这里报错；然后只留挑中的，报告里不列没用上的几何。
+        let mut used = vec![false; layouts.len()];
         if touches {
             for profile in &profiles {
-                layout_for(&layouts, *profile)?;
+                used[touch_noise::layout_for(&layouts, *profile)?] = true;
             }
         }
+        let mut used = used.into_iter();
+        layouts.retain(|_| used.next().unwrap_or(false));
         Some(ShuangpinEval {
             profiles,
             layouts,
@@ -360,19 +356,9 @@ fn load(path: &Path) -> Result<Vec<Case>, Box<dyn std::error::Error>> {
     Ok(cases)
 }
 
-/// `--key-geometry` 给的几何里，`profile` 该用的那一份：宿主只在微软双拼下显示 `;` 键，第二行因此多一个键，所以微软双拼取带 `;` 的那份，其余方案取不带的。
-fn layout_for(layouts: &[KeyLayout], profile: ShuangpinProfileKind) -> Result<&KeyLayout, String> {
-    let semicolon = profile == ShuangpinProfileKind::Microsoft;
-    layouts
-        .iter()
-        .find(|layout| layout.has_semicolon() == semicolon)
-        .ok_or_else(|| {
-            format!(
-                "{} needs a --key-geometry {} a ; key",
-                profile.name(),
-                if semicolon { "with" } else { "without" }
-            )
-        })
+/// 逗号分隔的一列数，每一项按 `parse` 解析和校验。
+fn parse_list(text: &str, parse: fn(&str) -> Result<f64, String>) -> Result<Vec<f64>, String> {
+    text.split(',').map(parse).collect()
 }
 
 /// `--touch-tuning base=12,scale=8,...`：只覆盖给出的几项，其余用引擎的默认值。
@@ -412,22 +398,55 @@ fn parse_tuning(text: &str) -> Result<TouchTuning, String> {
     Ok(tuning)
 }
 
-/// 逗号分隔的一列有限、非负的数。
-fn parse_list(text: &str, option: &str) -> Result<Vec<f64>, String> {
-    text.split(',')
-        .map(|item| match item.parse::<f64>() {
-            Ok(value) if value.is_finite() && value >= 0.0 => Ok(value),
-            _ => Err(format!(
-                "{option}: {item} is not a finite non-negative number"
-            )),
-        })
-        .collect()
+/// 资源里有的两个重排模型，整次运行只读一次，各个 Runtime 共用：模型只是权重，每个 `Reranker` 自己持有会话的前缀缓存，共用模型不会让一个方案的运行影响另一个。
+struct Models {
+    /// 停顿后重排用的 settled 模型（`sentence-model-desktop.safetensors`）。
+    settled: Option<Arc<SentenceModel>>,
+    /// 每次按键重排用的模型（`sentence-model.safetensors`）。
+    keystroke: Option<Arc<SentenceModel>>,
+}
+
+impl Models {
+    // Measuring the shipped path means measuring it with whatever the resource set contains. The model is optional there, so its absence has to leave these numbers exactly as they were.
+    fn load(resources: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        // The settled model, when the resource set ships one. Attaching it is what lets the eval measure the shipped pair rather than either model alone: the fast one ranks every keystroke and this one ranks once at the end, which is exactly what a host does with its settle timer.
+        let settled_path = resources.join("sentence-model-desktop.safetensors");
+        let settled = match std::fs::read(&settled_path) {
+            Ok(bytes) => {
+                let model = SentenceModel::load(&bytes)?;
+                eprintln!("settling with {}", settled_path.display());
+                Some(Arc::new(model))
+            }
+            Err(_) => {
+                eprintln!("no settled model at {}", settled_path.display());
+                None
+            }
+        };
+        let model_path = resources.join("sentence-model.safetensors");
+        let keystroke = match std::fs::read(&model_path) {
+            Ok(bytes) => {
+                let model = SentenceModel::load(&bytes)?;
+                eprintln!("reranking with {}", model_path.display());
+                Some(Arc::new(model))
+            }
+            Err(_) => {
+                eprintln!(
+                    "no model at {}, measuring the engine alone",
+                    model_path.display()
+                );
+                None
+            }
+        };
+        Ok(Self { settled, keystroke })
+    }
 }
 
 /// 建一个和宿主同样配置的 Runtime：关学习、关调频、关混输和本地模式，挂上资源里有的重排模型。`configure` 在建会话前改方案相关的选项，`tuning` 覆盖触点计价参数。
+#[allow(clippy::too_many_arguments)]
 fn open_runtime(
     resources: &Path,
     state: &Path,
+    models: &Models,
     keyboard_neural: bool,
     autocorrect: bool,
     source_commit: &str,
@@ -473,32 +492,12 @@ fn open_runtime(
     }
     // page_size is capped at 9 by the runtime, but all_candidates() is not paginated.
     let mut runtime = Runtime::new(engine, 9)?;
-    // Measuring the shipped path means measuring it with whatever the resource set contains. The
-    // model is optional there, so its absence has to leave these numbers exactly as they were.
-    // The settled model, when the resource set ships one. Attaching it here is what lets the eval
-    // measure the shipped pair rather than either model alone: the fast one ranks every keystroke
-    // and this one ranks once at the end, which is exactly what a host does with its settle timer.
-    let settled_path = resources.join("sentence-model-desktop.safetensors");
-    match std::fs::read(&settled_path) {
-        Ok(bytes) => {
-            runtime.set_settled_reranker(Some(Reranker::new(std::sync::Arc::new(
-                SentenceModel::load(&bytes)?,
-            ))));
-            eprintln!("settling with {}", settled_path.display());
-        }
-        Err(_) => eprintln!("no settled model at {}", settled_path.display()),
+    // 每个 Runtime 各建自己的 `Reranker`（前缀缓存跟着会话走），模型本身共用。
+    if let Some(model) = &models.settled {
+        runtime.set_settled_reranker(Some(Reranker::new(Arc::clone(model))));
     }
-    let model_path = resources.join("sentence-model.safetensors");
-    match std::fs::read(&model_path) {
-        Ok(bytes) => {
-            let model = SentenceModel::load(&bytes)?;
-            eprintln!("reranking with {}", model_path.display());
-            runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
-        }
-        Err(_) => eprintln!(
-            "no model at {}, measuring the engine alone",
-            model_path.display()
-        ),
+    if let Some(model) = &models.keystroke {
+        runtime.set_reranker(Some(Reranker::new(Arc::clone(model))));
     }
     // dispatch() drops every action while unfocused, which yields an empty candidate list rather
     // than an error.
@@ -525,8 +524,7 @@ fn type_case(
             runtime.set_key_touch(None);
         }
     }
-    // The user has stopped typing by the time a case is read, which is when a host fires its
-    // settle timer.
+    // The user has stopped typing by the time a case is read, which is when a host fires its settle timer.
     runtime.rerank_settled();
     let snapshot = runtime.all_candidates();
     let candidates = snapshot
@@ -549,12 +547,13 @@ fn run(
     autocorrect: bool,
     source_commit: &str,
 ) -> Result<Report, Box<dyn std::error::Error>> {
-    // Optional JSONL of the real candidate lists, for offline experiments that must not be able
-    // to change what the harness measures.
+    // Optional JSONL of the real candidate lists, for offline experiments that must not be able to change what the harness measures.
     let mut dumped = String::new();
+    let models = Models::load(resources)?;
     let mut runtime = open_runtime(
         resources,
         state,
+        &models,
         keyboard_neural,
         autocorrect,
         source_commit,
@@ -626,11 +625,33 @@ fn run_shuangpin(
     source_commit: &str,
     clean_top1_changed: &mut usize,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let models = Models::load(resources)?;
+    // 落点分布只取决于几何、σ 和偏置，各方案、各模式共用同一份几何时不必重算；在开线程前一次算好，各方案只读。只有 noisy、realistic 和要送落点的 clean 要抽落点。
+    let needs_noise = eval.modes.iter().any(|mode| match mode {
+        TouchMode::None => false,
+        TouchMode::Clean => eval.touch_points,
+        TouchMode::Noisy | TouchMode::Realistic => true,
+    });
+    let mut noises = Noises::new();
+    if needs_noise {
+        for (layout, geometry) in eval.layouts.iter().enumerate() {
+            for &sigma in &eval.sigmas {
+                for &bias in &eval.biases {
+                    noises.insert(
+                        (layout, sigma.to_bits(), bias.to_bits()),
+                        TouchNoise::new(geometry, sigma, bias),
+                    );
+                }
+            }
+        }
+    }
     let run = |profile: ShuangpinProfileKind| {
         run_profile(
             resources,
             // 每个方案各用一份可写目录，同时跑的会话不争同一个用户词库。
             &state.join(profile.name()),
+            &models,
+            &noises,
             cases,
             dump.is_some(),
             eval,
@@ -700,6 +721,8 @@ struct ProfileRun {
 fn run_profile(
     resources: &Path,
     state: &Path,
+    models: &Models,
+    noises: &Noises,
     cases: &[Case],
     dump: bool,
     eval: &ShuangpinEval,
@@ -716,6 +739,7 @@ fn run_profile(
     let mut runtime = open_runtime(
         resources,
         state,
+        models,
         keyboard_neural,
         autocorrect,
         source_commit,
@@ -727,8 +751,10 @@ fn run_profile(
     )?;
     // 像触屏宿主一样先注册这个方案用的那份几何；none 模式不送落点，注册与否结果都一样。
     let geometry_id = if touches && eval.touch_points {
-        let geometry = KeyGeometry::from_json(&layout_for(&eval.layouts, profile)?.json)?
-            .ok_or("a reference geometry needs a non-zero id")?;
+        let geometry = KeyGeometry::from_json(
+            &eval.layouts[touch_noise::layout_for(&eval.layouts, profile)?].json,
+        )?
+        .ok_or("a reference geometry needs a non-zero id")?;
         let id = geometry.id();
         runtime.set_key_geometry(Some(geometry));
         id
@@ -778,16 +804,16 @@ fn run_profile(
         };
         for setting in settings {
             let layout = match setting {
-                Some(_) => Some(layout_for(&eval.layouts, profile)?),
+                Some(_) => Some(touch_noise::layout_for(&eval.layouts, profile)?),
                 None => None,
             };
             // noisy 和 realistic 按落点分布换键；clean 每键都按在本键上，只在要送落点时才抽落点，不送落点时它就是原样的按键。
             let noise = match (layout, setting, mode) {
                 (Some(layout), Some((sigma, bias)), TouchMode::Noisy | TouchMode::Realistic) => {
-                    Some(TouchNoise::new(layout, sigma, bias))
+                    Some(&noises[&(layout, sigma.to_bits(), bias.to_bits())])
                 }
                 (Some(layout), Some((sigma, bias)), TouchMode::Clean) if eval.touch_points => {
-                    Some(TouchNoise::new(layout, sigma, bias))
+                    Some(&noises[&(layout, sigma.to_bits(), bias.to_bits())])
                 }
                 _ => None,
             };
@@ -798,13 +824,13 @@ fn run_profile(
                 let Some(intended) = &intended[index] else {
                     continue;
                 };
-                let typed: Option<Vec<TypedKey>> = match &noise {
+                let typed: Option<Vec<TypedKey>> = match noise {
                     Some(noise) => {
                         let mut rng = touch_noise::case_rng(
                             eval.seed,
                             &[
-                                profile as u64,
-                                mode as u64,
+                                touch_noise::profile_label(profile),
+                                mode.label(),
                                 sigma.unwrap_or_default().to_bits(),
                                 bias.unwrap_or_default().to_bits(),
                                 index as u64,
@@ -850,7 +876,7 @@ fn run_profile(
             }
             result.runs.push(render_touch_run(
                 profile,
-                layout.map(|layout| layout.name.as_str()),
+                layout.map(|layout| eval.layouts[layout].name.as_str()),
                 mode,
                 sigma,
                 bias,
@@ -892,6 +918,9 @@ impl ProfileRun {
         }
     }
 }
+
+/// 各组（几何下标，σ 的位，偏置的位）的落点分布，`run_shuangpin` 开线程前算好。
+type Noises = HashMap<(usize, u64, u64), TouchNoise>;
 
 /// `gold_rank` 的记忆表：（用例序号，按键，引擎收到的触点）到金标准名次及实际首选。
 type Ranks = HashMap<(usize, Vec<u8>, Vec<Option<KeyTouch>>), CandidateResult>;

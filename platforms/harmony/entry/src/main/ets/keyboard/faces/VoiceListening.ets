@@ -1,5 +1,3 @@
-import accessibility from '@ohos.accessibility';
-import deviceInfo from '@ohos.deviceInfo';
 import { FrameCallback } from '@kit.ArkUI';
 import { KeyboardLineIcon } from './KeyboardLineIcon';
 import {
@@ -45,7 +43,7 @@ class LevelFrame extends FrameCallback {
 /**
  * 手机语音面板展示录音、转写和上屏状态。主按钮结束采集或重试，取消按钮返回键盘；整句上传与流式识别共用同一界面，不把结果放进可编辑的输入框。两个按钮的文字都为空时（按住说话的会话在收尾识别）不画按钮行，上面那块区域占满整个面板。
  *
- * 排布按 `VoiceListeningPolicy.plan`：按钮行上面那块区域（没有按钮行时是整个面板）的实测高度决定圆盘多大、标题位留几行、画不画提示行，光圈的最大外扩算在方框里，满音量时也不出面板。光圈随麦克风电平（`level`）缩放，只在显示值还没追上电平时逐帧推进，追上就停；系统开了「减弱动画」时光圈停在安静时的大小。
+ * 排布按 `VoiceListeningPolicy.plan`：按钮行上面那块区域（没有按钮行时是整个面板）的实测高度决定圆盘多大、标题位留几行、画不画提示行，光圈的最大外扩算在方框里，满音量时也不出面板。光圈随麦克风电平（`level`）缩放，只在显示值还没追上电平时逐帧推进，追上就停。当前 API 21 编译 SDK 不提供系统「减弱动画」查询接口。
  */
 @Component
 export struct VoiceListening {
@@ -81,7 +79,6 @@ export struct VoiceListening {
   private regionHeight: number = 0;
   private titleLine: number = 0;
   private hintLine: number = 0;
-  private reduceMotion: boolean = false;
   private visible: boolean = false;
   private framePending: boolean = false;
   private lastFrameNs: number = -1;
@@ -89,7 +86,6 @@ export struct VoiceListening {
 
   aboutToAppear(): void {
     this.visible = true;
-    this.reduceMotion = this.animationReduced();
     this.frame = new LevelFrame((frameTimeInNano: number): void => this.advance(frameTimeInNano));
     this.refit();
   }
@@ -99,16 +95,7 @@ export struct VoiceListening {
     this.framePending = false;
   }
 
-  /** 「减弱动画」开关从 API 23 起才对应用开放，更早的系统查不到，按未开启处理。 */
-  private animationReduced(): boolean {
-    if (deviceInfo.sdkApiVersion >= 23) {
-      return accessibility.isAnimationReduceEnabledSync();
-    }
-    return false;
-  }
-
   private levelChanged(): void {
-    if (this.reduceMotion) return;
     this.schedule();
   }
 

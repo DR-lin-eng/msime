@@ -82,6 +82,8 @@ Rust PR 自己在会话失焦和销毁时就把攒着的统计交给后台线程
 
 ## Verification
 
+- `CandidateExpansionDeviceSmoke` 按新的候选读取边界分别覆盖：收起面板时逐键请求释义不换代；展开面板时释义与手动展开仍释放暂扣候选并同步当前代次。每轮隔离面板状态，避免上一轮展开状态影响下一轮。设备执行结果待补。
+
 - 审查整合共享 Rust 来源修复后的 `bash scripts/verify-local.sh --quick` 完整通过：Windows 便携测试 176 项、仓库契约、笔记、Rust workspace、Android 目标及 JVM 冒烟、WASM 与严格 clippy、Linux 设置外壳和原生宿主（CTest 汇总 112 项，含环境条件跳过）、macOS 原生构建及 Apple 桥均通过。鸿蒙完整 HAP、MinGW 原生宿主和 Windows 专用配置因本机缺少输入或工具链跳过；鸿蒙设置包因这个工作树未安装前端依赖跳过。
 
 - `ANDROID_SDK_ROOT=$HOME/Library/Android/sdk bash platforms/android/check-host.sh` 退出 0：292 项 JVM 冒烟、248 份设备测试源码编译、宿主资源检查通过。新增或扩充的冒烟：`CandidateSkinStampSmoke`（原地改写、原子替换、装包、换嵌套图片、根目录新增包时戳变化，条目过多不给戳）、`PreferencesSmoke`（同目录合并、`fresh` 只在每轮第一次、`startAfter`）、`EditorReadCacheSmoke`、`InputViewRefreshPolicySmoke`（推迟建会话、留会话的判断，隐私与学习开关不一致必须重建）、`SelectionEchoTrackerSmoke`、`DictionarySnapshotBacklogSmoke`、`PendingTypingStatisticsSmoke`、`ImePrivacyGateSmoke`（原地追加、写满仍丢最旧行、硬链接断言照常）。视图层改动 JVM 碰不到，`check-host.sh` 加了接线守卫（候选条从池子取按钮、`keepsChipFace`、`applySkin` 跳过 GONE 并挂兜底、渲染器不再 `postInvalidateOnAnimation`、快照延后与销毁补做、统计 flush 三处接线）。`CandidateCanvasDeviceSmoke` 补上帧边界、有限循环停止和减弱动效断言，但没有在设备上跑。

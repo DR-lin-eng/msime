@@ -14,6 +14,7 @@ pub(crate) use msime_engine::ordering::{
 use msime_engine::SchemeType;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub enum Action {
     ResetCache,
@@ -175,6 +176,8 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) settled_reranker: Option<Reranker>,
     /// Whether [`Runtime::rerank_settled`] runs the settled model: the product's desktop sentence model switch. On unless a host turns it off, so a caller that attaches a model and says nothing else gets it.
     pub(crate) settled_rerank_enabled: bool,
+    /// 记录输入线程是否正处于系统负载或上一键超时造成的降级窗口。
+    load_monitor: LoadMonitor,
     // 开关和模型分别拥有不复用的身份，防止在途评分跨配置发布或恢复旧模型。
     settled_settings_epoch: Arc<()>,
     settled_model_epoch: Arc<()>,
@@ -1030,6 +1033,7 @@ impl<E: InputEngine> Runtime<E> {
             reranker: None,
             settled_reranker: None,
             settled_rerank_enabled: true,
+            load_monitor: LoadMonitor::default(),
             settled_settings_epoch: Arc::new(()),
             settled_model_epoch: Arc::new(()),
             focused: false,
@@ -1223,6 +1227,7 @@ impl<E: InputEngine> Runtime<E> {
         !self.settled_rerank_enabled
             || self.settled_reranker.is_none()
             || self.is_idle()
+            || self.load_monitor.should_shed()
             || self.generation.checked_add(1).is_none()
     }
 
@@ -2471,7 +2476,12 @@ impl<E: InputEngine> Runtime<E> {
         if self.cached.prediction {
             return false;
         }
-        let mut moved = self.rerank();
+        // 基础词典候选仍然照常发布；模型重排属于可选工作，在调度压力下让出输入线程。
+        let mut moved = if self.load_monitor.should_shed() {
+            false
+        } else {
+            self.rerank()
+        };
         moved |= self.demote_runner_up_readings();
         moved |= self.normalize_online_slots();
         moved
@@ -2910,23 +2920,34 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     pub fn dispatch(&mut self, action: Action) -> Result<Transition, RuntimeError> {
+        self.load_monitor.begin();
+        let started = Instant::now();
         // 桌面上只有派发类调用运行脚本插件的候选变换，旁路调用只重放，见 `transform` 模块。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        {
-            self.dispatch_live(action)
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        )))]
-        {
-            self.dispatch_action(action)
-        }
+        let result = {
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            {
+                self.dispatch_live(action)
+            }
+            #[cfg(not(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            )))]
+            {
+                self.dispatch_action(action)
+            }
+        };
+        self.load_monitor.finish(started.elapsed());
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_load_shed_for_test(&mut self) {
+        self.load_monitor.force_shed();
     }
 
     /// 旁路与字符动作由 Host API 在同一次会话调用内设置、派发并清除。

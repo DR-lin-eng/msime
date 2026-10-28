@@ -91,7 +91,7 @@ iOS 三份是测试宿主排出来的，不是键盘扩展在系统里真正注�
 
 ### 重扫
 
-流程与上面 PR1a 那一节逐项相同：调参集是 sentences-v1、particles-v1、v2（455 条能编码），留出 neutral-v1（1064 条），几何是 Android 两份导出，种子 20261027，`--assert-top1-unchanged` 比实际首选文本。所有组合的 clean 集实际首选都没有变（`first changed` 0），每组按方案 × σ × 偏置 × 音节档 × 错键数档的每个分桶，top1/top3/top9/found/mrr 都不低于同条件的平面表。
+流程与上面 PR1a 那一节逐项相同，资源仍是词库锁 dict-v2.0.24 那一组：调参集是 sentences-v1、particles-v1、v2（455 条能编码），留出 neutral-v1（1064 条），几何是 Android 两份导出，种子 20261027，`--assert-top1-unchanged` 比实际首选文本。所有组合的 clean 集实际首选都没有变（`first changed` 0），每组按方案 × σ × 偏置 × 音节档 × 错键数档的每个分桶，top1/top3/top9/found/mrr 都不低于同条件的平面表。
 
 1. **只调座位的分数差**（B=12、s=8、不加逐键的闸，小鹤，σ=0.25、b=0）：平面表 noisy top9 0.007、found 0.143。`show_margin` 取 −1000、0、10、+1000 时 noisy top9 是 0.007、0.116、0.196、0.251，clean 被挤 0、1、1、29 / 455，与构造的几何几乎一样。
 2. **B × s × 分数差**（同一条件，96 组，不加逐键的闸）：仍是 B 越低召回越高、被挤越多。B=6 一排仍在前沿（B=6、s=12、分数差 10：top9 0.264，挤 4；B=6、s=16、分数差 8：0.244，挤 4；PR1a 是 0.262 挤 3、0.242 挤 1）；新几何上多出一条 B 较高、分数差较大的前沿（B=9、s=12、分数差 10：0.233，挤 1；B=9、s=16、分数差 15：0.244，挤 2；B=12、s=12、分数差 15：0.233，挤 2）。在 B=8、s=12、分数差 6、`show_penalty` 14 上单独改 `cut`（12/20）、`max_penalty`（24/40）、`min_penalty`（0/8），结果与不改逐字相同（top9 0.193，挤 0）；`sigma_y` 0.8 是 0.185，1.25 是 0.202。
@@ -130,23 +130,27 @@ iOS 三份是测试宿主排出来的，不是键盘扩展在系统里真正注�
 
 ### 定参后的整句族与词级族
 
-按 README 的命令（五个方案 × 四种模式 × σ{0,0.15,0.25,0.35} × b{0,0.1}，两份 Android 导出几何，`--jobs 5 --assert-top1-unchanged`）重新生成两份基线，另用同一个二进制加 `--no-touch-points` 跑出同条件的平面表作对照（平面表不提交）：
+上面 1–4 的扫参是在词库锁 dict-v2.0.24 那一组资源上做的。PR1a 合并以后 develop 把词库锁换成了 dict-v2.0.39，PR1b 改基于 develop，参数不变，按 README 的命令（五个方案 × 四种模式 × σ{0,0.15,0.25,0.35} × b{0,0.1}，两份 Android 导出几何，`--jobs 5 --assert-top1-unchanged`）在 v2.0.39 的资源上重新生成两份基线，另用同一个二进制加 `--no-touch-points` 跑出同条件的平面表作对照（平面表不提交）。资源目录的 12 个文件逐项按 `desktop-dictionary.lock.json` 核对过大小和 SHA-256（generation `576494c4…`），目录里没有 `sentence-model-desktop.safetensors`，stderr 打出 `no settled model at …`。
 
-- **门槛**：`--assert-top1-unchanged` 通过，clean 集 60760 条的实际首选文本一条都没变；按方案 × σ × 偏置 × 音节档 × 错键数档的每个分桶，top1、top3、top9、found、mrr 都不低于平面表；clean 集被往后挤一位的金标准 40 条（0.07%），单组最多 7 / 1519（0.46%，智能 ABC σ=0.35、b=0，这个方案不在调参集里），σ=0.35 的 10 组共 24 条、σ=0.25 的 10 组共 12 条、σ=0.15 的 10 组共 4 条、σ=0 的 10 组为 0；none 模式五组与 PR1a 的基线逐项相同。
-- **noisy σ=0.25、b=0**：第一页召回从平面表的 0.1%–0.7% 升到 16.0%–18.1%（PR1a 在构造的几何上是 14.0%–16.0%，几何不同，落点和按到的键都不一样，只能看量级），found 从 9.7%–11.3% 升到 22.7%–24.6%，MRR 从 0.002–0.007 升到 0.041–0.047；小鹤单错的 1211 条第一页召回从 0.3% 到 20.8%。σ=0.15 时五个方案 23.8%–25.7%，σ=0.35 时 3.7%–5.5%，b=0.1 时 15.1%–17.5%。
-- **realistic σ=0.25**：第一页召回升 4.2–6.8 个点（小鹤 0.579 到 0.621），top1 不变。
-- **延迟**：照「代价」一节的量法（`rerank_latency --touch-arms`，sentences-v1 加 particles，σ=0.25，两份 Android 导出几何，每个方案 5 轮、每轮紧接一次 A/A），10-28 晚上在 Studio 上测，负载 35–65（PR1a 那次是 10–18），噪声大得多。两臂 p95 之差的中位数：小鹤 +0.11 ms（各轮 −1.02 至 +0.92），微软 +0.35 ms（−0.33 至 +1.60），自然码 −0.05 ms（−0.40 至 +0.54）；A/A 的同一个量 +0.68、+0.03、−0.26 ms（各轮 −0.86 至 +0.93）。三个中位数都在 0.5 ms 之内，但这个负载下 A/A 自己就有 ±0.9 ms 的摆动，这次只能说没有看到超出噪声的增量，比 PR1a 那次弱。带触点那一臂的 p95 中位数 8.2–8.8 ms，最高 11.18 ms，每一轮都在 16 ms 预算内。计价代码与 PR1a 相同，只改了 `show_margin`。
-- **词级族**（2 音节）：送落点的报告与平面表逐字节相同，与 PR1a 一样，2 音节这一期没有纠错；数字随几何变了（按到的键不同），none 模式与旧基线逐项相同。
+- **门槛**：`--assert-top1-unchanged` 通过，clean 集 60760 条的实际首选文本一条都没变，`top1_changed` 为 0；按方案 × σ × 偏置 × 音节档 × 错键数档的每个分桶，top1、top3、top9、found、mrr 都不低于平面表；clean 集被往后挤一位的金标准 69 条（0.11%），单组最多 6 / 1519（0.39%，首道 σ=0.35、b=0.1），σ=0.35 的 10 组共 35 条、σ=0.25 的 10 组共 27 条、σ=0.15 的 10 组共 7 条、σ=0 的 10 组为 0，平面表为 0；none 模式五组送不送落点逐项相同。v2.0.24 上同一套是 40 条（0.07%），单组最多 7 / 1519（0.46%，智能 ABC σ=0.35、b=0）。
+- **词库本身的变化**：none 模式（不带落点，纠错整句照旧沉底）的整句族 top1 从 v2.0.24 的 0.679 降到 0.632，top9 从 0.876 降到 0.828；词级族 top1 从 0.733 降到 0.697，top9 不变。这一期的改动碰不到 none 模式，这是 develop 换词库带来的，所以下面的数字只和同一份词库上的平面表比。
+- **noisy σ=0.25、b=0**：第一页召回从平面表的 0.1%–0.7% 升到 16.4%–17.4%（v2.0.24 上是 16.0%–18.1%），found 从 9.5%–11.3% 升到 21.5%–22.5%，MRR 从 0.002–0.006 升到 0.042–0.046；小鹤单错的 1211 条第一页召回从 0.3% 到 20.2%。σ=0.15 时五个方案 23.8%–25.1%，σ=0.35 时 3.8%–5.8%，b=0.1 时 14.7%–17.1%。
+- **realistic σ=0.25**：第一页召回升 4.6–7.2 个点（小鹤 0.550 到 0.596），top1 不变。
+- **延迟**：照「代价」一节的量法（`rerank_latency --touch-arms`，sentences-v1 加 particles，σ=0.25，两份 Android 导出几何，每个方案 5 轮、每轮紧接一次 A/A），10-28 晚上在 Studio 上用 v2.0.39 的资源测，负载 59–106，比 v2.0.24 那次（35–65）还重。两臂 p95 之差的中位数：小鹤 −0.17 ms（各轮 −1.27 至 +1.07），微软 +0.08 ms（−0.17 至 +0.77），自然码 +0.08 ms（−0.01 至 +0.70）；A/A 的同一个量 −0.12、+0.08、+0.16 ms（各轮 −1.39 至 +2.29）。三个中位数都在 0.5 ms 之内，但 A/A 自己的摆动到了 2 ms 以上，和上一次一样只能说没有看到超出噪声的增量。带触点那一臂的 p95 中位数 11.05–11.75 ms，最高 12.43 ms，30 次运行都在 16 ms 预算内；比上一次高是机器负载，平面表那一臂同样高（中位数 11.2–12.1 ms）。
+- **词级族**（2 音节）：送落点的报告与平面表逐字节相同，与 PR1a 一样，2 音节这一期没有纠错；数字随词库变了。
 
 ### PR1b 的验证
 
-- **合并后的整棵树**：三条宿主分支与 PR1a 头合并无冲突（三端改的文件互不相交）。本机跑 `platforms/android/check-host.sh`（289 个 JVM 冒烟，含 `TouchPointPolicySmoke`，249 个设备套件源文件编过）和 `platforms/harmony/tests/run.sh`（0 失败），都通过。Mac Studio 上经 `rbuild`：`cargo test -p msime-engine --lib` 2718 项通过（含钉住默认值的新用例），`--test golden` 31 项，`msime-input-runtime` 库 405 项，`convert_eval` 23 项、`rerank_latency` 16 项，`msime-host-api` 库 1008 项通过、2 项失败（与 PR1a 记下的是同两项，与这次改动无关），其余目标全过；`cargo clippy -p msime-engine -p msime-input-runtime -p msime-host-api --all-targets -- -D warnings` 无警告。
-- **G0**：`verify-local.sh` 的 11 组 `convert_eval` 用本分支的二进制和 PR1a 头的二进制各跑一遍，报告和 `--dump` 逐字节相同（`fourteen-key` 的 dump 只差一行「本地时间」候选的秒数）；双拼 none 模式五个方案的整句族和词级族，报告和 dump 也逐字节相同。PR1a 已核对过它和 merge-base 的这些输出相同。这份资源目录（词库锁 v2.0.24 那一组）下，`sentences`、`harvested`、`neutral`、`words`、`nine-key` 五份已提交的全拼基线两个二进制都对不上，是基线与资源的既有差异，不是这次改的。
-- **三端各自分支上做过的设备验收**（合并后没有重跑）：
+- **基于 develop 重建**：PR1a 以改写过的历史合并进 develop（#10083），三条宿主分支和重扫所基于的那个 PR1a 提交不在 develop 上，所以 PR1b 从 develop 重新开分支，把三端宿主的 9 个提交和重扫的 3 个提交逐个挑过来，没有带合并提交，也没有带旧 PR1a 的任何提交。冲突都在清单和测试文件里：`verify-native.sh` 的导出表（把两对新符号插进 develop 的表）、Android `smoke.sh`（develop 改用 `check` / `verdict`，按下点验收照它的写法带退出码交给 `verdict`，几何导出照旧）、鸿蒙 `run.sh` 和 iOS `project.pbxproj`（两边新加的段都留下；Studio 上 `xcodegen generate` 生成的工程与提交的逐字相同）、评测 README（几何挑选沿用 develop 评审后的写法）、`touch::tests`（develop 的几何指纹用例和这里钉住默认值的用例都留下）。develop 合并 PR1a 时的评审修正（缓存签名里的几何指纹、所有非字符入口清掉待用触点、逐行的 `touch_supported`、共享的方案表、评测工具的后续修正）都原样保留。
+- **本机**：`platforms/android/check-host.sh`（293 个 JVM 冒烟，含 `TouchPointPolicySmoke`，255 个设备套件源文件编过）和 `platforms/harmony/tests/run.sh`（0 失败，含按下点与几何的 6 项）通过。
+- **Mac Studio，经 `rbuild`**：`cargo test -p msime-engine --lib` 2742 项通过、57 项忽略（含 `the_default_tuning_is_the_swept_one` 和 `the_fingerprint_follows_the_content_not_the_id`），`--test golden` 31 项，`msime-input-runtime` 库 405 项，`convert_eval` 29 项、`rerank_latency` 26 项，`cargo test -p msime-host-api --no-fail-fast` 全部目标 1067 项通过、0 失败（库测试 1043 项；PR1a 记下的那两项在 develop 上已经不再失败）；`cargo clippy -p msime-engine -p msime-input-runtime -p msime-host-api --all-targets -- -D warnings` 无警告。
+- **iOS**：Studio 上经 `rbuild` 建一台用完即删的 iPhone 17 模拟器（iOS 27.0），`build-for-testing` 通过，`TouchPointTests` 17 项和 `KeystrokeLatencyTests` 5 项通过。同一次运行加 `TEST_RUNNER_MSIME_KEY_GEOMETRY_EXPORT` 导出的三份几何，把 `id` 统一成 1 以后与提交的 `ios-iphone-portrait`、`-microsoft`、`ipad-split` 逐字相同，develop 的按键布局样式（#10070，默认样式逐键不变）没有改 iOS 默认的几何。Android 和鸿蒙的几何没有在 develop 上重新导出。
+- **G0**：这一期的改动只在带落点时起作用；两份族里 none 模式的报告送不送落点逐项相同。没有用 develop 的二进制重跑 `verify-local.sh` 的 11 组做逐字节对照，上一次的对照是在 v2.0.24 的资源和旧的合并树上做的（本分支对 PR1a 头逐字节相同）。
+- **三端各自分支上做过的设备验收**（基于 develop 重建以后都没有重跑）：
   - Android：自己起的 API 35 模拟器上 `MicrosoftShuangpinDeviceSmoke -e shuangpin-touch true` 通过（导出的几何与无障碍树逐键一致；键的边角和键距里的真实触摸组字是命中的键；小鹤 `mwgfxi` 把 f 按在偏 r 的一角时「没关系」以纠错行出现，前后两遍无障碍点击都不出现；微软 `;` 带落点），`DeviceSmoke` 等回归也过；完整的 `smoke.sh` 没跑。
   - iOS：模拟器上的 XCTest，`TouchPointTests` 等 36 + 68 项通过，完整 `MSIMEKeyboardTests` 1001 项通过（第一轮，修正之前）；没有在系统输入框里用真正的键盘扩展打字。
   - HarmonyOS：模拟器上用 uitest 合成点击，首键注册一次几何、之后不再注册；`womdui` 把 d 按在右缘（偏 f）时第一页第 4 格出现「我们是」纠错行，按在键心或左缘时没有；修正按下点跟键走之后没有再上模拟器。
-- **没做的**：三端都没有真机盲打，也没有在真机上量每键延迟；iOS 扩展和 HarmonyOS 微软双拼的几何没有真正导出；Android API 28、横屏、分离键盘的几何没有在设备上走过。
+- **没做的**：三端都没有真机盲打，也没有在真机上量每键延迟；iOS 扩展和 HarmonyOS 微软双拼的几何没有真正导出；Android API 28、横屏、分离键盘的几何没有在设备上走过；扫参没有在 v2.0.39 上重做，只在 v2.0.39 上核对了定下的参数。
 
 ## Alternatives considered
 

@@ -86,6 +86,7 @@ fn needs_dangling_segment_delimiter_backspace(raw: &str, caret: usize) -> bool {
 // host-api and the desktop shell, and this split is for readers of the source.
 mod engine;
 mod load;
+mod multilingual;
 mod providers;
 mod runtime;
 mod transform;

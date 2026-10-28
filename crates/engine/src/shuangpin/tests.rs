@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -11,10 +12,13 @@ use super::ShuangpinEngine;
 use crate::assets;
 use crate::helpcode::HelpcodeKeymap;
 use crate::paths::RuntimePaths;
+use crate::shuangpin::typo_edges::learned_discount;
+use crate::touch::{KeyGeometry, KeyTouch, TouchTuning};
 use crate::types::{
     fuzzy_rule, CandidateSource, FuzzyPinyinOptions, QueryRequest, SchemeType,
     SentenceAssociationOptions, ShuangpinProfileKind, WordItem,
 };
+use crate::user_dictionary::typo_profile::{PersonalTypoProfile, ShuangpinTypoOutcome};
 
 struct Fixture {
     _root: TempDir,
@@ -89,6 +93,48 @@ fn index_of(candidates: &[WordItem], word: &str) -> usize {
         .iter()
         .position(|item| item.word == word)
         .unwrap_or_else(|| panic!("{word} missing from {:?}", words(candidates)))
+}
+
+#[test]
+fn builtin_profiles_find_den_in_a_synthetic_dictionary() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_d(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_d VALUES('den', 'd', '扽', 100), ('dia', 'd', '嗲', 95), ('deng', 'd', '灯', 90);",
+    );
+    for kind in [
+        ShuangpinProfileKind::Xiaohe,
+        ShuangpinProfileKind::Ziranma,
+        ShuangpinProfileKind::Shoudao,
+        ShuangpinProfileKind::Microsoft,
+        ShuangpinProfileKind::SmartAbc,
+    ] {
+        let selected = profile(kind).unwrap();
+        let code = if kind == ShuangpinProfileKind::Shoudao {
+            assert_eq!(super::utils::cvt_single_sp_to_pinyin("dk", selected), "dia");
+            "dk".to_string()
+        } else {
+            let code = super::utils::encode_pinyin("den", selected)
+                .unwrap_or_else(|| panic!("{kind:?} cannot encode den"));
+            assert_eq!(
+                super::utils::cvt_single_sp_to_pinyin(&code, selected),
+                "den"
+            );
+            code
+        };
+        let mut engine = fixture.engine(kind);
+        let candidates = engine.query(&request(&code, false), None);
+        assert!(
+            words(&candidates).contains(&"扽"),
+            "{kind:?}: {code}: {:?}",
+            words(&candidates)
+        );
+        if kind == ShuangpinProfileKind::Shoudao {
+            assert!(
+                words(&candidates).contains(&"嗲"),
+                "手心原有的 `dia` 候选应保留"
+            );
+        }
+    }
 }
 
 #[test]
@@ -241,6 +287,51 @@ fn single_and_double_helpcodes_filter_the_base() {
     assert!(!engine
         .query(&request("nihcAE", false), Some(&codes))
         .is_empty());
+}
+
+#[test]
+fn strict_single_helpcode_filters_direct_triggered_and_fuzzy_rows() {
+    let fixture = Fixture::new(HELPCODE_FILTER);
+    let codes = helpcode_filter_keymap();
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    for (input, expected) in [
+        ("nihcc", vec!["拟好"]),
+        ("nihca", vec!["你好"]),
+        ("nihcE", vec!["你好", "拟好"]),
+        ("nihcA", vec!["你好"]),
+    ] {
+        let mut typed = request(input, true);
+        let loose = engine.query(&typed, Some(&codes));
+        assert!(words(&loose).contains(&"GitHub"));
+        typed.strict_quanpin_helpcode = true;
+        assert_eq!(words(&engine.query(&typed, Some(&codes))), expected);
+        typed.strict_quanpin_helpcode = false;
+        assert_eq!(words(&engine.query(&typed, Some(&codes))), words(&loose));
+    }
+    let mut triggered = request("nihc", true);
+    triggered.end_helpcodes = "c".into();
+    triggered.strict_quanpin_helpcode = true;
+    assert_eq!(words(&engine.query(&triggered, Some(&codes))), ["拟好"]);
+    triggered.shuangpin_helpcode_modes.mid_sentence = true;
+    triggered.syllable_helpcodes = vec![crate::types::SyllableHelpcode {
+        syllable: 0,
+        first: b'a',
+        second: 0,
+    }];
+    assert!(engine.query(&triggered, Some(&codes)).is_empty());
+
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_n VALUES('nen','n','嫩',100);\
+         CREATE TABLE tbl_1_r(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_r VALUES('ren','r','人',10000);",
+    );
+    let codes = keymap(&[("嫩", "ab"), ("人", "cd")]);
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    let mut fuzzy = request("lfa", true);
+    fuzzy.fuzzy_pinyin.rules = fuzzy_rule::N_L | fuzzy_rule::R_L;
+    fuzzy.strict_quanpin_helpcode = true;
+    assert_eq!(words(&engine.query(&fuzzy, Some(&codes))), ["嫩"]);
 }
 
 /// `shuangpin_helpcode_modes.direct` 关闭后，「完整基座 + 末尾裸字母」不再算辅助码：单码 `nihcc` 与双码 `nihcAB` 都按纯拼音读，与辅助码整体关闭一致；打开时维持现有的重排与筛选。
@@ -1055,6 +1146,225 @@ fn a_helpcode_never_moves_the_typo_sentence_to_the_first_seat() {
         let double = engine.query(&with_helpcode("mzgrcimX"), Some(&codes));
         assert!(double.is_empty(), "{:?}", words(&double));
     }
+}
+
+// ---- 按落点计价的纠错整句（#10018） ----
+
+/// QWERTY 的字母键，键宽 10、键高 14，每排比上一排右移半个键。
+fn qwerty_geometry() -> Arc<KeyGeometry> {
+    let mut keys = [[0.0f32; 4]; 26];
+    for (letters, left, y) in [
+        ("qwertyuiop", 5.0, 7.0),
+        ("asdfghjkl", 10.0, 21.0),
+        ("zxcvbnm", 20.0, 35.0),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
+        }
+    }
+    Arc::new(KeyGeometry::new(11, &keys, None, &[]).unwrap())
+}
+
+/// 测试里固定的计价参数，不随默认值的调参变化。
+fn test_tuning() -> TouchTuning {
+    TouchTuning {
+        base: 12.0,
+        scale: 8.0,
+        sigma_x: 1.0,
+        sigma_y: 1.0,
+        bias_y: 0.0,
+        min_penalty: 4.0,
+        max_penalty: 28.0,
+        cut: 16.0,
+        show_margin: 0.0,
+        show_penalty: f64::INFINITY,
+    }
+}
+
+/// `typed` 每个键都带触点：`leaning` 列出的位置按 (位置, dx, dy) 偏，其余按在键心。
+fn touched_request(typed: &str, leaning: &[(usize, i8, i8)]) -> QueryRequest {
+    QueryRequest {
+        key_touches: (0..typed.len())
+            .map(|index| {
+                let (dx, dy) = leaning
+                    .iter()
+                    .find(|(position, _, _)| *position == index)
+                    .map_or((0, 0), |&(_, dx, dy)| (dx, dy));
+                Some(KeyTouch { dx, dy, copy: 0 })
+            })
+            .collect(),
+        key_geometry: Some(qwerty_geometry()),
+        touch_tuning: test_tuning(),
+        ..autocorrect_request(typed, true)
+    }
+}
+
+/// 不带纠错行的那些行：触点只给纠错整句计价，字面候选一行不变。
+fn literal_words(candidates: &[WordItem]) -> Vec<&str> {
+    candidates
+        .iter()
+        .filter(|item| item.corrected_from.is_empty())
+        .map(|item| item.word.as_str())
+        .collect()
+}
+
+/// 小鹤 `mwgfxi`：想打 gr（关）却按到了 f。f 的落点偏向 r 时这次改正最便宜，按在 f 键心时比平面表的 20 还贵。同一串字母带不同触点各有各的缓存答案，来回查不串。
+#[test]
+fn touches_price_the_correction_and_never_share_a_cached_answer() {
+    let fixture = Fixture::new(TYPO_FIXTURE);
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    let toward_r = touched_request("mwgfxi", &[(3, -5, -10)]);
+    let centered = touched_request("mwgfxi", &[]);
+    let flat = autocorrect_request("mwgfxi", true);
+    let weight = |candidates: &[WordItem]| {
+        assert_corrected(candidates, "mwgfxi");
+        typo_row(candidates).unwrap().weight
+    };
+    let mut seen = None;
+    for _ in 0..2 {
+        let leaning = engine.query(&toward_r, None);
+        let plain = engine.query(&flat, None);
+        let center = engine.query(&centered, None);
+        let weights = (weight(&leaning), weight(&plain), weight(&center));
+        assert!(
+            weights.0 > weights.1 && weights.1 > weights.2,
+            "{weights:?}"
+        );
+        assert_eq!(literal_words(&leaning), literal_words(&plain));
+        assert_eq!(literal_words(&center), literal_words(&plain));
+        // 第二轮全部命中缓存，答案与第一轮相同。
+        assert_eq!(*seen.get_or_insert(weights), weights);
+    }
+    // 换一份几何（代次不同）也不读旧答案：键距放大到 1.5 倍后同一个偏移离 r 更远，价更高。
+    let mut keys = [[0.0f32; 4]; 26];
+    for (letters, left, y) in [
+        ("qwertyuiop", 7.5, 10.5),
+        ("asdfghjkl", 15.0, 31.5),
+        ("zxcvbnm", 30.0, 52.5),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 15.0 * column as f32, y, 10.0, 14.0];
+        }
+    }
+    let spread = QueryRequest {
+        key_geometry: Some(Arc::new(KeyGeometry::new(12, &keys, None, &[]).unwrap())),
+        ..toward_r.clone()
+    };
+    assert!(weight(&engine.query(&spread, None)) < seen.unwrap().0);
+    assert_eq!(weight(&engine.query(&toward_r, None)), seen.unwrap().0);
+}
+
+/// 纠错整句只有在落点支持时才标上 `touch_supported`（runtime 据此不把它挪到表尾）：分数不比字面整句低出 `show_margin`，而且改动的那一键改过去的价不超过 `show_penalty`。没有触点时永远不标。
+#[test]
+fn the_correction_keeps_its_seat_only_when_the_touch_supports_it() {
+    let fixture = Fixture::new(TYPO_FIXTURE);
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    let mut supported = |request: &QueryRequest| {
+        let candidates = engine.query(request, None);
+        typo_row(&candidates)
+            .unwrap_or_else(|| panic!("no typo sentence in {:?}", words(&candidates)))
+            .touch_supported
+    };
+    let with = |leaning: &[(usize, i8, i8)], tuning: TouchTuning| QueryRequest {
+        touch_tuning: tuning,
+        ..touched_request("mwgfxi", leaning)
+    };
+    let strict = TouchTuning {
+        show_penalty: 10.0,
+        ..test_tuning()
+    };
+    // f 那一键落在 r 的键心上，改过去的价是下限 4；落在 f 和 r 正中，价是 B = 12。
+    assert!(supported(&with(&[(3, -10, -20)], strict)));
+    assert!(!supported(&with(&[(3, -5, -10)], strict)));
+    assert!(supported(&with(&[(3, -5, -10)], test_tuning())));
+    // 分数差的线压到字面整句之上很远时，同一个落点也不算支持。
+    let demanding = TouchTuning {
+        show_margin: -100.0,
+        ..test_tuning()
+    };
+    assert!(!supported(&with(&[(3, -10, -20)], demanding)));
+    assert!(!supported(&autocorrect_request("mwgfxi", true)));
+}
+
+/// 按错的那一键几乎落在想按的键心上时，这次改正的价降到下限，纠错整句仍然只排在字面整句之后，不抢首选（首选规则是后面一期的事）。
+#[test]
+fn a_touched_correction_never_takes_the_first_seat() {
+    let fixture = Fixture::new(TYPO_FIXTURE);
+    for (kind, typed, position) in [
+        (ShuangpinProfileKind::Xiaohe, "mwgfxi", 3),
+        (ShuangpinProfileKind::Ziranma, "mzgrci", 4),
+    ] {
+        let mut engine = fixture.engine(kind);
+        // 小鹤按到 f、想按左上方的 r；自然码按到 c、想按左边的 x。
+        let mut request = touched_request(typed, &[]);
+        let toward = match kind {
+            ShuangpinProfileKind::Xiaohe => (-10, -20),
+            _ => (-20, 0),
+        };
+        request.key_touches[position] = Some(KeyTouch {
+            dx: toward.0,
+            dy: toward.1,
+            copy: 0,
+        });
+        let candidates = engine.query(&request, None);
+        assert_corrected(&candidates, typed);
+        assert!(candidates[0].corrected_from.is_empty(), "{kind:?}");
+    }
+}
+
+/// 用户接受过 3 次 gf → gr（小鹤：想打 guan 却按到了 gen）之后，同一个落点改过去的价少了 `learned_discount(3)`：纠错整句的分升高，原来过不了 `show_penalty` 的这次改正留在了座位上。按旧学习结果计价的缓存答案随档案代次作废。没有触点的同一串输入（平面表）不论新旧引擎都一行不变；别的方案没有这条记录，不打折。
+#[test]
+fn accepted_shuangpin_typos_discount_only_the_touch_path() {
+    let fixture = Fixture::new(TYPO_FIXTURE);
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    let strict = TouchTuning {
+        show_penalty: 10.0,
+        ..test_tuning()
+    };
+    // f 那一键落在 f 和 r 正中：改过去的价是 B = 12，超过 10。
+    let touched = QueryRequest {
+        touch_tuning: strict,
+        ..touched_request("mwgfxi", &[(3, -5, -10)])
+    };
+    let flat = autocorrect_request("mwgfxi", true);
+    let before = engine.query(&touched, None);
+    let flat_before = engine.query(&flat, None);
+    let row = typo_row(&before).unwrap().clone();
+    assert!(!row.touch_supported);
+
+    let profile = PersonalTypoProfile::shared(&fixture.paths.user(assets::USER_JOURNAL));
+    for _ in 0..3 {
+        profile
+            .record_shuangpin(
+                ShuangpinProfileKind::Xiaohe,
+                &[(*b"gf", *b"gr")],
+                ShuangpinTypoOutcome::Accepted,
+            )
+            .unwrap();
+    }
+    let after = engine.query(&touched, None);
+    let learned = typo_row(&after).unwrap();
+    assert_eq!(learned.word, row.word);
+    assert!(learned.touch_supported);
+    let gained = (learned.weight - row.weight) as f64 / 1000.0;
+    assert!((gained - learned_discount(3)).abs() < 0.01, "{gained}");
+    assert_eq!(literal_words(&after), literal_words(&before));
+
+    assert_eq!(engine.query(&flat, None), flat_before);
+    assert_eq!(
+        fixture
+            .engine(ShuangpinProfileKind::Xiaohe)
+            .query(&flat, None),
+        flat_before
+    );
+    // 微软双拼没有这条记录：同一串按键在它那里照旧计价（这里只比较带不带折扣，不要求有纠错行）。
+    let mut microsoft = fixture.engine(ShuangpinProfileKind::Microsoft);
+    let fresh = Fixture::new(TYPO_FIXTURE);
+    let mut unlearned = fresh.engine(ShuangpinProfileKind::Microsoft);
+    assert_eq!(
+        microsoft.query(&touched, None),
+        unlearned.query(&touched, None)
+    );
 }
 
 #[test]

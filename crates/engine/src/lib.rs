@@ -19,9 +19,11 @@ pub mod host;
 mod ime;
 mod japanese;
 mod korean;
+pub use korean::KoreanLayout;
 pub mod language_dictionary;
 mod lattice;
 mod local;
+pub mod multilingual;
 mod nine_key;
 mod nine_key_shuangpin;
 pub mod ordering;
@@ -36,6 +38,7 @@ pub mod stroke;
 mod text;
 mod tibetan;
 pub mod time;
+pub mod touch;
 mod types;
 mod user_dictionary;
 pub mod vietnamese;
@@ -45,7 +48,7 @@ mod wubi;
 pub mod zhuyin;
 
 pub use error::{EngineError, Result};
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_os = "android"))]
 pub use handwriting::handwriting_recognize;
 pub use handwriting::order_handwriting_candidates;
 // 按需下载的 `.gram` 语法模型由宿主侧资源包管理，删除包时需要释放
@@ -86,6 +89,7 @@ pub use user_dictionary::state::{
 };
 pub use wubi::code::phrase_code as wubi_phrase_code;
 
+pub use local::command::{valid_plugin_argument, EXTENDED_ARGUMENT_SYMBOLS};
 pub use local::date_time::LocalDateTime;
 pub use local::url;
 

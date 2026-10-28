@@ -1,7 +1,7 @@
 import { MobileKeyboardFeedbackSettings } from "../mobile-keyboard-feedback-settings";
 import { keyboardThemeId } from "../../theme/global-theme";
 import { ScreenKeyboardPreview } from "../../keyboard/screen-keyboard-preview";
-import { harmonyTouchKeyboardRows, type HarmonyTouchLayout } from "../../keyboard/keyboard-layouts";
+import { harmonyTouchKeyboardRows, harmonyTouchLayout } from "../../keyboard/keyboard-layouts";
 import * as settings from "../settings-style";
 import { useSettingsForm } from "../settings-form-context";
 import { GroupList, LinkRow } from "../../core/platform-controls";
@@ -17,10 +17,18 @@ import { defaultTouchKeyboardGeometry } from "../touch-keyboard-geometry-default
 import { HandwritingSettingsContent } from "./handwriting-page";
 import { screenKeyboardAndHandwritingTitle } from "../settings-page-projections";
 import { useSettingsTabs } from "../use-settings-tabs";
+import { pluginPreferences } from "../plugin-preferences";
+import { useTouchKeySoundPacks } from "../use-touch-key-sound-packs";
+import { useEffect } from "react";
+import { useMobileSettingsSubview } from "../use-mobile-settings-subview";
+import { fullScreenColumn, fullScreenSurface } from "../../core/full-screen-style";
+import { SettingsPageHeader } from "../settings-page-header";
+import { TouchKeyLayoutSettings, touchKeyLayoutGroups } from "../touch-key-layout-settings";
+import { keyLayoutEntryDescription } from "../../keyboard/touch-key-layout-styles";
+import { SettingsSearchReveal } from "../settings-search-reveal";
 
-type HarmonyKeyboardLayout = "twenty_six_key" | "fourteen_key" | "nine_key";
-
-/** 同一方案在 HarmonyOS 键盘上画出的几种键盘：全拼有 26 键、14 键和 9 键，日语有 26 键和 9 键。其他方案在那里都只有一种键盘。 */
+/** 同一方案在 HarmonyOS 键盘上画出的几种键盘：全拼有 26/14/18/9 键，双拼有独立的 26/14/18 键，五笔有独立的 26/14 键，日语有 26/9 键。 */
+type HarmonyKeyboardLayout = "twenty_six_key" | "fourteen_key" | "eighteen_key" | "nine_key";
 const harmonyLayoutGroups: readonly (readonly (readonly [
   HarmonyKeyboardLayout,
   TouchKeyboardScheme,
@@ -28,6 +36,7 @@ const harmonyLayoutGroups: readonly (readonly (readonly [
   [
     ["twenty_six_key", "quanpin"],
     ["fourteen_key", "fourteen_key"],
+    ["eighteen_key", "eighteen_key"],
     ["nine_key", "nine_key"],
   ],
   [
@@ -39,26 +48,61 @@ const harmonyLayoutGroups: readonly (readonly (readonly [
 const harmonyLayoutTitles: Record<HarmonyKeyboardLayout, string> = {
   twenty_six_key: "26 键",
   fourteen_key: "14 键",
+  eighteen_key: "18 键",
   nine_key: "9 键",
 };
-
-/** 当前方案在 HarmonyOS 键盘上画成的中文键盘，「尺寸」预览照它画。只有 26 键的方案画 26 键。 */
-function harmonyTouchLayout(selected: TouchKeyboardScheme): HarmonyTouchLayout {
-  if (selected === "fourteen_key" || selected === "nine_key" || selected === "japanese_nine_key")
-    return selected;
-  return "twenty_six_key";
-}
 
 /**
  * HarmonyOS 手机的 中文键盘 行：当前方案的 26 键、14 键或 9 键，和 Android 的 `KeyboardOptionsPage` 提供 `touch_keyboard_layout` 的方式一致。选择时像键盘自己的方案选择器那样切到这一组中的另一个键盘，把 `touch_keyboard_layout` 与 `scheme`、`touch_keyboard_schemes.selected` 一起写入（并启用它），因为键盘先读取选中的方案再读布局，只改布局不会让键盘切换。
  */
 function HarmonyChineseKeyboardRow({
   selected,
+  shuangpinLayout,
+  wubiLayout,
   onSelect,
+  onShuangpinLayoutChange,
+  onWubiLayoutChange,
 }: {
   selected: TouchKeyboardScheme;
+  shuangpinLayout: "twenty_six_key" | "fourteen_key" | "eighteen_key";
+  wubiLayout: "twenty_six_key" | "fourteen_key";
   onSelect: (scheme: TouchKeyboardScheme) => void;
+  onShuangpinLayoutChange: (layout: "twenty_six_key" | "fourteen_key" | "eighteen_key") => void;
+  onWubiLayoutChange: (layout: "twenty_six_key" | "fourteen_key") => void;
 }) {
+  // 五笔的 26 / 14 键单独存在 `touch_wubi_layout`，只改它，不动 `scheme`、`wubi_profile` 和启用列表，86 / 98 版共用这一个选择。
+  if (selected === "wubi") {
+    return (
+      <SelectRow
+        title="五笔键盘"
+        aria-label="五笔键盘"
+        value={wubiLayout}
+        onChange={(event) => onWubiLayoutChange(event.target.value as typeof wubiLayout)}
+      >
+        <option value="twenty_six_key">26 键</option>
+        <option value="fourteen_key">14 键</option>
+      </SelectRow>
+    );
+  }
+  const shuangpin =
+    selected === "xiaohe" ||
+    selected === "ziranma" ||
+    selected === "microsoft" ||
+    selected === "shoudao";
+  if (shuangpin) {
+    return (
+      <SelectRow
+        title="中文键盘"
+        aria-label="中文键盘"
+        value={shuangpinLayout}
+        onChange={(event) => onShuangpinLayoutChange(event.target.value as typeof shuangpinLayout)}
+      >
+        <option value="twenty_six_key">26 键</option>
+        <option value="fourteen_key">14 键</option>
+        <option value="eighteen_key">18 键</option>
+      </SelectRow>
+    );
+  }
   const group = harmonyLayoutGroups.find((layouts) =>
     layouts.some(([, scheme]) => scheme === selected),
   );
@@ -124,6 +168,48 @@ export function ScreenKeyboardSettingsPage() {
   } = useSettingsForm();
   const { onPreferencesChange } = createSettingsDraftActions({ setDraft });
   const harmonyPhone = harmonyPlatform && mobilePlatform;
+  // 「按键布局」子页：HarmonyOS 手机上和语音页的「服务配置」一样压一条历史记录，系统返回手势先关它；离开这页时随之关上。
+  const {
+    value: keyLayoutSubview,
+    open: openKeyLayoutSubview,
+    close: closeKeyLayout,
+    reset: resetKeyLayout,
+  } = useMobileSettingsSubview<boolean>({
+    mobile: harmonyPhone,
+    stateKey: "keyLayout",
+    decode: (state) => (state?.keyLayout === true ? true : null),
+    encode: () => ({ page: "screen-keyboard", keyLayout: true }),
+    isActiveState: (state) => state?.keyLayout === true,
+  });
+  useEffect(() => {
+    if (page !== "screen-keyboard") resetKeyLayout();
+  }, [page, resetKeyLayout]);
+  // 版本没有的键盘类型不列它的组；一组都没有时（只有日文、韩文这类方案的版本）也不画入口。
+  const keyLayoutGroups = touchKeyLayoutGroups(supportedInputSchemes(host));
+  const keyLayoutOffered =
+    harmonyPhone && (keyLayoutGroups.twentySix || keyLayoutGroups.fourteen || keyLayoutGroups.nine);
+  // 只有触屏键盘按所选包发按键音的宿主（HarmonyOS 手机和平板）才读目录、给「音效」行；2in1 和其他宿主在插件页或原生设置里选包，这里不变。
+  const keySoundPacks = useTouchKeySoundPacks(
+    host?.touch_key_sound_packs ? client.plugins?.catalog : undefined,
+    page === "screen-keyboard",
+  );
+  const plugins = pluginPreferences(draft);
+  const keySoundPack =
+    keySoundPacks && keySoundPacks.length > 0
+      ? {
+          selected: plugins.key_sound.pack,
+          packs: keySoundPacks,
+          onSelect: (pack: string) => {
+            onPreferencesChange({
+              plugins: { ...plugins, key_sound: { ...plugins.key_sound, pack } },
+            });
+            // 试听只是顺带的：播不出来不影响已经写入的选择，所以不报错。
+            void client.mobileKeyboardFeedback
+              ?.previewKeySound?.(pack, plugins.key_sound.volume)
+              .catch(() => undefined);
+          },
+        }
+      : undefined;
   // 宿主不按存下的高度或间距画键盘时（macOS），预览画键盘实际的样子：默认高度和默认间距，不画存下的值。
   const previewKeySpacingTenths = showTouchKeyboardSpacing
     ? touchKeySpacingTenths
@@ -146,7 +232,13 @@ export function ScreenKeyboardSettingsPage() {
       widthPercent={mobilePlatform ? (draft.touch_keyboard_width_percent ?? 100) : 100}
       touchRows={
         harmonyPhone
-          ? harmonyTouchKeyboardRows[harmonyTouchLayout(selectedTouchKeyboardScheme)]
+          ? harmonyTouchKeyboardRows[
+              harmonyTouchLayout(
+                selectedTouchKeyboardScheme,
+                draft.touch_shuangpin_layout ?? "twenty_six_key",
+                draft.touch_wubi_layout ?? "twenty_six_key",
+              )
+            ]
           : undefined
       }
     />
@@ -197,12 +289,8 @@ export function ScreenKeyboardSettingsPage() {
     introTabs["screen-keyboard"],
     (tab) => selectIntroTab("screen-keyboard", tab),
   );
-  return (
-    <SettingsPageFieldset
-      disabled={busy}
-      hidden={page !== "screen-keyboard"}
-      ariaLabel={handwritingOnScreenKeyboardPage ? screenKeyboardAndHandwritingTitle : "屏幕键盘"}
-    >
+  const body = (
+    <>
       {tabList}
       {panel(
         "keyboard",
@@ -211,10 +299,27 @@ export function ScreenKeyboardSettingsPage() {
           <TouchKeyboardGeometrySection
             layoutRows={
               harmonyPhone && (
-                <HarmonyChineseKeyboardRow
-                  selected={selectedTouchKeyboardScheme}
-                  onSelect={selectHomeScheme}
-                />
+                <>
+                  <HarmonyChineseKeyboardRow
+                    selected={selectedTouchKeyboardScheme}
+                    shuangpinLayout={draft.touch_shuangpin_layout ?? "twenty_six_key"}
+                    wubiLayout={draft.touch_wubi_layout ?? "twenty_six_key"}
+                    onSelect={selectHomeScheme}
+                    onShuangpinLayoutChange={(touch_shuangpin_layout) =>
+                      onPreferencesChange({ touch_shuangpin_layout })
+                    }
+                    onWubiLayoutChange={(touch_wubi_layout) =>
+                      onPreferencesChange({ touch_wubi_layout })
+                    }
+                  />
+                  {keyLayoutOffered && (
+                    <LinkRow
+                      title="按键布局"
+                      description={keyLayoutEntryDescription}
+                      onClick={() => openKeyLayoutSubview(true)}
+                    />
+                  )}
+                </>
               )
             }
             preview={harmonyPhone && phonePreview}
@@ -251,6 +356,8 @@ export function ScreenKeyboardSettingsPage() {
                 ? (draft.touch_shuangpin_key_hints ?? false)
                 : undefined
             }
+            // 全拼 26 键组字保留 ⇧ 的开关：触屏宿主都提供（Android、iOS 原生设置页已有同一行），缺省为关。
+            quanpinShift={mobilePlatform ? (draft.touch_quanpin_shift ?? false) : undefined}
             tabletFullKeysBusy={mobileKeyboardFeedbackBusy}
             onHeightAdjustmentChange={(touch_keyboard_height_adjustment) =>
               onPreferencesChange({ touch_keyboard_height_adjustment })
@@ -266,6 +373,9 @@ export function ScreenKeyboardSettingsPage() {
             }
             onShuangpinKeyHintsChange={(touch_shuangpin_key_hints) =>
               onPreferencesChange({ touch_shuangpin_key_hints })
+            }
+            onQuanpinShiftChange={(touch_quanpin_shift) =>
+              onPreferencesChange({ touch_quanpin_shift })
             }
             onToolbarChange={(touch_toolbar) => onPreferencesChange({ touch_toolbar })}
             onHarmonyToolbarChange={(harmony_toolbar) => onPreferencesChange({ harmony_toolbar })}
@@ -307,6 +417,7 @@ export function ScreenKeyboardSettingsPage() {
             ios={iosPlatform}
             // 「英文建议」管的是候选，放在输入页的「候选与联想」组。
             showEnglishSuggestions={false}
+            keySoundPack={keySoundPack}
             onChange={(value) => void saveMobileKeyboardFeedback(value)}
             onPreview={() => void previewMobileKeyboardHaptics()}
           />
@@ -327,6 +438,48 @@ export function ScreenKeyboardSettingsPage() {
         </>,
       )}
       {handwritingOnScreenKeyboardPage && panel("handwriting", <HandwritingSettingsContent />)}
+    </>
+  );
+  // 「按键布局」子页和这页的正文一直都挂着，只是轮流隐藏，与语音页的「服务配置」一样：设置项搜索才扫得到子页里的选项，命中时由 SettingsSearchReveal 打开子页（或关上子页回到正文）。
+  return (
+    <SettingsPageFieldset
+      disabled={busy}
+      hidden={page !== "screen-keyboard"}
+      ariaLabel={handwritingOnScreenKeyboardPage ? screenKeyboardAndHandwritingTitle : "屏幕键盘"}
+    >
+      {keyLayoutOffered ? (
+        <>
+          {/* 两层 div：外层的 hidden 属性管显隐，内层的 flex 排版类不会把它盖掉。 */}
+          <SettingsSearchReveal hidden={keyLayoutSubview === true} onReveal={closeKeyLayout}>
+            <div className="flex flex-col gap-6">{body}</div>
+          </SettingsSearchReveal>
+          <SettingsSearchReveal
+            label="按键布局"
+            hidden={keyLayoutSubview !== true}
+            onReveal={() => {
+              if (keyLayoutSubview !== true) openKeyLayoutSubview(true);
+            }}
+          >
+            <div
+              className={fullScreenSurface}
+              role="dialog"
+              aria-modal="true"
+              aria-label="按键布局"
+            >
+              <section className={fullScreenColumn}>
+                <SettingsPageHeader title="按键布局" onBack={closeKeyLayout} level={2} />
+                <TouchKeyLayoutSettings
+                  preferences={draft}
+                  groups={keyLayoutGroups}
+                  onChange={onPreferencesChange}
+                />
+              </section>
+            </div>
+          </SettingsSearchReveal>
+        </>
+      ) : (
+        body
+      )}
     </SettingsPageFieldset>
   );
 }

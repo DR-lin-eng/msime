@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 功能菜单：四列，手机竖屏和平板三行、手机横屏两行（{@link MSIMEInputService#pickerGrid}），常用操作在前、其他工具在后，过滤顶部已有的入口；条目见 {@link FunctionPanelModel}。本地输入与「AI 回复与润色」各有一个子页。
+ * 功能菜单：四列，手机竖屏和平板三行、手机横屏两行（{@link MSIMEInputService#pickerPhoneLandscape}），面板矮时磁贴整体缩小（{@link PagedTileGrid#pickerGrid}），常用操作在前、其他工具在后，过滤顶部已有的入口；条目见 {@link FunctionPanelModel}。本地输入与「AI 回复与润色」各有一个子页。
  *
  * <p>旧面板「开启态卡片渲染成深色块」的根因：开启的 TILE 卡片底色是 accentSoft（自定义皮肤里是 accent 加 0x24 透明度），经 `KeyboardSkinKeyDrawable` 绘制时选中卡片按 action 处理，`paint.setAlpha(opacity)` 把颜色自带的 0x24 透明度覆盖成 255，底色变成实心 accent，而文字 accentText 也是 accent，于是成了一块看不见字的深色块。面板条目不画底色（FunctionPanelView 挡掉样式通道给的键帽），开启态用强调色和勾标表示。
  */
@@ -23,10 +23,13 @@ final class ImeFunctionPanel {
     private FunctionPanelView chooserPanel;
     private String chooserTitle = "";
     private List<String> chooserLabels = List.of();
+    private View easterEgg;
 
     ImeFunctionPanel(MSIMEInputService s) {
         this.s = s;
     }
+
+    void close() { easterEgg = null; }
 
     /** 品牌键：面板关着时打开，开着时回到键盘。 */
     void toggleFunctionPanel() {
@@ -44,6 +47,10 @@ final class ImeFunctionPanel {
         if (s.imeOcr != null && s.imeOcr.active()) return;
         if (s.imeWorldClock != null && s.imeWorldClock.active()) {
             s.imeWorldClock.render();
+            return;
+        }
+        if (easterEgg != null) {
+            renderEasterEgg();
             return;
         }
         // 子页没有 FunctionPanelView，由容器自己承担「更多工具」的描述，免得同一面板出现两个同名节点。
@@ -64,10 +71,10 @@ final class ImeFunctionPanel {
             renderedItemIds = List.of();
         }
         FunctionPanelView panel = s.functionPanel;
-        panel.setPickerGrid(s.pickerGrid(FunctionPanelView.ITEM_HEIGHT_DP,
-            FunctionPanelView.CHROME_DP + MSIMEInputService.MORE_TOOLS_BOTTOM_PADDING_DP));
+        panel.setPhoneLandscape(s.pickerPhoneLandscape());
         java.util.Set<FunctionPanelModel.Id> hiddenItems = java.util.EnumSet.noneOf(FunctionPanelModel.Id.class);
         if (!s.toolbarHidden) {
+            if (s.toolbarScheme) hiddenItems.add(FunctionPanelModel.Id.SCHEME);
             if (s.toolbarEmoji) hiddenItems.add(FunctionPanelModel.Id.EMOJI);
             if (s.toolbarClipboard) hiddenItems.add(FunctionPanelModel.Id.CLIPBOARD);
             if (s.toolbarFloating) hiddenItems.add(FunctionPanelModel.Id.FLOATING);
@@ -124,6 +131,13 @@ final class ImeFunctionPanel {
                 toggle(s.fuzzyPinyinEnabled), ready && !s.panelPreferenceSaving);
             case TRADITIONAL -> add(entries, states, enabled, glyph(item, "繁", s::toggleChineseOutput),
                 toggle(s.traditionalChineseOutput), s.traditionalOutputToolAvailable());
+            case SCHEME -> add(entries, states, enabled,
+                icon(item, KeyboardIconPaths.Icon.TOOLBAR_SCHEME, () -> {
+                    s.closeMoreTools();
+                    s.imePanels.showSchemePicker();
+                    s.render();
+                }, null),
+                FunctionPanelView.State.NONE, ready);
             case HANDWRITING -> add(entries, states, enabled,
                 icon(item, KeyboardIconPaths.Icon.HANDWRITING, () -> {
                     s.closeMoreTools();
@@ -177,7 +191,7 @@ final class ImeFunctionPanel {
                     s.render();
                 }), FunctionPanelView.State.NONE, s.connection != null);
             case ABOUT -> add(entries, states, enabled,
-                icon(item, KeyboardIconPaths.Icon.ABOUT, () -> host("ABOUT"), null),
+                icon(item, KeyboardIconPaths.Icon.ABOUT, () -> host("ABOUT"), this::openEasterEgg),
                 FunctionPanelView.State.NONE, true);
             case WEBSITE -> add(entries, states, enabled,
                 icon(item, KeyboardIconPaths.Icon.WEBSITE, s::openWebsite, null),
@@ -246,6 +260,28 @@ final class ImeFunctionPanel {
         s.openHostPage(page);
     }
 
+    private void openEasterEgg() {
+        easterEgg = AboutEasterEgg.scene(s, Color.parseColor(s.skin.background()));
+        renderEasterEgg();
+    }
+
+    private void renderEasterEgg() {
+        if (easterEgg.getParent() == s.moreToolsPanel) return;
+        s.moreToolsPanel.removeAllViews();
+        s.moreToolsPanel.setContentDescription("水杉的小秘密");
+        KeyboardIconKey back = new KeyboardIconKey(s, KeyboardIconKey.Kind.CURSOR_LEFT);
+        back.setKeyboardRole(KeyboardKeyRole.PLAIN);
+        back.setText("返回工具");
+        back.setContentDescription("返回工具");
+        ViewPolicy.bindClick(back, () -> {
+            close();
+            renderMoreTools();
+        });
+        s.moreToolsPanel.addView(back, LayoutPolicy.matchWidthHeightPx(s.pixels(44)));
+        s.moreToolsPanel.addView(easterEgg, LayoutPolicy.matchWidthWrapParams());
+        s.moreToolsScroll.scrollTo(0, 0);
+    }
+
     private static FunctionPanelView.State toggle(boolean on) {
         return on ? FunctionPanelView.State.ON : FunctionPanelView.State.OFF;
     }
@@ -275,7 +311,7 @@ final class ImeFunctionPanel {
             longPress);
     }
 
-    /** 本地输入沿用主菜单图标网格，三列三行，不再给每项铺一块重底色。 */
+    /** 本地输入沿用主菜单图标网格，不再给每项铺一块重底色。九项是三列三行；加上 `/` 指令的十项排成四列三行，面板高度不变，不用上下滚动。 */
     private void renderLocalInput() {
         List<FunctionPanelView.Entry> entries = new ArrayList<>();
         List<Boolean> enabled = new ArrayList<>();
@@ -290,6 +326,7 @@ final class ImeFunctionPanel {
                 case KAOMOJI -> "顔";
                 case TEMPORARY_JAPANESE -> "あ";
                 case CHAIZI -> "拆";
+                case COMMAND -> "/";
             };
             entries.add(FunctionPanelView.Entry.glyph(mode.title(), mode.title(), glyph, () -> {
                 s.closeMoreTools();
@@ -297,7 +334,8 @@ final class ImeFunctionPanel {
             }, null));
             enabled.add(s.supportsLocalTools() && s.localModeEnabled(mode));
         }
-        renderChooser("本地输入", entries, enabled, 3, 3);
+        int columns = entries.size() > 9 ? 4 : 3;
+        renderChooser("本地输入", entries, enabled, columns, (entries.size() + columns - 1) / columns);
     }
 
     /** AI 辅助只呈现回复与润色两个入口，图标和标签与主菜单一致。 */

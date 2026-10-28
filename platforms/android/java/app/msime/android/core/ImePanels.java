@@ -4,6 +4,7 @@ import app.msime.android.LayoutPolicy;
 
 
 import app.msime.android.core.InputViewValuePolicy;
+import app.msime.android.clipboard.CloudClipboardRelayPolicy;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -27,6 +28,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
+import java.time.ZoneId;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -316,6 +318,58 @@ final class ImePanels {
         s.imeStyler.applySkinBackground(s.symbolPanel);
         ViewPolicy.show(s.symbolPanel);
         s.symbolPanel.requestFocus();
+        loadPluginSymbolGroups();
+    }
+
+    /**
+     * 在表情目录的工作线程上读一次插件目录里的符号集（`msime_client_emoji_catalog_request` 的 `list_plugin_symbol_groups`，插件目录是偏好目录下的 `plugins/`，设置里的插件页装的就是这一份），读完换进符号面板（{@link SymbolPanelView#setPluginCategories}）。每次打开面板都读：几个 `plugin.toml` 的量，装上或卸载的包下一次打开就跟上。读不出来时面板只有内置分类，不写日志里不该有的东西（插件目录里的内容是用户自己的）。
+     */
+    private void loadPluginSymbolGroups() {
+        String directory = s.preferencesDirectory;
+        if (directory.isEmpty()) return;
+        // 接口要求 resources 是绝对路径，列插件组时并不读它；内置目录还没准备好时随便给一个应用自己的绝对目录。
+        String resources = s.emojiResources.isEmpty() ? s.getFilesDir().getAbsolutePath() : s.emojiResources;
+        String query;
+        try {
+            query = new JSONObject().put("category", SymbolPanelModel.SYMBOLS_CATALOG).put("limit", 1)
+                .put("list_plugin_symbol_groups", true)
+                .put("plugins", new java.io.File(directory, "plugins").getAbsolutePath()).toString();
+        } catch (JSONException error) {
+            return;
+        }
+        s.emojiWorker.execute(() -> {
+            List<SymbolPanelModel.Category> categories;
+            try {
+                categories = SymbolPanelModel.pluginCategories(decodePluginSymbolGroups(NativeClient.emojiCatalog(query, resources)));
+            } catch (JSONException | RuntimeException | LinkageError error) {
+                categories = List.of();
+            }
+            List<SymbolPanelModel.Category> loaded = categories;
+            s.main.post(() -> {
+                if (s.symbolPanel != null) s.symbolPanel.setPluginCategories(loaded);
+            });
+        });
+    }
+
+    private static List<SymbolPanelModel.PluginGroup> decodePluginSymbolGroups(String response) throws JSONException {
+        JSONObject envelope = new JSONObject(response);
+        if (!Boolean.TRUE.equals(envelope.opt("ok"))) return List.of();
+        JSONArray groups = envelope.getJSONObject("value").optJSONArray("plugin_symbol_groups");
+        if (groups == null) return List.of();
+        List<SymbolPanelModel.PluginGroup> values = new ArrayList<>(groups.length());
+        for (int index = 0; index < groups.length(); index++) {
+            JSONObject group = groups.optJSONObject(index);
+            if (group == null) continue;
+            JSONArray items = group.optJSONArray("items");
+            List<String> texts = new ArrayList<>(items == null ? 0 : Math.min(items.length(), SymbolPanelModel.MAX_PLUGIN_GROUP_ITEMS));
+            for (int item = 0; items != null && item < items.length() && texts.size() < SymbolPanelModel.MAX_PLUGIN_GROUP_ITEMS; item++) {
+                if (items.opt(item) instanceof String text) texts.add(text);
+            }
+            values.add(new SymbolPanelModel.PluginGroup(JsonPolicy.strictStringOrEmpty(group.opt("pack")),
+                JsonPolicy.strictStringOrEmpty(group.opt("pack_name")), JsonPolicy.strictStringOrEmpty(group.opt("tab")),
+                JsonPolicy.strictStringOrEmpty(group.opt("title")), texts));
+        }
+        return values;
     }
 
     void showReplyKeyboard() {
@@ -542,11 +596,11 @@ final class ImePanels {
             String themeName = InputViewValuePolicy.textOr(entry, "title", id);
             KeyboardSkin choice = "custom".equals(id) ? s.themeSkin(id, customTheme, hostDark)
                 : KeyboardSkin.resolved(entry, themeName, hostDark, null);
-            choices.add(new MSIMEInputService.SkinChoice(id, choice.title(), choice, null));
+            choices.add(new MSIMEInputService.SkinChoice(id, choice.title(), choice, null, null));
         }
         if (choices.isEmpty()) {
             KeyboardSkin system = KeyboardSkin.system(hostDark);
-            choices.add(new MSIMEInputService.SkinChoice(system.id(), system.title(), system, null));
+            choices.add(new MSIMEInputService.SkinChoice(system.id(), system.title(), system, null, null));
         }
         // 已获取的设计与社区目录缓存里的设计，按皮肤的绘制键去重；「我的皮肤」与其中某一款相同时只留带名字的那一格。
         java.util.Set<String> libraryIds = new java.util.HashSet<>();
@@ -556,7 +610,7 @@ final class ImePanels {
             KeyboardSkin skin = KeyboardSkin.custom(design, hostDark);
             libraryIds.add(item.id());
             namedKeys.add(skin.key());
-            choices.add(new MSIMEInputService.SkinChoice("custom", item.name(), skin, design));
+            choices.add(new MSIMEInputService.SkinChoice("custom", item.name(), skin, design, item.id()));
         }
         // 社区里还没获取的皮肤：目录由 App 缓存（键盘不为浏览目录联网），选中时先存进皮肤库再换上。
         java.util.Map<MSIMEInputService.SkinChoice, CommunitySkinCache.Entry> uninstalled = new java.util.HashMap<>();
@@ -564,15 +618,16 @@ final class ImePanels {
             if (libraryIds.contains(entry.id())) continue;
             KeyboardSkin skin = KeyboardSkin.custom(entry.design(), hostDark);
             if (!namedKeys.add(skin.key())) continue;
-            MSIMEInputService.SkinChoice choice = new MSIMEInputService.SkinChoice("custom", entry.name(), skin, entry.design());
+            MSIMEInputService.SkinChoice choice = new MSIMEInputService.SkinChoice("custom", entry.name(), skin, entry.design(), entry.id());
             uninstalled.put(choice, entry);
             choices.add(choice);
         }
         choices.removeIf(choice -> "custom".equals(choice.id()) && choice.design() == null
             && namedKeys.contains(choice.skin().key()));
         // 所选主题属于另一种明暗时键盘按跟随系统画，选中态也落在跟随系统上。
-        String globalTheme = KeyboardSkin.effectiveTheme(themes,
-            InputViewValuePolicy.textOr(preferences, "global_theme", "system"), hostDark);
+        app.msime.android.KeyboardSkinModeChoice.Selected selectedChoice =
+            app.msime.android.KeyboardSkinModeChoice.selected(preferences, hostDark, libraryItems);
+        String globalTheme = KeyboardSkin.effectiveTheme(themes, selectedChoice.theme(), hostDark);
         PagedTileGrid grid = new PagedTileGrid(s);
         grid.setGrid(4, 2);
         // 行高容下按 390:292 的迷你键盘（约 86 dp 宽时 65 dp 高）、描边和下方的名字；行距、列距取设计的 6 / 10。
@@ -586,7 +641,9 @@ final class ImePanels {
             String key = choiceKey(choice);
             boolean selected = pendingSkinKey != null ? pendingSkinKey.equals(key)
                 : choice.design() == null ? choice.id().equals(globalTheme)
-                : "custom".equals(globalTheme) && s.skin.key().equals(choice.skin().key());
+                : "custom".equals(globalTheme) && (selectedChoice.libraryId() != null
+                    ? selectedChoice.libraryId().equals(choice.libraryId())
+                    : s.skin.key().equals(choice.skin().key()));
             ViewPolicy.setSelected(card, selected);
             if (selected) selectedIndex = index;
             if ("system".equals(choice.id())) {
@@ -607,15 +664,20 @@ final class ImePanels {
                 if (install != null) {
                     final String directory = s.preferencesDirectory;
                     s.preferencesWorker.execute(() -> {
+                        boolean saved = false;
                         try {
-                            if (!CustomSkinLibrary.add(java.nio.file.Paths.get(directory), install.id(), install.name(), install.design()))
-                                android.util.Log.i("MSIMESkin", "Skin library is full; the community skin is applied without being saved");
+                            saved = CustomSkinLibrary.add(java.nio.file.Paths.get(directory),
+                                install.id(), install.name(), install.design());
                         } catch (java.io.IOException | RuntimeException error) {
                             android.util.Log.w("MSIMESkin", "Community skin was not saved to the library", error);
                         }
+                        boolean installed = saved;
+                        s.main.post(() -> {
+                            if (installed) s.saveKeyboardSkin(choice.id(), choice.design(), choice.libraryId());
+                            else s.notice("皮肤保存失败，保留当前皮肤");
+                        });
                     });
-                }
-                s.saveKeyboardSkin(choice.id(), choice.design());
+                } else s.saveKeyboardSkin(choice.id(), choice.design(), choice.libraryId());
                 s.recordSkinStatistics(choice.design() == null ? choice.id() : "custom");
                 styleSkinPicker(cards);
                 s.closeSkinPicker();
@@ -668,12 +730,34 @@ final class ImePanels {
         grid.post(() -> grid.setPage(initialPage, false));
     }
 
+    /**
+     * 按面板高度排行的分页网格（{@link PagedTileGrid#setPickerFit}）加下方页点：输入方式面板用。网格拿去页点以外的全部高度，所以永远放得进面板；打开时停在第 {@code revealIndex} 个条目所在的页，行数要量过高度才知道，页码也就等到排版时才算。
+     */
+    private void addFittedGrid(LinearLayout parent, PagedTileGrid grid, int revealIndex) {
+        parent.addView(grid, LayoutPolicy.weightedWidthParams(1));
+        KeyboardPagerDots dots = new KeyboardPagerDots(s);
+        dots.setTag(PAGER_DOTS_TAG);
+        // 页点占满一行、自己居中画，页数随行数变时不必重新量宽度；只有一页时占着位置不画。
+        LinearLayout.LayoutParams dotParams = LayoutPolicy.matchWidthHeightPx(s.pixels(PAGER_DOTS_HEIGHT_DP));
+        dotParams.topMargin = s.pixels(PAGER_DOTS_MARGIN_DP);
+        dotParams.bottomMargin = s.pixels(PAGER_DOTS_MARGIN_DP);
+        parent.addView(dots, dotParams);
+        PagedTileGrid.OnPageChangeListener sync = (page, count) -> {
+            dots.setCount(count);
+            dots.setActive(page, true);
+            if (count > 1) ViewPolicy.show(dots);
+            else ViewPolicy.setInvisible(dots);
+        };
+        sync.onPageChanged(grid.page(), grid.pageCount());
+        grid.setOnPageChangeListener(sync);
+        grid.revealOnLayout(revealIndex);
+    }
+
     private static final String PAGER_DOTS_TAG = "msime-pager-dots";
     /** {@link #addPagedGrid} 里页点那一格的高度和上下边距。 */
     private static final int PAGER_DOTS_HEIGHT_DP = 10;
     private static final int PAGER_DOTS_MARGIN_DP = 6;
-    /** 输入方式卡片的行高和面板的上下内边距，面板选行数时算进网格以外的高度。 */
-    private static final int SCHEME_ROW_HEIGHT_DP = 56;
+    /** 输入方式面板的上下内边距。 */
     private static final int SCHEME_PANEL_PADDING_TOP_DP = 14;
     private static final int SCHEME_PANEL_PADDING_BOTTOM_DP = 6;
 
@@ -1153,15 +1237,14 @@ final class ImePanels {
         if (s.schemePanel == null) return;
         s.schemePanel.removeAllViews();
         LayoutPolicy.setPaddingDp(s.schemePanel, s, 8, SCHEME_PANEL_PADDING_TOP_DP, 8, SCHEME_PANEL_PADDING_BOTTOM_DP);
-        // 4 列分页网格，手机竖屏和平板三行、手机横屏两行（MSIMEInputService.pickerGrid）：已启用的方案按共享目录的顺序，英文 26 键排在第三格（方案不够时排最后），末尾是「+ 添加语言」。
+        // 4 列分页网格，手机竖屏和平板三行、手机横屏两行（MSIMEInputService.pickerPhoneLandscape），网格按面板量到的高度定行高和行距，放不下原尺寸时卡片整体缩小（PagedTileGrid.pickerGrid）：已启用的方案按共享目录的顺序，英文 26 键排在第三格（方案不够时排最后），末尾是「+ 添加语言」。
         java.util.List<KeyboardScheme> schemes = s.visibleSchemes;
         final int englishIndex = BoundsPolicy.bounded(2, 0, schemes.size());
         int cardCount = schemes.size() + 2;
-        PagedTileGrid.PickerGrid layout = s.pickerGrid(SCHEME_ROW_HEIGHT_DP, SCHEME_PANEL_PADDING_TOP_DP
-            + SCHEME_PANEL_PADDING_BOTTOM_DP + PAGER_DOTS_HEIGHT_DP + 2 * PAGER_DOTS_MARGIN_DP);
         PagedTileGrid grid = new PagedTileGrid(s);
-        grid.setGrid(4, layout.rows());
-        grid.setSpacing(SCHEME_ROW_HEIGHT_DP, layout.rowGap(), 4, 4);
+        grid.setGrid(4, 3);
+        grid.setSpacing(KeyboardSchemeCard.HEIGHT_DP, PagedTileGrid.PICKER_THREE_ROW_GAP_DP, 4, 4);
+        grid.setPickerFit(KeyboardSchemeCard.HEIGHT_DP, s.pickerPhoneLandscape());
         grid.setContentDescription("输入方案卡片区域");
         java.util.List<KeyboardSchemeCard> schemeCards = new java.util.ArrayList<>(cardCount);
         java.util.List<Boolean> cardSelection = new java.util.ArrayList<>(cardCount);
@@ -1203,7 +1286,7 @@ final class ImePanels {
             cardSelection.add(selected);
             grid.addView(card);
         }
-        addPagedGrid(s.schemePanel, grid, PagedTileGrid.pageOf(selectedIndex, PagedTileGrid.perPage(4, layout.rows())));
+        addFittedGrid(s.schemePanel, grid, selectedIndex);
         s.imeStyler.applySkin();
         // 必须在换肤遍历之后：那一趟会把每个 TextView 重新刷成 keyForeground。
         int accent = Color.parseColor(s.skin.accent());
@@ -1222,7 +1305,7 @@ final class ImePanels {
     }
 
     void showClipboardHistory() {
-        boolean cloudAllowed = cloudClipboardAllowed();
+        boolean cloudAllowed = cloudClipboardTabAvailable();
         if (!CloudClipboardPanelPolicy.panelAvailable(s.clipboardHistoryEnabled, cloudAllowed)
                 || s.clipboardSurface == null) return;
         // Clipboard entries are independent editor text. Finish the active composition when the
@@ -1239,6 +1322,7 @@ final class ImePanels {
         s.clipboardTab = CloudClipboardPanelPolicy.initialTab(s.clipboardTab, cloudAllowed);
         clipboardClearPending = false;
         clipboardActionText = null;
+        clearClipboardDetail();
         clipboardSwipedText = null;
         clipboardSelectionMode = false;
         clipboardSelectedTexts.clear();
@@ -1256,14 +1340,24 @@ final class ImePanels {
         return ViewPolicy.isVisible(s.clipboardSurface);
     }
 
+    void clearClipboardDetail() {
+        clipboardDetailItem = null;
+        clipboardDetailScrollY = 0;
+    }
+
     boolean cloudClipboardAllowed() {
         // 输入框本身的限制之外还要过隐私闸门：隐私模式开着时同样不碰云剪贴板。
         return CloudClipboardPanelPolicy.cloudAllowed(s.editorInputType, s.allowLearning)
             && s.imePrivacyGate.pushesCloudClipboard();
     }
 
+    /** 访客模式仍显示云端分段，但只画「此功能开发中」，绝不触网。 */
+    private boolean cloudClipboardTabAvailable() {
+        return cloudClipboardAllowed() || s.clipboardMode == ClipboardModePolicy.Mode.VISITOR;
+    }
+
     void selectClipboardTab(CloudClipboardPanelPolicy.Tab tab) {
-        if (tab == CloudClipboardPanelPolicy.Tab.CLOUD && !cloudClipboardAllowed()) return;
+        if (tab == CloudClipboardPanelPolicy.Tab.CLOUD && !cloudClipboardTabAvailable()) return;
         s.clipboardTab = tab;
         clipboardClearPending = false;
         clipboardActionText = null;
@@ -1279,7 +1373,7 @@ final class ImePanels {
     private record CloudOwner(boolean relay, String id, long generation) {}
 
     /**
-     * 「云端」这一刻归谁。偏好里配置了自建中继时是中继，绑定由地址和令牌算出（{@link CloudClipboardRelay#binding}），不需要登录；否则是水杉账号的登录绑定，读不到时为 null。
+     * 「云端」这一刻归谁。偏好里配置了自建中继或 WebDAV 网盘时是中继或网盘，绑定由地址和令牌（网盘是地址和账号）算出（{@link CloudClipboardRelay#binding}），不需要登录；否则是水杉账号的登录绑定，读不到时为 null。
      *
      * <p>只看内存里的偏好快照，不读文件，主线程上可以调用。快照最多晚一秒（偏好每秒重读一次），所以后台线程真正发请求之前还会再问一次共享层（{@link CloudClipboardRelay#selected}），两边不一致就按失败处理，绝不改走账号。
      */
@@ -1299,6 +1393,12 @@ final class ImePanels {
      * <p>配置了中继就只读中继；面板打开后中继设置变了（换了地址或令牌、改回了账号），这次读取按失败处理，下次刷新时按新的设置来。
      */
     void refreshCloudClipboard() {
+        if (s.clipboardMode == ClipboardModePolicy.Mode.VISITOR) {
+            s.cloudClipboardStatus = CloudClipboardPanelPolicy.Status.VISITOR;
+            s.cloudClipboardItems = java.util.List.of();
+            if (s.clipboardTab == CloudClipboardPanelPolicy.Tab.CLOUD) renderClipboardHistory();
+            return;
+        }
         if (!cloudClipboardAllowed()) return;
         CloudOwner owner = cloudClipboardOwner();
         String accountId = owner == null ? "" : owner.id();
@@ -1391,7 +1491,8 @@ final class ImePanels {
         }
         if (!CloudClipboardPanelPolicy.canUpload(cloudAllowed, s.cloudClipboardStatus, text)) {
             s.notice(CloudClipboardPanelPolicy.explains(s.cloudClipboardStatus)
-                    ? CloudClipboardPanelPolicy.message(s.cloudClipboardStatus, 0)
+                    ? CloudClipboardPanelPolicy.message(s.cloudClipboardStatus, 0,
+                        CloudClipboardRelayPolicy.webdav(accountId))
                     : "这条记录无法发到云剪贴板");
             return;
         }
@@ -1426,7 +1527,7 @@ final class ImePanels {
                     }
                     s.notice(result == null ? "已发到云剪贴板"
                         : CloudClipboardPanelPolicy.explains(result)
-                            ? CloudClipboardPanelPolicy.message(result, 0)
+                            ? CloudClipboardPanelPolicy.message(result, 0, CloudClipboardRelayPolicy.webdav(accountId))
                             : "未能发到云剪贴板，请稍后重试");
                     // Re-read rather than splice the entry in: the service deduplicates and orders the list.
                     refreshCloudClipboard();
@@ -1460,6 +1561,9 @@ final class ImePanels {
     private boolean clipboardClearPending;
     /** 长按打开了操作行的那一条（共享存储以文字标识条目）；没有时为 null。 */
     private String clipboardActionText;
+    /** 详情页只保留本次打开时的记录快照，返回后重新读取本机历史。 */
+    private ClipboardHistory.Item clipboardDetailItem;
+    private int clipboardDetailScrollY;
     /** 本机历史的多选状态；文字是共享存储识别条目的键。 */
     private boolean clipboardSelectionMode;
     private final java.util.Set<String> clipboardSelectedTexts = new java.util.LinkedHashSet<>();
@@ -1538,7 +1642,7 @@ final class ImePanels {
         });
         button.setContentDescription("剪贴板目标分类 " + name);
         ViewPolicy.setEnabled(button, !clipboardCategoryBusy);
-        s.clipboardPanel.addView(button, LayoutPolicy.matchWidthHeightPx(s.pixels(40)));
+        s.clipboardPanel.addView(button, LayoutPolicy.matchWidthWrapParams());
     }
 
     private void moveClipboardCategory(String text, String id) {
@@ -1581,7 +1685,11 @@ final class ImePanels {
         clipboardSwipedCell = null;
         LayoutPolicy.setHorizontalPaddingDp(s.clipboardHeader, s, 8);
         LayoutPolicy.setSymmetricPaddingDp(s.clipboardPanel, s, 8, 8);
-        boolean cloudAllowed = cloudClipboardAllowed();
+        if (clipboardDetailItem != null) {
+            renderClipboardDetail(clipboardDetailItem);
+            return;
+        }
+        boolean cloudAllowed = cloudClipboardTabAvailable();
         if (!cloudAllowed) s.clipboardTab = CloudClipboardPanelPolicy.Tab.LOCAL;
         boolean cloud = s.clipboardTab == CloudClipboardPanelPolicy.Tab.CLOUD;
         if (!cloud && clipboardSegments != null) {
@@ -1675,6 +1783,12 @@ final class ImePanels {
                 clipboardSelectedTexts.size() + " 项已选择", 12);
             header.addView(selected, LayoutPolicy.weightedMatchParentParams(1));
             clipboardAction(header, "取消", this::exitClipboardSelection);
+            Button export = clipboardAction(header, "导出", () -> {
+                java.util.List<String> selectedTexts = new java.util.ArrayList<>(clipboardSelectedTexts);
+                exitClipboardSelection();
+                s.exportClipboardItems(selectedTexts);
+            });
+            ViewPolicy.setEnabled(export, !clipboardSelectedTexts.isEmpty());
             Button remove = clipboardAction(header, "删除", () -> {
                 s.removeClipboardItems(new java.util.ArrayList<>(clipboardSelectedTexts));
                 exitClipboardSelection();
@@ -1742,7 +1856,8 @@ final class ImePanels {
                 : "此分类还没有记录，长按记录后可移动分类"));
             long now = System.currentTimeMillis();
             int columns = s.clipboardColumns;
-            float reveal = ClipboardSwipePolicy.revealWidth(DimensionPolicy.density(s), clipboardCellWidth(columns));
+            float reveal = ClipboardSwipePolicy.revealWidth(DimensionPolicy.density(s),
+                clipboardCellWidth(columns) - (clipboardSelectionMode ? 0 : s.pixels(38)));
             boolean swipedPresent = false;
             ClipboardHistory.Item actionItem = null;
             for (int index = 0; index < items.size(); index++) {
@@ -1757,7 +1872,13 @@ final class ImePanels {
                 swipedPresent |= swiped;
                 Button card = newClipboardCard(item.text(), meta, managed, () -> {
                     if (clipboardSelectionMode) {
-                        if (!clipboardSelectedTexts.add(item.text())) clipboardSelectedTexts.remove(item.text());
+                        if (clipboardSelectedTexts.contains(item.text())) {
+                            clipboardSelectedTexts.remove(item.text());
+                        } else if (ClipboardSelectionPolicy.canSelect(clipboardSelectedTexts.size())) {
+                            clipboardSelectedTexts.add(item.text());
+                        } else {
+                            s.notice("最多只能选择 " + ClipboardSelectionPolicy.MAX_SELECTIONS + " 项");
+                        }
                         renderClipboardHistory();
                         return;
                     }
@@ -1786,7 +1907,25 @@ final class ImePanels {
                     });
                     return true;
                 });
-                placeClipboardCell(index, items.size(), clipboardSwipeCell(card, item, swiped, reveal));
+                View cell = clipboardSwipeCell(card, item, swiped, reveal);
+                if (!clipboardSelectionMode) {
+                    LinearLayout withDetail = LayoutPolicy.row(s);
+                    Button detail = MSIMEInputService.role(s.button(withDetail, "ⓘ", () -> {
+                        clipboardDetailItem = item;
+                        clipboardDetailScrollY = s.clipboardScroll.getScrollY();
+                        clipboardActionText = null;
+                        clipboardSwipedText = null;
+                        renderClipboardHistory();
+                        s.clipboardScroll.scrollTo(0, 0);
+                    }), KeyboardKeyRole.GLYPH);
+                    detail.setContentDescription("查看这条剪贴板记录详情");
+                    detail.setLayoutParams(new LinearLayout.LayoutParams(s.pixels(38),
+                        LinearLayout.LayoutParams.MATCH_PARENT));
+                    withDetail.addView(cell, new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                    cell = withDetail;
+                }
+                placeClipboardCell(index, items.size(), cell);
                 if (managed) actionItem = item;
                 // 操作行放在这条所在那一行的下面：双列时跨在两条下方，不插进两条中间。
                 boolean rowEnds = index == items.size() - 1
@@ -1808,6 +1947,43 @@ final class ImePanels {
         clipboardSelectionMode = false;
         clipboardSelectedTexts.clear();
         renderClipboardHistory();
+    }
+
+    /** 详情仍在剪贴板面板内，返回只重绘上一级列表，不触碰输入框焦点。 */
+    private void renderClipboardDetail(ClipboardHistory.Item item) {
+        LinearLayout header = LayoutPolicy.row(s);
+        ViewPolicy.setCenteredVertically(header);
+        Button back = clipboardAction(header, "返回", () -> {
+            returnFromClipboardDetail();
+        });
+        back.setContentDescription("返回剪贴板历史列表");
+        TextView title = ViewPolicy.centeredText(s, "记录详情", 14);
+        header.addView(title, LayoutPolicy.weightedMatchParentParams(1));
+        s.clipboardHeader.addView(header, LayoutPolicy.matchWidthHeightPx(s.pixels(36)));
+
+        TextView text = ViewPolicy.textLabel(s, item.text(), 16);
+        LayoutPolicy.setSymmetricPaddingDp(text, s, 14, 12);
+        s.clipboardPanel.addView(text, LayoutPolicy.matchWidthWrapParams());
+        String time = ClipboardDetailPolicy.recordedAt(item.timestamp(), ZoneId.systemDefault());
+        TextView details = clipboardNote("记录时间：" + time + "\n来源 App："
+            + ClipboardDetailPolicy.sourceLabel(null) + "\n包名："
+            + ClipboardDetailPolicy.sourceLabel(null));
+        details.setGravity(Gravity.START);
+        LinearLayout actions = LayoutPolicy.row(s);
+        Button insert = clipboardAction(actions, "插入", () -> s.insertClipboardText(item.text()),
+            KeyboardKeyRole.RETURN);
+        insert.setContentDescription("插入这条剪贴板记录");
+        clipboardAction(actions, "返回", this::returnFromClipboardDetail);
+        s.clipboardPanel.addView(actions, LayoutPolicy.matchWidthHeightPx(s.pixels(44)));
+        s.imeStyler.applySkin();
+        ViewPolicy.setTextColor(details, ImeStyler.fade(s.skin.keyForeground(), .8));
+    }
+
+    private void returnFromClipboardDetail() {
+        int scrollY = clipboardDetailScrollY;
+        clearClipboardDetail();
+        renderClipboardHistory();
+        s.clipboardScroll.post(() -> s.clipboardScroll.scrollTo(0, scrollY));
     }
 
     /**
@@ -2439,7 +2615,8 @@ final class ImePanels {
     }
 
     void renderCloudClipboard(java.util.List<TextView> notes) {
-        String message = CloudClipboardPanelPolicy.message(s.cloudClipboardStatus, s.cloudClipboardItems.size());
+        String message = CloudClipboardPanelPolicy.message(s.cloudClipboardStatus, s.cloudClipboardItems.size(),
+            CloudClipboardRelayPolicy.webdav(s.cloudClipboardAccountId));
         if (!CloudClipboardPanelPolicy.showsItems(s.cloudClipboardStatus) || s.cloudClipboardItems.isEmpty()) {
             notes.add(clipboardNote(message));
             return;

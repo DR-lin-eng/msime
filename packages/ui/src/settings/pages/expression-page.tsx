@@ -3,6 +3,7 @@ import { createSettingsDraftActions } from "../settings-draft-actions";
 import { GroupList, MoreOptions } from "../../core/platform-controls";
 import { InputLanguageOptionsSection } from "../input-language-options-section";
 import { CandidatePronunciationSection } from "../candidate-pronunciation-section";
+import { candidateTranslationScope } from "../candidate-translation-options-section";
 import { EnglishSuggestionsSection } from "../english-suggestions-section";
 import { PhonePunctuationSection, PunctuationSection } from "../punctuation-section";
 import { SentenceAssociationLevelRow } from "../sentence-association-section";
@@ -61,6 +62,7 @@ export function ExpressionSettingsPage() {
     credentialTestControl,
     selectPage,
     host,
+    showAiGeneration,
   } = useSettingsForm();
   const { onPreferencesChange } = createSettingsDraftActions({ setDraft });
   const translation = createTranslationSettingsBindings({
@@ -91,12 +93,14 @@ export function ExpressionSettingsPage() {
     harmony: harmonyPlatform,
     mobile: mobilePlatform,
     translationAccount: draft.translation_account ?? false,
+    aiGeneration: showAiGeneration,
     translationTargetLanguage,
     translationSecondaryLanguage: draft.translation_secondary_language,
     candidateGlossLanguagesEnabled,
     visibleTranslationLanguages,
     visibleSecondaryLanguages,
     onDeviceMissingLanguages,
+    candidateTranslationScope: candidateTranslationScope(draft.candidate_translation_scope),
     candidateTranslationShowPos: draft.candidate_translation_show_pos ?? true,
     candidateTranslationSingleSense: draft.candidate_translation_single_sense ?? false,
     openSettings: client.onDeviceTranslation?.openSettings,
@@ -150,6 +154,7 @@ export function ExpressionSettingsPage() {
                 available={candidateTranslations}
                 provider={translationProvider}
                 showAccountProvider={translation.candidate.showAccountProvider ?? false}
+                showAiProvider={translation.candidate.showAiProvider}
                 offlineFallback={translation.candidate.offlineFallback}
                 onChange={setTranslationProvider}
               />
@@ -208,7 +213,9 @@ export function ExpressionSettingsPage() {
             : panel(tab, children)
         }
       />
-      {mobilePlatform && <MobileInputAiNotice onOpenAi={() => selectPage("ai")} />}
+      {mobilePlatform && showAiGeneration && (
+        <MobileInputAiNotice onOpenAi={() => selectPage("ai")} />
+      )}
     </SettingsPageFieldset>
   );
 }

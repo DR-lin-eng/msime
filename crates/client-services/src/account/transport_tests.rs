@@ -127,6 +127,41 @@ fn client(origin: &str) -> BackendAccountClient {
 }
 
 #[test]
+fn dictionary_add_posts_to_the_collection_route() {
+    let entry = json!({
+        "id": "a".repeat(64), "kind": "english", "code": "fixture",
+        "word": "synthetic", "weight": 1, "revision": 1
+    });
+    let (origin, received) = serve(vec![json_response(
+        "201 Created",
+        json!({"revision": 1, "previous": null, "replacement": entry}),
+    )]);
+    let result = client(&origin)
+        .add_dictionary(
+            DictionaryKind::English,
+            "fixture",
+            "synthetic",
+            1,
+            &token('a'),
+        )
+        .unwrap();
+    assert_eq!(result.revision, 1);
+    let request = received.recv().unwrap();
+    assert_eq!(
+        request.line(),
+        "POST /v1/users/me/dictionaries/english HTTP/1.1"
+    );
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer {}", token('a')).as_str())
+    );
+    assert_eq!(
+        request.json(),
+        json!({"code": "fixture", "word": "synthetic", "weight": 1})
+    );
+}
+
+#[test]
 fn translate_posts_the_validated_body_and_normalizes_the_answer() {
     let (origin, received) = serve(vec![
         json_response(
@@ -876,6 +911,40 @@ fn a_google_challenge_without_a_target_asks_for_the_id_token_flow() {
     // 其余 provider 的目标仍按原来的规则检查。
     assert_eq!(
         client(&origin).challenge("email", "").unwrap_err(),
+        AccountError::Invalid
+    );
+}
+
+#[test]
+fn a_huawei_challenge_has_no_target_and_its_id_token_goes_to_login() {
+    let (origin, received) = serve(vec![
+        json_response(
+            "201 Created",
+            json!({ "challenge_id": "c".repeat(64), "expires_in": 300, "nonce": "fixture-nonce" }),
+        ),
+        json_response("200 OK", session_tokens()),
+    ]);
+    let client = client(&origin);
+    let challenge = client.challenge("huawei", "").unwrap();
+    assert_eq!(challenge.nonce.as_deref(), Some("fixture-nonce"));
+    let sent = received.recv().unwrap();
+    assert_eq!(sent.line(), "POST /v1/auth/challenges HTTP/1.1");
+    assert_eq!(
+        sent.json(),
+        json!({ "provider": "huawei", "target": "", "purpose": "login" })
+    );
+    client
+        .login(&"c".repeat(64), "aGVhZGVy.cGF5bG9hZA.c2lnbmF0dXJl")
+        .unwrap();
+    let sent = received.recv().unwrap();
+    assert_eq!(sent.line(), "POST /v1/auth/login HTTP/1.1");
+    assert_eq!(
+        sent.json(),
+        json!({ "challenge_id": "c".repeat(64), "credential": "aGVhZGVy.cGF5bG9hZA.c2lnbmF0dXJl" })
+    );
+    // 华为账号没有回跳地址这一说，带目标的请求在发出去之前拒绝。
+    assert_eq!(
+        client.challenge("huawei", "x").unwrap_err(),
         AccountError::Invalid
     );
 }

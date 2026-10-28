@@ -11,7 +11,8 @@ import display from '@ohos.display';
 import window from '@ohos.window';
 import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
 import { KeyboardMetrics } from '../keyboard/KeyboardMetrics';
-import { TouchToolbarPolicy } from '../keyboard/TouchToolbarPolicy';
+import { TouchPanelShape } from '../keyboard/TouchLayoutStylePolicy';
+import { KeyboardFormFactorPolicy } from '../keyboard/KeyboardFormFactorPolicy';
 import { KeyboardGeometry } from '../keyboard/KeyboardGeometry';
 import { KeyboardFormFactor } from '../keyboard/KeyboardFormFactor';
 import { HardwareKeyRouter, HardwareKey, HardwareKeyAction, HardwareKeyDecision }
@@ -42,6 +43,7 @@ import { SharedStateMirror } from '../keyboard/SharedStateMirror';
 import { AccountSessionAdoption } from '../account/AccountSessionAdoption';
 import { HarmonyAccountIdentity } from '../account/HarmonyAccountIdentity';
 import { SharedStateSync } from '../keyboard/SharedStateSync';
+import { HarmonyPrivacyConsent } from '../privacy/HarmonyPrivacyConsent';
 
 // Where the badge goes and how long it stays, from platforms/macos/src/input/InputModeHUDPanel.mm: shown long enough to read and gone before the next word. Its size is the floating toolbar's, from InputModeHudPolicy.sizeVp.
 const HUD_SCREEN_MARGIN_VP: number = 8;
@@ -127,8 +129,8 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
   /** The editor changed its selection, invalidating everything derived from the old caret. */
   private readonly selectionChanged: (oldBegin: number, oldEnd: number,
                                       newBegin: number, newEnd: number) => void =
-    (_oldBegin: number, _oldEnd: number, _newBegin: number, _newEnd: number): void => {
-      KeyboardSession.shared.editorSelectionChanged();
+    (_oldBegin: number, _oldEnd: number, newBegin: number, newEnd: number): void => {
+      KeyboardSession.shared.editorSelectionChanged(newBegin === newEnd);
     };
 
   /** The editor changed its document, either as our edit echo or independently of the keyboard. */
@@ -751,7 +753,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     } else if (event.action === KeyAction.DOWN) {
       this.backspaceHold.reset();
     }
-    // A key sound belongs to the typing, not to what became of the key, so every key-down from here on has one: composed, handed back or released to the application. Only a 2in1 has sounds configured, and the session leaves password fields and English mode silent.
+    // 按键音属于这次敲击，与这个键最后被组字、交还还是放给应用无关，所以从这里起每次按下都出声。实体键只在 2in1 上出声（触屏键经 `KeyboardSession.softKeyPress` 出声），会话让密码框和英文模式保持安静。
     const sound = (): void => {
       if (event.action === KeyAction.DOWN && KeyboardFormFactor.isDesktop()) {
         session.hardwareKeySound(event.key.code, event.unicodeChar, event.ctrlKey, event.altKey,
@@ -896,6 +898,8 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         KeyboardSession.shared.useSharedSandbox(mirror, fullMode);
         SharedStateSync.keyboardSync(mirror, state, fullMode());
       }
+      // 隐私政策的授权由设置应用经共享沙箱镜像过来，上面那次导入之后读。没有授权时下面的匿名注册和使用统计都等着，键盘里的云端功能也不发请求；之后每次获得焦点导入镜像时再读一次（`KeyboardSession.attach`）。
+      HarmonyPrivacyConsent.load(state);
       // 覆盖从未打开应用就启用键盘的场景。完整体验模式下键盘获得焦点或编辑结束时发布这个匿名会话，设置应用第一次启动时本地还没有匿名会话，由 session_adopt 采用它，不再注册第二个；键盘发布之前就打开了设置应用、或者键盘在基础访问模式下时，设置应用仍会注册自己的那个。
       HarmonyAccountIdentity.ensureAnonymous(state);
       // 每个键盘进程只启动一个用量上报会话；在下方提前返回之前创建，让没有面板的进程也能上报。
@@ -912,6 +916,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         StagedResources.unstage(`${files}/offline-glosses`, `${files}/offline-glosses.ready`);
       }
       StagedResources.stageLanguageDictionaries(this.context.resourceDir, files);
+      StagedResources.stageHandwriting(this.context.resourceDir, files);
       // 扩展上下文提供系统颜色模式，视图本身没有可查询的上下文。
       const systemDark: boolean =
         this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
@@ -961,6 +966,14 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
           return;
         }
         this.panel = panel;
+        if (!desktop) {
+          // 挂上视图之前定下手机面板第一帧的形状：键面要等视图画出来才知道，按视图上次记下的键面和现在的偏好定（`TouchLayoutStylePolicy.firstPanel`），第一帧就带上数字行和长空格样式一直画着的工具条，不再先矮一行、过一帧再长高。视图出现时（`aboutToAppear`）从同一个形状出发核对高度，所以要在 `setUiContent` 之前。
+          // 上一个面板的视图在释放之后发来的高度请求不属于这个面板，作废。
+          KeyboardSession.shared.touchHeight.detach();
+          const shown: display.Display = display.getDefaultDisplaySync();
+          KeyboardSession.shared.decideFirstTouchPanel(KeyboardFormFactorPolicy.phoneLandscape(
+            shown.width / shown.densityPixels, shown.height / shown.densityPixels));
+        }
         await panel.setUiContent('keyboard/KeyboardView');
         if (this.tornDown) {
           if (this.panel === panel) {
@@ -974,16 +987,19 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         const screen: display.Display = display.getDefaultDisplaySync();
         // 面板尺寸与视图布局使用同一组数值，避免裁掉最底行。
         const settings: KeyboardPreferences = KeyboardSession.shared.preferences();
+        const opened: TouchPanelShape = KeyboardSession.shared.firstTouchPanel();
+        // 视图若已在 `setUiContent` 期间出现并按真实键面请求了高度（记下的键面过时），第一帧直接用它；否则按记下的形状。
+        const requested: number | null = desktop ? null : KeyboardSession.shared.touchHeight.takePending();
         const heightVp: number = desktop
           ? (KeyboardMetrics.candidateHeightVp(settings.candidateLayout, 0,
             settings.candidateShowPreedit, settings.candidateDecorationTopVp,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
             settings.candidatePreeditFontSize, CandidateLayoutPolicy.gap(settings.candidateSkinLayout, true,
         settings.candidateFontSize)) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit))
-          // 刚创建时还没有组字也没有面板，工具条画不画只看工具栏设置，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。
-          : KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
+          // 刚创建时还没有组字也没有面板，工具条画不画看工具栏设置和上次的键面是不是长空格样式的中文 26 键，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。
+          : requested !== null ? requested : KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-            settings.candidatePreeditFontSize, false, !TouchToolbarPolicy.rowHidden(settings.toolbarTools));
+            settings.candidatePreeditFontSize, false, opened.strip, opened.extraRows);
         // 软键盘占满屏幕宽度，候选窗口只按内容取宽，避免在桌面上遮住候选所对应的文本。
         const widthPx: number = desktop
           ? Math.round(KeyboardMetrics.CANDIDATE_WINDOW_WIDTH_VP * screen.densityPixels)
@@ -1039,12 +1055,13 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
             this.showDesktopSurface(surface);
           };
         } else {
-          KeyboardSession.shared.onTouchHeight = (requestedHeightVp: number): void => {
+          // 挂上回调时补发第一帧定高度之后、这里之前视图发来的请求（`TouchHeightRelay.attach`）。
+          KeyboardSession.shared.touchHeight.attach((requestedHeightVp: number): void => {
             panel.resize(screen.width, Math.round(requestedHeightVp * this.density))
               .catch((error: Object): void => {
                 KeyboardLog.error(`touch keyboard would not resize: ${describeError(error)}`);
               });
-          };
+          });
         }
         if (desktop) {
           await this.reconcileStatusPanels();
@@ -1100,7 +1117,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     }
     KeyboardSession.shared.shutdown();
     // These close over the panel being released.
-    KeyboardSession.shared.onTouchHeight = undefined;
+    KeyboardSession.shared.touchHeight.detach();
     KeyboardSession.shared.onDismiss = undefined;
     KeyboardSession.shared.onCandidateWidth = undefined;
     KeyboardSession.shared.onCandidateCount = undefined;

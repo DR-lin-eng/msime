@@ -1,14 +1,19 @@
 # Windows Server 会话适配
 
+## 首次运行引导
+
+完整安装完成后，安装器启动生产 `Server`；Server 首次准备 `runtime-options.json` 成功时，经现有 Shell 路由自动打开同目录的设置窗口首页。设置页顶部的输入法状态卡会检查本版本是否已加入 Windows 的键盘列表、是否为当前输入法，并提供「去添加」和「设为默认」操作；系统拒绝自动修改时会打开「设置 → 时间和语言 → 语言和区域」供用户手动完成。已经存在运行配置的升级、普通重启、TSF 按需拉起和隔离预览不会重复打开引导。Windows 7 使用同一首次准备时机，但打开兼容的原生设置窗口。输入法状态由 Windows 原生接口读取，不能把“设置窗口已打开”当成系统配置已完成。
+
 ## Windows 7 设置窗口
 
-`settings/win7` 是面向 Windows 7 的 Win32 原生宿主，目前接通快捷键页，工具栏显示、按钮与尺寸控件、图形预览与主题跳转，输入页的语言与方案选择、双拼和五笔选项、五笔查码、中英模式与应用例外、选词与翻页、候选混输与联想、云候选配置、繁简输出、空格和全角，高级选项的快捷模式、模糊音、辅助码与调频，标点组的模式、引号与括号样式、成对标点和智能标点，候选释义的离线英文、翻译与读音开关和两种目标语言，翻译服务的切换、凭据保存与配置测试，AI 输入辅助的服务商、地址、按地址密钥、模型、提示词、模型列表和配置测试，账号状态、登录方式、验证码登录、可取消的 Google 登录、资料与昵称、头像、退出与注销、设置同步，本地主题与皮肤选择、候选颜色编辑与预览、社区皮肤浏览与作品管理、本地皮肤发布，打字统计的记录开关、保留期、清空、各类图表与逐日明细、云端上传，以及维护与诊断页的日志开关、重启请求、目录打开和设置文件导入导出；配置使用同源 Rust 持久化与并发冲突处理。以词定字与翻页键冲突时一次保存关闭以词定字，页面刷新保留无关配置与原默认值。皮肤制作、主题卡片与 MCP 连接均有原生入口。Win7 产品构建通过显式配置选择此宿主，普通现代 Windows 构建继续使用 WinUI 3；完整安装入口见下方「完整 Win7 产品与安装包」。
+`settings/win7` 是面向 Windows 7 的 Win32 原生宿主，目前接通快捷键页，工具栏显示、按钮与尺寸控件、图形预览与主题跳转，输入页的语言与方案选择、双拼和五笔选项、五笔查码、中英模式与应用例外、选词与翻页、候选混输与联想、云候选配置、繁简输出、空格和全角，高级选项的快捷模式、模糊音、辅助码与调频，标点组的模式、引号与括号样式、成对标点和智能标点，候选释义的离线英文、翻译与读音开关和两种目标语言，翻译服务的切换、凭据保存与配置测试，本地主题与皮肤选择、候选颜色编辑与预览、本地皮肤导入与制作，打字统计的记录开关、保留期、清空、各类图表与逐日明细、云端上传，以及维护与诊断页的日志开关、命令行查询候选开关（`msime-mcp.exe candidates` 是否可用，缺省关闭）、重启请求、目录打开和设置文件导入导出；配置使用同源 Rust 持久化与并发冲突处理。以词定字与翻页键冲突时一次保存关闭以词定字，页面刷新保留无关配置与原默认值。皮肤制作与主题卡片均有原生入口。Win7 产品构建通过显式配置选择此宿主，普通现代 Windows 构建继续使用 WinUI 3；完整安装入口见下方「完整 Win7 产品与安装包」。
+Win7 兼容设置的导航只列本机核心设置：快捷键、输入、标点与翻译、候选窗口、悬浮工具栏、本地主题与皮肤、剪贴板、词库、背单词、本地插件、语音、屏幕键盘与手写、打字统计、维护与诊断、关于与帮助，以及键盘皮肤制作。账号与同步、AI 输入辅助、云剪贴板、社区内容和连接 AI 助手等依赖在线服务、登录状态或现代桌面宿主的页面不属于 Win7 设置；对应 `settings:<类别>` 深链接会明确返回失败，避免打开空白或半成品页面。现代 Windows 的设置页面和默认值保持不变。
 
 兼容设置识别 `--route=settings:<类别>` 和 `MSIME_CLIENT_ROUTE`，命令行优先；无参数打开输入页。已实现类别复用现有别名，首次读设置完成后再进入对应页，未知类别或尚未适配的页面返回错误。Win7 安装包的 Server、托盘与开始菜单均选择原生宿主。
 
-账号页的资料、昵称、头像和云端设置均通过共享账号服务；设置应用后重新加载实际偏好和预览，错误不会把已登录状态当作退出。Google 等待期间可取消，关闭窗口也会结束等待；目标或渠道改变后旧验证码不可再提交。头像只解码共享接口返回的 PNG/JPEG data URL，不由页面直接访问图片地址。上传、应用云端设置、移除头像、退出所有设备和注销等操作先确认；测试使用合成账号响应，不操作真实账号。QQ 群助手绑定、设备退出、云端数据概览、ZIP 导出与按分区清空已接通；部分成功的语音清理保留独立重试入口，注销后仍可使用。「我的内容」经 `settings:community-resources` 提供词库、回复模板、收藏与作品管理。
+现代 Windows 账号页的资料、昵称、头像和云端设置均通过共享账号服务；设置应用后重新加载实际偏好和预览，错误不会把已登录状态当作退出。Google 等待期间可取消，关闭窗口也会结束等待；目标或渠道改变后旧验证码不可再提交。头像只解码共享接口返回的 PNG/JPEG data URL，不由页面直接访问图片地址。上传、应用云端设置、移除头像、退出所有设备和注销等操作先确认；测试使用合成账号响应，不操作真实账号。QQ 群助手绑定、设备退出、云端数据概览、ZIP 导出与按分区清空已接通；部分成功的语音清理保留独立重试入口，注销后仍可使用。「我的内容」经 `settings:community-resources` 提供词库、回复模板、收藏与作品管理。
 
-本地剪贴板页提供历史开关、数量上限、每页 20 条的分页、固定、删除、重新复制与清空，使用输入法的同一共享存储。关闭与清空先确认，保存冲突不清空；重新复制失败不记录捕获，读取损坏文件不会重置。另有云剪贴板页接共享账号／中继加密接口，提供上传、搜索、置顶、保留期和设备核对批准；中继配置变更会拒绝旧窗口操作，中继失败不回退账号。中继令牌留空沿用且不回显已存值，配置保存不联网。独立面板与回原编辑器输入见下方 `panels/win7` 原生宿主。
+本地剪贴板页提供历史开关、数量上限、每页 20 条的分页、固定、删除、重新复制与清空，使用输入法的同一共享存储。关闭与清空先确认，保存冲突不清空；重新复制失败不记录捕获，读取损坏文件不会重置。现代 Windows 另有云剪贴板页接共享账号／中继加密接口，提供上传、搜索、置顶、保留期和设备核对批准；中继配置变更会拒绝旧窗口操作，中继失败不回退账号。中继令牌留空沿用且不回显已存值，配置保存不联网。同步方式还可以选 WebDAV 网盘（`docs/cloud-clipboard-webdav.md`）：填服务器地址、账号和应用密码，应用密码留空沿用已存值，保存前先在工作线程上「测试连接」（`msime_client_cloud_clipboard_webdav_probe`），不通过不保存；保存网盘删掉中继配置，反之亦然，改回账号两者都删。独立面板与回原编辑器输入见下方 `panels/win7` 原生宿主。
 
 本机词库页接同一个维护接口，提供个人／内置词查询、资源词库只读查询、词条编辑与调权、分页、按类型导入导出、导出全部个人词库和清除学习数据。格式、编码、大小限制及导出过滤复用公共模型；有歧义的失败重试沿用同一回执。官方词库更新接共享版本、下载校验和回滚，配置开关不改默认值；进度由独立工作线程轮询，不打断词条编辑。完整备份和云词库操作由下方独立原生面板提供。背单词页使用共享词书与复习服务，提供导入、复习设置、释义与作答、删除词书和清空进度；独立面板提供 `--route=vocabulary`，Win7 托盘已接通独立面板。
 
@@ -16,15 +21,15 @@
 
 本地主题页的目录、主题名称、明暗槽位和配色复用共享接口。导入皮肤文件夹前确认同名整包替换；五项候选颜色支持输入 `#RRGGBB` 后保存或清除覆盖，预览明暗不写配置。图片通过共享资源校验与解码接口加载，当前预览绘制固定候选样例及背景、装饰首帧；该固定样例用于设置预览，完整屏幕键盘皮肤由原生键盘面板绘制；双架构 Win7 窗口与像素回归另行覆盖。
 
-「社区皮肤」接通搜索、分类、我的皮肤库、分页、详情与预览、安装、评分、举报、作品可见性与分类、下架和手动同步。本地皮肤可补预览图与素材许可、检查包、填写资料并发布；同名替换、同步、下架及发布先确认，取消不请求。操作均通过工作线程调用共享 Rust 服务，安装后仍由用户在本地页选用。测试只注入合成网络响应，补许可、补预览和检查包使用真实共享接口，双架构控件回归已在 Win7 SP1 桌面通过，但不代表真实在线账号验收。
+现代 Windows 的「社区皮肤」接通搜索、分类、我的皮肤库、分页、详情与预览、安装、评分、举报、作品可见性与分类、下架和手动同步。本地皮肤可补预览图与素材许可、检查包、填写资料并发布；同名替换、同步、下架及发布先确认，取消不请求。操作均通过工作线程调用共享 Rust 服务，安装后仍由用户在本地页选用。测试只注入合成网络响应，补许可、补预览和检查包使用真实共享接口，双架构控件回归已在 Win7 SP1 桌面通过，但不代表真实在线账号验收。
 
-插件页提供声音与效果、已安装插件的搜索筛选与内容预览、文件或文件夹导入、选用／停用、指令与短语优先级、删除确认和缺失引用处理。删除成功后才清除引用，设置冲突时保留其他窗口的修改。`@` 名单提供名字、拼音和手机号的草稿编辑与显式保存；损坏文件不自动覆盖。脚本页展示内容哈希、申请能力、实际授权、运行状态和指令冲突，支持逐项选择、确认授权、全部撤销和执行排序，复用共享权限依赖和互斥规则；新包和变更内容不预选权限，过期哈希被共享服务拒绝后重读。社区插件与发布经独立社区页承载。上述双架构回归已在 Win7 SP1 桌面通过，使用合成插件和临时目录；安装与实际 TSF 输入另有验收。
+插件页提供声音与效果、已安装插件的搜索筛选与内容预览、文件或文件夹导入、选用／停用、指令与短语优先级、删除确认和缺失引用处理。删除成功后才清除引用，设置冲突时保留其他窗口的修改。`@` 名单提供名字、拼音和手机号的草稿编辑与显式保存；损坏文件不自动覆盖。脚本页展示内容哈希、申请能力、实际授权、运行状态和指令冲突，支持逐项选择、确认授权、全部撤销和执行排序，复用共享权限依赖和互斥规则；新包和变更内容不预选权限，过期哈希被共享服务拒绝后重读。现代 Windows 的社区插件与发布经独立社区页承载。上述双架构回归已在 Win7 SP1 桌面通过，使用合成插件和临时目录；安装与实际 TSF 输入另有验收。
 
 语音页（`settings:voice`）提供共享服务目录、独立凭据槽、识别与润色配置、提示词、麦克风与快捷键。配置测试由用户明确发起；模型管理展示语言、流式与热词能力、大小和许可，支持下载、离线文件校验导入、取消、选用与删除。保存只修改明确编辑的字段，不规范化无关的旧配置。Windows 7 语音运行库由最终兼容安装包配套，本页不下载普通运行库覆盖它；独立 `--route=voice` 面板复用 Server 的录音、识别与润色协议，提供开始、完成、取消、音量与阶段、结果编辑、复制和输入原编辑器；取消后的迟到结果失效，关闭会取消并等待线程退出。x86／x64 的实际 HWND 与合成协议回归通过，双架构窗口回归已在 Win7 SP1 通过，兼容本地识别库也通过实际模型推理；测试虚拟机加入 HDA 虚拟声卡后，双架构核心录音和同源 Server 录音、播放渲染、提示音通过；物理麦克风、扬声器与在线付费语音服务尚未验收。
 
 屏幕键盘设置（`settings:screen-keyboard`，兼容 `settings:osk`）提供高度、按键与行间距、语音入口、可拖动预览、显式保存和确认恢复默认；仅保存用户修改字段。原生 `--route=keyboard` 提供完整 PC 键面、九键和共享方案生成的九键双拼提示，读取已应用的主题颜色与几何参数。鼠标在同一按键内释放才向当前外部编辑器同步发键，移出／取消不发，部分发送不自动重试。x64／x86 的实际 HWND 测试与已知阻断导入检查通过；完整自定义皮肤、制作工具与预览已接通，双架构 Win7 原生窗口、共享存储和像素回归通过；真实 TSF 输入由系统记事本验收覆盖。
 
-关于页提供当前版本、仅选择 `windows7-v<版本>` 的专用安装包更新检查、系统信息复制、许可与隐私、匿名统计开关、帮助与反馈草稿。复制或浏览器预填前重新读取当前草稿。MCP 连接设置提供独立页面，关于页的帮助与反馈入口按用户操作打开。更新仅接受当前架构的专用包；完整安装与升级已实测，本任务不发布正式版本。
+关于页提供当前版本、仅选择 `windows7-v<版本>` 的专用安装包更新检查、系统信息复制、许可与隐私、匿名统计开关、帮助与反馈草稿。复制或浏览器预填前重新读取当前草稿。现代 Windows 的 MCP 连接设置提供独立页面，关于页的帮助与反馈入口按用户操作打开。更新仅接受当前架构的专用包；完整安装与升级已实测，本任务不发布正式版本。
 
 打字统计页读取共享聚合统计，提供按键、趋势、类型、模式、方案和候选图表及逐日明细，按当前页每 5 秒与重新激活刷新。缩短保留期、清空和云端开关先确认，取消恢复实际选择；延长保留期直接保存。网络失败后重新读取上传开关，损坏统计不自动重置。测试使用真实本地统计接口与合成账号传输，不计作真实云端上传验收。
 
@@ -59,7 +64,7 @@ python platforms/windows/tests/tools/windows7_mcp.py target/windows7-core/x64/ms
 
 ## Windows 7 原生面板
 
-`panels/win7` 是不依赖 WebView 的原生面板宿主，提供 `--route=handwriting`（默认）、`--route=clipboard`、`--route=cloud-clipboard` 、`--route=vocabulary`、`--route=cloud-dictionary` 和 `--route=emoji`，也读取 Server 的 `MSIME_CLIENT_ROUTE`；显式命令行优先，未知路由返回错误。画布支持自动识别、撤销、清空与候选上屏，识别在工作线程执行；清空或继续书写后丢弃旧结果。窗口不激活，只向打开时仍在前台的原编辑器上屏，切换到其他窗口时拒绝输入。成功上屏通过共享接口按手写来源记录聚合统计，使用 TSF 面板标记避免重复计数。
+`panels/win7` 是不依赖 WebView 的原生面板宿主，提供 `--route=handwriting`（默认）、`--route=clipboard`、`--route=cloud-clipboard` 、`--route=vocabulary`、`--route=cloud-dictionary`、`--route=dictionary-sync` 和 `--route=emoji`，也读取 Server 的 `MSIME_CLIENT_ROUTE`；显式命令行优先，未知路由返回错误。画布支持自动识别、撤销、清空与候选上屏，识别在工作线程执行；清空或继续书写后丢弃旧结果。窗口不激活，只向打开时仍在前台的原编辑器上屏，切换到其他窗口时拒绝输入。成功上屏通过共享接口按手写来源记录聚合统计，使用 TSF 面板标记避免重复计数。
 
 Win7 专用 Rust 目标使用系统 Tablet PC COM 中文识别器，普通 Windows 继续使用 WinRT。缺少系统识别器或没有候选时可回退到运行时选项 `handwriting_model`、`MSIME_HANDWRITING_MODEL`、随包模型或已发布手写资源包。窗口提供模型状态、下载、取消、离线多文件导入、移除和刷新；共享安装器按固定锁校验大小与 SHA-256，下载沿用已保存的模型镜像。离线导入需同时选择 `handwriting-zh_CN.model` 和 `HandwritingModel-LICENSE.txt`，按内容识别文件，保留源文件。模型操作使用独立线程，不占用识别队列，关闭时取消并等待退出。Win7 产品构建已将它接入托盘、工具栏和安装包，现代 Windows 继续使用原有共享面板。
 
@@ -78,7 +83,9 @@ ctest --test-dir target/windows-full/x64/win7-panels -C RelWithDebInfo --output-
 
 本地剪贴板面板按每页 20 条显示历史，支持刷新、固定、删除、复制和输入原编辑器；输入和复制前重新读取历史，外部关闭后禁止使用旧列表。云剪贴板面板复用设置页的全部表单和账号／中继来源校验，复制和输入前重新读取列表与设备；来源变化、待批准或读取失败时拒绝旧条目，不回退账号。云面板允许编辑搜索、上传和配置，只有本面板仍在前台时才恢复原编辑器，第三个窗口在前台时拒绝输入。复制与失败输入不计统计，成功输入使用 TSF 面板标记避免重复计数。
 
-背单词面板复用设置页的词书管理与复习表单，导入、作答和进度由同一共享服务处理。云词库独立面板提供个人词条、完整目录、候选调频与固定排位、词表导入导出，以及完整快照的备份、恢复、预览、确认应用和队列状态；同一 edition 与登录会话只允许一个窗口，工作线程操作前后核对账号，错误或换号会禁用旧结果。大文件经共享流式接口，系统文件选择与确认期间暂停状态轮询。网络验证使用合成响应，尚未对真实账号执行备份与恢复。默认面板测试只用实际 HWND、真实隔离存储和合成网络／输入接收器，不碰用户剪贴板或真实账号。在交互桌面运行 `windows7-clipboard-desktop-test.exe --desktop`，另验两个剪贴板面板向测试自己的编辑器真实上屏、焦点恢复、第三个窗口拒绝和只记一次统计；没有可见交互桌面时明确失败，不注册为默认 CTest。该入口已在 Win7 SP1 x64 交互桌面以 x64／x86 进程运行并通过。
+词库同步面板（`--route=dictionary-sync`，`panels/win7/DictionarySyncWindow.cpp`，表单在 `settings/win7/DictionarySyncForm.h`）是「我的词条」经 WebDAV 网盘同步（[docs/dictionary-webdav-sync.md](../../docs/dictionary-webdav-sync.md)）在 Win7 上的设置：Win7 设置窗口的导航不收云端同步的页面，所以与云剪贴板一样放在独立面板里，由设置窗口「词库」页的「词库同步（WebDAV 网盘）…」打开。网盘地址、账号和应用密码（遮罩、从不回填，留空沿用已存的）先「测试连接」，「测试并保存网盘配置」通过了才写偏好 `dictionary_sync_webdav`，不通过时输入留着；存着网盘时打开面板以 `opened` 同步一次并取设备和概况，另有「立即同步」（`manual`）、被挡下的大批删除的「同步删除」「从网盘恢复」、设备的允许（先对照核对码）、拒绝和移除（换钥）、重置密钥、以本机为准重新开始和「停止同步」，都先确认。同一台设备的几条登记合成一条。调用都在面板的工作线程上，目录与 Server、WinUI 设置相同（见下文「「我的词条」自动同步」），身份冲突时重试。`windows7-dictionary-sync-panel-test` 用实际 HWND 和合成回答核对这些行为，不连网盘。
+
+背单词面板复用设置页的词书管理与复习表单，导入、作答和进度由同一共享服务处理。云词库独立面板提供个人词条、完整目录、候选调频与固定排位、词表导入导出，以及完整快照的备份、恢复、预览、确认应用和队列状态；同一 edition 与登录会话只允许一个窗口，工作线程操作前后核对账号，错误或换号会禁用旧结果。大文件经共享流式接口，系统文件选择与确认期间暂停状态轮询。生产 HTTPS 已使用独立合成账号完成完整云词库备份、删除、恢复预览、恢复与严格读回；测试不使用个人账号或真实词条。新增词条的共享请求路径已在本轮线上验收中修正，细节与签名安装包复验结果见[产品构建记录](../../.agents/notes/implemented/feature/2026-10-24-windows7-product-build.md)。默认面板测试只用实际 HWND、真实隔离存储和合成网络／输入接收器，不碰用户剪贴板或真实账号。在交互桌面运行 `windows7-clipboard-desktop-test.exe --desktop`，另验两个剪贴板面板向测试自己的编辑器真实上屏、焦点恢复、第三个窗口拒绝和只记一次统计；没有可见交互桌面时明确失败，不注册为默认 CTest。该入口已在 Win7 SP1 x64 交互桌面以 x64／x86 进程运行并通过。
 
 默认测试通过真实资源包 C ABI 在首次进度回调取消下载，不访问网络，另覆盖任务登记前的取消、离线选择取消和错误文件不发布。将 `MSIME_WINDOWS7_TEST_HANDWRITING_FILES` 设为 `resources/handwriting-model.lock.json` 所对应的两个真实文件所在目录，可额外验证完整离线导入、安装状态与移除；仍只写测试自己的合成状态目录，不改用户模型。系统文件选择器与下载网络在交互桌面另行验收。
 
@@ -123,17 +130,18 @@ Rust 使用 `x86_64-win7-windows-msvc` / `i686-win7-windows-msvc` 与 `build-std
 
 源码缓存为 `target/tooling/onnxruntime-windows7-1.28.2` 与 `target/tooling/sherpa-onnx-windows7-1.13.8`，构建为 `target/windows7-voice/<arch>`。只有导入审计、合成 Add 与优化卷积推理、sherpa 版本及实际缓冲操作全部通过后，`bin/voice-runtime.build.json` 才记录本次来源和 DLL 摘要。保留完整 CPU 运算集合，使用静态 CRT，不启用 CUDA、DirectML 或原包同样未提供的 TTS。相邻 ONNX 的实际装载路径也参与验证，不能用系统的另一版同名 DLL 替代。
 
-x64 和 x86 的源码构建与运行测试在 Windows 11 和 Win7 SP1 上通过，固定模型另对 SAPI 合成语音完成非空识别，兼容运行库已由 Win7 产品脚本收集并进入安装包；普通现代发布不改。真实麦克风／扬声器和在线服务尚未验收。
+x64 和 x86 的源码构建与运行测试在 Windows 11 和 Win7 SP1 上通过，固定模型另对 SAPI 合成语音完成非空识别，兼容运行库已由 Win7 产品脚本收集并进入安装包；普通现代发布不改。独立 Win7 SP1 x86 已通过直通实体 USB 音频设备的录放音、提示音与安装核心采集；在线 ASR 与润色的实际服务结果见文末。录音验证不保存麦克风内容，也不代表人工音质评价。
 
 ## 产品版本（edition）
 
 同一套源码按 `shared/contracts/editions.json` 打出几个可以同时安装、彼此完全隔离的产品：full（水杉输入法）、pinyin（水杉拼音）、wubi（水杉五笔）、japanese（水杉日语）、vietnamese（水杉越南语）和 tibetan（水杉藏文）。每个版本有自己的 TSF CLSID、profile 和全部 TSF 内部 GUID、Inno AppId、Program Files 下的安装目录、HKLM 键、状态目录、用户目录（匿名账号和使用统计）、数据目录环境变量、看门狗计划任务、host DLL 名、`MSIME.exe` 的 Tauri identifier 和安装包名；命名管道、命名事件、互斥量和窗口类名都带 `.<id>` 后缀，full 也是（`.full`）。
 
-引入版本之前，full 在 Windows 上沿用的是另一个产品 msime-windows（https://github.com/metasequoiaime/msime-windows ）的整套身份：同一个 CLSID `{E3062E9A-...}`、同一组 TSF GUID、Inno AppId `{A7C3E91F-...}`、`{autopf}\metasequoiaime`、HKLM `Software\Metasequoia\MetasequoiaIME`、`METASEQUOIA_IME_DATA_DIR`、看门狗任务 `Metasequoia IME Watchdog`、标记 `.metasequoiaime-data`、安装包名 `MetasequoiaIME_Setup` 和不带后缀的管道名，所以装上本仓库的 full 会覆盖 msime-windows，卸掉它会删掉 msime-windows。现在 full 有自己的一组（`.full` 后缀、`metasequoiaime-full`、`Software\Metasequoia\MetasequoiaIME-Full`、`METASEQUOIA_IME_FULL_DATA_DIR`、`Metasequoia IME Watchdog (Full)`、`MetasequoiaIME-Full_Setup` 和新的 GUID），msime-windows 的那组记在 `scripts/edition_windows.py` 的 `MSIME_WINDOWS` 里，只用来避让：`scripts/test-editions.py` 检查没有任何版本用它的值，每个版本的安装器把它的注册表键和安装目录当作别人的数据目录。已经发布的 full 安装包（windows-v0.1.0、windows-v0.2.0）用的仍是 msime-windows 的身份；之后的 full 不升级、不迁移它们，在装过它们的机器上把它们当作 msime-windows 避让，两者并列存在。状态目录 `MSIME-Client`、用户目录 `MSIME`、`msime_host_api.dll` 和 Tauri identifier `app.msime.windows` 没有改，msime-windows 不用这些名字。显示名改成了「水杉输入法」（安装器、「已安装的应用」和键盘列表里都是这个名字），msime-windows 是 `Metasequoia IME 水杉输入法` 和 `Metasequoia 水杉输入法`：开始菜单文件夹和其中两个快捷方式的名字由显示名得出（`DefaultGroupName={#MyAppName}`），显示名相同时两者会共用同一个文件夹，后装的覆盖先装的快捷方式，卸载任何一个都会带走它们。
+引入版本之前，full 在 Windows 上沿用的是另一个产品 msime-windows（https://github.com/metasequoiaime/msime-windows ）的整套身份：同一个 CLSID `{E3062E9A-...}`、同一组 TSF GUID、Inno AppId `{A7C3E91F-...}`、`{autopf}\metasequoiaime`、HKLM `Software\Metasequoia\MetasequoiaIME`、`METASEQUOIA_IME_DATA_DIR`、看门狗任务 `Metasequoia IME Watchdog`、标记 `.metasequoiaime-data`、安装包名 `MetasequoiaIME_Setup` 和不带后缀的管道名，所以装上本仓库的 full 会覆盖 msime-windows，卸掉它会删掉 msime-windows。现在 full 有自己的一组（`.full` 后缀、`metasequoiaime-full`、`Software\Metasequoia\MetasequoiaIME-Full`、`METASEQUOIA_IME_FULL_DATA_DIR`、`Metasequoia IME Watchdog (Full)`、`MetasequoiaIME-Full_Setup` 和新的 GUID），msime-windows 的那组记在 `scripts/edition_windows.py` 的 `MSIME_WINDOWS` 里，只用来避让：`scripts/test-editions.py` 检查没有任何版本用它的值，每个版本的安装器把它的注册表键和安装目录当作别人的数据目录。已经发布的 full 安装包（windows-v0.1.0、windows-v0.2.0）用的仍是 msime-windows 的身份；之后的 full 不升级、不迁移它们，在装过它们的机器上把它们当作 msime-windows 避让，两者并列存在。状态目录 `MSIME-Client`、用户目录 `MSIME`、`msime_host_api.dll` 和 Tauri identifier `app.msime.windows` 没有改，msime-windows 不用这些名字。显示名改成了「水杉输入法」（安装器和「已安装的应用」里是这个名字，`app_name`），键盘列表里带后缀，是「水杉输入法.新」（`text_service_description`）：同一台机器上还装着旧的 msime-windows 时，系统输入法列表里两条不再是一眼分不出的同族名字。显示名是可以改的，CLSID、目录、键名这些标识不能改；但 `scripts/test-editions.py` 对 Windows 段是整段精确比对，所以改显示名要同时改 `shared/contracts/editions.json`、`shared/contracts/editions.frozen.json` 和该脚本里的 `FULL_WINDOWS`，三处一致才过门禁——这道门禁的作用是让改名必须显式过审，不是禁止改名。显示名经 `MSIME_EDITION_TEXT_SERVICE_DESCRIPTION` 编进 TSF DLL，改完要重编并重新注册 profile 才在列表里生效。msime-windows 是 `Metasequoia IME 水杉输入法` 和 `Metasequoia 水杉输入法`：开始菜单文件夹和其中两个快捷方式的名字由显示名得出（`DefaultGroupName={#MyAppName}`），显示名相同时两者会共用同一个文件夹，后装的覆盖先装的快捷方式，卸载任何一个都会带走它们。
 
 - `platforms/windows/scripts/edition_windows.py gen` 从版本表生成并提交 `shared/contracts/msime_edition.h`（C++ 读的宏）和 `installer/editions.iss`（Inno Setup 读的 `#define`）。构建必须定义且只定义一个 `MSIME_EDITION_<ID>`：CMake 由缓存变量 `MSIME_EDITION`（`Edition.cmake`，缺省 full）定义，WinUI 设置窗口工程由 `MsimeEdition` 属性定义；少了它头文件以 `#error` 停下，不会悄悄编成 full。
 - TSF DLL、Server、看门狗、prepare 工具和设置窗口在编译期绑定一个版本，所以每个版本各编一次：`Build-Client.ps1 -Edition <id>` 和 `build-cross.sh <arch> <id>` 的输出在 `target/windows-<id>`（full 仍是 `target/windows-full`）。host DLL 改成版本表里的名字（例如 `msime_host_api_wubi.dll`），再按原 DLL 的导出表生成同名导入库（MSVC 用 `lib /DEF`，MinGW 用 `dlltool`）：两个版本的 TIP 被同一个应用加载时，按导入表找 DLL 会拿到先加载的那一个。
 - `MSIME.exe` 和 `msime-mcp.exe` 所有版本共用一份构建，运行时读 Server 目录里的 `edition.json`（每个版本的包都有，由 `Prepare-PackageFiles.ps1 -Edition` 写入；没有它时按 full 运行）决定管道后缀、状态目录和 Tauri identifier。
+- 安装目录下 `server` 文件夹里的 `msime-mcp.exe candidates nihao`（`ni|hao` 标出光标，不给按键时从 stdin 逐行读）按用户现在的方案、设置和词库输出候选的 JSON，供不改源码测试输入引擎的程序使用；要先在原生设置窗口「维护与诊断」→「命令行工具」里打开「命令行查询候选」，输出格式、退出码和与打字时的差别见 [命令行查询候选](../../docs/command-line-candidates.md)。
 - 每个版本注册在它的默认方案所属的语言下（版本表 `langid`，经 `msime_edition.h` 的 `MSIME_EDITION_LANGID` 进入 TSF 的 `RegisterProfile`、看门狗和设置窗口的「添加到键盘列表」）：中文版本是简体中文 0x0804，日文版 0x0411（日语），越南文版 0x042A（越南语），藏文版 0x0451（藏语），于是在 Windows 设置里分别列在这几种语言下。TIP 的行为不按语言分支：保留键、开关和标点 compartment、转换模式和语言栏按钮在各版本都一样，提交的文字按注册语言标上 `GUID_PROP_LANGID`；唯一按语言取的是触摸键盘布局（中文版本是优化的简体拼音布局，日文版是优化的日文布局，越南文和藏文版没有优化布局，用经典布局）。未在真机核实：注册在日语下时，系统的输入指示器按 TIP 写的转换模式位（`TF_CONVERSIONMODE_NATIVE`、`FULLSHAPE`）显示成什么样子，以及触摸键盘是否按上面的布局弹出。
 - 日文、越南文和藏文版不带中文主词库、n-gram 和整句模型（资源锁见 `resources/editions/<id>.lock.json`），`Prepare-PackageFiles.ps1` 也不给它们装非英文离线释义（版本表 `features.offline_glosses` 为 false），托盘菜单和原生设置窗口也没有手写（`features.handwriting` 为 false）；越南文和藏文版只带 core，日文版另带日文词典。
 - Server 把版本 id 交给宿主库准备状态根，宿主库按版本选资源锁、收窄方案；托盘和设置窗口只列出本版本提供的方案和本版本带的快捷模式（五笔版没有临时日语，也没有全拼、双拼的辅助码）。几个版本的 Server 同时运行时，维护快捷键由焦点所在版本的 Server 处理（每个生产 Server 用命名事件 `MetasequoiaImeServer_ModeActive<后缀>` 发布本版本的模式是否活动）；没有任何版本的模式活动时，由先收到按键的 Server 处理，不会谁都不管。
@@ -157,6 +165,8 @@ x64 和 x86 的源码构建与运行测试在 Windows 11 和 Win7 SP1 上通过�
 | `system/` | 以上都不属于的系统层：看门狗、首次运行、偏好监视、焦点网关、shell 启动、进程与管道身份 |
 
 `settings/` 是独立的 Windows App SDK / WinUI 3 设置宿主。它只负责设置窗口和共享偏好文件的读写；TSF、Server 和共享面板仍由各自的宿主负责。
+
+现代设置与 Win7 设置在同一登录会话、用户和产品版本内只保留一个实例。重复启动恢复已有窗口；`--route=settings:<页面>` 转发到原窗口，裸 `settings` 保留当前页。首个进程初始化期间的重复启动等待其就绪，超时不另开窗口；原进程退出或崩溃后可以重新启动。`windows-settings-instance` 用真实 Win32 窗口和子进程覆盖并发启动、页面转发、恢复和退出接管，需在 Windows 交互会话或 Wine 中运行。
 
 设置布局参照 macOS 原生宿主：窗口初始 1000 × 780 DIP（与 macOS 设置窗口相同），标题是「水杉输入法 · 设置」（产品名按版本取）；最小 800 × 560 DIP，因为这个窗口没有 macOS 那种窄窗口时收起侧栏的布局。侧栏 260 DIP，平铺各页、不显示组名，图标是与 macOS 相同的产品图标，选中项是中性底色加正文色，保留一个设置项搜索入口：无描边、放大镜在左的搜索框，输入后页面列表换成结果列表（页面在前、设置行第二行写「页 › 标签 › 分组」（缺的段省掉）、不限条数，查不到时写「没有匹配的设置」）；标题栏只写当前页名，没有跨页面的历史返回按钮，正文不再画页面大标题，顶部是一句说明加水杉娘插画的页首引导（「关于」页没有）；正文用功能组卡片和标签／控件两列布局，组、行的间距与字号和正文边距取 macOS 的平台 token（数值见 `settings/README.md`），跳转行整行可点，「更多选项」一类折叠区是无边框的标题行加「›」，窄行把控件移到说明下方。「输入」页照 macOS 分「输入方案」「中英模式」「选词与翻页」「候选与联想」「输出设置」「高级选项」六个页内标签，方案组只展示当前方案的专属选项；「快捷键」分「按键设置」「按键速查」，「标点与翻译」分「标点设置」「候选释义」「翻译服务」。账号页未登录时是 macOS 那样一张居中的登录卡片（头像、欢迎语和一列整宽按钮），复选框按可用宽度自动排列；「主题」页先是「明暗」组，再是一次一张整宽卡片的主题轮播（内置主题和皮肤包，每张画横排、竖排候选窗口和悬浮工具栏），卡片本身就是预览，没有另外的完整实时预览。候选窗口照 macOS 分「布局」「字体与大小」「窗口样式」「预编辑」四个页内标签，预览在标签条下面的无标题卡片里，「游戏」组在标签内容下面一直显示，搜索落到某一行时切到它所在的标签；自定义候选配色在「主题」页的「自定义配色」折叠区里管理。「悬浮工具栏」页首的预览跟随按钮、尺寸和主题，下面是「显示」「按钮」「尺寸」三组，按钮复选框排成纵向一列。词库列表照 macOS：本机词库是编码、词条、权重、来源、操作五列，内置词条没有操作；只读的资源词库是两列，日语和韩语的第一列叫「读音」（见 `settings/README.md` 的「词库」一段）。
 
@@ -446,7 +456,7 @@ request_stop 可从回调调用，不 join；stop 由外部控制线程调用，
 
 SessionPump 在外部 I/O worker 运行一个完整 ticket 的消息循环，通过 MainTransport 接口连接实际 PipeMainTransport/PipeRegistry。登记通知消费时检查 current，再在 InputQueue 创建会话；每条 Main 消息经过路由与 prepare、worker 焦点确认、队列确认、Engine 输入、回复发送、队列回执之后才读下一条。队列任务复制单帧数据，管道读取和写入都在外部 worker；禁止从输入队列调用 run，入口会拒绝自等待。
 
-PipeMainTransport 的 read 复用 Registry 的可取消空闲等待与消息校验；send 要求显式有限超时，仅完整成功返回 true。is_current 只是登记快照，不证明进程存活或焦点；实际读写继续复核身份/代次，发送同时经过 FocusGate。正常焦点切换导致的过期任务和输出被丢弃，不视为连接故障；确实尝试但失败的写入、无法编码的回复、身份/请求不匹配的分发结果和队列故障终止循环，不重放输入或不确定写入。重复 hello 无操作。退出撤销匹配焦点与主注册，并在队列清理会话；若连清理也无法入队，停止共享输入队列，宿主还必须停止其他管道循环。
+PipeMainTransport 的 read 复用 Registry 的可取消空闲等待与消息校验；send 要求显式有限超时，仅完整成功返回 true。is_current 只是登记快照，不证明进程存活或焦点；实际读写继续复核身份/代次，发送同时经过 FocusGate。正常焦点切换导致的过期任务和输出被丢弃，不视为连接故障；确实尝试但失败的写入、无法编码的回复、身份/请求不匹配的分发结果和队列故障终止循环，不重放输入或不确定写入。按键任务里只有 `RequestRejected` 被就地接住：循环返回 `PumpResult::RequestRejected`，经 `Presentation::rejected` 交出一行诊断（请求种类、客户端、请求号、校验名和计数），断开这一个客户端，输入队列继续运行；其他异常仍让输入队列停机。重复 hello 无操作。退出撤销匹配焦点与主注册，并在队列清理会话；若连清理也无法入队，停止共享输入队列，宿主还必须停止其他管道循环。
 
 KeyHandler 在输入队列上使用真实 TSF 模式/消费路径选择 ReplyPath，并且只调用一次 state.key；测试里的 Unicode 专用分发不是生产 VK 推断器。EventHandler 必须显式提供，用于发布携带 lease 的模式/候选 UI 工作；有活动 route 时回调处于焦点锁内，不得重入 gate、调用 Engine 或执行 I/O。清理类通知没有新前台授权，不得隐藏其他客户端 UI；异步消费者仍须检查 lease。无编码帧的返回只能表示 ReplyComposer 已验证的本地完成或无回复路径，不能拿它绕过待回复门禁。
 
@@ -545,6 +555,18 @@ key_bindings 可选对象示例：
 
 隔离预览实例不注册 TSF，也不接管系统输入源：它挂上候选窗口、后台点击选词和悬浮工具条，走 configured_key 的同一套路径；未支持的路由会断开当前连接。生产模式复用同一份 Server 会话/窗口实现，只是换成安装器注册的生产管道名，TSF 注册和 DLL/Server 部署由安装器完成。Enter 缺少宿主实际本地提交观察时明确拒绝，不从 Engine 伪造观察。预览实例不连接旧产品管道，也不替代生产 KeyHandler。运行时检查包含此 EXE 的依赖，PowerShell 合成测试不启动常驻 Server 进程；CMake 另登记无副作用的 `windows-preview-help` --help 测试。
 
+#### 「我的词条」自动同步
+
+「我的词条」经用户自己的 WebDAV 网盘同步（[docs/dictionary-webdav-sync.md](../../docs/dictionary-webdav-sync.md)）的自动触发在 Server 里：它是一直活着、持有输入会话的进程。`src/system/DictionarySyncWorker.cpp` 起一个工作线程调用 `msime_client_dictionary_sync`：候选菜单的「删除」和维护快捷键删掉候选之后以 `local_change` 记一次（只记录、不联网，连着几次只记一次），启动两分钟后第一次 `periodic`，之后照每次回答里的 `next_check_ms` 再调（夹在 1 秒到 30 分钟之间，调用本身失败时半小时后再试）。要不要联网、额度、防抖和退避都在共享 Rust；偏好里没配网盘（`dictionary_sync_webdav.url` 为空）时线程只是等着，偏好发布时配上就在十秒后开始，清掉就停下。自动同步不请输入法让出词库，输入会话占着时这一轮的远端改动留到下一次；Rust 写本机词库每批取一次维护权、从不跨网络请求持有。打开设置（`opened`）和「立即同步」（`manual`）由设置窗口调，设置窗口改了词之后也自己记一次 `local_change`。只有受管理的 Server 做，预览实例不替用户联网；Win7 构建的 Server 是同一份代码。
+
+同步目录是本用户的 `%LOCALAPPDATA%\<本版本的用户目录>\dictionary-sync`（full 是 `%LOCALAPPDATA%\MSIME\dictionary-sync`，`common/DictionarySyncDirectory.h`），Server、WinUI 设置、Win7 设置和 Win7 词库同步面板都调这一个函数，所以一个安装只有一份设备身份：Server 的请求带 `create_identity: false`，身份只由设置窗口在第一次配置时生成，设置窗口还没配过时 Server 答 `clipboard_identity_missing`、不登记也不联网；设置窗口的几个进程第一次使用时同时生成身份由 Rust 的文件锁和「不覆盖另一个身份」挡住，仍然报 `clipboard_keystore_conflict` 时宿主重试（最多三次，`common/DictionarySyncRetry.h`）。不用账号目录本身：云剪贴板中继的密钥串也在那里、文件名相同；不放状态根：安装后的状态根整台机器共用、每个用户都能改，里面不能放词条明文和设备私钥。调度、请求和回答解析在 `src/system/DictionarySyncSchedule.h`，由 `windows-dictionary-sync-schedule` 测试核对。
+
+#### 后台更新提醒
+
+受管理的 Server 定期在后台检查新版本，有新版本时主动提醒；预览实例不检查。`src/system/UpdateNotifier.cpp` 起一个工作线程，启动五分钟后第一次调用 `msime_client_update_background_check`，之后每小时一次；偏好里的更新通道（`update_channel`，随偏好发布更新）变了以后，下一次调用推到一小时之后：换通道几乎总在设置窗口「关于」页上做，用户多半当场点了「检查更新」，马上再弹一条说同一个版本的通知是重复的。多久真正联网一次（成功后一天、失败后六小时）、换通道后立刻重查、同一个构建（版本号和运行 ID）只提醒一次、开发构建和 `MSIME_DISABLE_UPDATE_CHECK` 不检查，全在共享层（`crates/client-services/src/update_check/background.rs`），Server 只决定什么时候问、怎么提醒；没到时间时只读记录目录里的 `update-check.json`。请求的平台是 `windows`，带通道、不带架构，与设置窗口相同；Win7 构建是 `windows7`，只有正式发布、不带通道，带本程序编译成的架构（`x86_64` 或 `x86`，与 Win7 专用设置相同，共享层按它在两个安装包里选）。记录目录是本用户的 `%LOCALAPPDATA%\<本版本的用户目录>\update`（full 是 `%LOCALAPPDATA%\MSIME\update`，`common/UpdateRecordDirectory.h`），设置窗口「关于」页读 `msime_client_update_pending` 用的是同一个目录；不放状态根，因为安装后的状态根整台机器共用，几个 Windows 用户共用一份「提醒过哪个构建」，后登录的用户就收不到通知。联网只发生在这个工作线程上，不在输入线程、管道线程或消息循环上。
+
+共享层让提醒时，消息循环线程上的一个不显示的窗口加一个临时的通知区域图标（`Shell_NotifyIconW`，`NOTIFYICON_VERSION_4`）并弹出气泡：标题「<产品名>有新版本 vX」（产品名按版本取 `MSIME_EDITION_DISPLAY_NAME`，如「水杉输入法」「水杉五笔」），正文写明通道和构建（「测试版 v0.3.1 已发布。……」「每日构建 v0.3.1（构建 123）已发布。……」，写法与设置窗口共用 `common/UpdateChannelText.h`），Windows 10/11 显示成通知，Windows 7 显示成气泡。系统正不接受通知（`SHQueryUserNotificationState` 不是 `QUNS_ACCEPTS_NOTIFICATIONS`：全屏游戏或演示、锁屏、新用户登录后的安静时间）时先不弹，留在内存里每分钟再看一次，最多等两小时（`QUNS_BUSY` 有误报，不能无限等）。共享层返回时已经把这个构建记成提醒过，所以气泡超时、被关掉时图标仍然留着：Windows 10/11 删掉图标会连操作中心里的那条通知一起删掉，被勿扰或专注助手压下的通知也只在操作中心里。点气泡或图标打开设置窗口的「关于」页（与托盘「关于水杉输入法…」同一条 `settings:about` 路由）并删掉图标，设置窗口不在时改用浏览器打开发布页；右键图标只删掉图标；用户都不理会时一天后删掉。不显示窗口，不抢焦点。Server 停下时先停这个线程：最多等两秒，正在联网时放手让它自己结束（它只持有共享状态，回来后看见停止标志就退出）。请求、回答解析和通知文字在 `src/system/UpdateNotification.h`，由 `windows-update-notification` 测试核对。取舍见 [决策笔记](../../.agents/notes/implemented/feature/2026-10-25-windows-update-channels.md)。
+
 #### TSF 适配器交接契约
 
 TSF DLL 与 WindowsServer 保持独立进程，通过 Engine contracts 定义的 Main、ToTsf、Worker 管道交换协议帧。DLL 不调用 `configured_key`、`basic_key`、`navigate`，也不缓存 Server 内部 `FocusLease` 或 `PendingReply`。DLL 使用自身的 focus token、composition epoch 和 request_id 验证异步回复，再在所属线程的 TSF edit session 中修改文本；这些值不能冒充 Server 的连接代次或焦点 epoch。
@@ -617,6 +639,8 @@ WindowsServer/SessionController::request_mode(lease, mode) 提供中英文、中
 
 固定上游 TSF 的 _HandleCompositionDoubleSingleByte 在编辑会话内转换并上屏全角字符，Server 不重复转换。Server 拥有一个非激活的 Win32 悬浮工具栏，显示中英、标点、全半角状态，并把这三个按钮通过当前焦点 lease 路由回 TSF；位置按当前工作区定位，客户区支持拖动；拖动后的位置生产 Server 记在状态目录的 `floating_toolbar_position.json`，隔离预览实例写回启动配置，重启后都回到原处。`floating_toolbar_enabled` 控制显示，缺省开启；简繁输出、图标菜单和缩放通过共享设置与 `FloatingToolbarSettings` 下发。按钮组与 macOS 一致：中英、切换输入方案（弹出与托盘「输入方案」同一组行）、标点、全角、简繁、表情、手写（按版本提供）、屏幕键盘、语音（与托盘和语音快捷键切换同一个会话）、设置，各自受 `floating_toolbar.*` 开关控制，偏好里缺键时表情、手写、屏幕键盘和语音不画；语言按钮在双拼、五笔下显示「双」「五」，藏文显示「ཀ」，每个按钮都有悬停提示。尺寸照 macOS：栏高为图标尺寸加 20，按钮是图标尺寸加 8 的正方形、彼此相隔 2，左端的 logo 槽宽 34、logo 画成 22 见方（`show_app_logo` 关着时换成宽 10 的握把），都不随图标尺寸变，logo 之后依次留 4、3、1.2（分隔线，和按钮一样高）、4，最后一个按钮之后留 6，再整体乘 `scale_percent`；卡片圆角 10、描边 1。中英、标点、全半角和简繁四个按钮画文字（Microsoft YaHei UI 常规字重，图标尺寸的 0.95；「ཀ」用 Microsoft Himalaya），其余按钮画 Segoe Fluent Icons / MDL2 的字形，字体里没有时画替代字。悬停和按下都用 hover 色填满整个按钮，圆角取按钮高的四分之一。卡片上按钮以外的地方都能拖动（logo 或握把、分隔线两侧、按钮之间和上下的留白、尾部），只有 logo 那一段显示移动光标。以上是普通条；当前皮肤包带图片工具栏（`toolbarImage`）时改画皮肤图（`ToolbarImageState.h`）：不画卡片底色、阴影、边框、logo 或握把和分隔线，按钮按 status、fullwidth、punctuation、character_set、emoji、screen_keyboard、settings 的共享键序向布局桥请求（与 macOS 和设置页预览相同，不跟普通条标点在前的顺序），按钮位置和图标尺寸取自共享布局桥，文字按钮用同一个中文界面字体（Microsoft YaHei UI，「ཀ」用 Microsoft Himalaya）、按皮肤给的图标尺寸画，悬停和按下画内缩 2 的 6.5 圆角药丸，按下用选中色，按钮以外只有背景图不透明的地方能拖动并显示移动光标，透明处经窗口形状交给下面的窗口。卡片上点右键弹出实用菜单：表情与符号（系统 Win+. 面板）、打开设置、检查更新、访问 msime.app、使用帮助、关于、问题反馈、隐藏悬浮状态栏（写回 `floating_toolbar.enabled`）。没有共享应用时表情和屏幕键盘退回系统表情面板和 osk.exe。`show_app_logo` 关着时左端画两列三行圆点的握把代替 logo。连续 10 秒没有键盘输入工具栏自动隐藏，下一次按键时回来；在工具栏上点按、拖动或开着它的菜单都会重新计时。工具栏本身不注册也不修改本机输入源，那归安装器。
 
+输入状态 HUD（`input_mode_hud`）除中／英外，也提示繁／简、全／半角、中文／英文标点、英文候选模式、输入方案（含双拼配置与五笔版本）、候选译文开关和清缓存成功。快捷键、托盘和工具栏共用提示，系统语言栏的全半角和标点点击也覆盖；只在操作成功且状态改变后出现，后台加载、同值选择和标点锁拦截不提示。单字保持紧凑，多字按实际文字宽度展开，沿用 logo、主题、光标定位和 0.6 秒停留加 0.18 秒淡出；关闭 HUD 或全屏时不出现。焦点会话改变、切应用或过期的异步操作结果不重播。
+
 切换中英文时光标旁的「中」「英」提示（`InputModeHudWindow`，偏好 `input_mode_hud`）用工具栏的配色，尺寸照 macOS 固定：18 号常规字、高 32、两侧各留 8，`show_app_logo` 开着时左边加 16 的 logo、与字相隔 4，圆角 8、描边 1；只随显示器 DPI 缩放，不跟工具栏的字号和缩放。完全显示 0.6 秒后用 0.18 秒淡出（按 16 毫秒一帧重画、整张放进带不透明度的图层），途中换了显示器设置就直接收起。
 
 ### 编辑键与 TSF 预编辑回复
@@ -625,7 +649,7 @@ InputState::basic_key(lease, packet, style, local_text) 统一基础分发：复
 
 普通模式的无修饰 1..9 与 Unicode 模式的 Shift+1..9 均按 VK 槽位选择当前共享候选 ID，不依赖 wch；例如非美式布局数字键产生 & 时仍选词，Unicode 裸数字仍编辑。小键盘按同样规则归一化。空候选返回未提交状态，不把布局字符作为替代文本上屏。
 
-LocalCommit 分发先验证该包确为原始文本提交键，且调用方提供的本地完成文本等于已选前缀加 Engine 当前 editing_text，再执行共享提交；缺少文本、内容不符或错误键型抛错，并保留组合和待回复状态。stage 的提交后校验仍保留，调用方不能用 Engine 返回值反过来伪造本地已上屏的证明。拒绝并不能撤回 TSF 已经错误插入的文本，仍需宿主处理协议分歧。
+LocalCommit 分发先验证该包确为原始文本提交键，且调用方提供的本地完成文本等于已选前缀加 Engine 当前 editing_text，再执行共享提交。键型不对是路由内部不变量，抛 `std::logic_error`；缺少文本或内容不符是 TIP 交来的数据，抛 `RequestRejected`（固定校验名 `local_commit_observation` 加字节计数，不含文本）。两者都在改动 Engine 之前抛出，保留组合和待回复状态。stage 的提交后校验仍保留，调用方不能用 Engine 返回值反过来伪造本地已上屏的证明。拒绝并不能撤回 TSF 已经插入的文本，所以 SessionPump 拒绝这个请求后断开这一个客户端，TIP 经重连从空会话重新开始，Server 不留着对不上的旧组字。
 
 InputState::edit(lease, packet, style) 按 Engine 当前模式判定字母、组合中的手动分隔符、Unicode 裸数字/加号、Backspace/Delete 和左右光标移动，并在同一焦点/待回复门禁中推进会话。非编辑键、快捷键、空组合删除、关闭输入或 unknown 模式返回空，不调用 Engine；调用方继续其余原生分发，不能将空结果当作完成了一次输入。
 
@@ -693,15 +717,19 @@ TSF 在收到 Server 回复之前就要决定一个键是组合输入还是选�
 
 内置音效包由安装器放在 DataDir 的 `sound-packs`（与提示音 `audios` 同级），Server 通过 `src/system/SoundPackRoot.h` 在会话选项里写入 `sound_packs`；开发运行的状态目录里没有它时不写，由共享库按 resources 旁边的默认位置查找。官方插件包（uuid 脚本插件、latex-symbols 短语表，`plugins/official-packs.json` 登记的那些）不放 DataDir，而由安装器从 `server_exe/plugin-packs` 装到 Program Files 下 Server 目录的 `plugin-packs`：那里只有管理员能写。Server 通过 `src/system/PluginPackRoot.h` 在会话选项里写入 `plugin_packs`，目录不在（开发运行）时也照样写上，免得共享库退回到可写的 DataDir 旁边去找；原生设置应用和 Tauri 设置壳都取自己所在目录的 `plugin-packs`。它们默认停用：脚本插件要在授权页授权，短语表要在插件页启用。
 
+内置辅助码表同样不在资源目录里：安装器把它们放在 DataDir 的 `helpcodes`，Server 的 `server\resources` 没有 `helpcodes\`，而共享库只从资源目录的 `helpcodes\` 读内置码表，缺表时才读 `helpcode_fallback_resources`。Server 和 TIP 都通过 `src/system/HelpcodeRoot.h` 在内存里的会话选项中把 DataDir 写成 `helpcode_fallback_resources`（TIP 在 `tsf/HostConfiguration.cpp` 读 `runtime-options.json` 时写），不写回文件；DataDir 下没有 `helpcodes` 目录（开发运行）或选项里已有这个键时不写。
+
 ### 打字特效
 
 `msime_client_typing_effect` 的答案由输入线程经 `TypingEffectSignal` 交给界面线程，特效包的颜色和每键火花数随它一起发布（`TypingEffectPalette`）。候选窗取到之后自己画卡片闪光（闪光和 Power Mode）和 Power Mode 的横向抖动，其余交给 `src/candidate/TypingEffectOverlay.cpp`：一个 `WS_EX_LAYERED | WS_EX_TRANSPARENT`、不激活的置顶分层窗口，排在候选窗下面，用 `UpdateLayeredWindow` 贴出光标处的火花、候选窗不在时（上屏之后、交给应用的键）光标所在行的闪光，以及「连击 ×N」徽标（有卡片时在卡片右上角上方，没有时在光标右上方），升档和 Power Mode 时徽标弹一下。数值照搬 macOS 的 `TypingEffectPanel.mm`，都在 `TypingEffectOverlayPolicy.h` 里。特效包没给颜色时，火花、闪光和连击徽标用系统强调色（`src/system/SystemAccent.h` 经 `UISettings.GetColorValue(Accent)` 取，与 macOS 的 `controlAccentColor` 对应），取不到时退回主题的强调色。光标位置先取前台线程的系统光标，没有时用最近一次组字的锚点往上估一行。「显示动画」关掉时不闪、不动，只留徽标；节电模式下火花和 Power Mode 退回闪光；全屏应用在前台时浮层什么都不画。浮层每帧只用一把自己的画刷，播完就停计时器、收起窗口；建不出来时候选卡片照旧自己画闪光和连击数。
 
 未在真机核实：浮层的点击穿透、在候选窗下面的层级、火花的观感和帧率，以及没有系统光标的应用里按锚点估出的光标行，只在 macOS 上用 MinGW 语法检查和本机运行的纯策略测试验证过。
 
-Windows 7 原生设置另有 `--route=settings:community-plugins` 与 `--route=settings:community-resources`：前者提供社区插件浏览、安装、包检查与发布，后者管理社区词库、回复模板、收藏及我的作品。社区词库分别支持本机分组导入与带作品修订的账号云词库导入；本机导入部分失败会显示已应用数量，手动重试保留每组回执。以上入口已接入 Win7 产品启动器和安装包。
+现代 Windows 原生设置另有 `--route=settings:community-plugins` 与 `--route=settings:community-resources`：前者提供社区插件浏览、安装、包检查与发布，后者管理社区词库、回复模板、收藏及我的作品。Win7 兼容设置不提供这两个路由；社区资源需要账号、网络和现代桌面宿主，不能作为兼容版的半成品入口。
 
 ### 完整 Win7 产品与安装包
+
+Win7 使用独立版本源 `platforms/windows/version-win7.txt`；现代 Windows 继续使用 `platforms/windows/version.txt`。两个文件初始可以相同，但后续版本号可分别递增。Win7 安装器、关于页、MCP 握手和 `windows7-v<版本>` 更新检查都取 Win7 版本源，不能把普通 Windows 版本文件当作兼容包版本。
 
 在 Windows 构建机使用 PowerShell 7 和 MSVC 开发环境运行 `Build-Windows7Client.ps1`。依赖前缀必须为对应架构的 Release 包，curl 必须启用 `websockets`（例如 vcpkg 的 `curl[websockets]`）；构建会实际运行功能探针，只有头文件或静态库存在不算通过。`-VcpkgRoot` 只使用官方 toolchain 查找已安装依赖，不执行依赖安装。`-CoreOutputs` 和 `-VoiceOutputs` 可复用同源兼容核心与语音运行库。
 
@@ -718,14 +746,14 @@ Windows 7 原生设置另有 `--route=settings:community-plugins` 与 `--route=s
   -X86RuntimeDirectories @('<SDK Redist UCRT/x86>','<VC Redist/x86/Microsoft.VC143.CRT>') `
   -VcpkgRoot '<官方 vcpkg 根目录>' `
   -CoreOutputs "$PWD/target/windows7-core" -VoiceOutputs "$PWD/target/windows7-voice"
-./platforms/windows/installer/Prepare-PackageFiles.ps1 -Windows7Architecture x64
+./platforms/windows/installer/Prepare-PackageFiles.ps1 -Windows7Architecture x64 -TargetVersion (Get-Content platforms/windows/version-win7.txt -TotalCount 1).Trim()
 ./platforms/windows/installer/Sign-PackageBinaries-Local.ps1 -PackageDirectory "$PWD/target/windows7-package/full/x64"
 ./platforms/windows/installer/Compile-Installer.ps1 -Windows7Architecture x64 `
   -SourceDirectory "$PWD/target/windows7-package/full/x64" -OutputDirectory "$PWD/target/windows7-installer" `
-  -TargetVersion (Get-Content platforms/windows/version.txt -TotalCount 1).Trim()
+  -TargetVersion (Get-Content platforms/windows/version-win7.txt -TotalCount 1).Trim()
 ```
 
-构建目录固定为 `target/windows7-<edition>/<arch>`；`runtime` 只保留实际 PE 依赖闭包、摘要与产品声明。x64 安装包带 x64 Server、原生设置与面板、x64 和 x86 TIP；x86 包只用于 32 位系统。两者不含 WinUI、Tauri、WebView2 或 Arm64 产物，不改变普通 Windows 构建和默认值。完整资源、第三方声明、插件及词书仍由现有暂存规则负责；正式分发继续完成许可收集和受信任签名，本机测试证书只用于内部验收。未指定 `-Windows7Architecture` 时原安装流程保持。与现代构建相同，受信任签名并安装到安全目录的构建可显式传 `Build-Windows7Client.ps1 -ServerUiAccess`，保留跨完整性级别能力；未签名开发构建默认关闭，不能把两种权限能力视为相同。
+构建目录固定为 `target/windows7-<edition>/<arch>`；`runtime` 只保留实际 PE 依赖闭包、摘要与产品声明。x64 安装包带 x64 Server、原生设置与面板、x64 和 x86 TIP；x86 包只用于 32 位系统。两者不含 WinUI、Tauri、WebView2 或 Arm64 产物，不改变普通 Windows 构建和默认值。完整资源、第三方声明、插件及词书仍由现有暂存规则负责；正式分发完成许可收集与摘要校验，不以代码签名为前提，本机测试证书只用于内部验收。未指定 `-Windows7Architecture` 时原安装流程保持。与现代构建相同，受信任签名并安装到安全目录的构建可显式传 `Build-Windows7Client.ps1 -ServerUiAccess`，保留跨完整性级别能力；未签名发布构建默认关闭，不能把两种权限能力视为相同。
 
 真实 TLS 传输测试可在受控网络运行 `tests/tools/windows7_websocket_server.py --bind <测试地址> --certificate <合成证书.pem> --key <合成私钥.pem>`，再执行 `windows7-websocket-runtime.exe wss://<测试地址>:18778 <合成CA.pem>`。服务只处理固定合成帧，测试覆盖信任拒绝、重定向拒绝、二进制分片／ping、并发收发、取消和大小上限；不能代替真实语音账号或麦克风验收。测试服务默认只绑定本机。
 
@@ -735,4 +763,4 @@ Windows 7 原生设置另有 `--route=settings:community-plugins` 与 `--route=s
 
 Win7 验收基线为 Windows 7 SP1 x64，已安装 KB4474419、KB4490628、KB2921916，使用受信任测试签名和开启 UIAccess 的最终安装包。安装、升级保留合成数据、嵌套迁移、双架构 COM／TSF、看门狗、ACL 和显式卸载均通过；最终安装路径中的设置系统对话框打开／取消、x64 与 x86 系统记事本的真实拼音按键、可见候选与“你好”提交通过，Server 持续运行，英文出厂默认值保持。
 
-上述 x86 结果来自 WOW64，独立 32 位 Win7 系统仍需独立验收。测试虚拟机的 HDA 声卡已通过 x64／x86 核心录音、同源 Server 录音、播放渲染与提示音；物理麦克风、扬声器或付费服务仍未验收。固定模型对 SAPI 合成语音的非空识别与合成 TLS／WebSocket 另有专项验证。账号与社区回归使用合成响应，未操作真实云账号；现代 Windows 通过编译及相关原生回归，未重新实装现代完整安装包。本任务未发布正式 Release，分发时仍需正式受信任代码签名。
+独立 Win7 SP1 x86 已通过完整安装、升级保留合成数据、嵌套迁移、卸载和重启后系统记事本真实输入；直通实体 USB 双向音频设备的同源 Server 录音、播放渲染、提示音，以及安装核心的 16 kHz 单声道采集均通过，未保存麦克风内容或作人工音质评价。生产服务使用隔离合成账号验证匿名注册、服务与社区目录、AI、AI 翻译，以及真实云词库新增、完整备份和恢复；原生 ASR 与润色针对合成语音或合成句子获得非空结果。部分在线测试经显式代理访问 HTTPS，不代表直连、普通账号交互登录或全部模型均通过。现代 Windows 的同源完整包回归和各项证据见[产品构建记录](../../.agents/notes/implemented/feature/2026-10-24-windows7-product-build.md)。正式版由 `release-windows7.yml` 在 `main` 手动触发并开启 `publish`，发布页提供两个安装包、各自摘要和 `SHA256SUMS`；未签名包不提供 `UIAccess`，需按发布页核对摘要。

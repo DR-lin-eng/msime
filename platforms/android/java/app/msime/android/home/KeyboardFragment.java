@@ -26,10 +26,10 @@ import app.msime.android.AppEdition;
 import app.msime.android.FirstRunPreparation;
 import app.msime.android.KeyboardHeightPolicy;
 import app.msime.android.KeyboardScheme;
-import app.msime.android.KeyboardSkin;
 import app.msime.android.R;
 import app.msime.android.SchemePreferences;
 import app.msime.android.TextPolicy;
+import app.msime.android.TouchKeyStyle;
 import app.msime.android.ViewPolicy;
 import app.msime.android.core.InputViewValuePolicy;
 import app.msime.android.core.InputViewValuePolicy;
@@ -41,7 +41,7 @@ import org.json.JSONObject;
 /**
  * 设置 tab：键盘有没有设置好、现在是什么样、一个试用入口，以及各组设置的入口。
  *
- * <p>按设计的 Android 设置首页排。状态卡回答决定键盘能不能用的两件事——系统里启用了没有、是不是默认输入法——并把补上缺的那一步的操作放在旁边；卡里还有系统输入法设置的链接和整宽的「试用键盘」。下面的分组按 P11：[皮肤, 键盘] [输入, 表达, 词库] [语音输入, 手写输入] [开发者选项]，每行的副标题是当前值，点开经 {@link SettingsNavigator#open} 压入详情页。搜索胶囊同时找 {@link PageId} 的标题与关键词和本页各行。
+ * <p>按设计的 Android 设置首页排。状态卡回答决定键盘能不能用的两件事——系统里启用了没有、是不是默认输入法——并把补上缺的那一步的操作放在旁边；卡里还有系统输入法设置的链接和整宽的「试用键盘」。下面的分组按 P11：[皮肤, 键盘] [输入, 表达, 词库, 常用语] [AI 润色与回复, 插件] [语音输入, 手写输入] [开发者选项]，每行的副标题是当前值，点开经 {@link SettingsNavigator#open} 压入详情页。搜索胶囊同时找 {@link PageId} 的标题与关键词和本页各行。
  */
 public final class KeyboardFragment extends HomeTabFragment {
 
@@ -49,10 +49,12 @@ public final class KeyboardFragment extends HomeTabFragment {
     private AndroidLocalSettings.Snapshot local = AndroidLocalSettings.defaults();
     /** The current scheme's title for the status line, or null until the preferences are read. */
     @Nullable private String schemeTitle;
+    @Nullable private String selectedSkinTitle;
     private final android.view.ViewTreeObserver.OnWindowFocusChangeListener focusWatch = focused -> {
         if (focused && isAdded() && !isHidden()) renderStatus();
     };
     private boolean loaded;
+    @Nullable private TextView pendingChoices;
     private boolean prepared = true;
     @Nullable private FirstRunPreparation.Listener preparationListener;
     /** 首页的一行和搜索按什么文字匹配它。 */
@@ -78,6 +80,15 @@ public final class KeyboardFragment extends HomeTabFragment {
         TextView system = view.findViewById(R.id.keyboard_system_settings);
         system.setText("系统输入法设置 ›");
         ViewPolicy.bindClick(system, this::openInputMethodSettings);
+
+        pendingChoices = ViewPolicy.label(requireContext(), "", 14, ThemeColorPolicy.accent(requireContext()));
+        ViewPolicy.setMinimumHeightDp(requireContext(), pendingChoices, 48);
+        ((LinearLayout) card).addView(pendingChoices);
+        ViewPolicy.bindClick(pendingChoices, () -> OnboardingChoices.sync(requireContext(), result -> {
+            if (!isAdded() || getView() == null) return;
+            reload();
+        }));
+        ViewPolicy.hide(pendingChoices);
 
         // The system's input method picker is a dialog over this window, so there is no resume when it closes; the returning focus is the only sign the default may have changed.
         view.getViewTreeObserver().addOnWindowFocusChangeListener(focusWatch);
@@ -162,6 +173,7 @@ public final class KeyboardFragment extends HomeTabFragment {
         View view = getView();
         if (view != null) view.getViewTreeObserver().removeOnWindowFocusChangeListener(focusWatch);
         homeRows.clear();
+        pendingChoices = null;
         super.onDestroyView();
     }
 
@@ -169,6 +181,7 @@ public final class KeyboardFragment extends HomeTabFragment {
     // the user is in the keyboard rather than in here.
     // Notices are fetched when the app home comes on screen; the shared store caches the feed for a minute.
     @Override protected void onBecameVisible() {
+        OnboardingChoices.sync(requireContext(), result -> { if (getView() != null) reload(); });
         reload();
         View view = getView();
         if (view != null) NoticeBanner.load(this, view.findViewById(R.id.keyboard_notices));
@@ -180,11 +193,16 @@ public final class KeyboardFragment extends HomeTabFragment {
             JSONObject loadedSnapshot = ready ? HostStore.loadPreferences(context) : null;
             // 应用主题要读本地设置文件并调两次 Rust 解析，留在工作线程做；主线程只比较缓存的季节。
             if (loadedSnapshot != null) AppThemeController.follow(context, loadedSnapshot.optJSONObject("preferences"));
-            return new Object[] {ready, loadedSnapshot, AndroidLocalSettings.load(context)};
+            JSONObject preferences = loadedSnapshot == null ? null : loadedSnapshot.optJSONObject("preferences");
+            String skinTitle = preferences == null ? null : HostStore.keyboardSkin(context, preferences,
+                AppMode.dark(context), HostStore.seed(context)).title();
+            return new Object[] {ready, loadedSnapshot, AndroidLocalSettings.load(context), skinTitle};
         }, result -> {
             if (result != null) {
                 prepared = Boolean.TRUE.equals(result[0]);
+                snapshot = result[1] instanceof JSONObject value ? value : null;
                 if (result[2] instanceof AndroidLocalSettings.Snapshot settings) local = settings;
+                selectedSkinTitle = result[3] instanceof String title ? title : null;
                 if (result[1] instanceof JSONObject value) {
                     snapshot = value;
                     JSONObject preferences = value.optJSONObject("preferences");
@@ -214,6 +232,8 @@ public final class KeyboardFragment extends HomeTabFragment {
         row(typing, PageId.PHRASES, R.drawable.ic_ms_chat);
         HomeNavGroup ai = HomeNavGroup.add(rows);
         row(ai, PageId.AI_SETTINGS, R.drawable.ic_ms_star);
+        // 插件和 AI 一样是「工具」：共享设置页把它们放在同一组（`settings-page-registry.ts` 的「工具」）。
+        row(ai, PageId.PLUGINS, R.drawable.ic_ms_extension);
         HomeNavGroup other = HomeNavGroup.add(rows);
         row(other, PageId.VOICE, R.drawable.ic_ms_mic);
         row(other, PageId.HANDWRITING, R.drawable.ic_ms_edit);
@@ -243,11 +263,9 @@ public final class KeyboardFragment extends HomeTabFragment {
         String skin = pending;
         if (preferences != null) {
             // The page's own night mode stands in for the system's, as the keyboard's does: with `theme` on 跟随系统 the host follows the system, and with it forced the resolver never asks.
-            KeyboardSkin resolved = HostStore.keyboardSkin(preferences, AppMode.dark(requireContext()),
-                HostStore.seed(requireContext()));
             AppEdition edition = AppEdition.current();
             KeyboardScheme selected = SchemePreferences.storedScheme(preferences, edition);
-            skin = resolved.title();
+            skin = selectedSkinTitle == null ? "读取中…" : selectedSkinTitle;
             scheme = selected.title(InputViewValuePolicy.textOr(preferences, "wubi_profile", KeyboardScheme.WUBI_86));
         }
         schemeTitle = preferences == null ? null : scheme;
@@ -308,8 +326,11 @@ public final class KeyboardFragment extends HomeTabFragment {
                 listed.add(page);
                 shown++;
             }
+            // 本版本一组底行样式都没有（日语、越南语、藏语版）时键盘页不列「按键布局」入口，搜索同样不列它，免得打开一页空白。
+            boolean keyLayoutOffered = TouchKeyStyle.Groups.offeredBy(AppEdition.current()).any();
             for (PageId page : PageId.values()) {
                 if (listed.contains(page) || !page.searchable() || !page.matches(query)) continue;
+                if (page == PageId.KEY_LAYOUT_STYLES && !keyLayoutOffered) continue;
                 if (group == null) group = HomeNavGroup.add(results);
                 group.add(R.drawable.ic_search, page.title(), matchedKeyword(page, query, null),
                     () -> open(page));
@@ -338,12 +359,20 @@ public final class KeyboardFragment extends HomeTabFragment {
     private void renderStatus() {
         View view = getView();
         if (view == null) return;
-        boolean enabled = ImeSetup.enabled(requireContext());
-        boolean current = enabled && ImeSetup.isDefault(requireContext());
-        String state = getString(prepared && current
+        if (pendingChoices != null) {
+            boolean pending = OnboardingChoices.hasPending(requireContext());
+            pendingChoices.setText("引导中的选择尚未保存，点此重试");
+            ViewPolicy.setVisible(pendingChoices, pending);
+        }
+        Boolean enabled = ImeSetup.enabledState(requireContext());
+        Boolean current = ImeSetup.currentState(requireContext());
+        String state = !loaded ? "检查中…" : !prepared ? "需要准备运行资源"
+            : snapshot == null ? "无法读取偏好设置" : OnboardingChoices.hasPending(requireContext()) ? "引导选择尚未保存" : enabled == null || current == null ? "请在系统设置中确认输入法状态" : getString(Boolean.TRUE.equals(current)
             ? R.string.settings_status_ready : R.string.settings_status_incomplete);
-        ((TextView) view.findViewById(R.id.keyboard_status_line)).setText(
-            schemeTitle == null ? state : state + " · " + schemeTitle);
+        ((TextView) view.findViewById(R.id.keyboard_status_title)).setText(state);
+        TextView scheme = view.findViewById(R.id.keyboard_status_line);
+        scheme.setText(schemeTitle);
+        scheme.setVisibility(schemeTitle == null ? View.GONE : View.VISIBLE);
         check(view, R.id.keyboard_check_enabled, R.id.keyboard_check_enabled_mark,
             R.id.keyboard_check_enabled_action, R.string.settings_check_enabled, enabled,
             this::openInputMethodSettings);
@@ -353,15 +382,15 @@ public final class KeyboardFragment extends HomeTabFragment {
     }
 
     private void check(View view, int rowId, int markId, int actionId, @StringRes int label,
-            boolean done, Runnable action) {
+            Boolean done, Runnable action) {
         TextView mark = view.findViewById(markId);
         StatusMarkPolicy.apply(mark, requireContext(), done);
         TextView button = view.findViewById(actionId);
-        ViewPolicy.setVisible(button, !done);
-        ViewPolicy.bindOptionalClick(button, done ? null : action);
+        ViewPolicy.setVisible(button, !Boolean.TRUE.equals(done));
+        ViewPolicy.bindOptionalClick(button, Boolean.TRUE.equals(done) ? null : action);
         ViewPolicy.setTextColor(button, ColorStateList.valueOf(ThemeColorPolicy.accent(requireContext())));
         view.findViewById(rowId).setContentDescription(
-            getString(label) + (done ? "，已完成" : "，未完成"));
+            getString(label) + (done == null ? "，无法自动确认" : done ? "，已完成" : "，未完成"));
     }
 
     private void openInputMethodSettings() {

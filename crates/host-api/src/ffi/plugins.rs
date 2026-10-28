@@ -11,7 +11,9 @@ use msime_client_services::plugins::{self, PluginFailure};
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
-use msime_client_services::plugins::{script_commands, script_grants};
+use msime_client_services::plugins::{
+    script_commands, script_grants, script_settings, script_storage,
+};
 
 /// 授权页说明插件指令的状态时用的用户指令表：状态目录 `state_root`（插件根目录的上一级，偏好文件也在这里）里偏好启用的指令表包，和输入法交给引擎的是同一份。偏好读不出时按没有启用任何指令表说明。
 #[cfg(any(
@@ -175,12 +177,12 @@ pub unsafe extern "C" fn msime_client_music_pack(request: *const u8, length: usi
     })
 }
 
-/// Largest `msime_client_plugins` request: a full name list at its document bound, with room for JSON escaping and the two paths.
-const MAX_PLUGINS_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+/// `msime_client_plugins` 请求的上限：设置页编辑器保存一本单词本时最大，词表文件本身可到 4 MiB（`wordbook_pack::MAX_FILE_BYTES`），JSON 的键名和转义再翻一倍；名单在它的文档上限时也远在这之内。
+const MAX_PLUGINS_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
-/// 插件页的包仓库和 @ 名单，给桌面外壳以外的设置宿主：Windows 的原生设置应用、鸿蒙的插件页，以及 Android、iOS 设置里导入辅助码表。所有规则和失败码都来自 client-services，与桌面外壳回答设置页的相同。
+/// 插件页的包仓库、设置页插件编辑器和 @ 名单，给桌面外壳以外的设置宿主：Windows 的原生设置应用、鸿蒙的插件页，以及 Android、iOS 设置里导入辅助码表。所有规则和失败码都来自 client-services，与桌面外壳回答设置页的相同。
 ///
-/// 脚本插件只给有授权页的宿主：请求带 `script_page: true` 时目录列出脚本包、导入接受脚本包（`import_from_settings`），桌面上还能读写授权（`script_grants`、`set_script_grant`、`reorder_scripts`，回答和桌面外壳的同名命令一样是 `ScriptGrantsView`，其中插件 `/` 指令的状态按 `state_root` 里偏好启用的指令表算）。不带它时（Android、HarmonyOS 和各处的辅助码表导入）照旧：目录经 `without_scripts`，导入走 `import_without_script_page`。
+/// 脚本插件只给有授权页的宿主：请求带 `script_page: true` 时目录列出脚本包、导入接受脚本包（`import_from_settings`），桌面上还能读写授权（`script_grants`、`set_script_grant`、`reorder_scripts`，回答和桌面外壳的同名命令一样是 `ScriptGrantsView`，其中插件 `/` 指令的状态按 `state_root` 里偏好启用的指令表算），以及插件详情页的设置值和持久存储（`script_plugin_state`、`set_script_settings`、`clear_script_data`，回答是 `ScriptPluginStateView`）。不带它时（Android、HarmonyOS 和各处的辅助码表导入）照旧：目录经 `without_scripts`，导入走 `import_without_script_page`。
 /// # Safety
 /// `request` 指向 `length` 个可读的 UTF-8 JSON 字节，空指针会被拒绝。返回的响应必须用 `msime_client_string_free` 释放。
 #[no_mangle]
@@ -218,6 +220,16 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
         SaveMentions {
             entries: Vec<MentionEntry>,
         },
+        /// 设置页编辑器读出用户插件目录里的一个包。
+        AuthoringLoad {
+            kind: String,
+            id: String,
+        },
+        /// 设置页编辑器保存一个包，走导入同一条暂存、校验和替换的路径。
+        AuthoringSave {
+            pack: plugins::authoring::AuthoredPack,
+            replace: bool,
+        },
         /// 脚本插件的授权、执行顺序和输入法记下的停用。
         #[cfg(any(
             target_os = "macos",
@@ -245,6 +257,34 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
         ))]
         ReorderScripts {
             ids: Vec<String>,
+        },
+        /// 插件详情页：清单里每一项设置现在的值和持久存储占的字节数。
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        ScriptPluginState {
+            id: String,
+        },
+        /// 整份替换一个插件的设置值；没写的项用默认值。
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        SetScriptSettings {
+            id: String,
+            values: serde_json::Map<String, Value>,
+        },
+        /// 「清除数据」：删掉一个插件的持久存储。
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        ClearScriptData {
+            id: String,
         },
     }
     plugin_response(|| {
@@ -317,6 +357,12 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
                 plugins::remove_named(&root, &kind, &id)?;
                 Ok(Value::Null)
             }
+            PluginAction::AuthoringLoad { kind, id } => {
+                serde_json::to_value(plugins::authoring::load(&root, &kind, &id)?)
+            }
+            PluginAction::AuthoringSave { pack, replace } => {
+                serde_json::to_value(plugins::authoring::save(&root, &pack, replace)?)
+            }
             PluginAction::LoadMentions => serde_json::to_value(MentionStore::new(root).load()?),
             PluginAction::SaveMentions { entries } => {
                 MentionStore::new(root).save(&entries)?;
@@ -368,6 +414,31 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
                 user_data,
                 &user_command_triggers(&request.state_root, &root),
             )),
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            PluginAction::ScriptPluginState { id } => {
+                serde_json::to_value(script_settings::state(&root, builtin_packs, &id)?)
+            }
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            PluginAction::SetScriptSettings { id, values } => {
+                serde_json::to_value(script_settings::set(&root, builtin_packs, &id, values)?)
+            }
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            PluginAction::ClearScriptData { id } => {
+                script_storage::clear(&root, &id)?;
+                serde_json::to_value(script_settings::state(&root, builtin_packs, &id)?)
+            }
         };
         value.map_err(|_| PluginFailure::code("storage"))
     })

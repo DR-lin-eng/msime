@@ -512,11 +512,11 @@ constexpr ULONGLONG kApplicationKeyReplayWaitMs = 2000;
 } // namespace
 
 bool CMetasequoiaIME::_IsDeferredKeyOwnerCurrent(ITfContext *context, uint64_t focusGeneration,
-                                                   HWND foregroundWindow) const
+                                                   HWND foregroundWindow, bool allowPendingReset) const
 {
-    const auto localCurrent = [this, context, focusGeneration, foregroundWindow]() {
+    const auto localCurrent = [this, context, focusGeneration, foregroundWindow, allowPendingReset]() {
         return context && _pThreadMgr && focusGeneration == _deferredKeyFocusGeneration &&
-               !_localSessionResetPending.load(std::memory_order_acquire) && foregroundWindow &&
+               (allowPendingReset || !_localSessionResetPending.load(std::memory_order_acquire)) && foregroundWindow &&
                GetForegroundWindow() == foregroundWindow;
     };
     if (!localCurrent()) return false;
@@ -780,7 +780,7 @@ HRESULT CMetasequoiaIME::_ApplyKeyboardCancellation(TfEditCookie ec, ITfContext 
 HRESULT CMetasequoiaIME::_HandleHostCandidateNavigation(TfEditCookie ec, ITfContext *context, uint32_t command)
 {
     auto *host = _pCompositionProcessorEngine ? _pCompositionProcessorEngine->GetHostEngineAdapter() : nullptr;
-    if (!Global::IsUiLessMode() || !host || !host->valid() || !_IsComposing()) return S_FALSE;
+    if (!host || !host->valid() || !_IsComposing()) return S_FALSE;
     std::string raw, error;
     if (command && !host->command(command, &raw, &error)) return E_FAIL;
     return _HandleCompositionInputWorker(_pCompositionProcessorEngine, ec, context, FANY_IME_NO_REQUEST_ID);
@@ -1190,7 +1190,7 @@ HRESULT CMetasequoiaIME::_HandleCompositionInput(TfEditCookie ec, _In_ ITfContex
                 result.commit.push_back(static_cast<char>(wch));
                 result.handled = true;
             }
-            workerResult = _ApplyHostCompositionResult(ec, pContext, result);
+            workerResult = _ApplyHostCompositionResult(ec, pContext, result, false, static_cast<char>(wch));
         }
         tfSelection.range->Release();
         return workerResult;
@@ -1216,10 +1216,16 @@ Exit:
 }
 
 HRESULT CMetasequoiaIME::_ApplyHostCompositionResult(TfEditCookie ec, ITfContext *pContext,
-                                                       const msime::tsf::EngineResult &result, bool serverCommit)
+                                                       const msime::tsf::EngineResult &hostResult, bool serverCommit,
+                                                       char typedKey)
 {
     // 在线五笔先推进会话，文档等待同一回放 token 的 Server 最终文本。
-    if (!serverCommit && _wubiCommitOwner.observe(result)) return S_OK;
+    if (!serverCommit && _wubiCommitOwner.observe(hostResult)) return S_OK;
+    // 没有组字时宿主会话不收的字符已经被 TIP 吃下：按上屏这个字符处理。答「未处理」会让编辑会话返回 S_FALSE，回放队列把同一个键重放 8 次（Engine 每次都答同样的 handled=false），然后丢掉这个键、清空队列并重连。
+    msime::tsf::EngineResult declinedCommit;
+    const auto &result = typedKey != '\0' && msime::tsf::DeclinedIdleCharacterCommit(hostResult, typedKey, &declinedCommit)
+                             ? declinedCommit
+                             : hostResult;
     HRESULT outcome = S_OK;
     const auto status = msime::tsf::ApplyHostCharacterResult(result, [&](const std::string &text) {
         if (text.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) return false;
@@ -1292,11 +1298,13 @@ HRESULT CMetasequoiaIME::_HandleCompositionInputWorker(_In_ CCompositionProcesso
             // means, what the candidates are for, and what Enter commits. The one case that keeps
             // the letters is a caret the user moved into them, because the Engine's offset is an
             // offset into the romaji - see shared/input/CompositionDisplay.h.
+            // 「原始按键」样式画打出来的按键，全拼的 preedit 带显示用的隔音符（HostRawStyleText）；「拼音分词」样式下这段只在 Server 的预编辑没到时兜底，照旧取 preedit。
+            const bool rawStyle = GlobalSettings::getTsfPreeditStyle() == GlobalSettings::TsfPreeditStyle::Raw;
             const auto &value = msime::input::composition_shows_reading(
                                     result.view.reading, result.view.caret,
                                     result.view.editing_text.size())
                                     ? result.view.reading
-                                    : result.view.preedit;
+                                    : rawStyle ? msime::tsf::HostRawStyleText(result.view) : result.view.preedit;
             const int n = value.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                                                                   value.data(), static_cast<int>(value.size()), nullptr, 0);
             hostPreedit.assign(static_cast<size_t>(n > 0 ? n : 0), L'\0');
@@ -1999,7 +2007,11 @@ HRESULT CMetasequoiaIME::_HandleCompositionDelete(TfEditCookie ec, _In_ ITfConte
                 msime::tsf::EngineResult result;
                 if (msime::tsf::EngineSessionAdapter::parse_result(raw, &result, &error) && result.handled)
                 {
-                    const auto &value = result.view.preedit;
+                    // 与重画组字时同一条规则：「原始按键」样式不画全拼显示用的隔音符。
+                    const auto &value =
+                        GlobalSettings::getTsfPreeditStyle() == GlobalSettings::TsfPreeditStyle::Raw
+                            ? msime::tsf::HostRawStyleText(result.view)
+                            : result.view.preedit;
                     const int n = value.empty() ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                                                                           value.data(), static_cast<int>(value.size()), nullptr, 0);
                     std::wstring preedit(static_cast<size_t>(n > 0 ? n : 0), L'\0');

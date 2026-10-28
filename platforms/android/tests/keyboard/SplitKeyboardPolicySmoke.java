@@ -12,8 +12,10 @@ public final class SplitKeyboardPolicySmoke {
     public static void main(String[] args) {
         whenSplitApplies();
         portraitOverride();
+        configurableBounds();
         whichLayoutsSplit();
         gapWidth();
+        responsiveGapWidth();
         letterRowCuts();
         duplicatedInnerKeys();
         designLayerCuts();
@@ -39,6 +41,16 @@ public final class SplitKeyboardPolicySmoke {
         check(!SplitKeyboardPolicy.active(true, 411, true), "a phone in landscape never splits");
         check(!SplitKeyboardPolicy.active(true, 800, false), "a tablet in portrait does not split");
         check(!SplitKeyboardPolicy.active(false, 800, true), "the setting is off by default and then nothing splits");
+    }
+
+    private static void configurableBounds() {
+        check(SplitKeyboardPolicy.active(true, 480, true, false, 480), "minimum threshold is usable");
+        check(!SplitKeyboardPolicy.active(true, 479, true, false, 480), "below threshold stays whole");
+        check(SplitKeyboardPolicy.active(true, 1000, true, false, 1200), "threshold clamps to maximum");
+        check(SplitKeyboardPolicy.gapFraction(0, 10) == 0.10f, "minimum configured gap");
+        check(SplitKeyboardPolicy.gapFraction(0, 50) == 0.40f, "maximum configured gap");
+        close(SplitKeyboardPolicy.gapWeight(10f, 0f, 0, 10), 10f / 9f, "configured ten percent gap");
+        check(SplitKeyboardPolicy.gapFraction(1200, 10) >= 0.399f, "wide screen keeps key area usable");
     }
 
     private static void whichLayoutsSplit() {
@@ -94,6 +106,24 @@ public final class SplitKeyboardPolicySmoke {
         float gap = SplitKeyboardPolicy.gapWeight(10f);
         close(sum(row, 0, cut) / (10f + gap), .375f, "left half of the top row");
         close(sum(row, cut, row.length) / (10f + gap), .375f, "right half of the top row");
+    }
+
+    /** 按窗口变化验证可达范围、临界连续性与重复键借宽，防止大平板把五列键拉成长条。 */
+    private static void responsiveGapWidth() {
+        for (int width : new int[] {0, 600, 720, 959, 960, 961, 1200, 1600, 2400}) {
+            float gap = SplitKeyboardPolicy.gapWeight(10f, 0f, width);
+            float contentFraction = 10f / (10f + gap);
+            float expected = width <= 0 ? .75f : Math.min(.75f, 720f / width);
+            close(contentFraction, expected, "usable fraction at " + width);
+            if (width > 0) check(width * contentFraction <= 720.001f, "bounded thumb reach at " + width);
+            for (float duplicate : new float[] {0f, 1f}) {
+                float remaining = SplitKeyboardPolicy.gapWeight(10f, duplicate, width);
+                close(10f + remaining + duplicate, 10f + gap, "duplicate keeps key widths at " + width);
+                check(remaining > 0, "gap remains after duplicate at " + width);
+            }
+        }
+        close(SplitKeyboardPolicy.gapFraction(-1), .25f, "unknown width keeps the original gap");
+        close(SplitKeyboardPolicy.gapWeight(-1f, 0f, 1600), 0f, "empty row keeps no gap");
     }
 
     private static void letterRowCuts() {

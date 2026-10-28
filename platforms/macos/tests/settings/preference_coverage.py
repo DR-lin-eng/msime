@@ -22,9 +22,9 @@ exempt top-level struct is not descended into: the entry already explains the wh
 
 Two deliberate limits, both narrower than "the name appears somewhere":
 
-- A doc comment that names a preference is not a reader. `crates/host-api/src/ffi/host.rs` documents
-  `traditional_chinese_variant` in prose and nothing reads it; counting prose made the gate pass a field
-  macOS silently ignores. Doc-comment lines are dropped before matching.
+- 文档注释提到偏好不等于实际读取。`ffi/host.rs` 曾只在说明中提到
+  `traditional_chinese_variant`，把散文也算进去会漏掉未接入的偏好；扫描时排除文档注释。
+  现在 `ffi/input.rs` 的多语言逐段输出真正读取该字段，所以不再将它列为豁免。
 - A field read through a helper on its own struct (`WubiCandidateSelectionPreferences::slot`) does not spell
   the field name in the scan set. That is what the two `wubi_candidate_selection` entries record, and why
   the reason has to point at the consuming call.
@@ -39,6 +39,9 @@ from pathlib import Path
 # Preferences that no macOS input method can act on. Each entry says why, because "macOS does not read it"
 # is exactly what a defect looks like from the outside.
 NOT_APPLICABLE = {
+    "android_keyboard_skin_light": "仅 Android 原生皮肤页保存浅色键盘皮肤选择；macOS 屏幕键盘跟随自己的颜色模式，不读取 Android 键盘槽位",
+    "android_keyboard_skin_dark": "仅 Android 原生皮肤页保存深色键盘皮肤选择；macOS 屏幕键盘跟随自己的颜色模式，不读取 Android 键盘槽位",
+    "android_text_trackpad": "仅 Android 原生键盘的 TextTrackpadSettings 和 KeyboardOptionsPage 使用的文本拖拽手势；macOS 没有 Android 输入法键面或对应设置入口",
     "input_mode_corner_hud": "仅 Linux 的 IBus 与 Fcitx5 在无法定位光标时使用屏幕角落徽章；共享设置页只在 Linux 显示此项，macOS 没有对应角落提示",
     "input_mode_focus_hud": "仅 Linux 的 IBus 与 Fcitx5 在聚焦输入框时显示模式提示；共享设置页只在 Linux 显示此项，macOS 没有聚焦提示入口",
     "settings_theme": "the settings application's own appearance; the input method has no window to theme",
@@ -60,9 +63,14 @@ NOT_APPLICABLE = {
     "touch_japanese_toggle_input": "仅 Android 原生日语九键支持连点循环；macOS 使用物理键盘罗马字输入，共享设置页不提供此开关",
     "touch_quick_punctuation_symbols": "仅 iOS 原生触屏键盘提供自定义快捷符号；macOS 屏幕键盘不读取此列表，共享设置页不提供此项",
     "touch_number_keypad_order": "the touch keyboard's nine-key digit layer",
-    "touch_text_edit_button_order": "仅 Android 原生文本编辑面板读取七个侧边动作的排序；macOS 不提供此面板，共享设置页也不显示排序入口",
+    "touch_text_edit_button_order": "仅 Android 原生文本编辑面板读取侧边动作的排序；macOS 不提供此面板，共享设置页也不显示排序入口",
     "touch_twenty_six_key_number_layout": "the touch keyboard's 26-key digit layer",
     "touch_shuangpin_key_hints": "the touch keyboard's 26-key shuangpin letter keys",
+    "touch_quanpin_shift": "仅 Android 和 iOS 的触屏全拼 26 键读它（组字时 ⇧ 保留还是换成「分词」）；macOS 使用物理键盘，Shift 组合键的辅助码语义由引擎处理，屏幕键盘不存在这个问题",
+    "touch_twenty_six_key_style": "仅 Android、iOS 与鸿蒙手机的触屏中文 26 键底行读它；macOS 使用物理键盘，屏幕键盘面板是固定的整排键盘，不画这些底行样式",
+    "touch_fourteen_key_style": "仅 Android、iOS 与鸿蒙手机的触屏 14 键与 18 键底行读它；macOS 没有 14 键或 18 键键面",
+    "touch_nine_key_style": "仅 Android、iOS 与鸿蒙手机的触屏九键底行读它；macOS 没有九键字母键面",
+    "touch_number_row": "仅 Android、iOS 与鸿蒙手机的触屏字母层上方画 1 到 0 数字行；macOS 的物理键盘与屏幕键盘面板本来就有数字行",
     "touch_spelling_position": "where the touch keyboard puts the spelling; macOS composes inline and its candidate window follows `candidate_preedit_style`",
     "touch_toolbar": "the touch keyboard's row above the keys",
     "harmony_toolbar": "the HarmonyOS phone keyboard's toolbar tools and display mode; the page offers them only where the host reports `touch_toolbar_tools`",
@@ -74,8 +82,8 @@ NOT_APPLICABLE = {
     "keybindings.toggle_japanese_ctrl_shift_j": "由 `HostCapabilities::japanese_toggle_shortcut` 门控，macOS 为 false（`crates/client-core/src/host_surface.rs`：macOS 把「日」声明成系统输入模式，用 Ctrl+空格和地球键轮换，不需要这个组合键），设置页不显示这一项",
     "wubi_candidate_selection.second_key": "由共享运行时经 `WubiCandidateSelectionPreferences::slot` 消费（`crates/input-runtime/src/runtime.rs` 的 `set_wubi_candidate_selection` / `candidate_for_slot`）；宿主不直接拼字段名，所以按名匹配看不见它",
     "wubi_candidate_selection.third_key": "同上：与 `second_key` 一起交给 `slot()` 决定第二、第三候选的取词键",
-    "traditional_chinese_variant": "macOS 的简繁转换固定用 OpenCC `s2t`（`platforms/macos/src/core/ChineseTextConversion.mm` 调 `msime_client_simplified_to_traditional`），不选变体；带变体的 `msime_client_convert_to_traditional` 目前只有 Linux 的 IBus / Fcitx5 宿主调用（`crates/client-core/src/host_surface.rs` 的 `traditional_chinese_variants: matches!(platform, HostPlatform::Linux)`）。macOS 用 s2t 而不是 `s2tw` / `s2twp` 是刻意的：来源 MSIME-Apple 只有「简体 / 繁体」二选一的 `outputScript`，没有台湾正体 / 台湾用词三态，设置页也只给这两项；从 Linux 或云同步带过来的 `s2tw` / `s2twp` 在 macOS 上按 s2t 处理，属于「这项在 macOS 不适用」而不是「开关坏了」",
     "smart_punctuation_migrated": "not a setting: the one-time marker client-core's PreferencesStore sets while reading the document, after turning the old macOS default (smart punctuation off) on; the host reads the migrated values through msime_client_load_preferences",
+    "diagnostic_log.command_line_candidates": "不是输入法读的偏好：只由终端里的 `msime candidates`（`crates/mcp-server` 的 msime-mcp）在查询前检查，关着就提示并以错误码退出；输入法宿主打字时不看它。共享设置页在 macOS 的「维护与诊断」里显示这个开关",
     "fuzzy_pinyin.seeded": "not a setting: `FuzzyPinyinPreferences::seeded` 是内部标记，用来区分「首次开启」和「有意清空规则」，落盘但不渲染（`crates/client-core/src/preferences.rs` 的 `seed_fuzzy_pinyin_rules` 读它、设置页不显示）；宿主不消费它是设计如此",
     "custom_theme.keyboard.key_background": "触屏键盘的自定义设计；macOS 的 AppearancePreferences 仅透传 keyboard，屏幕键盘不消费此设计",
     "custom_theme.keyboard.key_foreground": "触屏键盘的自定义设计；macOS 的 AppearancePreferences 仅透传 keyboard，屏幕键盘不消费此设计",

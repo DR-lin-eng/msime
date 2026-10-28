@@ -25,7 +25,9 @@ fn options(root: &Path) -> EngineOptions {
         shuangpin_profile: 0,
         shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
+        force_cantonese_shuangpin: false,
         single_character_only: false,
+        caret_edit_suffix: false,
         learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
@@ -36,6 +38,7 @@ fn options(root: &Path) -> EngineOptions {
         wubi_z_wildcard: false,
         wubi_profile: 0,
         helpcode: false,
+        strict_quanpin_helpcode: false,
         show_helpcode: true,
         shuangpin_helpcode_modes: crate::types::ShuangpinHelpcodeModes::default(),
         helpcode_schema: "ziranma".into(),
@@ -58,6 +61,7 @@ fn options(root: &Path) -> EngineOptions {
         mixed_kaomoji: false,
         mixed_symbols: false,
         mixed_japanese: false,
+        multilingual_languages: Vec::new(),
         local_unicode: true,
         local_date_time: true,
         local_date_time_inline: true,
@@ -93,6 +97,7 @@ fn options(root: &Path) -> EngineOptions {
         sentence_alternatives: true,
         vietnamese_input_method: 0,
         vietnamese_tone_style: 0,
+        korean_layout: 0,
         cantonese_dictionary: String::new(),
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
@@ -932,6 +937,9 @@ fn invalid_options_return_errors_instead_of_unwinding_into_rust() {
     value.vietnamese_tone_style = 2;
     assert_eq!(message(&value), "Unsupported Vietnamese tone style");
     value.vietnamese_tone_style = 1;
+    value.korean_layout = 2;
+    assert_eq!(message(&value), "Unsupported Korean layout");
+    value.korean_layout = 1;
     assert!(Session::new(&value).is_ok());
     value.resources = "relative".into();
     assert_eq!(message(&value), "Runtime directories must be absolute");
@@ -1165,6 +1173,57 @@ fn shuangpin_key_hints_reject_an_unknown_profile() {
     assert!(shuangpin_key_hints("").is_empty());
     assert!(shuangpin_key_hints("xiaohe-v2").is_empty());
     assert!(shuangpin_key_hints("quanpin").is_empty());
+}
+
+/// 评测工具靠它把全拼用例编成双拼按键：按名字取内置方案，`custom` 和不认识的名字没有表可编。
+#[test]
+fn encode_shuangpin_uses_the_named_builtin_profile() {
+    assert_eq!(
+        encode_shuangpin("ni'hao", "xiaohe").as_deref(),
+        Some("ni'hc")
+    );
+    assert_eq!(
+        encode_shuangpin("a'ming", "microsoft").as_deref(),
+        Some("oa'm;")
+    );
+    for profile in ["custom", "", "quanpin", "xiaohe-v2"] {
+        assert_eq!(encode_shuangpin("ni'hao", profile), None, "{profile}");
+    }
+    assert_eq!(encode_shuangpin("ni'bad", "xiaohe"), None);
+}
+
+/// 音节表与方案无关：首道双拼编不出 `den`（`en` 和 `ia` 同在 `k` 上，解回 `dia`），`den` 仍是音节。
+#[test]
+fn shuangpin_syllables_do_not_depend_on_the_profile() {
+    for syllable in ["de", "den", "a", "na", "zhuang", "yo"] {
+        assert!(is_shuangpin_syllable(syllable), "{syllable}");
+    }
+    for piece in ["", "d", "zhei", "ni'hao", "xyz"] {
+        assert!(!is_shuangpin_syllable(piece), "{piece}");
+    }
+    assert_eq!(encode_shuangpin("den", "shoudao"), None);
+    assert_eq!(encode_shuangpin("den", "xiaohe").as_deref(), Some("df"));
+}
+
+/// 内置方案里只有微软双拼用 `;` 键；`custom` 和不认识的名字没有表，答不了。
+#[test]
+fn shuangpin_uses_semicolon_follows_the_builtin_table() {
+    for (profile, expected) in [
+        ("xiaohe", false),
+        ("ziranma", false),
+        ("shoudao", false),
+        ("microsoft", true),
+        ("smart_abc", false),
+    ] {
+        assert_eq!(
+            shuangpin_uses_semicolon(profile),
+            Some(expected),
+            "{profile}"
+        );
+    }
+    for profile in ["custom", "", "quanpin"] {
+        assert_eq!(shuangpin_uses_semicolon(profile), None, "{profile}");
+    }
 }
 
 #[test]
@@ -2039,6 +2098,7 @@ fn session_options_map_every_host_field() {
     value.fuzzy_pinyin_rules = u32::MAX;
     value.wubi_mixed_pinyin = true;
     value.helpcode = true;
+    value.strict_quanpin_helpcode = true;
     value.helpcode_schema = "xiaohe".into();
     value.chinese_punctuation = false;
     value.paired_punctuation = false;
@@ -2081,6 +2141,7 @@ fn session_options_map_every_host_field() {
     assert_eq!(mapped.fuzzy_pinyin.rules, crate::fuzzy_rule::ALL);
     assert!(mapped.wubi.mixed_pinyin);
     assert!(mapped.helpcode);
+    assert!(mapped.strict_quanpin_helpcode);
     assert_eq!(mapped.helpcode_schema, "xiaohe");
     assert!(!mapped.chinese_punctuation);
     assert!(!mapped.paired_punctuation);
@@ -3789,4 +3850,97 @@ fn resource_dictionary_browse_distinguishes_missing_files_and_preserves_model_pa
     assert_eq!(std::fs::read(path).unwrap(), bytes);
     assert!(dictionary_resource_entries(&options, Japanese, "", 0, 1001).is_err());
     assert!(dictionary_resource_entries(&options, Japanese, "", 1_000_001, 1).is_err());
+}
+
+fn multilingual_fixture(root: &Path) -> EngineOptions {
+    let mut value = helpcode_fixture(root, "", "");
+    value.helpcode = false;
+    value.mixed_english = false;
+    value.multilingual_languages = vec![
+        crate::multilingual::Language::Chinese,
+        crate::multilingual::Language::English,
+        crate::multilingual::Language::Japanese,
+    ];
+    Connection::open(Path::new(&value.dictionaries).join("msime-english.db"))
+        .unwrap()
+        .execute_batch("INSERT INTO english_words VALUES('hello','hello',100);")
+        .unwrap();
+    std::fs::write(
+        Path::new(&value.resources).join("msime-japanese.dat"),
+        crate::japanese::decoder::test_model::bytes(
+            &[("おはよう", "おはよう", 0, 0, 500)],
+            1,
+            &[0],
+        ),
+    )
+    .unwrap();
+    value
+}
+
+#[test]
+fn host_multilingual_options_map_the_selected_languages() {
+    let root = tempfile::tempdir().unwrap();
+    let value = multilingual_fixture(root.path());
+    assert_eq!(
+        options::session_options(&value)
+            .unwrap()
+            .multilingual_languages,
+        value.multilingual_languages
+    );
+}
+
+#[test]
+fn host_multilingual_snapshot_keeps_the_raw_identity_and_language_ranges() {
+    use crate::multilingual::Language;
+    let root = tempfile::tempdir().unwrap();
+    let value = multilingual_fixture(root.path());
+    let mut session = Session::new(&value).unwrap();
+    type_text(&mut session, b"hellonihaoohayou");
+    let snapshot = session.snapshot().unwrap();
+    let index = snapshot
+        .candidate_sources
+        .iter()
+        .position(|source| *source == CandidateSource::Multilingual as u8)
+        .expect("宿主应保留连续混合行");
+    assert_eq!(snapshot.candidates[index], "hello你好おはよう");
+    let metadata = snapshot
+        .multilingual_conversion
+        .expect("宿主快照应保留语言边界");
+    assert_eq!(metadata.raw_input, "hellonihaoohayou");
+    assert_eq!(metadata.raw_input, snapshot.editing_text);
+    assert_eq!(
+        metadata
+            .conversion
+            .segments
+            .iter()
+            .map(|segment| (
+                segment.language,
+                segment.input.clone(),
+                segment.text.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (Language::English, 0..5, "hello"),
+            (Language::Chinese, 5..10, "你好"),
+            (Language::Japanese, 10..16, "おはよう"),
+        ]
+    );
+    assert_eq!(session.select(index).unwrap().commit, "hello你好おはよう");
+    assert!(session
+        .snapshot()
+        .unwrap()
+        .multilingual_conversion
+        .is_none());
+    type_text(&mut session, b"nihao");
+    assert!(session
+        .snapshot()
+        .unwrap()
+        .multilingual_conversion
+        .is_none());
+    session.command(Command::Cancel).unwrap();
+    assert!(session
+        .snapshot()
+        .unwrap()
+        .multilingual_conversion
+        .is_none());
 }

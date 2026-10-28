@@ -14,6 +14,8 @@ export interface SettingsPageProjectionOptions {
   hasVocabularyReview: boolean;
   hasAccount: boolean;
   hasChat: boolean;
+  /** 「AI 辅助」页：宿主报 `ai_generation` 为 false（HarmonyOS）时没有这一页。 */
+  hasAi: boolean;
   hasCommunity: boolean;
   showFloatingToolbar: boolean;
   showDeveloperPage: boolean;
@@ -69,6 +71,7 @@ export function settingsPageProjections({
   hasVocabularyReview,
   hasAccount,
   hasChat,
+  hasAi,
   hasCommunity,
   showFloatingToolbar,
   showDeveloperPage,
@@ -88,6 +91,7 @@ export function settingsPageProjections({
         (item.id !== "vocabulary" || hasVocabularyReview) &&
         (item.id !== "account" || hasAccount) &&
         (item.id !== "chat" || hasChat) &&
+        (item.id !== "ai" || hasAi) &&
         // 有社区服务的宿主才有「社区」页。触屏宿主上它是底部「社区」标签的根页（皮肤与词库两类图库）；桌面上它不在侧栏里，只从「我的内容」各行进入。
         (item.id !== "community" || hasCommunity) &&
         (item.id !== "floating-toolbar" || showFloatingToolbar) &&
@@ -111,7 +115,7 @@ export function settingsPageProjections({
             : item.title,
     }));
 
-  // 触屏的「设置」列表（和 iPad 侧栏）不列底部标签页自己的根页：社区、统计、我的已经各占一格。桌面和 2in1 的侧栏不经过这条过滤。
+  // 触屏的「首页」列表（和 iPad 侧栏）不列底部标签页自己的根页：社区、统计、我的已经各占一格。桌面和 2in1 的侧栏不经过这条过滤。
   const mobileListedPage = (id: SettingsPageId): boolean =>
     ((id !== "about" && id !== "feedback") || !hasAccount) &&
     !mobilePrimaryPageIds.includes(id as MobilePrimaryPageId) &&

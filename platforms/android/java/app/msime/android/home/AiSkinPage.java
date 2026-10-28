@@ -65,6 +65,8 @@ public final class AiSkinPage extends ColumnDetailPage {
         return java.util.List.of("设计", "音效", "动画");
     }
 
+    @Override protected boolean hideFixedNavigationWhenIme() { return true; }
+
     private static final String STORE = "msime_ai_skin";
     private static final String UNAVAILABLE_UNTIL = "unavailable_until";
     private static final long HIDE_MILLIS = 24L * 60 * 60 * 1000;
@@ -240,7 +242,7 @@ public final class AiSkinPage extends ColumnDetailPage {
         HostTask.run(this, context -> {
             JSONObject preferences = KeyboardSheets.preferences(context);
             return preferences == null ? KeyboardSkin.system(dark, HostStore.seed(context))
-                : HostStore.keyboardSkin(preferences, dark, HostStore.seed(context));
+                : HostStore.keyboardSkin(context, preferences, dark, HostStore.seed(context));
         }, skin -> {
             currentSkin = skin;
             refreshPreview();
@@ -583,7 +585,14 @@ public final class AiSkinPage extends ColumnDetailPage {
         } catch (java.io.IOException error) {
             return "保存皮肤失败，请重试";
         }
-        JSONObject saved = KeyboardSheets.write(context, preferences -> KeyboardSheets.applyDesign(preferences, design));
+        JSONObject saved = KeyboardSheets.write(context, preferences -> {
+            boolean dark = app.msime.android.KeyboardSkin.resolveDark(
+                preferences.optString("screen_keyboard_theme", "follow"),
+                preferences.optString("theme", "system"), AppMode.dark(context));
+            preferences.put(app.msime.android.KeyboardSkinModeChoice.key(dark),
+                app.msime.android.KeyboardSkinModeChoice.design(id));
+            KeyboardSheets.applyDesignFeedback(preferences, design);
+        });
         if (saved == null) return "皮肤已保存到我的设计，但切换失败，请在皮肤页里选它";
         KeyboardSheets.applyLocalFeedback(context, design);
         KeyboardSheets.recordSkin(context, id);

@@ -21,12 +21,34 @@ export type ScriptCapability =
   | "rerank_candidates"
   | "annotate_candidates"
   | "filter_candidates"
-  | "provide_commands";
+  | "provide_commands"
+  | "insert_candidates"
+  | "persist_data";
 
 export type PluginCommand = { trigger: string; title: string; template: string };
 
-/** 脚本插件在 `/` 指令里声明的一条指令：`client-services::plugins::script_pack::ScriptCommand`。和指令表的一条不同，它没有模板，候选由插件给出。 */
-export type ScriptCommand = { trigger: string; title: string };
+/** 脚本插件在 `/` 指令里声明的一条指令：`client-services::plugins::script_pack::ScriptCommand`。和指令表的一条不同，它没有模板，候选由插件给出。`arguments` 为 `extended` 时触发词后面另外收数字和运算符号；只收字母（默认）时不序列化。 */
+export type ScriptCommand = { trigger: string; title: string; arguments?: "letters" | "extended" };
+
+/** 脚本插件清单 `[[script.settings]]` 的一项：`script_pack::ScriptSetting`，`type` 之外的字段按类型平铺。 */
+export type ScriptSetting = { key: string; title: string; description?: string } & (
+  | { type: "bool"; default: boolean }
+  | { type: "choice"; options: { value: string; title: string }[]; default: string }
+  /** 整数，`min <= default <= max`。 */
+  | { type: "number"; min: number; max: number; default: number }
+  /** `max_length` 是 UTF-16 码元数，和 JS 字符串的 `length` 一致。 */
+  | { type: "text"; max_length: number; default: string }
+);
+
+/** 一项设置的值：布尔、选项的 `value`、整数或文本。 */
+export type ScriptSettingValue = boolean | string | number;
+
+/** 插件详情页读到的一个脚本插件的状态：`script_settings::ScriptPluginStateView`。`values` 覆盖清单里的每一项，文件里不合规的值回到默认值；`storage_bytes` 是 `persist_data` 存储现在的字节数。 */
+export type ScriptPluginState = {
+  id: string;
+  values: Record<string, ScriptSettingValue>;
+  storage_bytes: number;
+};
 
 /** 辅助码表的一条：`client-services::plugins::helpcode_pack::HelpcodeEntry`。 */
 export type PluginHelpcodeEntry = { character: string; code: string };
@@ -42,6 +64,35 @@ export type PluginSymbolGroup = {
 
 /** 短语表的一行：`client-services::plugins::phrase_table::PhraseRow`。 */
 export type PluginPhrase = { key: string; text: string };
+
+/** 设置页插件编辑器能写的四种类型：`client-services::plugins::authoring::AuthoredKind`。 */
+export type AuthoredKind = "phrase_table" | "command_table" | "symbol_set" | "wordbook";
+
+/** 编辑器里符号集的一组：`authoring::AuthoredGroup`。 */
+export type AuthoredGroup = {
+  tab: "symbols" | "kaomoji";
+  title: string;
+  keywords: string | null;
+  items: string[];
+};
+
+/** 编辑器里单词本的一个单词：`authoring::AuthoredWord`。 */
+export type AuthoredWord = { word: string; phonetic: string | null; gloss: string };
+
+/** 编辑器与宿主交换的一个包：`authoring::AuthoredPack`。`id` 为 null 表示新建、由宿主生成；内容字段只带与 `kind` 对应的那一个。 */
+export type AuthoredPack = {
+  kind: AuthoredKind;
+  id: string | null;
+  name: string;
+  version: string;
+  license: string;
+  author: string | null;
+  description: string | null;
+  phrases?: PluginPhrase[];
+  commands?: PluginCommand[];
+  groups?: AuthoredGroup[];
+  words?: AuthoredWord[];
+};
 
 /** `client-services::plugins::scan` 列出的一个包：清单的各字段，并把该种类的内容平铺进来。 */
 export type PluginPackage = {
@@ -85,6 +136,11 @@ export type PluginPackage = {
   permissions?: ScriptCapability[];
   memory_pages?: number;
   content_hash?: string;
+  /** 脚本插件清单 `[[script.settings]]`，按清单顺序；没有时不出现。 */
+  settings?: ScriptSetting[];
+  /** 脚本插件随包的只读数据文件名（`[script].data`）和合计字节数；没有时不出现。 */
+  data?: string[];
+  data_bytes?: number;
 };
 
 /** `script-grants.json` 的一条：client-services 的 `script_grants::ScriptGrantView`。 */
@@ -121,16 +177,24 @@ export type ScriptGrantsResult = {
   commands: ScriptCommandState[];
 };
 
-/** 插件详情可以链接过去的设置页：辅助码和快捷模式都在「输入」页。 */
-export type PluginSettingsPage = "input" | "vocabulary";
+/** 插件详情可以链接过去的设置页：辅助码和快捷模式都在「输入」页，触屏的按键音开关在「屏幕键盘」页。 */
+export type PluginSettingsPage = "input" | "vocabulary" | "screen-keyboard";
+
+/** 触屏设置的插件页（`HostCapabilities.touch_plugin_packs`）：只列触屏键盘用得上的包，按键音效包按触屏规则选用，导入只收 .zip。触屏键盘的「按键音」开关不在共享偏好里，是宿主本机的按键反馈设置，由页面读到后交给这里。 */
+export type TouchPluginRules = {
+  /** 「按键音」开关；还没读到时为 undefined，按打开处理。 */
+  keySoundEnabled?: boolean;
+  /** 打开「按键音」；没有时详情只说明开关在哪里。 */
+  onEnableKeySound?: () => void;
+};
 
 /** A folder under the plugins directory that is not a loadable pack, and why. */
 export type PluginIssue = { kind: PluginKind; folder: string; reason: string };
 
 export type PluginCatalogResult = { packages: PluginPackage[]; issues: PluginIssue[] };
 
-/** @ 模式名单中的一条：`client-services::plugins::mentions::MentionEntry`。 */
-export type MentionEntry = { text: string; key: string };
+/** @ 模式名单中的一条：`client-services::plugins::mentions::MentionEntry`。`phone` 是移动端导入的联系人手机号，这一页不显示也不编辑，保存时原样带回去；页面上新加的条目没有它。 */
+export type MentionEntry = { text: string; key: string; phone?: string };
 
 /**
  * The host side of the 插件 page. The host resolves every directory itself: the page reads the catalog, asks the host to show its own picker for an import, and names a pack to remove by kind and id, never by path.
@@ -144,6 +208,10 @@ export interface PluginClient {
   remove(kind: PluginKind, id: string): Promise<void>;
   loadMentions(): Promise<MentionEntry[]>;
   saveMentions(entries: MentionEntry[]): Promise<void>;
+  /** 设置页插件编辑器读出用户插件目录里的一个包；内置包、别的类型和没装的包以 `plugin_not_editable` 拒绝。宿主没有编辑器时为空，页面不显示新建和编辑。 */
+  loadAuthoredPack?(kind: AuthoredKind, id: string): Promise<AuthoredPack>;
+  /** 保存编辑器里的包，回答装好的包，与 `importPack` 的回答同形。`replace` 为假且同类型同 id 的包已经装着时以 `plugin_exists` 拒绝。 */
+  saveAuthoredPack?(pack: AuthoredPack, replace: boolean): Promise<PluginPackage>;
   /** 脚本插件的授权和执行顺序；只有运行脚本插件的桌面宿主有这三个方法。 */
   scriptGrants?(): Promise<ScriptGrantsResult>;
   /** 授予、调整或撤销一个脚本插件的授权。`hash` 是页面展示给用户的那个内容哈希，包在这之后被换过时以 `plugin_script_changed` 拒绝。 */
@@ -155,4 +223,13 @@ export interface PluginClient {
   ): Promise<ScriptGrantsResult>;
   /** 调整执行顺序：`ids` 按给出的顺序排在最前。 */
   reorderScripts?(ids: string[]): Promise<ScriptGrantsResult>;
+  /** 插件详情页：一个脚本插件每项设置现在的值和持久存储的字节数。和下面两项一样，只有运行脚本插件的桌面宿主有。 */
+  scriptPluginState?(id: string): Promise<ScriptPluginState>;
+  /** 整份替换一个脚本插件的设置值，没写的项回到默认值；不合规时以 `plugin_script_setting_invalid` 拒绝，`detail` 说明是哪一项。改设置不作废授权。 */
+  setScriptSettings?(
+    id: string,
+    values: Record<string, ScriptSettingValue>,
+  ): Promise<ScriptPluginState>;
+  /** 「清除数据」：删掉一个脚本插件的持久存储，回答清除之后的状态。 */
+  clearScriptData?(id: string): Promise<ScriptPluginState>;
 }

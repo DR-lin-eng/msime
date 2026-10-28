@@ -5,11 +5,12 @@
 ## 改动范围
 
 - 只暂存明确列出的路径，不用 `git add -A`。
-- **一个 issue 一个 PR。** 处理 GitHub issue 时，每个 issue 单独一条分支、一个 PR，正文写 `Fixes #N`（只做了其中一部分时写 `Refs #N`，不自动关闭）。不要把几个 issue 合进同一个 PR，即使它们是同一次一起处理的。做某件事时顺带发现、没有对应 issue 的小问题，并进那件事的 PR，不必另开。#7045 把 7 个互不相关的 issue（AI 候选占位、Linux 设置窗口闪烁、DeepL、五笔查码、Android 图片发送、Caps Lock 切换、候选栏跟随光标）塞进一个横跨六个平台的 PR，审查、合并和回滚都没法按 issue 分开，几项还没补完的验证也跟着其余的一起进了 develop。见 `.agents/notes/implemented/process/2026-10-11-one-issue-one-pr.md`。
+- **一个 issue 一个 PR。** 处理 GitHub issue 时，每个 issue 单独一条分支、一个 PR，正文写 `Fixes #N`；只有 issue 要求的行为或平台还有一部分没实现时才写 `Refs #N`，并在正文列出还差什么。没在真机、报告者环境或真实编辑器里验收过不算没做完：缺的验收写进 PR 的验证段，需要报告者复验就在合并后到 issue 里请对方确认，照样写 `Fixes`。不要把几个 issue 合进同一个 PR，即使它们是同一次一起处理的。做某件事时顺带发现、没有对应 issue 的小问题，并进那件事的 PR，不必另开。#7045 把 7 个互不相关的 issue（AI 候选占位、Linux 设置窗口闪烁、DeepL、五笔查码、Android 图片发送、Caps Lock 切换、候选栏跟随光标）塞进一个横跨六个平台的 PR，审查、合并和回滚都没法按 issue 分开，几项还没补完的验证也跟着其余的一起进了 develop。见 `.agents/notes/implemented/process/2026-10-11-one-issue-one-pr.md`。
 - 不复制相邻仓库的未提交内容；上游来源以远端实际默认分支和固定提交为准。
 - **「把功能对齐某个平台」不等于「把默认值改成那个平台的出厂值」。** 对齐的验收标准是**能力可达**：字段存在、有宿主读、设置页有控件、行为能按用户选择生效。出厂默认值属于产品决策，会改变现有用户的手感，必须单独授权。做对齐任务时若发现默认值与参考平台不同，**只记录不改**，把差异表写进决策笔记（参考平台出厂值、本仓现值、为什么这次不动）。2026-10-22 一次「补齐 Windows 对齐」的 PR 顺手把 `helpcode.enabled`、`emoji`、`kaomoji`、`navigation.left_right` 等 7 个默认值翻成 Windows 出厂值，被维护者当场指出越界：这些翻转会静默改变所有 macOS 老用户的输入手感，且没有单独评审。
 - 日志、测试和提交中不得包含真实输入、凭据或私人资料，测试数据使用合成值。
 - CI 会在 Pull Request 上运行，提交前仍先跑本地 quick 门禁。发布 workflow 一律手动触发，不要在任务没有明确要求发布时去碰它们。
+- **develop 红着时先修红。** 最近一次合进 develop 后的推送 CI（Core CI、Native Platform CI、iOS CI、macOS CI、macOS package）或 nightly 失败时，先修它；修好之前不合并功能 PR，除非这次失败已经在对应的 `ci-red` issue 里写明原因、确认与要合的 PR 无关。开 PR 前先看 `gh run list --branch develop --limit 10` 和 `gh issue list --label ci-red`，有红的就在 PR 正文写明红在哪、与本 PR 有没有关系。2026-10-25 到 10-27 的 nightly 连红三天没人发现，Android 瘦包超出体积上限和只在 Fedora 上失败的 Linux ctest 都混在常态的红里进了 develop。见 `.agents/notes/implemented/process/2026-10-28-ci-red-tracking.md`。
 - **改了文件读写、目录遍历、权限或安卓资源（drawable、主题、布局），合并前在安卓模拟器上跑过再说「验证过」。** macOS 上的单测和 CI 的编译、lint 都碰不到 Android 的限制：应用对 `/data` 只有搜索权限、SELinux 禁止应用建硬链接、Android 9 的 `GradientDrawable` 读不到带主题属性的径向渐变半径。0.3.0 带着这三个问题发出去（词库准备失败、匿名账号写不进、Android 9 一打开就崩溃），编译、lint 和 JVM 测试全绿。本机做法：`bash platforms/android/tests/device/start-emulator.sh 28`（35 同理），`MSIME_ANDROID_TEST_SERIAL=emulator-5566 bash platforms/android/tests/device/build-core-test.sh` 编出 client-base、client-core、client-providers 和 client-services 的单测，经 cargo runner `run-core-test.sh` 在设备上整套运行，再用 `smoke.sh emulator-5566 --core` 装包验收（API 35 不带 `--core`）。CI 的 `android-device.yml` 在合进 develop 后和发版前跑同样的两步，PR 上不跑，所以 PR 上要靠本机跑过。
 - **不要把 Tauri 生成的工程当成某个平台的产品去启动、调试或验收。** 每个平台的产品本体都是 `platforms/<os>` 下的原生宿主，Tauri/React 只是公共组件，而且不是每个宿主都承载它：共享 React 设置页只在 macOS、Linux（Tauri 设置应用）和 HarmonyOS（ArkWeb 加载的 rawfile，不经过 Tauri）上作为设置界面出现，Windows 的原生宿主只拉起 Tauri 的共享面板，iOS App 与 Android 发布 APK 两者都不含（见 docs/ARCHITECTURE.md 的「设置界面按平台归属」）。装机、启动和设备验收一律针对原生宿主；`apps/desktop` 的目录名和 Tauri 生成工程里自带的 bundle id 都不构成例外。
 
@@ -50,7 +51,7 @@
 非平凡改动必须带一篇笔记，写入 `.agents/notes/`；方法、格式与判定标准见 `.agents/skills/write-notes-like-deepseek/SKILL.md`。
 
 - 判定标准、目录结构（`{lifecycle}/{class}/yyyy-mm-dd-topic.md`）、文件格式以 SKILL.md 为准，本节只写仓库约定：笔记正文一律用简体中文；仓库 CI（`quality.yml`）跑同样的三条校验。
-- 动手前先检索旧笔记：有归属就地更新，不另起新篇；决定翻转才新建并互链。
+- 动手前先检索旧笔记：`rg --hidden --glob '!.agents/notes/archived/**' "<关键词>" .agents/notes/`。有归属就地更新，不另起新篇；决定翻转才新建并互链。
 - 新想法先写 `proposed/`，落地随同代码改动转 `implemented/`；被否且值得记的进 `rejected/`。
 - 被放弃的方案先写它最强的理由，再解释为什么不用；确实没有真实备选时，`## Alternatives considered` 保留标题、正文写「无」，不要编造。
 - 提交前跑 `pnpm run verify-notes`，红了先修再交。机械性小改（样式、格式化、打标、不改行为的补丁）不写笔记，直接提交。
@@ -60,7 +61,7 @@
 - 打版本一律从 `develop` 新建 `release/<版本号>` 分支（例如 `release/0.51.0`），由这个分支向 `main` 开 PR。禁止直接从 `develop` 向 `main` 开 PR 或合并，`branch-guard.yml` 的 Base branch 检查会拒绝这种 PR。
 - 各平台版本号（`platforms/<os>/version.txt` 及随它一起改的文件，macOS 还有 `build-number.txt`）先经普通 PR 合入 `develop`，再从包含它的 `develop` 切 release 分支，让 `main` 上的版本号始终来自 `develop`。
 - release 分支合入 `main` 用 merge commit，不要 squash：squash 会让 `develop` 的提交不在 `main` 的祖先里，下一次发版会在双方各自新增过的文件上冲突。
-- 各平台的 Release 工作流按触发分支给发布加后缀：`main` 不加（`android-v0.1.4`），`develop` 加 `-beta`（`android-v0.1.4-beta`），其他分支加 `-alpha`。后缀只在 tag、标题和发布说明上，包内版本号仍是 `X.Y.Z`；带后缀的发布一律标为 prerelease，应用内更新检查不会提供它，Homebrew cask 和 Linux 发行版包定义也只在 `main` 的正式版之后更新。网页引擎只能从 `main` 发布，后缀只出现在其他分支的构建产物里。
+- 各平台的 Release 工作流按触发分支给发布加后缀：`main` 不加（`android-v0.1.4`），`develop` 加 `-beta`（`android-v0.1.4-beta`），其他分支加 `-alpha`。后缀只在 tag、标题和发布说明上，包内版本号仍是 `X.Y.Z`；带后缀的发布一律标为 prerelease，稳定版通道的应用内更新检查不会提供它（Windows、Linux、macOS 选了测试版或每日构建通道时提供 `-beta`、不提供 `-alpha`，见 `crates/client-services/src/update_check.rs`；Android 的预览版通道见 `UpdateApi.java`），Homebrew cask 和 Linux 发行版包定义也只在 `main` 的正式版之后更新。网页引擎只能从 `main` 发布，后缀只出现在其他分支的构建产物里。
 - Release Android 的 `publish` 依赖 `device` job（`android-device.yml`，API 28 和 35 模拟器上跑 client-base、client-core、client-providers 和 client-services 单测和装包验收），它不过就不发。不要为了赶发版把这个依赖去掉；它失败时先看上传的 logcat，确认是设备环境问题还是产品问题。
 - 网页引擎（Release Web Engine）勾选 `publish` 时只能在 `main` 上运行，workflow 会拒绝其他分支：它同时发布 npm 包 `@msime/web-engine`，npm 的 `latest` 会被接入方的版本范围和不带版本号的 CDN 地址自动取走。只构建不发布时任何分支都可以。
 

@@ -3,6 +3,7 @@
 //! The setters the product only sets at construction (`switch_scheme`, `set_helpcode_schema`, `set_helpcode_enabled`, `set_wubi_mixed_pinyin`, `set_personal_context_enabled`) and `candidate_key` stay public because the golden scenarios drive them. Learning undo (`set_learning_undo_enabled`, `forget_recent_commits`) is dropped.
 
 mod candidates;
+mod caret_edit;
 mod chain;
 mod clock;
 mod commit;
@@ -27,6 +28,7 @@ use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::nine_key::{KeyGrid, NineKeySession};
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
+use crate::touch::{KeyGeometry, KeyTouch, TouchTuning};
 use crate::types::{
     CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery, KeyResult,
     LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery, QuickPhraseEntry,
@@ -109,9 +111,10 @@ impl Session {
         self.input.clock = clock;
     }
 
-    /// One ASCII character; `shift_only` is a bare Shift+letter (local mode entry). 全拼下九键开启且没有别的组字时，数字 2-9 交给九宫格会话；九键双拼交的是方案用到的数字（可以有 1 和 0）；注音九键的数字由注音编辑器自己处理。
+    /// One ASCII character; `shift_only` is a bare Shift+letter (local mode entry). 全拼下九键开启且没有别的组字时，数字 2-9 交给九宫格会话；九键双拼交的是方案用到的数字（可以有 1 和 0）；注音九键的数字由注音编辑器自己处理。待用的触点（[`Self::set_key_touch`]）只交给 26 键组字，九宫格的数字用不到它，一律在这一键后作废。
     pub fn character(&mut self, value: u8, shift_only: bool) -> KeyResult {
         self.prediction.clear();
+        let touch = self.input.pending_touch.take();
         // English is a mode rather than a scheme, so the grid stays available in it: the same digits spell words instead of syllables. A local mode still takes the keys, and the scheme underneath must be quanpin: 拼音九宫格只认得全拼音节，注音九键走注音编辑器。九键双拼没有英文九键，专用英文里数字照常是数字。
         let grid_digit = match self.key_grid {
             Some(KeyGrid::NineKey) => (b'2'..=b'9').contains(&value),
@@ -136,21 +139,40 @@ impl Session {
             }
             return KeyResult::unhandled();
         }
+        self.input.pending_touch = touch;
         self.input.handle_character(value, shift_only)
+    }
+
+    /// 下一次 `character` 的按下点（触屏宿主经 `msime_client_touch_character` 送来）。只有那一键是 26 键双拼的小写字母或 `;` 时才交给方案；其余会改动组字或改道按键的入口（命令、选词、以词定字、结束组字、钉住和删除候选、移光标、九宫格、网格键、滑行、标点、换方案、换网格或几何、展开首字母候选、重置上下文）一开头就丢掉它，所以改道到别处的按键不会把触点留给后面的字母。只改配置的 setter（辅助码表、云候选开关、重排上下文等）不碰它。
+    pub fn set_key_touch(&mut self, touch: Option<KeyTouch>) {
+        self.input.pending_touch = touch;
+    }
+
+    /// 宿主注册或清除的键位几何，见 [`crate::touch::KeyGeometry`]。
+    pub fn set_key_geometry(&mut self, geometry: Option<Arc<KeyGeometry>>) {
+        // 待用触点是按旧几何量出来的，交给新几何解释没有意义。
+        self.input.pending_touch = None;
+        self.input.engine.set_key_geometry(geometry);
+    }
+
+    /// 按触点计价的参数；只有 Rust 侧（评测示例）调用，不经 FFI。
+    pub fn set_touch_tuning(&mut self, tuning: TouchTuning) {
+        self.input.engine.set_touch_tuning(tuning);
     }
 
     /// 滑过字母键的一笔：它最可能拼出的全拼字母写到光标处，与已有组字之间用 `'` 隔开。不是全拼、在本地模式或专用英文里、九键数字正在组字，以及没有串跟得上这一笔时，不处理。
     pub fn glide(&mut self, keyboard: &GlideKeyboard, points: &[GlidePoint]) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if self.nine_key.active() {
             return KeyResult::unhandled();
         }
         self.input.glide(keyboard, points)
     }
 
-    /// 九宫格（九键或 14 键）正在组字：这时的快照、命令和上屏都来自九宫格会话。
+    /// 字母网格正在组字：九宫格会话（九键、14 键、18 键）在组字，快照、命令和上屏都来自它；或者五笔 14 键在组字，组码不是确定的字母。两种情况下的原样上屏都不是用户逐个打出的字母。
     pub fn grid_composing(&self) -> bool {
-        self.nine_key.active()
+        self.nine_key.active() || self.input.wubi_grid_composing()
     }
 
     /// `set_key_grid` 的九键开关：开是九键，关是不用网格。
@@ -161,6 +183,7 @@ impl Session {
     /// 换触屏的组码网格，先丢掉网格里的组字，所以在换键盘布局、没有组字时调用。英文九键和注音九键只在九键下打开（注音组字会被丢掉）：14 键的英文模式画全键盘，注音没有 14 键。
     pub fn set_key_grid(&mut self, grid: Option<KeyGrid>) {
         self.prediction.clear();
+        self.input.pending_touch = None;
         self.input.helpcode_entry = None;
         self.nine_key.command(Command::Cancel);
         if let Some(grid) = grid {
@@ -173,9 +196,10 @@ impl Session {
         self.input.set_zhuyin_nine_key(nine_key);
     }
 
-    /// 字母网格的一键：`letter` 是这一组里的任一字母，由 `KeyGrid::code_of` 归成组码交给九宫格会话，宿主约定送首字母。不复用硬件键盘的 `character`。全拼和双拼分别使用自己的分组表；本地模式、专用英文或已有 26 键组字时不处理，状态不变。
+    /// 字母网格的一键：小写字母由 `KeyGrid::code_of` 归成整组，十八键双拼另收大写 ASCII 标记精确字母。标记保留在组码里，不复用硬件键盘的 `character`。全拼和双拼分别使用自己的分组表，五笔在 14 键下按组展开码表（`wubi::grid`）；本地模式、专用英文或已有 26 键组字时不处理，状态不变。
     pub fn grid_key(&mut self, letter: u8) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         let Some(
             grid @ (KeyGrid::FourteenKey
             | KeyGrid::EighteenKey
@@ -188,6 +212,13 @@ impl Session {
         let Some(code) = grid.code_of(letter) else {
             return KeyResult::unhandled();
         };
+        // 五笔 14 键：键面与全拼 14 键相同，组码交给五笔方案按码表展开，不经九宫格会话。
+        if grid == KeyGrid::FourteenKey && self.input.scheme() == SchemeType::Wubi {
+            let Some(representative) = crate::wubi::grid::representative(code) else {
+                return KeyResult::unhandled();
+            };
+            return self.input.handle_wubi_grid_key(representative);
+        }
         let supported = match grid {
             KeyGrid::FourteenKey | KeyGrid::EighteenKey => {
                 self.input.scheme() == SchemeType::Quanpin
@@ -225,6 +256,7 @@ impl Session {
 
     /// 九宫格会话活跃时选它的拼写；否则在注音里钉目标音节的读音。
     pub fn choose_nine_key_spelling(&mut self, index: usize) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.nine_key.active() && self.input.zhuyin_rules_apply() {
             return self.input.choose_zhuyin_spelling(index);
         }
@@ -234,6 +266,7 @@ impl Session {
 
     /// 九宫格组字时按单字、按笔画筛选候选（`NineKeySession::set_filter`）；没有九宫格组字时不处理。
     pub fn set_nine_key_filter(&mut self, single_character: bool, strokes: &str) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.nine_key.active() {
             return KeyResult::unhandled();
         }
@@ -241,6 +274,7 @@ impl Session {
     }
 
     pub fn command(&mut self, command: Command) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             self.prediction.clear();
             return if command == Command::Cancel {
@@ -272,6 +306,7 @@ impl Session {
     /// 整句改字的左移，进入改字时从第 `index` 个候选（宿主高亮的那一行）开始；已在改字里时与 `command(ConversionLeft)` 相同。九宫格和进不了改字时按 `MoveLeft` 处理。
     pub fn conversion_left_from(&mut self, index: usize) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if self.nine_key.active() {
             return self.command(Command::MoveLeft);
         }
@@ -281,6 +316,7 @@ impl Session {
     /// `1`..`9` 选择组字候选；空闲联想不接管数字键。
     pub fn candidate_key(&mut self, value: u8) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if self.nine_key.active() {
             if !(b'1'..=b'9').contains(&value) {
                 return KeyResult::unhandled();
@@ -294,6 +330,7 @@ impl Session {
     /// Finishes the composition and appends the Chinese mark; unhandled when Chinese punctuation is off or locked to ASCII, or the key has no mark.
     pub fn punctuation(&mut self, value: u8) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if !self.nine_key.active() {
             return self.input.handle_punctuation(value);
         }
@@ -341,6 +378,7 @@ impl Session {
     }
 
     pub fn select(&mut self, index: usize) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             let Some((row, word, pinyin)) = self.prediction.selected(index) else {
                 return KeyResult::unhandled();
@@ -367,6 +405,7 @@ impl Session {
 
     /// Commit the first or last Han character of a candidate and drop the rest of the composition.
     pub fn select_edge(&mut self, index: usize, edge: CandidateEdge) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             return KeyResult::unhandled();
         }
@@ -378,6 +417,7 @@ impl Session {
 
     /// Promote a dictionary candidate without committing; unsupported rows are unhandled, persistence failures carry a diagnostic.
     pub fn pin(&mut self, index: usize) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             return KeyResult::unhandled();
         }
@@ -389,6 +429,7 @@ impl Session {
 
     /// Remove a dictionary phrase without committing; single-character non-English rows are protected.
     pub fn remove(&mut self, index: usize) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             return KeyResult::unhandled();
         }
@@ -400,6 +441,7 @@ impl Session {
 
     /// Fix a dictionary candidate to slot 1..=5 in this input context; unhandled for any other slot.
     pub fn fix_position(&mut self, index: usize, position: i32) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             return KeyResult::unhandled();
         }
@@ -413,6 +455,7 @@ impl Session {
     }
 
     pub fn clear_position(&mut self, index: usize) -> KeyResult {
+        self.input.pending_touch = None;
         if !self.prediction.rows.is_empty() {
             return KeyResult::unhandled();
         }
@@ -425,6 +468,7 @@ impl Session {
     /// 从宿主高亮的候选开始结束整段组字（没有高亮时为 0），剩余片段使用各自首选；索引无效时提交原文。普通拼音中的大写片段由字面候选保留。
     pub fn finish(&mut self, first_index: usize) -> KeyResult {
         self.prediction.clear();
+        self.input.pending_touch = None;
         if self.nine_key.active() {
             let result = self.nine_key.finish(first_index);
             return self.after_nine_key(result);
@@ -434,6 +478,7 @@ impl Session {
 
     /// Discards the composition. Fails, staying in the current scheme with the composition untouched, when the new scheme's dictionary cannot be opened (Cantonese without a usable `msime-cantonese.db`, Stroke without a usable `msime-stroke.db`: `LANGUAGE_DICTIONARY_UNAVAILABLE`, `LANGUAGE_DICTIONARY_VERSION_UNSUPPORTED`).
     pub fn switch_scheme(&mut self, scheme: SchemeType) -> Result<()> {
+        self.input.pending_touch = None;
         self.input.switch_scheme(scheme)?;
         self.prediction.clear();
         self.nine_key.command(Command::Cancel);
@@ -461,6 +506,7 @@ impl Session {
 
     /// 只有模式改变时才取消组字；重复设置保留当前输入。
     pub fn set_dedicated_english(&mut self, enabled: bool) {
+        self.input.pending_touch = None;
         if self.input.dedicated_english == enabled {
             return;
         }
@@ -529,6 +575,7 @@ impl Session {
     /// Forget the committed-word context (focus or application change, host-inserted text).
     pub fn reset_context(&mut self) {
         self.prediction.clear();
+        self.input.pending_touch = None;
         self.input.reset_commit_context();
     }
 
@@ -577,6 +624,7 @@ impl Session {
 
     /// Hand over the candidates withheld from a single-letter query; whether the list grew.
     pub fn expand_initial_candidates(&mut self) -> bool {
+        self.input.pending_touch = None;
         // Nine-key rows come from the spelling session rather than a dictionary query, so nothing is withheld there.
         if self.nine_key.active() {
             return false;
@@ -587,7 +635,9 @@ impl Session {
     /// 设置前缀解码的组字光标（overlays.md §7.6）；位置限制在可编辑范围，不能越过本地模式的入口标记。`None` 回到末尾，九键组码时无操作。
     pub fn set_caret(&mut self, caret: Option<usize>) {
         self.prediction.clear();
-        if self.nine_key.active() {
+        self.input.pending_touch = None;
+        // 五笔 14 键的组码不是逐个字母，没有可以落脚的光标位置。
+        if self.nine_key.active() || self.input.wubi_grid_composing() {
             return;
         }
         self.input.set_caret(caret);
@@ -647,6 +697,12 @@ impl Session {
         for item in &mut candidates {
             input.apply_english_word_case(item.source, &mut item.word);
         }
+        // 光标后编辑：候选仍是光标后那段的行，首选显示时前面接上固定的那段（由 runtime 在视图里接上），这样重排、释义和选择核对都按行本身的文字进行。
+        let caret_edit_suffix = input.caret_edit.active && input.conversion.is_none();
+        let caret_edit_prefix = input
+            .caret_edit_prefix()
+            .filter(|_| caret_edit_suffix && !candidates.is_empty())
+            .unwrap_or_default();
         // 宿主显示全拼分词；参考回放的底层快照仍保留原文。
         let segmented_preedit = (segmented_quanpin && input.scheme() == SchemeType::Quanpin)
             || (!self.shuangpin_preedit_uses_raw && input.scheme() == SchemeType::Shuangpin);
@@ -670,13 +726,23 @@ impl Session {
             editing_text: input.editing_text(),
             caret_position: input.caret_position(),
             nine_key_spellings: input.zhuyin_spellings(),
-            nine_key_reading: String::new(),
+            // 五笔 14 键的读音行显示首选的编码（就是预编辑），宿主 14 键的读音行照常读这一项。
+            nine_key_reading: if input.wubi_grid_composing() {
+                input.preedit()
+            } else {
+                String::new()
+            },
             nine_key_single_character: false,
             nine_key_strokes: String::new(),
             answered_by_pinyin_fallback: input.answered_by_pinyin_fallback(),
             wubi_unique_four_code: input.wubi_unique_four_code(),
             shuangpin_profile: input.profile.kind.name().to_owned(),
             candidate_sources: candidates.iter().map(|item| item.source).collect(),
+            multilingual_conversion: candidates
+                .iter()
+                .any(|item| item.source == CandidateSource::Multilingual)
+                .then(|| input.multilingual_conversion.clone())
+                .flatten(),
             candidate_annotations: input.candidate_annotations(hide_helpcode),
             // 纠错候选按原始按键长度消费；普通候选仍按 `pinyin`，两者都由组字推进判断。
             candidate_answers_key: candidates
@@ -702,6 +768,8 @@ impl Session {
                 .conversion
                 .as_ref()
                 .map_or((0, 0), |edit| edit.focus_span()),
+            caret_edit_suffix,
+            caret_edit_prefix,
             candidates,
         }
     }

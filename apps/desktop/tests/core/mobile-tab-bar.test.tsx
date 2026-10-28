@@ -27,6 +27,8 @@ function mount(
   initialPage?: string,
   platform = "harmony",
   home: Parameters<typeof SettingsPage>[0]["client"]["home"] = {},
+  // 这些用例测的是触屏外壳里的 AI 对话二级页，所以鸿蒙按拿到资质、总闸打开时的样子报 `ai_generation`；总闸关着的样子由文件末尾的用例覆盖。
+  aiGeneration = true,
 ) {
   render(
     <SettingsPage
@@ -54,16 +56,16 @@ function mount(
         communitySkins: {
           list: vi.fn().mockResolvedValue({ skins: [], has_more: false }),
         } as never,
-        host: testHost({ platform }),
+        host: testHost({ platform, ai_generation: aiGeneration }),
       }}
     />,
   );
 }
 
 /** 三个触屏宿主共用的四个主入口：第二格是社区。 */
-const tabs = ["设置", "社区", "统计", "我的"];
+const tabs = ["首页", "社区", "统计", "我的"];
 
-/** 「设置」根页，把每个没有自己标签页的页面列成一行。 */
+/** 「首页」根页，把每个没有自己标签页的页面列成一行。 */
 const root = () => screen.getByRole("region", { name: "首页" });
 const rootRowTitles = () =>
   [...root().querySelectorAll("[data-row-title]")].map((row) => row.textContent ?? "");
@@ -82,7 +84,7 @@ test("the phone tab bar is four tabs, each an icon over a word", async () => {
   expect(icons.every((icon) => icon?.getAttribute("aria-hidden") === "true")).toBe(true);
   // 鸿蒙画设计里的 Fluent 图标，是 24px 的 `currentColor` SVG，所以选中时取强调色。
   expect(icons.map((icon) => icon!.getAttribute("data-tab-icon"))).toEqual([
-    "settings",
+    "home",
     "globe",
     "data_bar_vertical",
     "person",
@@ -112,13 +114,14 @@ test("a touch host other than HarmonyOS keeps the masked tab icons", async () =>
   expect(bar.querySelector("svg")).toBeNull();
 });
 
-// 这正是当初有 `<select>` 的原因。拿掉它却不给那些页面另开入口，手机上大部分应用就进不去了，所以改为必须满足这个条件：侧栏能到的地方，手机也能到，通过标签页、「设置」根页自己的行，或「我的」。断言对照的是侧栏而不是手写的页面名列表，这样以后新增的页面也会被覆盖，不用有人记得回来改这里。
+// 这正是当初有 `<select>` 的原因。拿掉它却不给那些页面另开入口，手机上大部分应用就进不去了，所以改为必须满足这个条件：侧栏能到的地方，手机也能到，通过标签页、「首页」根页自己的行，或「我的」。断言对照的是侧栏而不是手写的页面名列表，这样以后新增的页面也会被覆盖，不用有人记得回来改这里。
 test("every page the sidebar reaches is reachable on a phone", async () => {
   mount();
   await settingsFormReady();
 
   const sidebar = screen.getByRole("navigation", { name: "设置分类" });
-  const reachable = new Set([...tabs, ...rootRowTitles()]);
+  // 「首页」标签的根页在侧栏里叫应用名「水杉输入法」，它就是第一个标签。
+  const reachable = new Set([...tabs, "水杉输入法", ...rootRowTitles()]);
 
   const stranded = [...sidebar.querySelectorAll("button")]
     .map((button) => button.textContent ?? "")
@@ -126,7 +129,7 @@ test("every page the sidebar reaches is reachable on a phone", async () => {
   expect(stranded).toEqual([]);
 });
 
-// 「社区」标签的根页是社区页：点它直接打开，标签高亮，没有返回按钮；「设置」根页不列社区那一行。
+// 「社区」标签的根页是社区页：点它直接打开，标签高亮，没有返回按钮；「首页」根页不列社区那一行。
 test("the 社区 tab opens the community page as its root", async () => {
   mount();
   await settingsFormReady();
@@ -138,15 +141,15 @@ test("the 社区 tab opens the community page as its root", async () => {
   expect(within(bar).getByRole("button", { name: "社区" }).getAttribute("aria-current")).toBe(
     "page",
   );
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBeNull();
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBeNull();
   expect(screen.queryByRole("button", { name: "返回" })).toBeNull();
   expect(window.history.state).toEqual(
     expect.objectContaining({ page: "community", tab: "community" }),
   );
 });
 
-// 皮肤页回到「设置」根页的列表里，从那里推入：「设置」保持高亮，标题前带返回按钮，返回回到「设置」根页。
-test("the 设置 list holds 皮肤 again and pushes the skin page", async () => {
+// 皮肤页回到「首页」根页的列表里，从那里推入：「首页」保持高亮，标题前带返回按钮，返回回到「首页」根页。
+test("the 首页 list holds 皮肤 again and pushes the skin page", async () => {
   mount();
   await settingsFormReady();
   expect(rootRowTitles()).toContain("皮肤");
@@ -154,7 +157,7 @@ test("the 设置 list holds 皮肤 again and pushes the skin page", async () => 
   openRootRow("皮肤");
   expect(await screen.findByRole("heading", { level: 1, name: "皮肤" })).toBeTruthy();
   const bar = screen.getByRole("navigation", { name: "主要功能" });
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
   expect(window.history.state).toEqual(expect.objectContaining({ page: "skin", tab: "home" }));
@@ -163,19 +166,19 @@ test("the 设置 list holds 皮肤 again and pushes the skin page", async () => 
 });
 
 // Drilling into a page that has no tab does not leave the bar blank: the page was reached from the
-// 设置 tab, so the 设置 tab is still where you are. The source keeps its first tab selected for
+// 首页 tab, so the 首页 tab is still where you are. The source keeps its first tab selected for
 // everything its navigation stack pushes.
-test("the 设置 tab stays lit on the pages reached from it", async () => {
+test("the 首页 tab stays lit on the pages reached from it", async () => {
   mount();
   await settingsFormReady();
 
   const bar = screen.getByRole("navigation", { name: "主要功能" });
-  const home = within(bar).getByRole("button", { name: "设置" });
+  const home = within(bar).getByRole("button", { name: "首页" });
   expect(home.getAttribute("aria-current")).toBe("page");
 
   openRootRow("输入");
 
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
   expect(within(bar).getByRole("button", { name: "我的" }).getAttribute("aria-current")).toBeNull();
@@ -190,10 +193,10 @@ test("the pages opened from 我的 belong to the 我的 tab", async () => {
   expect(within(bar).getByRole("button", { name: "我的" }).getAttribute("aria-current")).toBe(
     "page",
   );
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBeNull();
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBeNull();
 
-  fireEvent.click(within(bar).getByRole("button", { name: "设置" }));
-  expect(screen.getByRole("heading", { level: 1, name: "设置" })).toBeTruthy();
+  fireEvent.click(within(bar).getByRole("button", { name: "首页" }));
+  expect(screen.getByRole("heading", { level: 1, name: "水杉输入法" })).toBeTruthy();
   fireEvent.click(within(bar).getByRole("button", { name: "我的" }));
   expect(screen.getByRole("heading", { level: 1, name: "关于" })).toBeTruthy();
 });
@@ -210,10 +213,10 @@ test("each phone tab remembers where the user left it", async () => {
   const bar = screen.getByRole("navigation", { name: "主要功能" });
   fireEvent.click(within(bar).getByRole("button", { name: "统计" }));
   expect(await screen.findByRole("heading", { level: 1, name: "统计" })).toBeTruthy();
-  fireEvent.click(within(bar).getByRole("button", { name: "设置" }));
+  fireEvent.click(within(bar).getByRole("button", { name: "首页" }));
 
   expect(screen.getByRole("heading", { name: "输入" })).toBeTruthy();
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
 });
@@ -229,7 +232,7 @@ test("AI chat opens as a secondary page from AI settings", async () => {
   fireEvent.click(screen.getByRole("button", { name: "返回" }));
   expect(await screen.findByRole("heading", { level: 1, name: "AI 辅助" })).toBeTruthy();
   const bar = screen.getByRole("navigation", { name: "主要功能" });
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
 });
@@ -323,7 +326,7 @@ test("the desktop AI 辅助 page keeps its row into the chat", async () => {
   expect(await screen.findByRole("region", { name: "AI 对话" })).toBeTruthy();
 });
 
-// 已经在「设置」标签里、停在它的某个子页面时，再点「设置」回到设置首页；从别的标签点过来才回到它记住的那一页。
+// 已经在「首页」标签里、停在它的某个子页面时，再点「首页」回到它的根页；从别的标签点过来才回到它记住的那一页。
 test("tapping the tab you are on goes back to its first page", async () => {
   mount();
   await settingsFormReady();
@@ -333,10 +336,10 @@ test("tapping the tab you are on goes back to its first page", async () => {
 
   fireEvent.click(within(bar()).getByRole("button", { name: "统计" }));
   expect(await screen.findByRole("heading", { level: 1, name: "统计" })).toBeTruthy();
-  fireEvent.click(within(bar()).getByRole("button", { name: "设置" }));
+  fireEvent.click(within(bar()).getByRole("button", { name: "首页" }));
   expect(await screen.findByRole("heading", { level: 1, name: "输入" })).toBeTruthy();
 
-  fireEvent.click(within(bar()).getByRole("button", { name: "设置" }));
+  fireEvent.click(within(bar()).getByRole("button", { name: "首页" }));
   expect(await screen.findByRole("region", { name: "首页" })).toBeTruthy();
 });
 
@@ -357,22 +360,49 @@ test("a scrolled sub-page keeps its way back in the collapsed title bar", async 
   expect(await screen.findByRole("region", { name: "首页" })).toBeTruthy();
 });
 
-// 设置页里指向皮肤页的链接（键盘页的「屏幕键盘外观」）把皮肤页压在「设置」的栈上，返回回到键盘页。
-test("a link to the skin page from a 设置 page stays on the 设置 tab", async () => {
+// 设置页里指向皮肤页的链接（键盘页的「屏幕键盘外观」）把皮肤页压在「首页」的栈上，返回回到键盘页。
+test("a link to the skin page from a page under 首页 stays on the 首页 tab", async () => {
   mount("screen-keyboard", "android");
   await settingsFormReady();
   const bar = screen.getByRole("navigation", { name: "主要功能" });
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
 
   fireEvent.click(await screen.findByRole("button", { name: /^屏幕键盘外观/ }));
   expect(await screen.findByRole("heading", { level: 1, name: "皮肤" })).toBeTruthy();
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
   expect(window.history.state).toEqual(expect.objectContaining({ page: "skin", tab: "home" }));
 
   window.history.back();
   expect(await screen.findByRole("heading", { level: 1, name: "键盘" })).toBeTruthy();
+});
+
+// 鸿蒙版拿到 AI 生成类资质之前（`ai_generation` 为 false）：「首页」列表没有「AI 辅助」，AI 对话和 AI 辅助的路由回到首页，试用键盘打开不带发送键的试用页。
+test("HarmonyOS without AI generation offers no AI page, no chat and a plain 试用键盘", async () => {
+  mount(undefined, "harmony", {}, false);
+  await settingsFormReady();
+  expect(rootRowTitles()).not.toContain("AI 辅助");
+  expect(rootRowTitles().some((title) => title.includes("AI"))).toBe(false);
+  fireEvent.click(
+    within(screen.getByRole("group", { name: "水杉输入法状态" })).getByRole("button", {
+      name: "试用键盘",
+    }),
+  );
+  expect(await screen.findByRole("region", { name: "试用键盘" })).toBeTruthy();
+  expect(screen.queryByRole("region", { name: "AI 对话" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+});
+
+test("HarmonyOS without AI generation does not open the AI page or the chat by route", async () => {
+  mount("chat", "harmony", {}, false);
+  await settingsFormReady();
+  expect(screen.queryByRole("region", { name: "AI 对话" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "聊天消息" })).toBeNull();
+  cleanup();
+  mount("ai", "harmony", {}, false);
+  await settingsFormReady();
+  expect(screen.queryByRole("heading", { level: 1, name: "AI 辅助" })).toBeNull();
 });

@@ -388,11 +388,11 @@ test("Android touch schemes follow Apple order and stay absent on hosts without 
     within(group)
       .getAllByRole("button")
       .map((button) => button.textContent?.replace("✓", "")),
-  ).toEqual([...touchSchemeLabels, "全拼 14 键", "九键双拼"]);
+  ).toEqual([...touchSchemeLabels, "全拼 14 键", "九键双拼", "全拼 18 键"]);
   // 高情商回复是键盘工具栏上的工具，不是输入方案。
   expect(within(group).queryByText("高情商回复")).toBeNull();
-  expect(within(group).getAllByRole("switch")).toHaveLength(13);
-  // 全拼 14 键与九键双拼追加在原有列表后，默认不启用。
+  expect(within(group).getAllByRole("switch")).toHaveLength(14);
+  // 全拼 14 键、九键双拼与全拼 18 键追加在原有列表后，默认不启用。
   expect(
     (screen.getByRole("switch", { name: "显示输入方案 全拼 14 键" }) as HTMLInputElement).checked,
   ).toBe(false);
@@ -442,8 +442,9 @@ test("touch hosts offering Cantonese, Zhuyin, Vietnamese, Tibetan and Stroke lis
     "注音 9 键",
     "全拼 14 键",
     "九键双拼",
+    "全拼 18 键",
   ]);
-  expect(within(group).getAllByRole("switch")).toHaveLength(19);
+  expect(within(group).getAllByRole("switch")).toHaveLength(20);
   for (const label of [
     "粤拼 26 键",
     "大千注音",
@@ -1320,7 +1321,15 @@ test("voice settings default to the single API Key mode", async () => {
     revision: 8,
     preferences,
   }));
-  const client: SettingsClient = { load: vi.fn().mockResolvedValue(initial), save };
+  // 出厂服务是本地模型，鉴权方式只在选了豆包时出现。
+  const doubao: Snapshot = {
+    ...initial,
+    preferences: {
+      ...initial.preferences,
+      voice_input: { enabled: true, language: "zh-CN", asr_provider: "doubao" },
+    },
+  };
+  const client: SettingsClient = { load: vi.fn().mockResolvedValue(doubao), save };
   render(<SettingsPage client={client} />);
   await settingsReady();
   fireEvent.click(screen.getByRole("button", { name: "语音输入" }));
@@ -2031,11 +2040,17 @@ test("helpcode schemes save independently and retain disabled selections", async
   await screen.findByText("已保存");
   expect(client.save).toHaveBeenCalledWith(7, {
     ...initial.preferences,
-    quanpin_helpcode: { enabled: false, schema: "xiaohe", show_in_candidate_window: false },
+    quanpin_helpcode: {
+      enabled: false,
+      schema: "xiaohe",
+      show_in_candidate_window: false,
+      strict_filter: false,
+    },
     shuangpin_helpcode: {
       enabled: true,
       schema: "wubi86",
       show_in_candidate_window: true,
+      strict_filter: false,
       modes: defaultShuangpinHelpcodeModes,
     },
   });
@@ -2102,8 +2117,12 @@ test("clears helpcode packs when the active host has no plugin catalog", async (
   await waitFor(() => expect(within(quanpin).getByRole("option", { name: "部首码（插件）" })));
 
   view.rerender(<SettingsPage initialPage="input" client={withoutPlugins} />);
+  // 宿主切换会清空并重建表单，断言当前页面，不能继续检查已经卸载的旧节点。
+  await settingsReady();
+  selectSettingsTab("进阶");
+  const currentQuanpin = screen.getByRole("combobox", { name: "全拼辅助码方案" });
   await waitFor(() =>
-    expect(within(quanpin).queryByRole("option", { name: "部首码（插件）" })).toBeNull(),
+    expect(within(currentQuanpin).queryByRole("option", { name: "部首码（插件）" })).toBeNull(),
   );
 });
 
@@ -2564,7 +2583,13 @@ test("macOS 维护与诊断 page exposes reversible uninstall with explicit data
   expect(await within(developer).findByText("卸载水杉输入法")).toBeDefined();
   expect(await within(developer).findByText("/synthetic/default-state")).toBeDefined();
   // 基础的服务操作在前，破坏性的那个在最后。
-  expect(groupTitles(developer)).toEqual(["输入法服务", "诊断日志", "数据目录", "卸载"]);
+  expect(groupTitles(developer)).toEqual([
+    "输入法服务",
+    "诊断日志",
+    "命令行工具",
+    "数据目录",
+    "卸载",
+  ]);
   const remove = screen.getByRole("checkbox", { name: /同时删除词库/ }) as HTMLInputElement;
   expect(remove.checked).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "卸载…" }));
@@ -3877,6 +3902,78 @@ test("the diagnostic log action needs a host that can reveal the file", async ()
   );
 });
 
+test.each([
+  ["macos", true],
+  ["linux", true],
+  ["windows", true],
+  ["harmony", false],
+  ["android", false],
+  ["ios", false],
+  [undefined, false],
+] as const)(
+  "the command line candidate switch is offered only where the command ships (%s)",
+  async (platform, offered) => {
+    render(
+      <SettingsPage
+        client={{
+          load: vi.fn().mockResolvedValue(initial),
+          save: vi.fn(),
+          host: platform ? testHost({ platform }) : undefined,
+        }}
+      />,
+    );
+    await settingsReady();
+    const toggle = screen.queryByLabelText("命令行查询候选") as HTMLInputElement | null;
+    if (!offered) {
+      expect(toggle).toBeNull();
+      return;
+    }
+    expect(toggle).not.toBeNull();
+    // 没写过这个键的配置一律是关着的。
+    expect(toggle?.checked).toBe(false);
+    const description =
+      document.getElementById(toggle?.getAttribute("aria-describedby") ?? "")?.textContent ?? "";
+    // Windows 包里只有 msime-mcp.exe，没有 msime 这个链接。
+    expect(description).toContain(
+      platform === "windows" ? "msime-mcp candidates" : "msime candidates",
+    );
+    expect(description).toContain("词库里有你打过的词");
+  },
+);
+
+test("the command line candidate switch saves under diagnostic_log and keeps the log switches", async () => {
+  const loaded: Snapshot = {
+    ...initial,
+    preferences: { ...initial.preferences, diagnostic_log: { server: true, tsf: false } },
+  };
+  const client: SettingsClient = {
+    load: vi.fn().mockResolvedValue(loaded),
+    save: vi.fn().mockImplementation(async (_revision, preferences) => ({
+      ...loaded,
+      revision: 8,
+      preferences,
+    })),
+    host: testHost({ platform: "macos" }),
+  };
+  render(<SettingsPage client={client} />);
+  await settingsReady();
+  fireEvent.click(screen.getByRole("button", { name: /^(维护与诊断|维护诊断)$/ }));
+  const toggle = (await screen.findByRole("switch", {
+    name: "命令行查询候选",
+  })) as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  fireEvent.click(toggle);
+  saveSettingsNow();
+  await screen.findByText("已保存");
+  expect(client.save).toHaveBeenCalledWith(7, {
+    ...loaded.preferences,
+    diagnostic_log: { server: true, tsf: false, command_line_candidates: true },
+  });
+  expect(toggle.checked).toBe(true);
+  // 已经打开的诊断日志不受影响。
+  expect((screen.getByLabelText("输入法日志") as HTMLInputElement).checked).toBe(true);
+});
+
 test.each(["windows", "linux", "macos", "android", "ios", "harmony", undefined])(
   "the usage reporting switch is offered on every platform, starts on and says what it sends (%s)",
   async (platform) => {
@@ -4079,8 +4176,8 @@ test("mobile hosts use Apple-style primary navigation and retain secondary setti
     within(primary)
       .getAllByRole("button")
       .map((button) => button.textContent),
-  ).toEqual(["设置", "社区", "统计", "我的"]);
-  // 标签栏只有这四项。其余页面都是「设置」标签根页上的一行，皮肤页也在其中；已有标签页的「社区」和二级页「AI 对话」不在其中。
+  ).toEqual(["首页", "社区", "统计", "我的"]);
+  // 标签栏只有这四项。其余页面都是「首页」标签根页上的一行，皮肤页也在其中；已有标签页的「社区」和二级页「AI 对话」不在其中。
   const home = screen.getByRole("region", { name: "首页" });
   const secondaryLabels = [...home.querySelectorAll("[data-row-title]")].map(
     (row) => row.textContent ?? "",
@@ -4663,7 +4760,7 @@ test("mobile account deep links participate in the back stack", async () => {
     // The tab and the sidebar entry share the page's title, so reach for the one in the bar.
     const bar = screen.getByRole("navigation", { name: "主要功能" });
     fireEvent.click(within(bar).getByRole("button", { name: "我的" }));
-    // 触屏宿主上反馈和关于在「我的」里，「设置」列表不再重复列出。
+    // 触屏宿主上反馈和关于在「我的」里，「首页」列表不再重复列出。
     expect(screen.queryByRole("button", { name: "帮助与反馈" })).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: /^(关于|关于水杉)$/ }));
     expect(window.history.state).toEqual(
@@ -7233,6 +7330,8 @@ const referenceSections: {
   // 子页从父页里进入；与别的组共用一页的组（输入页上的辅助码）按组名找它的 region。
   via?: string;
   group?: string;
+  // 只在某个偏好下出现的小节，按这份偏好打开页面。
+  preferences?: Partial<Snapshot["preferences"]>;
   titles: string[];
 }[] = [
   {
@@ -7333,6 +7432,8 @@ const referenceSections: {
   {
     page: "voice",
     button: "语音输入",
+    // 出厂服务是本地模型，豆包的选项只在选了豆包时出现。
+    preferences: { voice_input: { enabled: true, language: "zh-CN", asr_provider: "doubao" } },
     titles: [
       // 来源的「基础设置」与「启用语音输入」在这里合成一节。
       "语音输入",
@@ -7450,11 +7551,14 @@ const followedSurfaceThemeSections: Record<string, string> = {
 
 test.each(referenceSections)(
   "the $page page still carries the reference window's sections",
-  async ({ page: pageId, button, via, group, titles }) => {
+  async ({ page: pageId, button, via, group, preferences, titles }) => {
     render(
       <SettingsPage
         client={{
-          load: vi.fn().mockResolvedValue(initial),
+          load: vi.fn().mockResolvedValue({
+            ...initial,
+            preferences: { ...initial.preferences, ...preferences },
+          }),
           save: vi.fn(),
           // The dictionary and skin pages render their sections only once the host offers them
           // anything to show; without these two the pages would be empty and the table would be
@@ -7581,11 +7685,14 @@ const macosAbsentSections: Record<string, string> = {
 
 test.each(referenceSections)(
   "the $page page carries the reference window's sections on macOS too",
-  async ({ page: pageId, button, via, group, titles }) => {
+  async ({ page: pageId, button, via, group, preferences, titles }) => {
     render(
       <SettingsPage
         client={{
-          load: vi.fn().mockResolvedValue(initial),
+          load: vi.fn().mockResolvedValue({
+            ...initial,
+            preferences: { ...initial.preferences, ...preferences },
+          }),
           save: vi.fn(),
           // What `host_surface.rs` gives HostPlatform::Macos, so a missing section is a difference
           // in the page rather than a capability the fixture forgot to declare.
@@ -8566,6 +8673,7 @@ test.each(["macos", "windows", "linux"] as const)(
         }}
       />,
     );
+    await settingsReady();
     fireEvent.click(screen.getByRole("button", { name: /^(关于|关于水杉)$/ }));
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("发现新版本 v1.2.0")).toBeDefined();
@@ -8590,6 +8698,7 @@ test("a platform without a published release is a normal result", async () => {
       }}
     />,
   );
+  await settingsReady();
   fireEvent.click(screen.getByRole("button", { name: /^(关于|关于水杉)$/ }));
   fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
   expect(await screen.findByText("暂无可用发行版")).toBeDefined();
@@ -8618,6 +8727,54 @@ test("a Linux release without a chosen package points at SHA256SUMS instead of i
     screen.getByText(/该软件包未签名。.*sha256sum -c SHA256SUMS --ignore-missing/),
   ).toBeDefined();
 });
+
+test.each(["立即返回", "延后返回"])(
+  "关于页首次可点击时的更新检查保留结果（%s）",
+  async (completion) => {
+    const load = deferred<Snapshot>();
+    const response = deferred<UpdateCheckResult>();
+    const update: UpdateCheckResult = {
+      status: "available",
+      update: hostRelease("linux-v1.2.0"),
+    };
+    const checkUpdate = vi.fn(() =>
+      completion === "立即返回" ? Promise.resolve(update) : response.promise,
+    );
+    render(
+      <SettingsPage
+        client={{
+          load: () => load.promise,
+          save: vi.fn(),
+          checkUpdate,
+          host: testHost({ platform: "linux", arch: "x86_64" }),
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^(关于|关于水杉)$/ }));
+    let disabledAtClick: boolean | undefined;
+    // 在 DOM 提交后的第一个可点击时刻操作，不让测试框架先冲刷 passive effects。
+    const observer = new MutationObserver(() => {
+      const button = screen.queryByRole<HTMLButtonElement>("button", { name: "检查更新" });
+      if (!button) return;
+      observer.disconnect();
+      disabledAtClick = button.matches(":disabled");
+      act(() => button.click());
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      load.resolve(initial);
+      await waitFor(() => expect(checkUpdate).toHaveBeenCalledOnce());
+      expect(disabledAtClick).toBe(false);
+      if (completion === "延后返回") {
+        expect(await screen.findByRole("button", { name: "正在检查…" })).toBeDefined();
+        await act(async () => response.resolve(update));
+      }
+      expect(await screen.findByText("发现新版本 v1.2.0")).toBeDefined();
+    } finally {
+      observer.disconnect();
+    }
+  },
+);
 
 test("Linux update notice shows the .deb digest and the sha256sum command", async () => {
   const digest = "0123456789abcdef".repeat(4);
@@ -8788,6 +8945,8 @@ test("installer trust uses sha256sum on Linux and keeps Get-FileHash on Windows"
         installerName: "msime-linux_1.2.0_amd64.deb",
         installerSha256: digest,
         signed: false,
+        channel: "stable",
+        buildRun: null,
       },
       "linux",
     ),
@@ -8797,7 +8956,15 @@ test("installer trust uses sha256sum on Linux and keeps Get-FileHash on Windows"
   });
   expect(
     describeInstallerTrust(
-      { version, releaseUrl, installerName: null, installerSha256: null, signed: false },
+      {
+        version,
+        releaseUrl,
+        installerName: null,
+        installerSha256: null,
+        signed: false,
+        channel: "stable",
+        buildRun: null,
+      },
       "linux",
     ).verify,
   ).toBeNull();
@@ -8807,6 +8974,8 @@ test("installer trust uses sha256sum on Linux and keeps Get-FileHash on Windows"
     installerName: "MetasequoiaIME-Full_Setup_v1.2.0.exe",
     installerSha256: digest,
     signed: false,
+    channel: "stable" as const,
+    buildRun: null,
   };
   const expected = {
     warning:
@@ -10179,7 +10348,12 @@ test("category navigation preserves one draft and saves edits across pages", asy
   expect(client.save).toHaveBeenCalledWith(7, {
     ...initial.preferences,
     candidate_page_size: 9,
-    quanpin_helpcode: { enabled: false, schema: "ziranma", show_in_candidate_window: false },
+    quanpin_helpcode: {
+      enabled: false,
+      schema: "ziranma",
+      show_in_candidate_window: false,
+      strict_filter: false,
+    },
   });
   expect(client.load).toHaveBeenCalledTimes(1);
 });
@@ -10313,7 +10487,7 @@ test("a host that fixes the candidate page size and layout does not offer them",
   expect(screen.getByLabelText("候选项排列方式")).toBeTruthy();
 });
 
-test("an unreadable preferences document offers a repair that backs it up first", async () => {
+test("配置修复先备份原文档，修复后的修改仍会自动保存", async () => {
   const recovered: Snapshot = {
     ...initial,
     revision: 12,
@@ -10336,7 +10510,7 @@ test("an unreadable preferences document offers a repair that backs it up first"
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toContain("配置文件无法读取");
 
-  // Cancelling asks nothing of the host.
+  // 取消确认不调用宿主修复。
   fireEvent.click(within(alert).getByRole("button", { name: "修复配置文件…" }));
   expect((await screen.findByRole("alertdialog")).textContent).toContain(
     "损坏的配置文件会先备份到同一目录",
@@ -10354,6 +10528,19 @@ test("an unreadable preferences document offers a repair that backs it up first"
 
   fireEvent.click(within(notice).getByRole("button", { name: "在 Finder 中显示" }));
   expect(openPreferencesDirectory).toHaveBeenCalledTimes(1);
+
+  vi.mocked(client.save).mockImplementation(async (revision, preferences) => ({
+    ...recovered,
+    revision: revision + 1,
+    preferences,
+  }));
+  fireEvent.click(screen.getByRole("radio", { name: "五笔" }));
+  saveSettingsNow();
+  await waitFor(() => expect(client.save).toHaveBeenCalledOnce());
+  expect(client.save).toHaveBeenCalledWith(
+    recovered.revision,
+    expect.objectContaining({ scheme: "wubi", candidate_page_size: 7 }),
+  );
 });
 
 test("a host without a repair keeps the unreadable-document message alone", async () => {
@@ -10548,7 +10735,8 @@ test.each(["macos", "windows", "linux", "harmony"])(
           load: vi.fn().mockResolvedValue(initial),
           save: vi.fn(),
           aiAssistant: { fetchModels: vi.fn(), test: vi.fn() },
-          host: testHost({ platform }),
+          // 鸿蒙按 AI 生成类资质到位、总闸打开时的样子报 `ai_generation`，测的是那时重新出现的 AI 页。
+          host: testHost({ platform, ai_generation: true }),
         }}
       />,
     );

@@ -181,6 +181,9 @@ public final class LexiconPage extends ReloadingDetailPage {
 
         if (sogouSection == null) sogouSection = new SogouSection(getViewLifecycleOwner(), context, sectionColumn(target, "已安装"), false);
         else sogouSection.attach(sectionColumn(target, "已安装"));
+        GroupCard sync = GroupCard.add(sectionColumn(target, "已安装"), "同步");
+        sync.nav(PageId.DICTIONARY_SYNC.title(), "「我的词条」经自己的 WebDAV 网盘在设备之间同步", null,
+            () -> SettingsNavigator.open(context, PageId.DICTIONARY_SYNC, null));
 
         GroupCard community = GroupCard.add(sectionColumn(target, "社区"), "发现词库").withDividers(58);
         List<CommunityCatalog.Item> items = discover;

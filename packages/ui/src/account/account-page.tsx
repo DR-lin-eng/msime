@@ -6,18 +6,19 @@ import type {
   AccountClient,
   AccountCommunityDestination,
 } from "./account-model";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
+import { StatisticsAuthenticationRow } from "./statistics-authentication-row";
+import type { StatisticsAuthenticationSettings } from "../settings/statistics-authentication-gate";
 import type { Preferences } from "../core/preferences-model";
 import { ActionButton } from "../core/action-button";
 import { errorCode } from "../core/error-code";
 import { FluentIcon, type FluentIconName } from "../core/fluent-icons";
 import type { AppThemeClient } from "../core/host-contracts";
-import { GroupList, NavGroup, NavRow, Row } from "../core/platform-controls";
+import { GroupList, NavRow, Row } from "../core/platform-controls";
 import { useToast } from "../core/toast";
 import { useTemporaryFlag } from "../core/use-temporary-flag";
 import { privacyUrl } from "../settings/app-resources";
 import type { SettingsPageId } from "../settings/settings-page-registry";
-import * as doc from "../settings/document-style";
 import * as account from "./account-style";
 import { AccountAvatar } from "./account-avatar";
 import { accountMessage, isAccountCancellation } from "./account-errors";
@@ -30,8 +31,9 @@ import { AccountIdentityDetails } from "./account-identity-details";
 import { SettingsSyncCard } from "./settings-sync-card";
 import { AppIconSettingsCard } from "./app-icon-settings-card";
 import { AppThemeRow } from "./app-theme-row";
-import { QqLinkCard } from "./qq-link-card";
+import { MobileQqLinksPage, QqLinkCard } from "./qq-link-card";
 import { LoginSheet } from "./login-sheet";
+import { LoginConsent, useLoginConsent } from "./login-consent";
 import { MobileDownloadPage, otherPlatformCount } from "./mobile-download-page";
 import { StatusMessage } from "../core/status-message";
 import { copyAccountId as copyAccountIdToClipboard } from "./account-id-copy";
@@ -46,6 +48,7 @@ import { useAccountRename } from "./use-account-rename";
 import { useAccountGoogleLogin } from "./use-account-google-login";
 import { useAccountVerification, type AccountChannel } from "./use-account-verification";
 import { useMobileSettingsSubview } from "../settings/use-mobile-settings-subview";
+import { AccountMeGroup, AccountMeRow, AccountMeSupportGroup } from "./account-me-components";
 
 export type {
   AccountUser,
@@ -64,72 +67,15 @@ export type {
 
 type Confirmation = "logout-all" | "delete" | null;
 
-/** 触屏宿主在「我的」里推入的页面；鸿蒙手机还会推入「其他平台下载」。它们记在历史条目的 `accountSubpage` 里，所以系统返回手势能关掉它们。 */
-type AccountSubpage = "profile" | "download";
+/** 触屏宿主在「我的」里推入资料和 QQ 群助手页；鸿蒙手机还会推入「其他平台下载」。它们记在历史条目的 `accountSubpage` 里，所以系统返回手势能关掉它们。 */
+type AccountSubpage = "profile" | "download" | "qq-links";
 
 function accountSubpageOf(state: unknown): AccountSubpage | null {
   const value =
     state && typeof state === "object"
       ? (state as { accountSubpage?: unknown }).accountSubpage
       : null;
-  return value === "profile" || value === "download" ? value : null;
-}
-
-/** 鸿蒙手机「我的」页上的一组：可选的 14px 标题，下面是一张装着若干 `NavRow` 的无边框卡片。 */
-function MeGroup({ title, children }: { title?: string; children: ReactNode }) {
-  const titleId = useId();
-  return (
-    <section className={account.meGroup} aria-labelledby={title ? titleId : undefined}>
-      {title && (
-        <h3 id={titleId} className={account.meGroupTitle}>
-          {title}
-        </h3>
-      )}
-      <NavGroup>{children}</NavGroup>
-    </section>
-  );
-}
-
-/** One row of a 我的 group on a touch host: it opens a page, a panel or a link. */
-function MeRow({
-  title,
-  disabled,
-  onClick,
-}: {
-  title: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" className={doc.linkRow} disabled={disabled} onClick={onClick}>
-      <span className={doc.linkTitle}>{title}</span>
-      <span aria-hidden="true">›</span>
-    </button>
-  );
-}
-
-/** The last, untitled group of 我的 on a touch host (dc.html `meGroups`): the walkthrough again, 帮助与反馈 and 关于. It does not depend on the account, so a host without one still reaches them. */
-function MeSupportGroup({
-  disabled,
-  onReplayOnboarding,
-  onOpenFeedback,
-  onOpenAbout,
-}: {
-  disabled?: boolean;
-  onReplayOnboarding?: () => void;
-  onOpenFeedback?: () => void;
-  onOpenAbout?: () => void;
-}) {
-  if (!onReplayOnboarding && !onOpenFeedback && !onOpenAbout) return null;
-  return (
-    <GroupList>
-      {onReplayOnboarding && (
-        <MeRow title="新手引导" disabled={disabled} onClick={onReplayOnboarding} />
-      )}
-      {onOpenFeedback && <MeRow title="帮助与反馈" disabled={disabled} onClick={onOpenFeedback} />}
-      {onOpenAbout && <MeRow title="关于" disabled={disabled} onClick={onOpenAbout} />}
-    </GroupList>
-  );
+  return value === "profile" || value === "download" || value === "qq-links" ? value : null;
 }
 
 export function AccountPage({
@@ -143,6 +89,7 @@ export function AccountPage({
   onOpenLocalDesigns,
   onOpenCommunity,
   communityHasSkins,
+  communityHasReplies,
   onOpenCloudDictionary,
   onOpenCloudClipboard,
   onOpenAbout,
@@ -163,6 +110,8 @@ export function AccountPage({
   onOpenCommunity?: (destination: AccountCommunityDestination) => void;
   /** 社区页里有没有皮肤画廊。没有时（Windows 的社区页只有词包与回复模板）「我发布的皮肤」不经社区页打开。缺省为有。 */
   communityHasSkins?: boolean;
+  /** 「我的内容」里列不列回复模板的两行。回复模板是高情商回复的提示词，不提供 AI 生成类功能的宿主（HarmonyOS）不列。缺省为列出。 */
+  communityHasReplies?: boolean;
   onOpenCloudDictionary?: () => void;
   onOpenCloudClipboard?: () => void;
   onOpenAbout?: () => void;
@@ -173,6 +122,11 @@ export function AccountPage({
 } & HarmonyMeProps) {
   const resolvedAppIcon = appIcon ?? client?.appIcon;
   if (!client) {
+    // 鸿蒙手机拒绝隐私授权后没有账号客户端，授权弹窗和键盘都让用户去「我的 › 隐私」重新同意，所以这一行在这里也要有；其他宿主的隐私入口不在这个分支里。
+    const onOpenPrivacy =
+      platform === "harmony" && (mobile ?? true) && meProps.onOpenPage
+        ? () => meProps.onOpenPage?.("privacy")
+        : undefined;
     return (
       <div className={account.page}>
         {resolvedAppIcon && (
@@ -181,7 +135,18 @@ export function AccountPage({
             platform={platform === "harmony" ? undefined : platform}
           />
         )}
-        <MeSupportGroup
+        {onOpenPrivacy && (
+          <AccountMeGroup title="通用">
+            <NavRow
+              variant="me"
+              icon={<FluentIcon name="shield_lock" size={18} />}
+              title="隐私"
+              value="本地优先"
+              onClick={onOpenPrivacy}
+            />
+          </AccountMeGroup>
+        )}
+        <AccountMeSupportGroup
           onReplayOnboarding={onReplayOnboarding}
           onOpenFeedback={onOpenFeedback}
           onOpenAbout={onOpenAbout}
@@ -201,6 +166,7 @@ export function AccountPage({
       onOpenLocalDesigns={onOpenLocalDesigns}
       onOpenCommunity={onOpenCommunity}
       communityHasSkins={communityHasSkins}
+      communityHasReplies={communityHasReplies}
       onOpenCloudDictionary={onOpenCloudDictionary}
       onOpenCloudClipboard={onOpenCloudClipboard}
       onOpenAbout={onOpenAbout}
@@ -214,6 +180,7 @@ export function AccountPage({
 
 /** 鸿蒙手机「我的」页所需的附加能力；其他触屏宿主也可复用其中的通用入口。 */
 type HarmonyMeProps = {
+  statisticsAuthentication?: StatisticsAuthenticationSettings;
   /** 已保存的偏好；保留宿主接线兼容性，鸿蒙手机「我的」页不再重复展示设置入口。 */
   preferences?: Preferences;
   /** 打开共享设置页，例如「隐私」。 */
@@ -240,6 +207,7 @@ function AccountDetailsPage({
   onOpenLocalDesigns,
   onOpenCommunity,
   communityHasSkins = true,
+  communityHasReplies = true,
   onOpenCloudDictionary,
   onOpenCloudClipboard,
   onOpenAbout,
@@ -247,6 +215,7 @@ function AccountDetailsPage({
   onOpenDesktopDownload,
   onReplayOnboarding,
   preferences: _preferences,
+  statisticsAuthentication,
   onOpenPage,
   appTheme,
   onOpenUrl,
@@ -264,6 +233,7 @@ function AccountDetailsPage({
   onOpenLocalDesigns?: () => void;
   onOpenCommunity?: (destination: AccountCommunityDestination) => void;
   communityHasSkins?: boolean;
+  communityHasReplies?: boolean;
   /** 触屏宿主的「我的」里打开云词库。桌面的云词库入口在「词库」页，账号页不再列出。 */
   onOpenCloudDictionary?: () => void;
   onOpenCloudClipboard?: () => void;
@@ -367,6 +337,8 @@ function AccountDetailsPage({
     cancel: cancelGoogle,
     signIn: runGoogleLogin,
   } = useAccountGoogleLogin({ client, mounted, clientGeneration });
+  // 桌面式登录卡片（macOS、Linux、鸿蒙 2in1）的同意勾选；鸿蒙手机的登录面板自己持有一份。
+  const consent = useLoginConsent();
 
   // Leaving the page must not leave the loopback listener waiting for a browser the user abandoned.
   useEffect(() => () => cancelGoogle(), [client]);
@@ -392,8 +364,11 @@ function AccountDetailsPage({
   });
 
   // 登录成功（任何一种方式）或者读出了已登录的用户，说明保存的登录状态是可读的，之前那次读不出来的结论作废；否则退出登录后又会冒出「清除失效登录状态」。
+  // 同意勾选也一并清掉：退出登录后再登录要重新勾选。
   useEffect(() => {
-    if (user) setSessionUnreadable(false);
+    if (!user) return;
+    setSessionUnreadable(false);
+    consent.reset();
   }, [user]);
 
   const loadProfile = async (generation = clientGeneration.current) => {
@@ -446,9 +421,12 @@ function AccountDetailsPage({
     setNotice("");
   };
 
-  const requestCode = () => void perform(sendCode);
+  const requestCode = () => {
+    if (consent.confirm()) void perform(sendCode);
+  };
 
-  const signIn = () =>
+  const signIn = () => {
+    if (!consent.confirm()) return;
     void perform(async () => {
       const result = await runVerificationSignIn();
       if (!result) return;
@@ -461,6 +439,7 @@ function AccountDetailsPage({
       setNotice("登录成功。");
       onLoginComplete?.();
     });
+  };
 
   // Only the user and profile change: the nickname field keeps whatever is being typed in the dialog.
   const applyAvatar = (updated: AccountProfile) => {
@@ -544,6 +523,9 @@ function AccountDetailsPage({
       />
     );
 
+  if (mobileSubpage === "qq-links" && user && client.qqLinks)
+    return <MobileQqLinksPage client={client.qqLinks} userId={user.id} onBack={closeSubpage} />;
+
   if (mobileSubpage === "profile" && user)
     return (
       <MobileAccountProfilePage
@@ -562,16 +544,19 @@ function AccountDetailsPage({
       />
     );
 
-  // Count only providers this host can render; the backend may enable Apple or Google for hosts without a native client for them.
+  // 只数本宿主画得出的登录方式：服务端可能为没有对应原生客户端的宿主也开着 Apple、Google 或华为账号。
   const appleAvailable = providers.apple === true && Boolean(client.appleLogin);
   const googleAvailable = providers.google === true && Boolean(client.googleLogin);
+  const huaweiAvailable = providers.huawei === true && Boolean(client.huaweiLogin);
   const enabledProviders =
     Number(providers.email) +
     Number(providers.phone) +
     Number(appleAvailable) +
-    Number(googleAvailable);
+    Number(googleAvailable) +
+    Number(huaweiAvailable);
 
-  const signInWithApple = () =>
+  const signInWithApple = () => {
+    if (!consent.confirm()) return;
     void perform(async () => {
       const generation = clientGeneration.current;
       if (!client.appleLogin) throw { code: "account_unavailable" };
@@ -584,8 +569,27 @@ function AccountDetailsPage({
       setNotice("登录成功。");
       onLoginComplete?.();
     });
+  };
 
-  const signInWithGoogle = () =>
+  // 鸿蒙 2in1 的桌面式登录卡片：Account Kit 的授权页由宿主拉起，页面只等结果。
+  const signInWithHuawei = () => {
+    if (!consent.confirm()) return;
+    void perform(async () => {
+      const generation = clientGeneration.current;
+      if (!client.huaweiLogin) throw { code: "account_unavailable" };
+      const result = await client.huaweiLogin();
+      if (!mounted.current || generation !== clientGeneration.current) return;
+      if (!result.user) throw { code: "account_unavailable" };
+      setUser(result.user);
+      await loadProfile(generation);
+      if (!mounted.current || generation !== clientGeneration.current) return;
+      setNotice("登录成功。");
+      onLoginComplete?.();
+    });
+  };
+
+  const signInWithGoogle = () => {
+    if (!consent.confirm()) return;
     void perform(async () => {
       const result = await runGoogleLogin();
       if (!result) return;
@@ -595,6 +599,7 @@ function AccountDetailsPage({
       setNotice("登录成功。");
       onLoginComplete?.();
     });
+  };
 
   if (harmony) {
     // 别的页面请求了登录（`onCancelLogin` 是回去的路），所以面板直接打开；关掉它就回到那里。
@@ -645,10 +650,23 @@ function AccountDetailsPage({
           <FluentIcon name="chevron_right" size={20} className={account.meCardChevron} />
         </button>
         {appIcon && <AppIconSettingsCard client={appIcon} />}
-        {/* 「绑定 QQ 群助手」：/bind 拿到的码多半就在这台手机的 QQ 里。 */}
-        {user && client.qqLinks && <QqLinkCard client={client.qqLinks} userId={user.id} />}
-        {(appTheme || onOpenPage || onOpenUrl) && (
-          <MeGroup title="通用">
+        {client.qqLinks && (
+          <AccountMeGroup title="同步">
+            <NavRow
+              variant="me"
+              icon={icon("link")}
+              title="绑定 QQ 群助手"
+              description={user ? "在群里发 /stats 查看打字数据" : "登录后可用"}
+              disabled={busy || !user}
+              onClick={() => openSubpage("qq-links")}
+            />
+          </AccountMeGroup>
+        )}
+        {(appTheme || onOpenPage || onOpenUrl || statisticsAuthentication) && (
+          <AccountMeGroup title="通用">
+            {statisticsAuthentication && (
+              <StatisticsAuthenticationRow client={statisticsAuthentication} />
+            )}
             {appTheme && <AppThemeRow client={appTheme} disabled={busy} />}
             {(onOpenPage || onOpenUrl) && (
               <NavRow
@@ -661,10 +679,10 @@ function AccountDetailsPage({
                 onClick={() => (onOpenPage ? onOpenPage("privacy") : onOpenUrl?.(privacyUrl))}
               />
             )}
-          </MeGroup>
+          </AccountMeGroup>
         )}
         {(openDownload || onOpenFeedback || onOpenAbout || onReplayOnboarding) && (
-          <MeGroup>
+          <AccountMeGroup>
             {openDownload && (
               <NavRow
                 variant="me"
@@ -703,7 +721,7 @@ function AccountDetailsPage({
                 onClick={onReplayOnboarding}
               />
             )}
-          </MeGroup>
+          </AccountMeGroup>
         )}
         {loginShown && (
           <LoginSheet
@@ -799,6 +817,14 @@ function AccountDetailsPage({
           {!channel ? (
             <>
               <div className={account.signInBody}>
+                {huaweiAvailable && (
+                  <ActionButton
+                    action={signInWithHuawei}
+                    className={account.provider}
+                    disabled={busy}
+                    label="华为账号登录"
+                  />
+                )}
                 {appleAvailable && (
                   <ActionButton
                     action={signInWithApple}
@@ -887,6 +913,7 @@ function AccountDetailsPage({
               </div>
             </div>
           )}
+          <LoginConsent consent={consent} onOpenUrl={onOpenUrl} />
         </section>
       )}
       {appIcon && (
@@ -989,7 +1016,7 @@ function AccountDetailsPage({
       {/* 桌面的云词库入口只在「词库」页：那里不登录也看得到，这里不再放第二个。macOS 不在设置里打开云剪贴板（要输入法提供输入会话），这一组在 macOS 上因此整组不出现。 */}
       {user && !mobile && onOpenCloudClipboard && (
         <GroupList title="云端">
-          <MeRow title="云剪贴板" disabled={busy} onClick={onOpenCloudClipboard} />
+          <AccountMeRow title="云剪贴板" disabled={busy} onClick={onOpenCloudClipboard} />
         </GroupList>
       )}
       {!mobile && (onOpenLocalDesigns || (user && (openPublishedSkins || onOpenCommunity))) && (
@@ -1005,30 +1032,34 @@ function AccountDetailsPage({
             </Row>
           )}
           {user && openPublishedSkins && (
-            <MeRow title="我发布的皮肤" disabled={busy} onClick={openPublishedSkins} />
+            <AccountMeRow title="我发布的皮肤" disabled={busy} onClick={openPublishedSkins} />
           )}
           {user && onOpenCommunity && (
             <>
-              <MeRow
+              <AccountMeRow
                 title="我发布的词库"
                 disabled={busy}
                 onClick={() => onOpenCommunity("published-dictionary")}
               />
-              <MeRow
-                title="我发布的回复模板"
-                disabled={busy}
-                onClick={() => onOpenCommunity("published-reply")}
-              />
-              <MeRow
+              {communityHasReplies && (
+                <AccountMeRow
+                  title="我发布的回复模板"
+                  disabled={busy}
+                  onClick={() => onOpenCommunity("published-reply")}
+                />
+              )}
+              <AccountMeRow
                 title="收藏的词库"
                 disabled={busy}
                 onClick={() => onOpenCommunity("saved-dictionary")}
               />
-              <MeRow
-                title="收藏的回复模板"
-                disabled={busy}
-                onClick={() => onOpenCommunity("saved-reply")}
-              />
+              {communityHasReplies && (
+                <AccountMeRow
+                  title="收藏的回复模板"
+                  disabled={busy}
+                  onClick={() => onOpenCommunity("saved-reply")}
+                />
+              )}
             </>
           )}
         </GroupList>
@@ -1083,56 +1114,71 @@ function AccountDetailsPage({
           {((user && (onOpenCloudClipboard || onOpenCloudDictionary)) || onOpenDesktopDownload) && (
             <GroupList title="工具">
               {user && onOpenCloudClipboard && (
-                <MeRow title="云剪贴板" disabled={busy} onClick={onOpenCloudClipboard} />
+                <AccountMeRow title="云剪贴板" disabled={busy} onClick={onOpenCloudClipboard} />
               )}
               {user && onOpenCloudDictionary && (
-                <MeRow title="云词库" disabled={busy} onClick={onOpenCloudDictionary} />
+                <AccountMeRow title="云词库" disabled={busy} onClick={onOpenCloudDictionary} />
               )}
               {onOpenDesktopDownload && (
-                <MeRow title="其他平台下载" disabled={busy} onClick={onOpenDesktopDownload} />
+                <AccountMeRow
+                  title="其他平台下载"
+                  disabled={busy}
+                  onClick={onOpenDesktopDownload}
+                />
               )}
             </GroupList>
           )}
           {user && client.settingsSync && (
             <SettingsSyncCard client={client.settingsSync} userId={user.id} />
           )}
-          {/* 「绑定 QQ 群助手」在手机上同样要有：/bind 拿到的码可能就在手机的 QQ 里。 */}
-          {user && client.qqLinks && <QqLinkCard client={client.qqLinks} userId={user.id} />}
+          {user && client.qqLinks && (
+            <GroupList title="同步">
+              <AccountMeRow
+                title="绑定 QQ 群助手"
+                disabled={busy}
+                onClick={() => openSubpage("qq-links")}
+              />
+            </GroupList>
+          )}
           {(onOpenLocalDesigns || (user && (openPublishedSkins || onOpenCommunity))) && (
             <GroupList title="我的内容">
               {onOpenLocalDesigns && (
-                <MeRow title="我的设计" disabled={busy} onClick={onOpenLocalDesigns} />
+                <AccountMeRow title="我的设计" disabled={busy} onClick={onOpenLocalDesigns} />
               )}
               {user && openPublishedSkins && (
-                <MeRow title="我发布的皮肤" disabled={busy} onClick={openPublishedSkins} />
+                <AccountMeRow title="我发布的皮肤" disabled={busy} onClick={openPublishedSkins} />
               )}
               {user && onOpenCommunity && (
                 <>
-                  <MeRow
+                  <AccountMeRow
                     title="我发布的词库"
                     disabled={busy}
                     onClick={() => onOpenCommunity("published-dictionary")}
                   />
-                  <MeRow
-                    title="我发布的回复模板"
-                    disabled={busy}
-                    onClick={() => onOpenCommunity("published-reply")}
-                  />
-                  <MeRow
+                  {communityHasReplies && (
+                    <AccountMeRow
+                      title="我发布的回复模板"
+                      disabled={busy}
+                      onClick={() => onOpenCommunity("published-reply")}
+                    />
+                  )}
+                  <AccountMeRow
                     title="收藏的词库"
                     disabled={busy}
                     onClick={() => onOpenCommunity("saved-dictionary")}
                   />
-                  <MeRow
-                    title="收藏的回复模板"
-                    disabled={busy}
-                    onClick={() => onOpenCommunity("saved-reply")}
-                  />
+                  {communityHasReplies && (
+                    <AccountMeRow
+                      title="收藏的回复模板"
+                      disabled={busy}
+                      onClick={() => onOpenCommunity("saved-reply")}
+                    />
+                  )}
                 </>
               )}
             </GroupList>
           )}
-          <MeSupportGroup
+          <AccountMeSupportGroup
             disabled={busy}
             onReplayOnboarding={onReplayOnboarding}
             onOpenFeedback={onOpenFeedback}
@@ -1142,12 +1188,12 @@ function AccountDetailsPage({
       )}
       {!mobile && (onOpenAbout || onOpenDesktopDownload || onReplayOnboarding) && (
         <GroupList title="关于">
-          {onOpenAbout && <MeRow title="关于水杉" disabled={busy} onClick={onOpenAbout} />}
+          {onOpenAbout && <AccountMeRow title="关于水杉" disabled={busy} onClick={onOpenAbout} />}
           {onOpenDesktopDownload && (
-            <MeRow title="电脑版下载" disabled={busy} onClick={onOpenDesktopDownload} />
+            <AccountMeRow title="电脑版下载" disabled={busy} onClick={onOpenDesktopDownload} />
           )}
           {onReplayOnboarding && (
-            <MeRow title="重新查看新手引导" disabled={busy} onClick={onReplayOnboarding} />
+            <AccountMeRow title="重新查看新手引导" disabled={busy} onClick={onReplayOnboarding} />
           )}
         </GroupList>
       )}

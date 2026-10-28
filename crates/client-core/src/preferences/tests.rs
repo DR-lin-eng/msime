@@ -5,6 +5,141 @@
 use super::*;
 
 #[test]
+fn adaptive_candidate_settings_defaults_round_trip_and_validate() {
+    let mut value = serde_json::to_value(Preferences::default()).unwrap();
+    for key in [
+        "candidate_count_mode",
+        "candidate_max_width",
+        "candidate_columns",
+    ] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    let mut preferences: Preferences = serde_json::from_value(value).unwrap();
+    assert_eq!(preferences.candidate_count_mode, CandidateCountMode::Fixed);
+    assert_eq!(preferences.candidate_max_width, 420);
+    assert_eq!(preferences.candidate_columns, 6);
+    preferences.candidate_count_mode = CandidateCountMode::Adaptive;
+    preferences.candidate_max_width = 600;
+    preferences.candidate_columns = 8;
+    let restored: Preferences =
+        serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+    assert_eq!(restored, preferences);
+    for width in [159, 1201] {
+        preferences.candidate_max_width = width;
+        assert!(matches!(
+            preferences.validate(),
+            Err(PreferencesError::InvalidAdaptiveCandidateLayout)
+        ));
+    }
+    preferences.candidate_max_width = 400;
+    for columns in [0, 11] {
+        preferences.candidate_columns = columns;
+        assert!(matches!(
+            preferences.validate(),
+            Err(PreferencesError::InvalidAdaptiveCandidateLayout)
+        ));
+    }
+    for width in [160, 1200] {
+        for columns in [1, 10] {
+            preferences.candidate_max_width = width;
+            preferences.candidate_columns = columns;
+            preferences.validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn multilingual_input_defaults_off_and_legacy_documents_remain_compatible() {
+    let defaults = Preferences::default();
+    assert!(!defaults.multilingual_input.enabled);
+    assert!(defaults.multilingual_input.active_languages().is_empty());
+    let document = serde_json::to_value(&defaults).unwrap();
+    assert!(document.get("multilingual_input").is_none());
+    let restored: Preferences = serde_json::from_value(document).unwrap();
+    assert_eq!(restored.multilingual_input, defaults.multilingual_input);
+}
+
+#[test]
+fn multilingual_input_requires_two_distinct_languages_when_enabled() {
+    let mut preferences = Preferences::default();
+    preferences.multilingual_input.enabled = true;
+    for languages in [
+        vec![],
+        vec![MultilingualLanguage::Chinese],
+        vec![MultilingualLanguage::Chinese, MultilingualLanguage::Chinese],
+    ] {
+        preferences.multilingual_input.languages = languages;
+        assert!(preferences.multilingual_input.active_languages().is_empty());
+    }
+    preferences.multilingual_input.languages = vec![
+        MultilingualLanguage::Chinese,
+        MultilingualLanguage::Japanese,
+        MultilingualLanguage::Chinese,
+    ];
+    assert_eq!(
+        preferences.multilingual_input.active_languages(),
+        vec![
+            MultilingualLanguage::Chinese,
+            MultilingualLanguage::Japanese
+        ]
+    );
+}
+
+#[test]
+fn multilingual_input_round_trips_language_selection_and_rejects_unknown_languages() {
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["multilingual_input"] = serde_json::json!({
+        "enabled": true, "languages": ["chinese", "japanese"]
+    });
+    let preferences: Preferences = serde_json::from_value(document.clone()).unwrap();
+    assert!(preferences.validate().is_ok());
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let saved = store.save(0, preferences).unwrap();
+    assert_eq!(serde_json::to_value(&saved.preferences).unwrap(), document);
+    assert_eq!(store.load().unwrap().preferences, saved.preferences);
+    let mut disabled = saved.preferences;
+    disabled.multilingual_input.enabled = false;
+    assert!(disabled.multilingual_input.active_languages().is_empty());
+    store.save(saved.revision, disabled.clone()).unwrap();
+    assert_eq!(store.load().unwrap().preferences, disabled);
+    for invalid in [
+        serde_json::json!({"enabled": true, "languages": ["chinese", "unknown"]}),
+        serde_json::json!({"enabled": "true", "languages": ["chinese", "english"]}),
+        serde_json::json!({"enabled": true, "languages": "chinese"}),
+    ] {
+        document["multilingual_input"] = invalid;
+        assert!(serde_json::from_value::<Preferences>(document.clone()).is_err());
+    }
+}
+
+#[test]
+fn multilingual_input_preserves_future_fields_when_other_settings_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut document = serde_json::json!({
+        "format_version": 1, "revision": 4,
+        "preferences": serde_json::to_value(Preferences::default()).unwrap()
+    });
+    document["preferences"]["multilingual_input"] = serde_json::json!({
+        "enabled": true, "languages": ["chinese", "japanese"],
+        "future_policy": {"synthetic": true}
+    });
+    fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut snapshot = store.load().unwrap();
+    snapshot.preferences.candidate_page_size = 7;
+    store.save(snapshot.revision, snapshot.preferences).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(written["revision"], 5);
+    assert_eq!(written["preferences"]["candidate_page_size"], 7);
+    assert_eq!(
+        written["preferences"]["multilingual_input"],
+        document["preferences"]["multilingual_input"]
+    );
+}
+
+#[test]
 fn eighteen_key_quanpin_preferences_round_trip_without_changing_defaults() {
     let defaults = Preferences::default();
     let mut document = serde_json::to_value(&defaults).unwrap();
@@ -53,6 +188,205 @@ fn touch_shuangpin_layout_defaults_persists_and_rejects_unsupported_layouts() {
     let mut malformed = legacy;
     malformed["touch_japanese_toggle_input"] = "false".into();
     assert!(serde_json::from_value::<Preferences>(malformed).is_err());
+}
+
+#[test]
+fn touch_wubi_layout_defaults_persists_and_rejects_unsupported_layouts() {
+    let defaults = Preferences::default();
+    let legacy = serde_json::to_value(&defaults).unwrap();
+    assert!(legacy.get("touch_wubi_layout").is_none());
+    assert_eq!(
+        serde_json::from_value::<Preferences>(legacy.clone())
+            .unwrap()
+            .touch_wubi_layout,
+        TouchWubiLayout::TwentySixKey
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    // 五笔布局与全拼、双拼的布局互不覆盖，换 98 码表也保留。
+    let configured = Preferences {
+        scheme: InputScheme::Wubi,
+        wubi_profile: WubiProfile::Wubi98,
+        touch_wubi_layout: TouchWubiLayout::FourteenKey,
+        touch_shuangpin_layout: TouchShuangpinLayout::EighteenKey,
+        touch_keyboard_layout: TouchKeyboardLayout::NineKey,
+        ..defaults
+    };
+    store.save(0, configured.clone()).unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(loaded, configured);
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap()["touch_wubi_layout"],
+        "fourteen_key"
+    );
+    for unsupported in ["nine_key", "eighteen_key"] {
+        let mut invalid = legacy.clone();
+        invalid["touch_wubi_layout"] = unsupported.into();
+        assert!(serde_json::from_value::<Preferences>(invalid).is_err());
+    }
+}
+
+#[test]
+fn touch_key_styles_and_number_row_default_to_todays_keyboards_and_are_not_written() {
+    let defaults = Preferences::default();
+    assert_eq!(
+        defaults.touch_twenty_six_key_style,
+        TouchTwentySixKeyStyle::Standard
+    );
+    assert_eq!(
+        defaults.touch_fourteen_key_style,
+        TouchFourteenKeyStyle::Standard
+    );
+    assert_eq!(defaults.touch_nine_key_style, TouchNineKeyStyle::Standard);
+    assert!(!defaults.touch_number_row);
+    let written = serde_json::to_value(&defaults).unwrap();
+    for key in [
+        "touch_twenty_six_key_style",
+        "touch_fourteen_key_style",
+        "touch_nine_key_style",
+        "touch_number_row",
+    ] {
+        assert!(written.get(key).is_none(), "{key}");
+    }
+
+    // 没有这四个键的旧文档读出默认值，读完不改写文件。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let legacy = serde_json::to_vec(&PreferencesSnapshot::default()).unwrap();
+    fs::write(store.path(), &legacy).unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(
+        loaded.touch_twenty_six_key_style,
+        TouchTwentySixKeyStyle::Standard
+    );
+    assert_eq!(
+        loaded.touch_fourteen_key_style,
+        TouchFourteenKeyStyle::Standard
+    );
+    assert_eq!(loaded.touch_nine_key_style, TouchNineKeyStyle::Standard);
+    assert!(!loaded.touch_number_row);
+    assert_eq!(fs::read(store.path()).unwrap(), legacy);
+}
+
+#[test]
+fn touch_key_styles_and_number_row_round_trip_through_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut revision = store.load().unwrap().revision;
+    for (twenty_six, fourteen, nine) in [
+        (
+            TouchTwentySixKeyStyle::CommaPeriod,
+            TouchFourteenKeyStyle::LongSpace,
+            TouchNineKeyStyle::CommaPeriod,
+        ),
+        (
+            TouchTwentySixKeyStyle::LongSpace,
+            TouchFourteenKeyStyle::Emoji,
+            TouchNineKeyStyle::Emoji,
+        ),
+        (
+            TouchTwentySixKeyStyle::Emoji,
+            TouchFourteenKeyStyle::Standard,
+            TouchNineKeyStyle::Standard,
+        ),
+        (
+            TouchTwentySixKeyStyle::Standard,
+            TouchFourteenKeyStyle::Standard,
+            TouchNineKeyStyle::TallReturn,
+        ),
+    ] {
+        let configured = Preferences {
+            touch_twenty_six_key_style: twenty_six,
+            touch_fourteen_key_style: fourteen,
+            touch_nine_key_style: nine,
+            touch_number_row: true,
+            ..Preferences::default()
+        };
+        revision = store.save(revision, configured.clone()).unwrap().revision;
+        let loaded = store.load().unwrap().preferences;
+        assert_eq!(loaded, configured);
+        let written = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(
+            written.get("touch_twenty_six_key_style"),
+            (!twenty_six.is_default())
+                .then(|| twenty_six.as_str().into())
+                .as_ref()
+        );
+        assert_eq!(
+            written.get("touch_nine_key_style"),
+            (!nine.is_default()).then(|| nine.as_str().into()).as_ref()
+        );
+        assert_eq!(written["touch_number_row"], true);
+    }
+}
+
+#[test]
+fn touch_key_style_wire_strings_are_pinned_and_unknown_strings_read_as_standard() {
+    for (style, wire) in [
+        (TouchTwentySixKeyStyle::Standard, "standard"),
+        (TouchTwentySixKeyStyle::CommaPeriod, "comma_period"),
+        (TouchTwentySixKeyStyle::LongSpace, "long_space"),
+        (TouchTwentySixKeyStyle::Emoji, "emoji"),
+    ] {
+        assert_eq!(serde_json::to_value(style).unwrap(), wire);
+        assert_eq!(style.as_str(), wire);
+        assert_eq!(TouchTwentySixKeyStyle::parse(wire), Some(style));
+        assert_eq!(
+            serde_json::from_value::<TouchTwentySixKeyStyle>(wire.into()).unwrap(),
+            style
+        );
+    }
+    for (style, wire) in [
+        (TouchFourteenKeyStyle::Standard, "standard"),
+        (TouchFourteenKeyStyle::LongSpace, "long_space"),
+        (TouchFourteenKeyStyle::Emoji, "emoji"),
+    ] {
+        assert_eq!(serde_json::to_value(style).unwrap(), wire);
+        assert_eq!(style.as_str(), wire);
+        assert_eq!(TouchFourteenKeyStyle::parse(wire), Some(style));
+        assert_eq!(
+            serde_json::from_value::<TouchFourteenKeyStyle>(wire.into()).unwrap(),
+            style
+        );
+    }
+    for (style, wire) in [
+        (TouchNineKeyStyle::Standard, "standard"),
+        (TouchNineKeyStyle::CommaPeriod, "comma_period"),
+        (TouchNineKeyStyle::Emoji, "emoji"),
+        (TouchNineKeyStyle::TallReturn, "tall_return"),
+    ] {
+        assert_eq!(serde_json::to_value(style).unwrap(), wire);
+        assert_eq!(style.as_str(), wire);
+        assert_eq!(TouchNineKeyStyle::parse(wire), Some(style));
+        assert_eq!(
+            serde_json::from_value::<TouchNineKeyStyle>(wire.into()).unwrap(),
+            style
+        );
+    }
+
+    // 不认识的字符串（包括别的键面才有的样式）按现有底行读，整份文档照常读出；不是字符串照样报错。
+    let legacy = serde_json::to_value(Preferences::default()).unwrap();
+    for (key, unknown) in [
+        ("touch_twenty_six_key_style", "split_space"),
+        ("touch_fourteen_key_style", "comma_period"),
+        ("touch_nine_key_style", "long_space"),
+    ] {
+        let mut document = legacy.clone();
+        document[key] = unknown.into();
+        let parsed = serde_json::from_value::<Preferences>(document).unwrap();
+        assert_eq!(parsed, Preferences::default(), "{key} = {unknown}");
+        let mut wrong = legacy.clone();
+        wrong[key] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<Preferences>(wrong).is_err(),
+            "{key}"
+        );
+    }
+    assert_eq!(TouchFourteenKeyStyle::parse("comma_period"), None);
+    assert_eq!(TouchNineKeyStyle::parse("long_space"), None);
+    let mut wrong = legacy;
+    wrong["touch_number_row"] = "true".into();
+    assert!(serde_json::from_value::<Preferences>(wrong).is_err());
 }
 
 #[test]
@@ -197,6 +531,50 @@ fn backspace_selection_preference_keeps_legacy_default_and_persists_disabled() {
         serde_json::to_value(&saved.preferences).unwrap()["backspace_reverts_selection"],
         false
     );
+}
+
+/// 「移动光标后编辑光标后的部分」默认关：关着时不写进文档，缺这个键的旧文档读作关，打开后存下来、读回来仍是开。
+#[test]
+fn caret_edit_suffix_defaults_off_and_persists_when_enabled() {
+    let defaults = Preferences::default();
+    assert!(!defaults.caret_edit_suffix);
+    let legacy = serde_json::to_value(&defaults).unwrap();
+    assert!(legacy.get("caret_edit_suffix").is_none());
+    assert!(
+        !serde_json::from_value::<Preferences>(legacy.clone())
+            .unwrap()
+            .caret_edit_suffix
+    );
+    let mut malformed = legacy;
+    malformed["caret_edit_suffix"] = "true".into();
+    assert!(serde_json::from_value::<Preferences>(malformed).is_err());
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let enabled = Preferences {
+        caret_edit_suffix: true,
+        ..defaults
+    };
+    let saved = store.save(0, enabled).unwrap();
+    assert!(saved.preferences.caret_edit_suffix);
+    assert!(store.load().unwrap().preferences.caret_edit_suffix);
+    assert_eq!(
+        serde_json::to_value(&saved.preferences).unwrap()["caret_edit_suffix"],
+        true
+    );
+    let restored = store
+        .save(
+            saved.revision,
+            Preferences {
+                caret_edit_suffix: false,
+                ..saved.preferences
+            },
+        )
+        .unwrap();
+    assert!(serde_json::to_value(&restored.preferences)
+        .unwrap()
+        .get("caret_edit_suffix")
+        .is_none());
 }
 
 #[cfg(unix)]
@@ -1048,6 +1426,58 @@ fn candidate_translation_display_defaults_follow_windows_factory_config() {
 }
 
 #[test]
+fn candidate_translation_scope_defaults_to_highlighted_for_new_and_legacy_documents() {
+    use crate::preferences::CandidateTranslationScope;
+    let defaults = Preferences::default();
+    assert_eq!(
+        defaults.candidate_translation_scope,
+        CandidateTranslationScope::Highlighted
+    );
+    let written = serde_json::to_value(&defaults).unwrap();
+    assert_eq!(written["candidate_translation_scope"], "highlighted");
+
+    // 没有这个键的旧文档（候选词翻译开着的老用户）同样读成「仅当前高亮」。
+    let mut legacy = written.clone();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("candidate_translation_scope");
+    legacy["candidate_translations"] = serde_json::json!(true);
+    let parsed = serde_json::from_value::<Preferences>(legacy).unwrap();
+    assert!(parsed.candidate_translations);
+    assert_eq!(
+        parsed.candidate_translation_scope,
+        CandidateTranslationScope::Highlighted
+    );
+
+    // 显式选的「全部」原样往返；不认识的值按默认读，不让整份偏好读不出来。
+    for (raw, expected) in [
+        ("all", CandidateTranslationScope::All),
+        ("highlighted", CandidateTranslationScope::Highlighted),
+        ("every_page", CandidateTranslationScope::Highlighted),
+    ] {
+        let mut document = written.clone();
+        document["candidate_translation_scope"] = serde_json::json!(raw);
+        let parsed = serde_json::from_value::<Preferences>(document).unwrap();
+        assert_eq!(parsed.candidate_translation_scope, expected, "{raw}");
+    }
+    let all = Preferences {
+        candidate_translation_scope: CandidateTranslationScope::All,
+        ..defaults
+    };
+    let round_tripped =
+        serde_json::from_str::<Preferences>(&serde_json::to_string(&all).unwrap()).unwrap();
+    assert_eq!(
+        round_tripped.candidate_translation_scope,
+        CandidateTranslationScope::All
+    );
+    // 类型不对照样报错，和其他字段一致。
+    let mut wrong = written;
+    wrong["candidate_translation_scope"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<Preferences>(wrong).is_err());
+}
+
+#[test]
 fn candidate_badge_defaults_follow_windows_factory_config() {
     let defaults = Preferences::default();
     assert!(defaults.candidate_fixed_badge);
@@ -1140,6 +1570,80 @@ fn usage_reporting_defaults_on_and_survives_a_save() {
     let saved = store.save(0, disabled).unwrap();
     assert!(!saved.preferences.usage_reporting);
     assert!(!store.load().unwrap().preferences.usage_reporting);
+}
+
+#[test]
+fn update_channel_defaults_to_stable_and_reads_unknown_values_as_stable() {
+    let defaults = Preferences::default();
+    assert_eq!(defaults.update_channel, UpdateChannel::Stable);
+    // 等于默认值时不写进文档，旧版本读到的文档和以前一样。
+    let serialized = serde_json::to_value(&defaults).unwrap();
+    assert!(serialized.get("update_channel").is_none());
+    assert_eq!(
+        serde_json::from_value::<Preferences>(serialized.clone())
+            .unwrap()
+            .update_channel,
+        UpdateChannel::Stable
+    );
+    for (value, expected) in [
+        ("beta", UpdateChannel::Beta),
+        ("nightly", UpdateChannel::Nightly),
+        ("stable", UpdateChannel::Stable),
+        // 以后的版本加的通道、手改的值：按稳定版读，整份偏好照常读出来。
+        ("canary", UpdateChannel::Stable),
+        ("Beta", UpdateChannel::Stable),
+        ("", UpdateChannel::Stable),
+    ] {
+        let mut document = serialized.clone();
+        document["update_channel"] = value.into();
+        assert_eq!(
+            serde_json::from_value::<Preferences>(document)
+                .unwrap()
+                .update_channel,
+            expected,
+            "{value}"
+        );
+    }
+    let mut malformed = serialized;
+    malformed["update_channel"] = 1.into();
+    assert!(serde_json::from_value::<Preferences>(malformed).is_err());
+
+    let nightly = Preferences {
+        update_channel: UpdateChannel::Nightly,
+        ..Preferences::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&nightly).unwrap()["update_channel"],
+        "nightly"
+    );
+    assert!(nightly.validate().is_ok());
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    store.save(0, nightly).unwrap();
+    assert_eq!(
+        store.load().unwrap().preferences.update_channel,
+        UpdateChannel::Nightly
+    );
+    // 恢复默认设置回到稳定版。
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .preferences
+            .restored_to_defaults()
+            .update_channel,
+        UpdateChannel::Stable
+    );
+
+    assert_eq!(UpdateChannel::parse("beta"), Some(UpdateChannel::Beta));
+    assert_eq!(UpdateChannel::parse("canary"), None);
+    for channel in [
+        UpdateChannel::Stable,
+        UpdateChannel::Beta,
+        UpdateChannel::Nightly,
+    ] {
+        assert_eq!(UpdateChannel::parse(channel.as_str()), Some(channel));
+    }
 }
 
 #[test]
@@ -1272,6 +1776,20 @@ fn candidate_translations_keep_legacy_and_explicit_choices() {
         assert_eq!(store.load().unwrap(), current);
         assert_eq!(current.preferences.candidate_translations, enabled);
     }
+}
+
+#[test]
+fn voice_provider_defaults_to_the_offline_local_model() {
+    // 出厂识别服务是本地模型：音频不离开设备、不需要 API Key。出厂文档本身要能通过校验。
+    let defaults = Preferences::default();
+    assert_eq!(defaults.voice_input.asr_provider, "local");
+    defaults.validate().expect("factory preferences validate");
+    // 只改出厂值：旧版本写下的 `doubao` 原样保留，不迁移。
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy["voice_input"]["asr_provider"] = "doubao".into();
+    let legacy = serde_json::from_value::<Preferences>(legacy).unwrap();
+    assert_eq!(legacy.voice_input.asr_provider, "doubao");
+    legacy.validate().expect("a stored doubao choice validates");
 }
 
 #[test]
@@ -1510,6 +2028,7 @@ fn diagnostic_logging_defaults_off_and_survives_a_round_trip() {
         diagnostic_log: DiagnosticLogPreferences {
             server: true,
             tsf: false,
+            command_line_candidates: false,
         },
         ..Preferences::default()
     };
@@ -1528,7 +2047,31 @@ fn diagnostic_logging_defaults_off_and_survives_a_round_trip() {
 }
 
 #[test]
-fn fuzzy_pinyin_preserves_disabled_rules_and_rejects_unknown_ids() {
+fn command_line_candidates_stay_off_until_the_user_turns_them_on() {
+    // 新装和加这一项之前写下的文档都关着：命令行查候选会交出用户的词库，不能因为升级就打开。
+    assert!(
+        !Preferences::default()
+            .diagnostic_log
+            .command_line_candidates
+    );
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["diagnostic_log"] = serde_json::json!({ "server": true, "tsf": false });
+    let legacy: Preferences = serde_json::from_value(document).unwrap();
+    assert!(legacy.diagnostic_log.server);
+    assert!(!legacy.diagnostic_log.command_line_candidates);
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut preferences = Preferences::default();
+    preferences.diagnostic_log.command_line_candidates = true;
+    store.save(0, preferences).unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert!(loaded.diagnostic_log.command_line_candidates);
+    assert!(!loaded.diagnostic_log.server && !loaded.diagnostic_log.tsf);
+}
+
+#[test]
+fn fuzzy_pinyin_preserves_disabled_rules_and_reads_past_unknown_ids() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
     let rules = [FuzzyPinyinRule::ZZh, FuzzyPinyinRule::FH]
@@ -1562,7 +2105,16 @@ fn fuzzy_pinyin_preserves_disabled_rules_and_rejects_unknown_ids() {
     assert_eq!(store.load().unwrap(), enabled);
 
     let mut invalid = serde_json::to_value(enabled.preferences).unwrap();
+    // 更新的版本加的规则读入时丢掉（存储保存时接回，见 newer_list_values_survive_a_save），不是字符串的仍然拒绝。
     invalid["fuzzy_pinyin"]["rules"] = serde_json::json!(["z-zh", "unsupported"]);
+    assert_eq!(
+        serde_json::from_value::<Preferences>(invalid.clone())
+            .unwrap()
+            .fuzzy_pinyin
+            .rules,
+        [FuzzyPinyinRule::ZZh].into_iter().collect()
+    );
+    invalid["fuzzy_pinyin"]["rules"] = serde_json::json!(["z-zh", 3]);
     assert!(serde_json::from_value::<Preferences>(invalid).is_err());
 }
 
@@ -1963,11 +2515,17 @@ fn mixed_symbols_defaults_on() {
     assert!(!mixed.symbols);
 }
 
-/// 辅助码开关（Windows v0.11.1 出厂关、门禁 pin 出厂开）本仓出厂值为开，缺键读作开；差异已记录。文档里写明的值原样生效。
+/// 全拼辅助码默认开、双拼默认关；已有对象缺开关时仍读作开，写明的值原样生效。
 #[test]
-fn helpcode_enabled_defaults_on() {
+fn helpcode_enabled_defaults_by_family() {
     assert!(HelpcodePreferences::default().enabled);
-    assert!(default_quanpin_helpcode().enabled && default_shuangpin_helpcode().enabled);
+    let preferences = Preferences::default();
+    assert!(preferences.quanpin_helpcode.enabled);
+    assert!(!preferences.shuangpin_helpcode.enabled);
+    let mut value = serde_json::to_value(&preferences).unwrap();
+    value.as_object_mut().unwrap().remove("shuangpin_helpcode");
+    let missing: Preferences = serde_json::from_value(value).unwrap();
+    assert!(!missing.shuangpin_helpcode.enabled);
     let mut value = serde_json::to_value(default_shuangpin_helpcode()).unwrap();
     value.as_object_mut().unwrap().remove("enabled");
     let helpcode: HelpcodePreferences = serde_json::from_value(value).unwrap();
@@ -3552,6 +4110,51 @@ fn vietnamese_preferences_default_when_absent_and_round_trip() {
 }
 
 #[test]
+fn korean_layout_loads_legacy_files_and_roundtrips_romaja() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    document["preferences"]
+        .as_object_mut()
+        .unwrap()
+        .remove("korean");
+    let bytes = serde_json::to_vec(&document).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.preferences.korean.layout, KoreanLayout::Dubeolsik);
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    let mut preferences = loaded.preferences;
+    preferences.korean.layout = KoreanLayout::Romaja;
+    let saved = store.save(loaded.revision, preferences).unwrap();
+    assert_eq!(store.load().unwrap(), saved);
+    assert_eq!(
+        serde_json::to_value(saved.preferences).unwrap()["korean"]["layout"],
+        "romaja"
+    );
+}
+
+#[test]
+fn korean_unknown_disk_layout_falls_back_without_resetting_other_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    document["preferences"]["korean"] =
+        serde_json::json!({ "layout": "future", "future_option": true });
+    document["preferences"]["candidate_page_size"] = 4.into();
+    let bytes = serde_json::to_vec(&document).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.preferences.korean.layout, KoreanLayout::Dubeolsik);
+    assert_eq!(loaded.preferences.candidate_page_size, 4);
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    store.save(loaded.revision, loaded.preferences).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(saved["preferences"]["korean"]["future_option"], true);
+    assert!(serde_json::from_value::<Preferences>(document["preferences"].clone()).is_err());
+}
+
+#[test]
 fn vietnamese_preferences_reject_unknown_members_and_values() {
     // 多出的成员是更新版本的设置，记为未知键；未知的取值仍然拒绝。
     let mut document = serde_json::to_value(Preferences::default()).unwrap();
@@ -3692,12 +4295,22 @@ fn touch_keyboard_scheme_visibility_matches_apple_order_and_fallback_contract() 
         assert_eq!(fs::read(store.path()).unwrap(), bytes);
     }
 
+    // 更新的版本启用的方案读入时丢掉，文件不动；见 newer_list_values_survive_a_save。
     let mut unknown = serde_json::to_value(&saved).unwrap();
     unknown["preferences"]["touch_keyboard_schemes"]["enabled"] =
         serde_json::json!(["nine_key", "future_scheme"]);
+    unknown["preferences"]["touch_keyboard_schemes"]["selected"] = serde_json::json!("nine_key");
     let bytes = serde_json::to_vec(&unknown).unwrap();
     fs::write(store.path(), &bytes).unwrap();
-    assert!(store.load().is_err());
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded.preferences.touch_keyboard_schemes.enabled,
+        [TouchKeyboardScheme::NineKey].into_iter().collect()
+    );
+    assert_eq!(
+        loaded.preferences.touch_keyboard_schemes.selected,
+        Some(TouchKeyboardScheme::NineKey)
+    );
     assert_eq!(fs::read(store.path()).unwrap(), bytes);
 }
 
@@ -3807,9 +4420,10 @@ fn cantonese_zhuyin_and_vietnamese_touch_schemes_are_appended_and_opt_in() {
             TouchKeyboardScheme::FourteenKey,
             TouchKeyboardScheme::NineKeyShuangpin,
             TouchKeyboardScheme::EighteenKey,
+            TouchKeyboardScheme::CantoneseShuangpin,
         ]
     );
-    assert_eq!(TouchKeyboardScheme::ALL.len(), 20);
+    assert_eq!(TouchKeyboardScheme::ALL.len(), 21);
     // 全拼 14 键和九键双拼也不在以前的默认列表里，没存列表的旧文档不会凭空多出它们。
     for scheme in [
         TouchKeyboardScheme::FourteenKey,
@@ -3819,6 +4433,10 @@ fn cantonese_zhuyin_and_vietnamese_touch_schemes_are_appended_and_opt_in() {
     }
     for (scheme, id) in [
         (TouchKeyboardScheme::Cantonese, "cantonese"),
+        (
+            TouchKeyboardScheme::CantoneseShuangpin,
+            "cantonese_shuangpin",
+        ),
         (TouchKeyboardScheme::Zhuyin, "zhuyin"),
         (TouchKeyboardScheme::Vietnamese, "vietnamese"),
         (TouchKeyboardScheme::Tibetan, "tibetan"),
@@ -4261,6 +4879,7 @@ fn helpcode_legacy_defaults_and_independent_schemes_roundtrip() {
                 enabled: false,
                 schema,
                 show_in_candidate_window: true,
+                strict_filter: false,
                 modes: ShuangpinHelpcodeModes::default(),
             },
             ..Preferences::default()
@@ -5685,6 +6304,43 @@ fn error_wordings_the_harmony_host_matches_on() {
             .to_string()
             .starts_with("invalid preferences document:")
     );
+    // Windows 设置页（`platforms/windows/settings/PreferencesSaveFailure.h`）按这个前缀认出写盘失败：保留页面上的修改并稍后重试，而不是当成别处改过设置去重读。
+    assert!(PreferencesError::Io(std::io::Error::from_raw_os_error(5))
+        .to_string()
+        .starts_with("preferences storage failed:"));
+}
+
+/// 杀毒软件、备份工具常常不带删除共享地打开 preferences.json 几毫秒，Windows 上这期间替换会被拒绝。保存要等它过去，而不是失败后让设置页重读旧值、丢掉用户刚做的修改。
+#[cfg(windows)]
+#[test]
+fn save_waits_for_a_reader_that_briefly_holds_the_document_open() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let saved = store.save(0, Preferences::default()).unwrap();
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(store.path())
+        .unwrap();
+    let releasing = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(reader);
+    });
+    // 换成另一个合法的页大小，保存一定会写盘。
+    let page_size = saved.preferences.candidate_page_size % 10 + 1;
+    let edited = Preferences {
+        candidate_page_size: page_size,
+        ..saved.preferences.clone()
+    };
+    let resaved = store.save(saved.revision, edited).unwrap();
+    releasing.join().unwrap();
+    assert_eq!(resaved.revision, saved.revision + 1);
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.revision, resaved.revision);
+    assert_eq!(loaded.preferences.candidate_page_size, page_size);
 }
 
 /// A restore puts every setting back and costs the user no secret.
@@ -7000,6 +7656,158 @@ fn cloud_clipboard_relay_is_both_or_nothing_and_left_out_until_configured() {
     assert!(back.cloud_clipboard_relay.is_configured());
 }
 
+/// WebDAV 网盘的三项要么都空，要么都合规；与中继只能二选一；没配置时不写进文档。
+#[test]
+fn cloud_clipboard_webdav_is_all_or_nothing_and_exclusive_with_the_relay() {
+    let defaults = Preferences::default();
+    let document = serde_json::to_value(&defaults).unwrap();
+    assert!(document.get("cloud_clipboard_webdav").is_none());
+    assert!(!defaults.cloud_clipboard_webdav.is_configured());
+
+    let configured = |url: &str, username: &str, password: &str| {
+        let mut preferences = Preferences::default();
+        preferences.cloud_clipboard_webdav.url = url.into();
+        preferences.cloud_clipboard_webdav.username = username.into();
+        preferences.cloud_clipboard_webdav.password = password.into();
+        preferences
+    };
+    let user = "synthetic@example.test";
+    let password = "synthetic-app-password";
+    let long = "u".repeat(257);
+    for (url, username, password, valid) in [
+        ("https://dav.example.test/dav/msime", user, password, true),
+        ("https://dav.example.test/dav/", user, password, true),
+        ("http://127.0.0.1:8080/dav", user, password, true),
+        ("http://dav.example.test/dav", user, password, false),
+        (
+            "https://user:secret@dav.example.test/dav",
+            user,
+            password,
+            false,
+        ),
+        ("https://dav.example.test/dav?x=1", user, password, false),
+        ("https://dav.example.test/dav", "", password, false),
+        ("https://dav.example.test/dav", "has:colon", password, false),
+        ("https://dav.example.test/dav", "bad\u{7}", password, false),
+        ("https://dav.example.test/dav", user, "", false),
+        ("https://dav.example.test/dav", user, "bad\n", false),
+        (
+            "https://dav.example.test/dav",
+            long.as_str(),
+            password,
+            false,
+        ),
+        ("", user, password, false),
+    ] {
+        let preferences = configured(url, username, password);
+        assert_eq!(
+            preferences.validate().is_ok(),
+            valid,
+            "{url} {username}: {:?}",
+            preferences.validate()
+        );
+        if !valid {
+            assert!(matches!(
+                preferences.validate(),
+                Err(PreferencesError::InvalidCloudClipboardWebDav)
+            ));
+        }
+    }
+
+    // 配置了中继就不能再配置网盘。
+    let mut both = configured("https://dav.example.test/dav", user, password);
+    both.cloud_clipboard_relay.url = "https://relay.example.test".into();
+    both.cloud_clipboard_relay.token = "synthetic-relay-token".into();
+    assert!(matches!(
+        both.validate(),
+        Err(PreferencesError::InvalidCloudClipboardWebDav)
+    ));
+
+    let preferences = configured("https://dav.example.test/dav", user, password);
+    let text = serde_json::to_string(&preferences).unwrap();
+    let back: Preferences = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        back.cloud_clipboard_webdav,
+        preferences.cloud_clipboard_webdav
+    );
+
+    // 诊断快照里账号和密码都换掉，地址只留协议、主机和路径。
+    let mut preferences = preferences;
+    preferences.cloud_clipboard_webdav.url = "https://dav.example.test/dav?token=secret".into();
+    let redacted = preferences.redacted_for_diagnostics();
+    assert_eq!(redacted["cloud_clipboard_webdav"]["username"], REDACTED);
+    assert_eq!(redacted["cloud_clipboard_webdav"]["password"], REDACTED);
+    assert_eq!(
+        redacted["cloud_clipboard_webdav"]["url"],
+        "https://dav.example.test/dav"
+    );
+    assert!(!redacted.to_string().contains("synthetic"));
+}
+
+/// 词库同步的网盘与云剪贴板的网盘各配各的：三项要么都空、要么都合规，没配置时不写进文档；应用密码进凭据清单，诊断快照里账号和密码都换掉；恢复默认设置时保留。
+#[test]
+fn dictionary_sync_webdav_is_all_or_nothing_redacted_and_kept_on_reset() {
+    let defaults = Preferences::default();
+    assert!(serde_json::to_value(&defaults)
+        .unwrap()
+        .get("dictionary_sync_webdav")
+        .is_none());
+    let configured = |url: &str, username: &str, password: &str| {
+        let mut preferences = Preferences::default();
+        preferences.dictionary_sync_webdav.url = url.into();
+        preferences.dictionary_sync_webdav.username = username.into();
+        preferences.dictionary_sync_webdav.password = password.into();
+        preferences
+    };
+    let user = "synthetic@example.test";
+    let password = "synthetic-app-password";
+    for (url, username, password, valid) in [
+        ("https://dav.example.test/dav/", user, password, true),
+        ("http://127.0.0.1:8080/dav", user, password, true),
+        ("http://dav.example.test/dav", user, password, false),
+        ("https://dav.example.test/dav?x=1", user, password, false),
+        ("https://dav.example.test/dav", "has:colon", password, false),
+        ("https://dav.example.test/dav", user, "", false),
+        ("", user, password, false),
+    ] {
+        let preferences = configured(url, username, password);
+        assert_eq!(preferences.validate().is_ok(), valid, "{url} {username}");
+        if !valid {
+            assert!(matches!(
+                preferences.validate(),
+                Err(PreferencesError::InvalidDictionarySyncWebDav)
+            ));
+        }
+    }
+    // 与云剪贴板的网盘、中继同时配置也可以：各走各的。
+    let mut both = configured("https://dav.example.test/dav", user, password);
+    both.cloud_clipboard_webdav = CloudClipboardWebDavPreferences {
+        url: "https://dav.example.test/dav".into(),
+        username: user.into(),
+        password: password.into(),
+    };
+    assert!(both.validate().is_ok());
+
+    let mut preferences = configured("https://dav.example.test/dav?token=secret", user, password);
+    let redacted = preferences.redacted_for_diagnostics();
+    assert_eq!(redacted["dictionary_sync_webdav"]["username"], REDACTED);
+    assert_eq!(redacted["dictionary_sync_webdav"]["password"], REDACTED);
+    assert_eq!(
+        redacted["dictionary_sync_webdav"]["url"],
+        "https://dav.example.test/dav"
+    );
+    assert!(!redacted.to_string().contains("synthetic"));
+    assert!(preferences
+        .credential_slots()
+        .iter()
+        .any(|(path, _)| *path == "dictionary_sync_webdav.password"));
+    preferences.dictionary_sync_webdav.url = "https://dav.example.test/dav".into();
+    assert_eq!(
+        preferences.restored_to_defaults().dictionary_sync_webdav,
+        preferences.dictionary_sync_webdav
+    );
+}
+
 // 引号样式与方头括号样式缺省是弯引号、实心，等于缺省时不写进文档；三种引号样式和两种括号样式都能保存读回，不认识的取值让整份文档解析失败。
 #[test]
 fn punctuation_styles_default_omitted_roundtrip_and_reject_unknown_values() {
@@ -7167,10 +7975,13 @@ fn settings_from_a_newer_build_are_read_and_kept_through_a_save() {
     let restored = store.restore_defaults(written.revision).unwrap();
     let on_disk: serde_json::Value =
         serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
-    assert_eq!(
-        on_disk["preferences"],
-        serde_json::to_value(&restored.preferences).unwrap()
-    );
+    let mut expected = serde_json::to_value(&restored.preferences).unwrap();
+    // 默认的文本编辑排列不写进文件（见 a_default_text_edit_order_is_left_out_of_the_file）。
+    expected
+        .as_object_mut()
+        .unwrap()
+        .remove("touch_text_edit_button_order");
+    assert_eq!(on_disk["preferences"], expected);
 }
 
 /// 未知键的父对象这次因为取默认值没有写出时不重建它：只凭一个未知键写出半个已知对象，读它的版本会缺字段。父对象写出时照常放回，本版本已有同名键时以本版本为准。
@@ -7179,6 +7990,7 @@ fn an_unknown_key_goes_back_only_into_a_written_section() {
     let unknown = vec![UnknownPreferenceField {
         path: vec!["section".into(), "from_a_newer_build".into()],
         value: true.into(),
+        elements: false,
     }];
     let mut preferences = serde_json::json!({});
     restore_unknown_fields(&mut preferences, &unknown);
@@ -7520,12 +8332,12 @@ fn text_edit_button_order_round_trips_and_restores_defaults() {
 }
 
 #[test]
-fn text_edit_button_order_rejects_missing_duplicate_and_unknown_actions() {
+fn text_edit_button_order_is_strict_on_save_and_tolerant_on_read() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
     for order in [
         vec![],
-        vec![TextEditButton::Copy; 7],
+        vec![TextEditButton::Copy; 8],
         default_text_edit_button_order()[..6].to_vec(),
     ] {
         let preferences = Preferences {
@@ -7538,8 +8350,1094 @@ fn text_edit_button_order_rejects_missing_duplicate_and_unknown_actions() {
         ));
         assert_eq!(store.load().unwrap().revision, 0);
     }
+    // 读进来的文档放宽：不认识的动作丢掉、缺的补上，见 text_edit_button_order_reads_any_list_it_is_given。
     let mut unknown = serde_json::to_value(Preferences::default()).unwrap();
-    unknown["touch_text_edit_button_order"][6] = serde_json::json!("return");
-    let error = serde_json::from_value::<Preferences>(unknown).unwrap_err();
-    assert!(error.to_string().contains("unknown variant `return`"));
+    unknown["touch_text_edit_button_order"][7] = serde_json::json!("return");
+    let read = serde_json::from_value::<Preferences>(unknown.clone()).unwrap();
+    assert_eq!(
+        read.touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+    read.validate().unwrap();
+    // 提交来保存的偏好不放宽：不认识、重复和缺的动作都拒绝。
+    assert!(matches!(
+        Preferences::from_submission(unknown),
+        Err(PreferencesError::Json(_))
+    ));
+    for order in [
+        serde_json::json!([
+            "copy",
+            "copy",
+            "paste",
+            "select_all",
+            "cut",
+            "space",
+            "number_pad",
+            "delete"
+        ]),
+        serde_json::json!([
+            "copy",
+            "paste",
+            "select_all",
+            "cut",
+            "space",
+            "number_pad",
+            "delete"
+        ]),
+        serde_json::json!([]),
+    ] {
+        let mut submitted = serde_json::to_value(Preferences::default()).unwrap();
+        submitted["touch_text_edit_button_order"] = order.clone();
+        assert!(
+            matches!(
+                Preferences::from_submission(submitted),
+                Err(PreferencesError::InvalidTextEditButtonOrder)
+            ),
+            "{order}"
+        );
+    }
+}
+
+// 保存接口收到的偏好出自本版本的宿主或设置页：读盘时为别的版本放宽的几处在这里照旧严格，名字和 Rust 对不上要报出来，而不是整理掉再存下。
+#[test]
+fn submitted_preferences_are_parsed_strictly() {
+    let base = serde_json::to_value(Preferences {
+        touch_text_edit_button_order: vec![
+            TextEditButton::SelectLine,
+            TextEditButton::Delete,
+            TextEditButton::Copy,
+            TextEditButton::Paste,
+            TextEditButton::SelectAll,
+            TextEditButton::Cut,
+            TextEditButton::Space,
+            TextEditButton::NumberPad,
+        ],
+        ..Preferences::default()
+    })
+    .unwrap();
+    let accepted = Preferences::from_submission(base.clone()).unwrap();
+    assert_eq!(
+        accepted,
+        serde_json::from_value::<Preferences>(base.clone()).unwrap()
+    );
+    // 没带排列时取默认排列，与读盘相同。
+    let mut without_order = base.clone();
+    without_order
+        .as_object_mut()
+        .unwrap()
+        .remove("touch_text_edit_button_order");
+    assert_eq!(
+        Preferences::from_submission(without_order)
+            .unwrap()
+            .touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+    // 退役的高情商回复照旧在读入时迁移掉，不算不认识的名字。
+    let mut retired = base.clone();
+    retired["touch_keyboard_schemes"] = serde_json::json!({"enabled": ["quanpin", "thoughtful_reply"], "selected": "thoughtful_reply"});
+    Preferences::from_submission(retired).unwrap();
+    for (pointer, value) in [
+        (
+            "/touch_keyboard_schemes",
+            serde_json::json!({"enabled": ["quanpin", "typo"]}),
+        ),
+        (
+            "/touch_keyboard_schemes",
+            serde_json::json!({"enabled": ["quanpin"], "selected": "typo"}),
+        ),
+        (
+            "/fuzzy_pinyin",
+            serde_json::json!({"enabled": true, "rules": ["z-zh", "typo"], "seeded": true}),
+        ),
+    ] {
+        let mut submitted = base.clone();
+        *submitted.pointer_mut(pointer).unwrap() = value.clone();
+        // 同一份内容读盘时读得进来。
+        serde_json::from_value::<Preferences>(submitted.clone()).unwrap();
+        assert!(
+            matches!(
+                Preferences::from_submission(submitted),
+                Err(PreferencesError::Json(_))
+            ),
+            "{value}"
+        );
+    }
+}
+
+// 排列等于默认排列时不写进文件：已经发出去的 Android 0.6.0、HarmonyOS 0.3.0-beta、macOS 0.55.0、Linux 0.14.0 只认识七个动作，读到带「选择行」的排列会整份读不了；它们给这个键配了默认值（见那几个标签上的 `#[serde(default = "default_text_edit_button_order")]`），缺这个键时用自己的七个动作。排过顺序的排列照常写出。
+#[test]
+fn a_default_text_edit_order_is_left_out_of_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let written = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap()
+    };
+    let saved = store.save(0, Preferences::default()).unwrap();
+    assert!(written()["preferences"]
+        .get("touch_text_edit_button_order")
+        .is_none());
+    assert_eq!(store.load().unwrap(), saved);
+    // 经 FFI 交给宿主的快照照旧带着完整排列。
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["preferences"]["touch_text_edit_button_order"],
+        serde_json::to_value(default_text_edit_button_order()).unwrap()
+    );
+    let mut customized = saved.preferences.clone();
+    customized.touch_text_edit_button_order.reverse();
+    let saved = store.save(saved.revision, customized.clone()).unwrap();
+    assert_eq!(
+        written()["preferences"]["touch_text_edit_button_order"],
+        serde_json::to_value(&customized.touch_text_edit_button_order).unwrap()
+    );
+    assert_eq!(store.load().unwrap(), saved);
+    // 已发布版本写下的七个动作补齐后就是默认排列：本版本存一次，文件里不再有这个键，那个版本读回去照样读得了。
+    for (release, document) in RELEASED_DOCUMENTS {
+        fs::write(store.path(), document).unwrap();
+        let loaded = store.load().unwrap();
+        let mut changed = loaded.preferences.clone();
+        changed.candidate_page_size = 7;
+        store.save(loaded.revision, changed).unwrap();
+        assert!(
+            written()["preferences"]
+                .get("touch_text_edit_button_order")
+                .is_none(),
+            "{release}"
+        );
+    }
+}
+#[test]
+fn android_keyboard_skin_slots_round_trip_without_changing_legacy_theme() {
+    let mut preferences = Preferences {
+        global_theme: crate::theme::GlobalTheme::Night,
+        android_keyboard_skin_light: Some("theme:paper".into()),
+        android_keyboard_skin_dark: Some("design:synthetic-night".into()),
+        ..Preferences::default()
+    };
+    preferences.validate().unwrap();
+    let decoded: Preferences =
+        serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+    assert_eq!(
+        decoded.android_keyboard_skin_light.as_deref(),
+        Some("theme:paper")
+    );
+    assert_eq!(
+        decoded.android_keyboard_skin_dark.as_deref(),
+        Some("design:synthetic-night")
+    );
+    assert_eq!(decoded.global_theme, crate::theme::GlobalTheme::Night);
+
+    let mut legacy = serde_json::to_value(&preferences).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("android_keyboard_skin_light");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("android_keyboard_skin_dark");
+    let decoded: Preferences = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.android_keyboard_skin_light, None);
+    assert_eq!(decoded.android_keyboard_skin_dark, None);
+
+    preferences.android_keyboard_skin_dark = Some("design:invalid\nvalue".into());
+    assert!(preferences.validate().is_err());
+    preferences.android_keyboard_skin_dark = Some("theme:native".into());
+    assert!(preferences.validate().is_err());
+    preferences.android_keyboard_skin_dark = Some(format!("design:{}", "x".repeat(129)));
+    assert!(preferences.validate().is_err());
+}
+
+#[test]
+fn text_edit_button_order_saved_before_select_line_still_loads() {
+    // 选择行之前保存的文档只列七个动作，用户排过的顺序保留，缺的动作接在末尾。
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut document = serde_json::json!({
+        "format_version": 1, "revision": 3,
+        "preferences": serde_json::to_value(Preferences::default()).unwrap()
+    });
+    document["preferences"]["touch_text_edit_button_order"] = serde_json::json!([
+        "delete",
+        "copy",
+        "paste",
+        "select_all",
+        "cut",
+        "space",
+        "number_pad"
+    ]);
+    fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+    use TextEditButton::*;
+    let snapshot = store.load().unwrap();
+    assert_eq!(snapshot.revision, 3);
+    assert_eq!(
+        snapshot.preferences.touch_text_edit_button_order,
+        vec![Delete, Copy, Paste, SelectAll, Cut, Space, NumberPad, SelectLine]
+    );
+    // 重复的动作只留第一次出现的位置，补成完整排列，不再让整份偏好读不了。
+    document["preferences"]["touch_text_edit_button_order"] = serde_json::json!([
+        "copy",
+        "copy",
+        "paste",
+        "select_all",
+        "cut",
+        "space",
+        "number_pad",
+        "delete"
+    ]);
+    fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .preferences
+            .touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+}
+
+#[test]
+fn candidate_status_defaults_on_and_can_be_disabled_without_changing_preedit() {
+    assert!(Preferences::default().show_candidate_status);
+    let mut value = serde_json::to_value(Preferences::default()).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("show_candidate_status");
+    let mut preferences: Preferences = serde_json::from_value(value).unwrap();
+    assert!(preferences.show_candidate_status);
+    preferences.show_candidate_status = false;
+    let restored: Preferences =
+        serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+    assert!(!restored.show_candidate_status);
+    assert_eq!(
+        restored.candidate_preedit_style,
+        Preferences::default().candidate_preedit_style
+    );
+}
+
+/// 写一份 `{"format_version": 1, "revision": 5, "preferences": ...}` 到存储的文件，返回写下的字节。
+fn write_document(store: &PreferencesStore, preferences: serde_json::Value) -> Vec<u8> {
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "format_version": 1,
+        "revision": 5,
+        "preferences": preferences,
+    }))
+    .unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn text_edit_button_order_reads_any_list_it_is_given() {
+    use TextEditButton::*;
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    for (stored, expected) in [
+        // v0.6.0 之前的版本写的七个动作，用户排过顺序：选择行接在末尾。
+        (
+            serde_json::json!([
+                "delete",
+                "copy",
+                "paste",
+                "select_all",
+                "cut",
+                "space",
+                "number_pad"
+            ]),
+            vec![
+                Delete, Copy, Paste, SelectAll, Cut, Space, NumberPad, SelectLine,
+            ],
+        ),
+        // 现在的八个动作原样读入。
+        (
+            serde_json::json!([
+                "select_line",
+                "delete",
+                "copy",
+                "paste",
+                "select_all",
+                "cut",
+                "space",
+                "number_pad"
+            ]),
+            vec![
+                SelectLine, Delete, Copy, Paste, SelectAll, Cut, Space, NumberPad,
+            ],
+        ),
+        // 更新的版本加的动作丢掉，其余的位置不变。
+        (
+            serde_json::json!([
+                "paste",
+                "select_word",
+                "copy",
+                "select_all",
+                "cut",
+                "space",
+                "number_pad",
+                "delete",
+                "select_line"
+            ]),
+            vec![
+                Paste, Copy, SelectAll, Cut, Space, NumberPad, Delete, SelectLine,
+            ],
+        ),
+        // 重复的只留第一次出现的位置，缺的按默认先后补上。
+        (
+            serde_json::json!(["cut", "copy", "cut", "cut"]),
+            vec![
+                Cut, Copy, Paste, SelectAll, Space, NumberPad, Delete, SelectLine,
+            ],
+        ),
+        // 空列表和不是字符串的元素：回到默认排列。
+        (serde_json::json!([]), default_text_edit_button_order()),
+        (
+            serde_json::json!([7, null, {"copy": true}, "delete"]),
+            vec![
+                Delete, Copy, Paste, SelectAll, Cut, Space, NumberPad, SelectLine,
+            ],
+        ),
+    ] {
+        let mut preferences = serde_json::to_value(Preferences::default()).unwrap();
+        preferences["touch_text_edit_button_order"] = stored.clone();
+        let bytes = write_document(&store, preferences);
+        let loaded = store
+            .load()
+            .unwrap_or_else(|error| panic!("{stored}: {error}"));
+        assert_eq!(
+            loaded.preferences.touch_text_edit_button_order, expected,
+            "{stored}"
+        );
+        loaded.preferences.validate().unwrap();
+        // 读不改写文件。
+        assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    }
+
+    // 不是数组仍是一份读不了的文档；输入运行时照样能用默认排列跑（见 load_for_runtime_keeps_typing_on_unreadable_documents）。
+    let mut preferences = serde_json::to_value(Preferences::default()).unwrap();
+    preferences["touch_text_edit_button_order"] = serde_json::json!("copy");
+    write_document(&store, preferences);
+    assert!(matches!(store.load(), Err(PreferencesError::Json(_))));
+    let runtime = store.load_for_runtime().unwrap();
+    assert!(runtime.load_error.is_some());
+    assert_eq!(
+        runtime.snapshot.preferences.touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+}
+
+/// 各个已发布版本第一次保存时写下的 preferences.json（`PreferencesStore::save(0, Preferences::default())` 的结果，在各自的发布标签上生成）。#9802 那样新版本校验更严、旧文档读不了的改动会让这里失败。
+const RELEASED_DOCUMENTS: [(&str, &str); 6] = [
+    (
+        "android-v0.6.0",
+        include_str!("../../tests/fixtures/released-preferences/android-v0.6.0.json"),
+    ),
+    (
+        "harmony-v0.3.0-beta",
+        include_str!("../../tests/fixtures/released-preferences/harmony-v0.3.0-beta.json"),
+    ),
+    (
+        "ios-v0.52.0",
+        include_str!("../../tests/fixtures/released-preferences/ios-v0.52.0.json"),
+    ),
+    (
+        "linux-v0.14.0",
+        include_str!("../../tests/fixtures/released-preferences/linux-v0.14.0.json"),
+    ),
+    (
+        "macos-v0.55.0",
+        include_str!("../../tests/fixtures/released-preferences/macos-v0.55.0.json"),
+    ),
+    (
+        "windows7-v0.3.0",
+        include_str!("../../tests/fixtures/released-preferences/windows7-v0.3.0.json"),
+    ),
+];
+
+#[test]
+fn documents_written_by_released_versions_load_and_save() {
+    for (release, document) in RELEASED_DOCUMENTS {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferencesStore::new(directory.path());
+        fs::write(store.path(), document).unwrap();
+        let loaded = store
+            .load()
+            .unwrap_or_else(|error| panic!("{release}: {error}"));
+        loaded.preferences.validate().unwrap();
+        assert_eq!(
+            loaded.preferences.touch_text_edit_button_order,
+            default_text_edit_button_order(),
+            "{release}"
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), document.as_bytes());
+        let mut changed = loaded.preferences.clone();
+        changed.candidate_page_size = 7;
+        let saved = store.save(loaded.revision, changed).unwrap();
+        assert_eq!(store.load().unwrap(), saved, "{release}");
+    }
+}
+
+#[test]
+fn develop_documents_round_trip_through_the_tolerant_reader() {
+    use TextEditButton::*;
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let preferences = Preferences {
+        touch_text_edit_button_order: vec![
+            SelectLine, Delete, NumberPad, Space, Cut, SelectAll, Paste, Copy,
+        ],
+        touch_keyboard_schemes: TouchKeyboardSchemePreferences {
+            enabled: [TouchKeyboardScheme::Wubi, TouchKeyboardScheme::Handwriting]
+                .into_iter()
+                .collect(),
+            selected: Some(TouchKeyboardScheme::Handwriting),
+        },
+        fuzzy_pinyin: FuzzyPinyinPreferences {
+            enabled: true,
+            rules: [FuzzyPinyinRule::NL, FuzzyPinyinRule::AnAng]
+                .into_iter()
+                .collect(),
+            seeded: true,
+        },
+        ..Preferences::default()
+    };
+    let saved = store.save(0, preferences.clone()).unwrap();
+    let bytes = fs::read(store.path()).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded, saved);
+    assert_eq!(loaded.preferences, preferences);
+    // 没有改动的保存不前进修订号，也不改写文件。
+    assert_eq!(
+        store.save(saved.revision, loaded.preferences).unwrap(),
+        saved
+    );
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    // 文档里的写法与结构体逐个一致：宽松读法没有改掉任何本版本写下的取值。
+    let reread: PreferencesSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reread).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+    );
+}
+
+#[test]
+fn newer_list_values_survive_a_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["touch_keyboard_schemes"] = serde_json::json!({
+        "enabled": ["nine_key", "future_scheme", "thoughtful_reply"],
+        "selected": "future_scheme",
+    });
+    document["fuzzy_pinyin"] = serde_json::json!({
+        "enabled": true,
+        "rules": ["z-zh", "future-rule"],
+        "seeded": true,
+    });
+    let mut order = document["touch_text_edit_button_order"].clone();
+    order
+        .as_array_mut()
+        .unwrap()
+        .insert(1, "select_word".into());
+    document["touch_text_edit_button_order"] = order;
+    let bytes = write_document(&store, document);
+
+    let loaded = store.load().unwrap();
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    let schemes = &loaded.preferences.touch_keyboard_schemes;
+    assert_eq!(
+        schemes.enabled,
+        [TouchKeyboardScheme::NineKey].into_iter().collect()
+    );
+    // 更新的版本选中的方案本版本画不出来，当作没选。
+    assert_eq!(schemes.selected, None);
+    assert_eq!(
+        loaded.preferences.fuzzy_pinyin.rules,
+        [FuzzyPinyinRule::ZZh].into_iter().collect()
+    );
+    assert_eq!(
+        loaded.preferences.touch_text_edit_button_order,
+        default_text_edit_button_order()
+    );
+
+    // 本版本改了别的设置再保存：更新的版本的方案、选中项和规则原样接回，退役的方案和不认识的动作不接回。
+    let mut changed = loaded.preferences.clone();
+    changed.candidate_page_size = 7;
+    changed.fuzzy_pinyin.rules.insert(FuzzyPinyinRule::NL);
+    let saved = store.save(loaded.revision, changed).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        written["preferences"]["touch_keyboard_schemes"],
+        serde_json::json!({"enabled": ["nine_key", "future_scheme"], "selected": "future_scheme"})
+    );
+    assert_eq!(
+        written["preferences"]["fuzzy_pinyin"]["rules"],
+        serde_json::json!(["z-zh", "n-l", "future-rule"])
+    );
+    // 丢掉不认识的动作后排列就是默认排列，不写进文件，更不会带着 select_word。
+    assert!(written["preferences"]
+        .get("touch_text_edit_button_order")
+        .is_none());
+    assert_eq!(store.load().unwrap(), saved);
+
+    // 本版本选了自己的方案时以本版本为准，更新的版本的方案仍留在启用列表里。
+    let mut selected = saved.preferences.clone();
+    selected.touch_keyboard_schemes.selected = Some(TouchKeyboardScheme::NineKey);
+    let saved = store.save(saved.revision, selected).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        written["preferences"]["touch_keyboard_schemes"],
+        serde_json::json!({"enabled": ["nine_key", "future_scheme"], "selected": "nine_key"})
+    );
+
+    // 恢复默认设置连同更新的版本的取值一起清掉。
+    store.restore_defaults(saved.revision).unwrap();
+    let written = fs::read_to_string(store.path()).unwrap();
+    assert!(!written.contains("future_scheme"));
+    assert!(!written.contains("future-rule"));
+
+    // 启用列表里只有更新的版本的方案：本版本回到全拼 26 键，保存后两者都在。
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["touch_keyboard_schemes"] = serde_json::json!({"enabled": ["future_scheme"]});
+    write_document(&store, document);
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded.preferences.touch_keyboard_schemes.enabled,
+        [TouchKeyboardScheme::Quanpin].into_iter().collect()
+    );
+    let mut changed = loaded.preferences.clone();
+    changed.candidate_page_size = 7;
+    store.save(loaded.revision, changed).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        written["preferences"]["touch_keyboard_schemes"]["enabled"],
+        serde_json::json!(["quanpin", "future_scheme"])
+    );
+
+    // 不是字符串的元素仍是读不了的文档。
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["fuzzy_pinyin"]["rules"] = serde_json::json!([7]);
+    write_document(&store, document);
+    assert!(store.load().is_err());
+}
+
+#[test]
+fn load_for_runtime_keeps_typing_on_unreadable_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+
+    // 读得了的文档：与 load 相同，没有错误。
+    let customized = Preferences {
+        scheme: InputScheme::Wubi,
+        ..Preferences::default()
+    };
+    let saved = store.save(0, customized.clone()).unwrap();
+    let runtime = store.load_for_runtime().unwrap();
+    assert!(runtime.load_error.is_none());
+    assert_eq!(runtime.snapshot, saved);
+
+    let base = serde_json::to_value(&customized).unwrap();
+    let with = |pointer: &str, value: serde_json::Value| {
+        let mut document = base.clone();
+        *document.pointer_mut(pointer).unwrap() = value;
+        document
+    };
+    let documents: Vec<(&str, Vec<u8>)> = vec![
+        // 更新的版本的标量枚举取值。
+        (
+            "future scheme",
+            serde_json::to_vec(&serde_json::json!({"format_version": 1, "revision": 9, "preferences": with("/candidate_layout", "future_value".into())})).unwrap(),
+        ),
+        // 本版本校验通不过的取值（#9802 就是这一类）。
+        (
+            "out of range",
+            serde_json::to_vec(&serde_json::json!({"format_version": 1, "revision": 9, "preferences": with("/candidate_page_size", 99.into())})).unwrap(),
+        ),
+    ];
+    for ((kind, bytes), not_kept) in documents
+        .into_iter()
+        .zip(["candidate_layout", "candidate_page_size"])
+    {
+        fs::write(store.path(), &bytes).unwrap();
+        assert!(store.load().is_err(), "{kind}");
+        let runtime = store.load_for_runtime().unwrap();
+        assert!(runtime.load_error.is_some(), "{kind}");
+        assert_eq!(runtime.not_kept, vec![not_kept.to_owned()], "{kind}");
+        assert_eq!(runtime.snapshot.revision, 9, "{kind}");
+        runtime.snapshot.preferences.validate().unwrap();
+        // 读不了的那个键取默认值，其余设置（这里是五笔）照旧。
+        assert_eq!(
+            runtime.snapshot.preferences.scheme,
+            InputScheme::Wubi,
+            "{kind}"
+        );
+        // 文件原样不动，保存仍然被拒绝，任何宿主都写不进去。
+        assert_eq!(fs::read(store.path()).unwrap(), bytes, "{kind}");
+        assert!(
+            store.save(9, runtime.snapshot.preferences.clone()).is_err(),
+            "{kind}"
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), bytes, "{kind}");
+    }
+
+    // 更新的文档格式：同名键的含义可能变了，不逐键救，整份取默认值；修订号照旧沿用，文件不动。
+    let bytes = serde_json::to_vec(
+        &serde_json::json!({"format_version": 2, "revision": 9, "preferences": base.clone()}),
+    )
+    .unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    let runtime = store.load_for_runtime().unwrap();
+    assert!(matches!(
+        runtime.load_error,
+        Some(PreferencesError::UnsupportedFormat)
+    ));
+    assert_eq!(runtime.not_kept, vec!["*".to_owned()]);
+    assert_eq!(runtime.snapshot.revision, 9);
+    assert_eq!(runtime.snapshot.preferences, Preferences::default());
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+
+    // 不是 JSON：默认偏好，修订号 0，文件同样不动。
+    fs::write(store.path(), b"{\"format_version\":1,").unwrap();
+    let runtime = store.load_for_runtime().unwrap();
+    assert!(matches!(
+        runtime.load_error,
+        Some(PreferencesError::Json(_))
+    ));
+    assert_eq!(runtime.not_kept, vec!["*".to_owned()]);
+    assert_eq!(runtime.snapshot.revision, 0);
+    assert_eq!(runtime.snapshot.preferences, Preferences::default());
+    assert_eq!(fs::read(store.path()).unwrap(), b"{\"format_version\":1,");
+
+    // 没有文件：与 load 相同，也不创建文件。
+    fs::remove_file(store.path()).unwrap();
+    let runtime = store.load_for_runtime().unwrap();
+    assert!(runtime.load_error.is_none());
+    assert_eq!(runtime.snapshot.revision, 0);
+    assert!(!store.path().exists());
+}
+
+/// 把默认文档里每一个字符串取值（枚举、主题 id、名字……）逐个换成本版本不认识的值：哪怕整份文档因此读不了，输入运行时也必须起得来，文件不变。新加一个只认几个取值的字段时，这里会覆盖到它。
+#[test]
+fn every_string_setting_with_a_future_value_still_runs() {
+    fn string_pointers(value: &serde_json::Value, pointer: String, found: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(_) => found.push(pointer),
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    string_pointers(item, format!("{pointer}/{index}"), found);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    let key = key.replace('~', "~0").replace('/', "~1");
+                    string_pointers(item, format!("{pointer}/{key}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let base = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    let mut pointers = Vec::new();
+    string_pointers(&base["preferences"], "/preferences".into(), &mut pointers);
+    assert!(pointers.len() > 20, "{pointers:?}");
+    let mut unreadable = 0;
+    for pointer in pointers {
+        let mut document = base.clone();
+        *document.pointer_mut(&pointer).unwrap() = "future_value".into();
+        let bytes = serde_json::to_vec(&document).unwrap();
+        fs::write(store.path(), &bytes).unwrap();
+        let runtime = store
+            .load_for_runtime()
+            .unwrap_or_else(|error| panic!("{pointer}: {error}"));
+        runtime.snapshot.preferences.validate().unwrap();
+        unreadable += usize::from(runtime.load_error.is_some());
+        assert_eq!(fs::read(store.path()).unwrap(), bytes, "{pointer}");
+    }
+    // 确实覆盖到了读不了的文档，而不只是一串都读得了的名字。
+    assert!(unreadable > 10, "{unreadable}");
+}
+
+// 运行时救下的偏好里，决定把内容发到哪里的设置换成了默认值时，关掉用它的联网功能，而不是拿默认的去向照常发请求；去向原样保留时照常开着。
+#[test]
+fn runtime_salvage_closes_features_whose_destination_was_not_kept() {
+    let configured = Preferences {
+        cloud_candidates: true,
+        cloud_candidate_provider: crate::cloud::candidates::CloudCandidatePreferences {
+            source: crate::cloud::candidates::CloudCandidateSource::Custom,
+            endpoint: "https://private.example/q?x={query}".into(),
+            ..Default::default()
+        },
+        network: crate::network::NetworkPreferences {
+            proxy_mode: crate::network::ProxyMode::None,
+            proxy_server: "127.0.0.1:7890".into(),
+        },
+        ..Preferences::default()
+    };
+    configured.validate().unwrap();
+    let base = serde_json::to_value(&configured).unwrap();
+    let salvage = |pointer: &str, value: serde_json::Value| {
+        let mut document = base.clone();
+        *document.pointer_mut(pointer).unwrap() = value;
+        assert!(serde_json::from_value::<Preferences>(document.clone())
+            .map_err(PreferencesError::from)
+            .and_then(|preferences| preferences.validate())
+            .is_err());
+        let (preferences, not_kept) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        preferences.validate().unwrap();
+        (preferences, not_kept)
+    };
+
+    // 别的设置读不了：云候选和代理原样保留，照常开着。
+    let (kept, not_kept) = salvage("/candidate_layout", "future_value".into());
+    assert_eq!(not_kept, vec!["candidate_layout".to_owned()]);
+    assert!(kept.cloud_candidates);
+    assert_eq!(
+        kept.cloud_candidate_provider,
+        configured.cloud_candidate_provider
+    );
+    assert_eq!(kept.network, configured.network);
+
+    // 云候选来源是更新的版本的取值：来源换成了默认的 Google，开关关掉，不把组字发给用户没选的服务。
+    let (closed, _) = salvage("/cloud_candidate_provider/source", "future_value".into());
+    assert_ne!(
+        closed.cloud_candidate_provider.source,
+        configured.cloud_candidate_provider.source
+    );
+    assert!(!closed.cloud_candidates);
+
+    // 代理模式是更新的版本的取值、又填了代理地址：用这个地址，不回退成跟随系统、绕开它。
+    let (proxied, _) = salvage("/network/proxy_mode", "future_value".into());
+    assert_eq!(
+        proxied.network.proxy_mode,
+        crate::network::ProxyMode::CustomRequired
+    );
+    assert_eq!(proxied.network.proxy_server, "127.0.0.1:7890");
+    assert!(!proxied.cloud_candidates);
+
+    // AI 的接口地址表、语音识别和润色的地址读不了：对应的功能关掉。
+    let mut ai = base.clone();
+    ai["ai_assistant"]["enabled"] = true.into();
+    ai["ai_assistant"]["endpoints"] = "future_value".into();
+    ai["translation_ai"] = true.into();
+    ai["voice_input"]["enabled"] = true.into();
+    ai["voice_input"]["asr_endpoint"] = 7.into();
+    ai["voice_input"]["polish_enabled"] = true.into();
+    ai["voice_input"]["polish_endpoint"] = 7.into();
+    let (closed, not_kept) = Preferences::salvaged_from(ai, Preferences::default()).unwrap();
+    assert_eq!(
+        not_kept,
+        vec!["ai_assistant".to_owned(), "voice_input".to_owned()]
+    );
+    assert!(!closed.ai_assistant.enabled);
+    assert!(!closed.translation_ai);
+    assert!(!closed.voice_input.enabled);
+    assert!(!closed.voice_input.polish_enabled);
+    closed.validate().unwrap();
+}
+
+#[test]
+fn runtime_salvage_closes_cloud_when_its_destination_section_is_not_an_object() {
+    let configured = Preferences {
+        cloud_candidates: true,
+        cloud_candidate_provider: crate::cloud::candidates::CloudCandidatePreferences {
+            source: crate::cloud::candidates::CloudCandidateSource::Custom,
+            endpoint: "https://private.example/q?x={query}".into(),
+            ..Default::default()
+        },
+        translation_ai: true,
+        ..Preferences::default()
+    };
+    configured.validate().unwrap();
+    for damaged in [
+        serde_json::json!("future-shape"),
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!(7),
+        serde_json::json!(true),
+    ] {
+        let mut document = serde_json::to_value(&configured).unwrap();
+        document["cloud_candidate_provider"] = damaged.clone();
+        // 空数组也可能被 serde 当成缺省字段；用无关损坏确保运行时需要走救援。
+        document["candidate_layout"] = "future_value".into();
+        assert!(serde_json::from_value::<Preferences>(document.clone()).is_err());
+        let (preferences, not_kept) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        preferences.validate().unwrap();
+        assert!(not_kept.iter().any(|key| key == "candidate_layout"));
+        assert_eq!(
+            preferences.cloud_candidate_provider,
+            Preferences::default().cloud_candidate_provider,
+            "{damaged}"
+        );
+        assert!(!preferences.cloud_candidates, "{damaged}");
+        assert!(preferences.translation_ai, "{damaged}");
+    }
+}
+
+#[test]
+fn runtime_salvage_closes_ai_when_its_destination_section_is_not_an_object() {
+    let configured = Preferences {
+        cloud_candidates: true,
+        translation_ai: true,
+        ai_assistant: AiAssistantPreferences {
+            enabled: true,
+            endpoint: "https://private.example/ai".into(),
+            ..Default::default()
+        },
+        ..Preferences::default()
+    };
+    configured.validate().unwrap();
+    for damaged in [
+        serde_json::json!("future-shape"),
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!(7),
+        serde_json::json!(true),
+    ] {
+        let mut document = serde_json::to_value(&configured).unwrap();
+        document["ai_assistant"] = damaged.clone();
+        document["candidate_layout"] = "future_value".into();
+        assert!(serde_json::from_value::<Preferences>(document.clone()).is_err());
+        let (preferences, not_kept) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        preferences.validate().unwrap();
+        assert!(not_kept.iter().any(|key| key == "candidate_layout"));
+        assert!(!preferences.ai_assistant.enabled, "{damaged}");
+        assert!(!preferences.translation_ai, "{damaged}");
+        assert!(preferences.cloud_candidates, "{damaged}");
+    }
+}
+
+#[test]
+fn runtime_salvage_keeps_features_with_missing_destination_defaults() {
+    let configured = Preferences {
+        cloud_candidates: true,
+        translation_ai: true,
+        ..Preferences::default()
+    };
+    for omitted in [true, false] {
+        let mut document = serde_json::to_value(&configured).unwrap();
+        for section in ["cloud_candidate_provider", "ai_assistant"] {
+            if omitted {
+                document.as_object_mut().unwrap().remove(section);
+            } else {
+                document[section] = serde_json::json!({});
+            }
+        }
+        let expected: Preferences = serde_json::from_value(document.clone()).unwrap();
+        expected.validate().unwrap();
+        // 别处损坏触发真实救援；服务段缺省与对象内字段缺省都仍表示采用默认去向。
+        document["candidate_layout"] = "future_value".into();
+        let (preferences, not_kept) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        preferences.validate().unwrap();
+        assert_eq!(not_kept, ["candidate_layout"]);
+        assert!(preferences.cloud_candidates);
+        assert!(preferences.translation_ai);
+        assert_eq!(
+            preferences.cloud_candidate_provider,
+            expected.cloud_candidate_provider
+        );
+        assert_eq!(preferences.ai_assistant, expected.ai_assistant);
+    }
+}
+
+// 设置页的修复只换掉读不了的取值：本版本不认识的键和列表元素（多半出自更新的版本）照保存时那样放回文件。
+#[test]
+fn recover_keeps_what_a_newer_version_wrote() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document["future_setting"] = serde_json::json!({"level": 3});
+    document["korean"]["future_option"] = true.into();
+    document["touch_keyboard_schemes"] =
+        serde_json::json!({"enabled": ["nine_key", "future_scheme"], "selected": "nine_key"});
+    document["candidate_layout"] = "future_value".into();
+    write_document(&store, document);
+    assert!(store.load().is_err());
+    let RecoveryOutcome::Recovered { snapshot, .. } = store.recover().unwrap() else {
+        panic!("a document that does not load is recovered");
+    };
+    assert_eq!(snapshot.revision, 6);
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        written["preferences"]["future_setting"],
+        serde_json::json!({"level": 3})
+    );
+    assert_eq!(written["preferences"]["korean"]["future_option"], true);
+    assert_eq!(
+        written["preferences"]["touch_keyboard_schemes"]["enabled"],
+        serde_json::json!(["nine_key", "future_scheme"])
+    );
+    assert_eq!(
+        written["preferences"]["candidate_layout"],
+        serde_json::to_value(Preferences::default().candidate_layout).unwrap()
+    );
+    assert_eq!(store.load().unwrap(), snapshot);
+}
+
+#[test]
+fn runtime_salvage_preserves_a_required_proxy_when_the_address_is_unusable() {
+    for mode in ["future_mode", "custom"] {
+        for server in [
+            serde_json::json!("socks5://127.0.0.1:7890"),
+            serde_json::json!({"future_address": true}),
+        ] {
+            let mut document = serde_json::to_value(Preferences::default()).unwrap();
+            for pointer in [
+                "/cloud_candidates",
+                "/ai_assistant/enabled",
+                "/translation_ai",
+                "/translation_account",
+                "/voice_input/enabled",
+                "/voice_input/polish_enabled",
+                "/custom_translation/enabled",
+                "/tencent_tmt/enabled",
+                "/niutrans/enabled",
+            ] {
+                *document.pointer_mut(pointer).unwrap() = true.into();
+            }
+            document["network"] = serde_json::json!({"proxy_mode": mode, "proxy_server": server});
+            let (preferences, _) =
+                Preferences::salvaged_from(document, Preferences::default()).unwrap();
+            preferences.validate().unwrap();
+            assert!(!preferences.cloud_candidates);
+            assert!(!preferences.ai_assistant.enabled);
+            assert!(!preferences.translation_ai);
+            assert!(!preferences.translation_account);
+            assert!(!preferences.voice_input.enabled);
+            assert!(!preferences.voice_input.polish_enabled);
+            assert!(!preferences.custom_translation.enabled);
+            assert!(!preferences.tencent_tmt.enabled);
+            assert!(!preferences.niutrans.enabled);
+            assert_eq!(
+                preferences.network.effective_mode(),
+                crate::network::ProxyMode::CustomRequired
+            );
+            assert!(
+                crate::network::normalized_proxy_url(&preferences.network.proxy_server).is_none()
+            );
+            let restored: Preferences =
+                serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+            assert_eq!(restored.network, preferences.network);
+        }
+    }
+}
+
+#[test]
+fn runtime_salvage_unknown_proxy_mode_without_server_stays_closed() {
+    for network in [
+        serde_json::json!({"proxy_mode": "future_mode"}),
+        serde_json::json!({"proxy_mode": "future_mode", "proxy_server": ""}),
+    ] {
+        let mut document = serde_json::to_value(Preferences::default()).unwrap();
+        document["cloud_candidates"] = true.into();
+        document["network"] = network;
+        let (preferences, _) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        assert_eq!(
+            preferences.network.effective_mode(),
+            crate::network::ProxyMode::CustomRequired
+        );
+        assert!(!preferences.cloud_candidates);
+    }
+}
+
+#[test]
+fn runtime_salvage_non_object_network_keeps_proxy_constraint() {
+    for network in [
+        serde_json::json!(null),
+        serde_json::json!(false),
+        serde_json::json!(7),
+        serde_json::json!([]),
+        serde_json::json!("future_network"),
+    ] {
+        let mut document = serde_json::to_value(Preferences::default()).unwrap();
+        document["cloud_candidates"] = true.into();
+        document["translation_account"] = true.into();
+        document["candidate_layout"] = "future_layout".into();
+        document["network"] = network.clone();
+        let (preferences, _) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        preferences.validate().unwrap();
+        assert_eq!(
+            preferences.network.effective_mode(),
+            crate::network::ProxyMode::CustomRequired,
+            "network: {network}"
+        );
+        assert!(!preferences.cloud_candidates, "network: {network}");
+        assert!(!preferences.translation_account, "network: {network}");
+    }
+    for network in [None, Some(serde_json::json!({}))] {
+        let mut document = serde_json::to_value(Preferences::default()).unwrap();
+        document["cloud_candidates"] = true.into();
+        document["translation_account"] = true.into();
+        document["candidate_layout"] = "future_layout".into();
+        if let Some(network) = network {
+            document["network"] = network;
+        } else {
+            document.as_object_mut().unwrap().remove("network");
+        }
+        let (preferences, _) =
+            Preferences::salvaged_from(document, Preferences::default()).unwrap();
+        assert_eq!(
+            preferences.network,
+            crate::network::NetworkPreferences::default()
+        );
+        assert!(preferences.cloud_candidates);
+        assert!(preferences.translation_account);
+    }
+}
+
+#[test]
+fn android_layout_migration_checks_original_style_and_preserves_newer_styles() {
+    for style in [None, Some("standard"), Some("emoji"), Some("split_space")] {
+        for number_row in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = PreferencesStore::new(directory.path());
+            let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+            document["revision"] = 1.into();
+            if let Some(style) = style {
+                document["preferences"]["touch_twenty_six_key_style"] = style.into();
+            }
+            document["preferences"]["touch_fourteen_key_style"] = "future_fourteen".into();
+            document["preferences"]["touch_nine_key_style"] = "future_nine".into();
+            fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+            let saved = store
+                .migrate_android_key_layout(1, true, number_row)
+                .unwrap();
+            let raw: serde_json::Value =
+                serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+            let expected = match style {
+                None | Some("standard") => "long_space",
+                Some(value) => value,
+            };
+            assert_eq!(raw["preferences"]["touch_twenty_six_key_style"], expected);
+            assert_eq!(
+                raw["preferences"]["touch_fourteen_key_style"],
+                "future_fourteen"
+            );
+            assert_eq!(raw["preferences"]["touch_nine_key_style"], "future_nine");
+            assert_eq!(saved.preferences.touch_number_row, number_row);
+            let before = fs::read(store.path()).unwrap();
+            assert_eq!(
+                store
+                    .migrate_android_key_layout(saved.revision, true, number_row)
+                    .unwrap()
+                    .revision,
+                saved.revision
+            );
+            assert!(matches!(
+                store.migrate_android_key_layout(0, true, true),
+                Err(PreferencesError::Conflict)
+            ));
+            assert_eq!(fs::read(store.path()).unwrap(), before);
+        }
+    }
 }

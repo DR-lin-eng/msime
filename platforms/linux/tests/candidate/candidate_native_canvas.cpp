@@ -19,6 +19,19 @@ std::uint32_t pixel(cairo_surface_t *surface, int x, int y) {
   std::memcpy(&value, cairo_image_surface_get_data(surface) + y * cairo_image_surface_get_stride(surface) + x * 4, 4);
   return value;
 }
+// 黑底上的抗锯齿像素仍保留分段色主通道，小字号的单个分隔符不保证有足够纯色像素。
+int segment_ink(cairo_surface_t *surface, const host::NativeCanvasLayout &layout, std::uint32_t color) {
+  const int own_channel = color == 0xff0000u ? 0 : color == 0x00ff00u ? 1 : 2;
+  int ink = 0;
+  for (int y = 0; y < layout.height; ++y) for (int x = 0; x < layout.width; ++x) {
+    const auto value = pixel(surface, x, y);
+    const int rgb[3] = {static_cast<int>((value >> 16) & 0xff), static_cast<int>((value >> 8) & 0xff),
+        static_cast<int>(value & 0xff)};
+    const int own = rgb[own_channel], other = rgb[(own_channel + 1) % 3], third = rgb[(own_channel + 2) % 3];
+    if (own > 60 && other < own / 2 && third < own / 2) ++ink;
+  }
+  return ink;
+}
 void skin_layout() {
   const auto target = image(1000, 1000, 0);
   auto *cr = cairo_create(target.get());
@@ -268,6 +281,42 @@ void fixed_position_appearance() {
   assert(plain[0xffffff] > 100 && plain[host::kCandidateFixedPositionColor] == 0);
 }
 
+// 光标后编辑：canvas 包的画法同样把首选开头固定的那几个字用序号色画淡（选中行用选中序号色），有释义时释义的配色不受影响，行的大小不变。
+void caret_edit_dim_appearance() {
+  host::NativeCanvasAssets assets;
+  host::NativeCanvasContent content;
+  content.font = "Sans 30px";
+  content.items = {{"", "MMMM"}};
+  const Json palette = {{"surface", "#000000"}, {"selected", "#000000"}, {"hover", "#000000"},
+      {"text", "#FFFFFF"}, {"selected_text", "#FFFFFF"}, {"number", "#00FF00"}, {"selected_number", "#0000FF"},
+      {"translation", "#FF0000"}};
+  const auto ink = [&](std::size_t dim_bytes, int selected) {
+    content.items[0].dim_prefix_bytes = dim_bytes;
+    content.selected = selected;
+    auto target = image(800, 300, 0);
+    auto *cr = cairo_create(target.get());
+    const auto layout = host::measure_native_canvas(cr, assets, content);
+    host::paint_native_canvas(cr, assets, content, layout, palette);
+    std::map<std::uint32_t, int> colors;
+    for (int y = 0; y < layout.height; ++y) for (int x = 0; x < layout.width; ++x) ++colors[pixel(target.get(), x, y) & 0xffffff];
+    cairo_destroy(cr);
+    return std::make_pair(layout.items[0], colors);
+  };
+  auto [plain_box, plain] = ink(0, -1);
+  assert(plain[0xffffff] > 100 && plain[0x00ff00] == 0);
+  auto [dim_box, dimmed] = ink(2, -1);
+  assert(dimmed[0x00ff00] > 50 && dimmed[0xffffff] > 50 && dimmed[0xffffff] < plain[0xffffff]);
+  assert(dim_box.width == plain_box.width && dim_box.height == plain_box.height);
+  auto [selected_box, selected] = ink(2, 0);
+  assert(selected[0x0000ff] > 50 && selected[0x00ff00] == 0);
+  (void)selected_box;
+  // 有释义的行：画淡只落在正文开头，释义仍是释义色。
+  content.items[0].translation = "MMM";
+  auto [glossed_box, glossed] = ink(2, -1);
+  assert(glossed[0x00ff00] > 50 && glossed[0xff0000] > 50);
+  (void)glossed_box;
+}
+
 void translation_appearance() {
   host::NativeCanvasAssets assets;
   host::NativeCanvasContent content;
@@ -389,15 +438,24 @@ void constrained_text_layout() {
       Json::object(), false, wide.first.item_text_widths[0]);
   assert(pango_layout_get_line_count(line) == 1);
   g_object_unref(line);
+  const auto segment_counts = [&](const host::NativeCanvasLayout &layout) {
+    host::paint_native_canvas(cr, assets, content, layout, palette);
+    std::map<std::uint32_t, int> counts;
+    for (const auto color : {0xff0000u, 0x00ff00u, 0x0000ffu})
+      counts[color] = segment_ink(target.get(), layout, color);
+    return counts;
+  };
+  const auto narrow_segments = segment_counts(narrow.first), wide_segments = segment_counts(wide.first);
   for (const auto color : {0xff0000u, 0x00ff00u, 0x0000ffu}) {
-    assert(narrow.second.at(color) > 2 && wide.second.at(color) > 2);
+    assert(narrow_segments.at(color) > 2 && wide_segments.at(color) > 2);
   }
   for (int at = 0; at < 24; ++at) content.items[0].translation += " 合成MMM";
   for (bool horizontal : {false, true}) {
     content.horizontal = horizontal;
     const auto wrapped = render(320);
     assert(wrapped.first.items[0].height > narrow.first.items[0].height * 2);
-    for (const auto color : {0xff0000u, 0x00ff00u, 0x0000ffu}) assert(wrapped.second.at(color) > 2);
+    const auto counts = segment_counts(wrapped.first);
+    for (const auto color : {0xff0000u, 0x00ff00u, 0x0000ffu}) assert(counts.at(color) > 2);
   }
   // 每个横排行独立撑高与均分；均分不能重排原先受限的文字。
   content.horizontal = true;
@@ -854,9 +912,40 @@ void expanded_identity() {
   assert(!host::native_canvas_snapshot_current(snapshot, 7, 11));
 }
 
+// 「仅当前高亮」：canvas 包按有没有释义变高，没有统一预留，所以竖排横排都按高亮行的标记（视图的 translation_reserved）给它一直留出释义的行数；释义到了、高亮换了一行，卡片都一样高。
+void reserved_highlight_gloss() {
+  const auto target = image(1000, 600, 0);
+  auto *cr = cairo_create(target.get());
+  host::NativeCanvasAssets assets;
+  for (const bool horizontal : {false, true}) {
+    host::NativeCanvasContent content;
+    content.font = "Sans 16px";
+    content.horizontal = horizontal;
+    content.items = {{"1. ", "alpha"}, {"2. ", "beta"}, {"3. ", "gamma"}};
+    const auto plain = host::measure_native_canvas(cr, assets, content);
+    content.items[0].reserved_gloss_lines = 1;
+    const auto waiting = host::measure_native_canvas(cr, assets, content);
+    assert(waiting.items[0].height > plain.items[0].height + 4);
+    assert(waiting.height > plain.height + 4);
+    if (!horizontal) assert(std::abs(waiting.items[1].height - plain.items[1].height) < 0.5);
+    content.items[0].translation = "gloss";
+    const auto answered = host::measure_native_canvas(cr, assets, content);
+    assert(std::abs(answered.height - waiting.height) < 0.5);
+    content.items[0].translation.clear();
+    content.items[0].reserved_gloss_lines = 0;
+    content.items[1].reserved_gloss_lines = 1;
+    content.selected = 1;
+    const auto moved = host::measure_native_canvas(cr, assets, content);
+    assert(std::abs(moved.height - waiting.height) < 0.5);
+    content.items[1].reserved_gloss_lines = 2;
+    assert(host::measure_native_canvas(cr, assets, content).height > moved.height + 4);
+  }
+  cairo_destroy(cr);
+}
 int main() {
   text_cache_pixels();
   decoration_overlay();
+  reserved_highlight_gloss();
   chrome_decoration_overlay();
   expanded_panel();
   expanded_identity();
@@ -864,6 +953,7 @@ int main() {
   skin_layout();
   skin_appearance();
   fixed_position_appearance();
+  caret_edit_dim_appearance();
   translation_appearance();
   constrained_text_layout();
   // 完整次数、精确帧边界、跨循环和有限末帧停止唤醒。

@@ -4,8 +4,11 @@
 
 use crate::DictionaryHostOptions;
 use msime_client_core::preferences::PreferencesStore;
+use msime_client_services::plugins::authoring::{self, AuthoredPack};
 use msime_client_services::plugins::mentions::{MentionEntry, MentionStore};
 use msime_client_services::plugins::script_grants::{self, ScriptGrantsView};
+use msime_client_services::plugins::script_settings::{self, ScriptPluginStateView};
+use msime_client_services::plugins::script_storage;
 use msime_client_services::plugins::{
     self, script_commands, BuiltinDirs, PluginCatalog, PluginFailure, PluginSummary,
 };
@@ -191,6 +194,28 @@ pub async fn remove_plugin_pack(
     blocking(move || plugins::remove_named(&root, &kind, &id)).await
 }
 
+/// 设置页编辑器读出用户插件目录里的一个短语表、指令表、符号集或单词本。内置包、别的类型和没装的包是 `plugin_not_editable`。
+#[tauri::command]
+pub async fn load_authored_plugin_pack(
+    state: State<'_, PluginsState>,
+    kind: String,
+    id: String,
+) -> Result<AuthoredPack, PluginFailure> {
+    let root = state.0.clone();
+    blocking(move || Ok(authoring::load(&root, &kind, &id)?)).await
+}
+
+/// 设置页编辑器保存一个包：生成清单和词表，按导入同样的规则校验后安装，回答与 `import_plugin_pack` 相同的包摘要。同 id 的包已经装着时，`replace` 为假是 `plugin_exists`。
+#[tauri::command]
+pub async fn save_authored_plugin_pack(
+    state: State<'_, PluginsState>,
+    pack: AuthoredPack,
+    replace: bool,
+) -> Result<PluginSummary, PluginFailure> {
+    let root = state.0.clone();
+    blocking(move || Ok(authoring::save(&root, &pack, replace)?)).await
+}
+
 /// 宿主选项里的 `user_data`：输入法写健康文件的目录。
 fn user_data(options: &DictionaryHostOptions) -> Option<PathBuf> {
     options
@@ -310,6 +335,59 @@ pub async fn reorder_scripts(
     .await
 }
 
+/// 插件详情页：一个脚本插件清单里每一项设置现在的值和持久存储占的字节数。官方脚本插件的清单从内置插件包目录读。
+#[tauri::command]
+pub async fn script_plugin_state(
+    app: tauri::AppHandle,
+    state: State<'_, PluginsState>,
+    options: State<'_, DictionaryHostOptions>,
+    id: String,
+) -> Result<ScriptPluginStateView, PluginFailure> {
+    let root = state.0.clone();
+    let options = options.inner().clone();
+    blocking(move || {
+        let packs = builtin_plugin_packs(&app, &options);
+        Ok(script_settings::state(&root, packs.as_deref(), &id)?)
+    })
+    .await
+}
+
+/// 整份替换一个脚本插件的设置值，没写的项用默认值；清单里没有的项、类型不对或超出范围的值返回 `plugin_script_setting_invalid`。改设置不作废授权。
+#[tauri::command]
+pub async fn set_script_settings(
+    app: tauri::AppHandle,
+    state: State<'_, PluginsState>,
+    options: State<'_, DictionaryHostOptions>,
+    id: String,
+    values: serde_json::Map<String, serde_json::Value>,
+) -> Result<ScriptPluginStateView, PluginFailure> {
+    let root = state.0.clone();
+    let options = options.inner().clone();
+    blocking(move || {
+        let packs = builtin_plugin_packs(&app, &options);
+        Ok(script_settings::set(&root, packs.as_deref(), &id, values)?)
+    })
+    .await
+}
+
+/// 「清除数据」：删掉一个脚本插件的持久存储（`persist_data`），返回清除之后这个插件的状态。
+#[tauri::command]
+pub async fn clear_script_data(
+    app: tauri::AppHandle,
+    state: State<'_, PluginsState>,
+    options: State<'_, DictionaryHostOptions>,
+    id: String,
+) -> Result<ScriptPluginStateView, PluginFailure> {
+    let root = state.0.clone();
+    let options = options.inner().clone();
+    blocking(move || {
+        let packs = builtin_plugin_packs(&app, &options);
+        script_storage::clear(&root, &id)?;
+        Ok(script_settings::state(&root, packs.as_deref(), &id)?)
+    })
+    .await
+}
+
 /// The @ mode's name list, empty before one was saved.
 #[tauri::command]
 pub async fn load_plugin_mentions(
@@ -385,6 +463,34 @@ mod tests {
         assert_eq!(
             import_pack_at(&source.path().join("missing.txt"), &root).unwrap_err(),
             PluginFailure::code("plugin_unsupported_source")
+        );
+    }
+
+    #[test]
+    fn authored_packs_install_under_the_state_directory_the_page_lists() {
+        let state = tempfile::tempdir().unwrap();
+        let root = PluginsState::new(state.path()).0;
+        let pack: AuthoredPack = serde_json::from_value(serde_json::json!({
+            "kind": "phrase_table", "id": null, "name": "合成短语", "version": "1.0.0",
+            "license": "CC0-1.0", "author": null, "description": null,
+            "phrases": [{"key": "dh", "text": "合成电话"}],
+        }))
+        .unwrap();
+        let saved = authoring::save(&root, &pack, false).unwrap();
+        let catalog = plugins::scan(&root, BuiltinDirs::default());
+        assert_eq!(catalog.packages, std::slice::from_ref(&saved));
+        assert_eq!(
+            authoring::save(
+                &root,
+                &AuthoredPack {
+                    id: Some(saved.id.clone()),
+                    ..pack
+                },
+                false
+            )
+            .map_err(PluginFailure::from)
+            .unwrap_err(),
+            PluginFailure::code("plugin_exists")
         );
     }
 

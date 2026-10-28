@@ -27,7 +27,10 @@ import { ResourcePackRow, resourcePackStatus, useResourcePacks } from "../resour
 import { SettingsPageFieldset } from "../settings-page-fieldset";
 import { SelectRow } from "../select-row";
 import { SwitchRow } from "../switch-row";
-import { CandidateTranslationOptionsSection } from "../candidate-translation-options-section";
+import {
+  CandidateTranslationOptionsSection,
+  candidateTranslationScope,
+} from "../candidate-translation-options-section";
 import { CandidateEnglishGlossSection } from "../candidate-english-gloss-section";
 import { ShuangpinCustomEditor, NineKeyShuangpinEditor } from "../shuangpin-custom-editor";
 import type { ShuangpinCustomProfileClient } from "../shuangpin-custom-profile";
@@ -141,12 +144,8 @@ export function InputSettingsPage() {
   const neuralKeyboard = host?.edition?.neural_keyboard ?? true;
   // 应用例外只在认得前台应用的宿主上提供（macOS 按 bundle id，Windows 按进程基名，Linux 按输入法框架报告的程序名）。
   const showAppInputModeRules = host?.app_input_mode_rules === true;
-  // HarmonyOS 手机像 Android 的 `TypingPage` 一样画设计稿的 输入 页：语言与方案、中文、辅助码 和 翻译 直接可见，其余都放进末尾的 更多 折叠区。翻页键在它的 外接键盘快捷键 页，整句联想 在它的 表达 页，所以这里不画。
+  // HarmonyOS 手机像 Android 的 `TypingPage` 一样画设计稿的 输入 页：语言与方案、中文、辅助码 和 翻译直接可见，输入通用设置也直接展开，不再额外套一个「更多」分组。翻页键在它的 外接键盘快捷键 页，整句联想 在它的 表达 页，所以这里不画。
   const harmonyPhone = harmonyPlatform && mobilePlatform;
-  // 拼音纠错 是两项全拼纠错共用的一个开关，只有两项都开启时才显示为开；打开或关闭会同时设置两项，和 Android 的 `TypingPage` 一样。
-  const autocorrect =
-    (draft.quanpin?.autocorrect_transposition ?? true) &&
-    (draft.quanpin?.autocorrect_neighbor ?? true);
   const fuzzyPinyinSection = (layout: "section" | "row") => (
     <FuzzyPinyinSection
       preferences={fuzzyPinyin}
@@ -224,6 +223,7 @@ export function InputSettingsPage() {
           <InputSchemeSettingsContent
             preferences={draft}
             hasTouchKeyboardSchemes={Boolean(client.touchKeyboardSchemes)}
+            koreanRomaja={host?.korean_romaja === true}
             touchKeyboardSchemes={touchKeyboardSchemes}
             selectedTouchKeyboardScheme={selectedTouchKeyboardScheme}
             macos={macosPlatform}
@@ -306,14 +306,25 @@ export function InputSettingsPage() {
               <option value="traditional">繁体</option>
             </SelectRow>
             <SwitchRow
-              title="拼音纠错"
-              checked={autocorrect}
+              title="全拼邻键纠错"
+              checked={draft.quanpin?.autocorrect_neighbor ?? true}
+              onChange={(checked) =>
+                onPreferencesChange({
+                  quanpin: {
+                    ...draft.quanpin,
+                    autocorrect_neighbor: checked,
+                  },
+                })
+              }
+            />
+            <SwitchRow
+              title="全拼乱序纠错"
+              checked={draft.quanpin?.autocorrect_transposition ?? true}
               onChange={(checked) =>
                 onPreferencesChange({
                   quanpin: {
                     ...draft.quanpin,
                     autocorrect_transposition: checked,
-                    autocorrect_neighbor: checked,
                   },
                 })
               }
@@ -335,6 +346,10 @@ export function InputSettingsPage() {
               accountTranslation={false}
               onEnabledChange={(candidate_translations) =>
                 onPreferencesChange({ candidate_translations })
+              }
+              scope={candidateTranslationScope(draft.candidate_translation_scope)}
+              onScopeChange={(candidate_translation_scope) =>
+                onPreferencesChange({ candidate_translation_scope })
               }
               onTargetLanguageChange={(translation_target_language) =>
                 onPreferencesChange({ translation_target_language })
@@ -373,7 +388,7 @@ export function InputSettingsPage() {
           ) : undefined
         }
         renderGroup={panel}
-        foldIntoMore={harmonyPhone}
+        showTraditionalOutput={!harmonyPhone}
         traditionalChineseVariants={host?.traditional_chinese_variants === true}
         preferences={draft}
         wordCharacter={wordCharacter}
@@ -421,7 +436,9 @@ export function InputSettingsPage() {
         onMixedInputChange={(mixed_input) => onPreferencesChange({ mixed_input })}
         showMixedInputMinimumPrefix={showMixedInputMinimumPrefix}
         temporaryJapanese={temporaryJapanese}
+        showMultilingualInput={host?.edition?.input_schemes.includes("quanpin") ?? true}
         quickPhraseCandidates={host?.quick_phrase_candidates ?? false}
+        caretEditSuffix={host?.caret_edit_suffix ?? false}
         paging={
           !harmonyPhone && (
             <NavigationSection

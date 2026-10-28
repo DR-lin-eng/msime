@@ -15,6 +15,19 @@ fn result(ok: bool, message: &str) -> ProbeResult {
     }
 }
 
+/// HTTP 测试被拒时给设置页的一句话，带上状态码，不带服务端正文。402 是 DeepSeek、OpenRouter 等的「余额不足」，不该让用户去改接口地址和模型。5xx 多半是服务端自己的故障，先让用户稍后重试；但 one-api、new-api 这类中转对没有渠道的模型名也回 503，所以重试无效时要提醒核对模型。`other` 是其余状态码时的建议。
+pub(crate) fn rejected_status_message(status: u16, other: &str) -> String {
+    match status {
+        401 | 403 => format!("认证失败（HTTP {status}），请检查 API Key 和访问权限。"),
+        402 => "账户余额不足（HTTP 402），请到服务商控制台充值后重试。".into(),
+        429 => "服务限流或额度不足（HTTP 429），请稍后重试。".into(),
+        500..=599 => format!(
+            "服务暂时不可用（HTTP {status}），请稍后重试；一直如此时，请确认该服务支持所填的模型。"
+        ),
+        _ => format!("{other}（HTTP {status}）"),
+    }
+}
+
 /// 探测仅保留固定错误类别，不向设置页返回服务端文字或凭据。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeFailure {
@@ -35,6 +48,7 @@ impl ProbeTransport for ChatProbeTransport {
     fn post(&self, endpoint: &str, token: &str, body: &Value) -> Result<u16, ProbeFailure> {
         let url = crate::ai::endpoint::validate(endpoint).map_err(|_| ProbeFailure::Connection)?;
         let client = crate::ai::endpoint::blocking_client_builder(&url)
+            .map_err(|_| ProbeFailure::Connection)?
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
@@ -117,19 +131,14 @@ pub fn test_chat(service: &str, config: &Value, transport: &impl ProbeTransport)
     if uses_token && !crate::credential::usable_token(token) {
         return result(false, "请先填写有效的 API Key。");
     }
-    // AI 辅助的接口地址按 `ai::endpoint` 检查，本机和局域网的 http 也可以；语音润色仍只收 https。
-    if service == "ai.assistant" {
-        if !crate::ai::endpoint::is_allowed(endpoint)
-            || model.is_empty()
-            || !crate::text::is_bounded_text(model, 256)
-        {
-            return result(
-                false,
-                "请填写有效的接口地址（https://，或本机、局域网的 http://）和模型名。",
-            );
-        }
-    } else if !crate::credential::valid_https_endpoint_and_model(endpoint, model) {
-        return result(false, "请填写有效的 HTTPS 接口地址和模型名。");
+    if !crate::ai::endpoint::is_allowed(endpoint)
+        || model.is_empty()
+        || !crate::text::is_bounded_text(model, 256)
+    {
+        return result(
+            false,
+            "请填写有效的接口地址（https://，或本机、局域网的 http://）和模型名。",
+        );
     }
     // 给强制思考模型留出生成正文的预算；这是上限，不要求生成 512 个 token。
     let mut body = json!({"model": model, "stream": false, "max_tokens": 512,
@@ -170,9 +179,10 @@ pub fn test_chat(service: &str, config: &Value, transport: &impl ProbeTransport)
     match transport.post(endpoint, token, &body) {
         Ok(200..=299) if !uses_token => result(true, "连接成功，模型配置有效。"),
         Ok(200..=299) => result(true, "连接成功，API Key 和模型配置有效。"),
-        Ok(401 | 403) => result(false, "认证失败，请检查 API Key 和访问权限。"),
-        Ok(429) => result(false, "服务限流或额度不足，请稍后重试。"),
-        Ok(_) => result(false, "服务拒绝请求，请检查接口地址和模型配置。"),
+        Ok(status) => ProbeResult {
+            ok: false,
+            message: rejected_status_message(status, "服务拒绝请求，请检查接口地址和模型配置"),
+        },
         Err(ProbeFailure::OutputLimit) => result(
             false,
             "服务已响应，但模型耗尽测试输出预算，未完成回复。可换用思考较少的模型后重试。",
@@ -260,7 +270,9 @@ mod tests {
         ] {
             let mut request = config("openai");
             request[key] = json!(value);
-            assert!(!test_chat("ai.assistant", &request, &fake).ok);
+            for service in ["ai.assistant", "voice.polish"] {
+                assert!(!test_chat(service, &request, &fake).ok, "{service}: {key}");
+            }
         }
         assert!(!test_chat("voice.asr", &config("openai"), &fake).ok);
         assert!(fake.bodies.borrow().is_empty());
@@ -289,7 +301,7 @@ mod tests {
         assert_eq!(transport.0.borrow().len(), 2);
     }
     #[test]
-    fn credential_chat_accepts_local_network_http_only_for_ai_assistant() {
+    fn credential_chat_endpoint_policy_matches_the_shared_contract() {
         struct Recording(RefCell<Vec<String>>);
         impl ProbeTransport for Recording {
             fn post(&self, endpoint: &str, _: &str, _: &Value) -> Result<u16, ProbeFailure> {
@@ -297,17 +309,27 @@ mod tests {
                 Ok(200)
             }
         }
-        let transport = Recording(RefCell::default());
-        let mut request = config("openai");
-        request["endpoint"] = json!("http://192.168.1.20:1234/v1/chat/completions");
-        assert!(test_chat("ai.assistant", &request, &transport).ok);
-        assert!(!test_chat("voice.polish", &request, &transport).ok);
-        request["endpoint"] = json!("http://8.8.8.8/v1/chat/completions");
-        assert!(!test_chat("ai.assistant", &request, &transport).ok);
-        assert_eq!(
-            *transport.0.borrow(),
-            ["http://192.168.1.20:1234/v1/chat/completions"]
-        );
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../../../shared/contracts/ai-endpoint/cases.json"
+        ))
+        .unwrap();
+        for service in ["ai.assistant", "voice.polish"] {
+            let transport = Recording(RefCell::default());
+            for case in contract["cases"].as_array().unwrap() {
+                let mut request = config("custom");
+                let endpoint = case["endpoint"].as_str().unwrap();
+                // 测试入口会先清理首尾空白，URL 契约检查的是清理后的原文。
+                if endpoint != endpoint.trim() {
+                    continue;
+                }
+                request["endpoint"] = case["endpoint"].clone();
+                let allowed = case["result"] == "allowed";
+                let before = transport.0.borrow().len();
+                let tested = test_chat(service, &request, &transport);
+                assert_eq!(tested.ok, allowed, "{service}: {case}: {}", tested.message);
+                assert_eq!(transport.0.borrow().len(), before + usize::from(allowed));
+            }
+        }
     }
     #[test]
     fn credential_chat_returns_only_bounded_public_status() {
@@ -320,6 +342,40 @@ mod tests {
             assert!(!result.ok);
             assert!(result.message.len() < 256);
             assert!(!result.message.contains("synthetic-key"));
+        }
+    }
+
+    // DeepSeek 的错误码表：402 是余额不足、500/503 是服务端故障，都不能让用户回头检查接口地址和模型。
+    #[test]
+    fn credential_chat_names_balance_and_server_failures_with_their_status() {
+        for (status, explanation) in [
+            (401, "认证失败（HTTP 401）"),
+            (403, "认证失败（HTTP 403）"),
+            (402, "账户余额不足（HTTP 402）"),
+            (429, "服务限流或额度不足（HTTP 429）"),
+            (500, "服务暂时不可用（HTTP 500）"),
+            (503, "服务暂时不可用（HTTP 503）"),
+            (404, "服务拒绝请求，请检查接口地址和模型配置（HTTP 404）"),
+            (422, "服务拒绝请求，请检查接口地址和模型配置（HTTP 422）"),
+        ] {
+            let fake = Fake {
+                status: Some(status),
+                bodies: RefCell::default(),
+            };
+            let result = test_chat("voice.polish", &config("deepseek"), &fake);
+            assert!(!result.ok);
+            assert!(
+                result.message.starts_with(explanation),
+                "{status}: {}",
+                result.message
+            );
+            if matches!(status, 402 | 500..=599) {
+                assert!(!result.message.contains("接口地址"), "{status}");
+            }
+            // 中转服务对没有渠道的模型名也回 503，重试无效时得让用户想到模型。
+            if matches!(status, 500..=599) {
+                assert!(result.message.contains("所填的模型"), "{status}");
+            }
         }
     }
 
@@ -422,67 +478,77 @@ mod tests {
     #[test]
     fn credential_chat_budget_allows_the_reasoning_server_to_finish() {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!(
-            "http://{}/v1/chat/completions",
-            listener.local_addr().unwrap()
-        );
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            let body_start;
-            let body_len;
-            loop {
-                let mut buffer = [0; 1024];
-                let count = stream.read(&mut buffer).unwrap();
-                assert!(count > 0);
-                request.extend_from_slice(&buffer[..count]);
-                assert!(request.len() <= 16384);
-                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                    body_start = end + 4;
-                    body_len = std::str::from_utf8(&request[..end])
-                        .unwrap()
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap();
-                    break;
+        for service in ["ai.assistant", "voice.polish"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!(
+                "http://{}/v1/chat/completions",
+                listener.local_addr().unwrap()
+            );
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let body_start;
+                let body_len;
+                loop {
+                    let mut buffer = [0; 1024];
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    assert!(request.len() <= 16384);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        body_start = end + 4;
+                        body_len = std::str::from_utf8(&request[..end])
+                            .unwrap()
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        break;
+                    }
                 }
-            }
-            while request.len() < body_start + body_len {
-                let mut buffer = [0; 1024];
-                let count = stream.read(&mut buffer).unwrap();
-                assert!(count > 0);
-                request.extend_from_slice(&buffer[..count]);
-                assert!(request.len() <= 16384);
-            }
-            let body: Value =
-                serde_json::from_slice(&request[body_start..body_start + body_len]).unwrap();
-            // 合成服务先消耗思考预算，只有剩余预算足够时才返回正文。
-            let enough = body["max_tokens"].as_u64().unwrap() > 32;
-            let reply = json!({"choices":[{"message":{"reasoning_content":"synthetic reasoning",
-                "content":if enough {"OK"} else {""}},
-                "finish_reason":if enough {"stop"} else {"length"}}]})
-            .to_string();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                reply.len(),
-                reply
-            )
-            .unwrap();
-        });
-        let mut request = config("everyapi");
-        request["model"] = json!("synthetic-reasoning-model");
-        request["endpoint"] = json!(endpoint);
-        assert!(test_chat("ai.assistant", &request, &ChatProbeTransport).ok);
-        server.join().unwrap();
+                while request.len() < body_start + body_len {
+                    let mut buffer = [0; 1024];
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    assert!(request.len() <= 16384);
+                }
+                let headers = std::str::from_utf8(&request[..body_start]).unwrap();
+                assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+                assert!(headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer synthetic-key\r\n"));
+                let body: Value =
+                    serde_json::from_slice(&request[body_start..body_start + body_len]).unwrap();
+                assert_eq!(body["model"], "synthetic-reasoning-model");
+                // 合成服务先消耗思考预算，只有剩余预算足够时才返回正文。
+                let enough = body["max_tokens"].as_u64().unwrap() > 32;
+                let reply =
+                    json!({"choices":[{"message":{"reasoning_content":"synthetic reasoning",
+                    "content":if enough {"OK"} else {""}},
+                    "finish_reason":if enough {"stop"} else {"length"}}]})
+                    .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    reply.len(),
+                    reply
+                )
+                .unwrap();
+            });
+            let mut request = config("custom");
+            request["model"] = json!("synthetic-reasoning-model");
+            request["endpoint"] = json!(endpoint);
+            let tested = crate::credential::test_service(service, &request);
+            assert!(tested.ok, "{service}: {}", tested.message);
+            server.join().unwrap();
+        }
     }
 
     #[test]

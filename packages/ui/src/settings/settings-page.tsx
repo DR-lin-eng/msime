@@ -4,7 +4,7 @@ import { useSettingsPageModel, type SettingsPageProps } from "./use-settings-pag
 import { SettingsMascotIntro, settingsMascotIntro } from "./settings-mascot-intro";
 import { SettingsSidebar } from "./settings-sidebar";
 import { appThemeStyle, seasonAttr } from "../core/app-theme-style";
-import { SetupWarningStrip } from "../keyboard/setup-status-card";
+import { SetupWarningStrip, OobeStatusNotice } from "../keyboard/setup-status-card";
 import { KeyboardSwitchGuideHost } from "../keyboard/keyboard-switch-guide";
 import { useSettingsWindowInteractions } from "./use-settings-window-interactions";
 import { useSettingsShellState } from "./use-settings-shell-state";
@@ -95,6 +95,8 @@ function SettingsShell(props: SettingsPageProps) {
   const {
     pluginView,
     setPluginView,
+    pluginOpenRequest,
+    setPluginOpenRequest,
     skinView,
     setSkinView,
     navQuery,
@@ -195,7 +197,7 @@ function SettingsShell(props: SettingsPageProps) {
   });
   const { onOpenChat, onRestoreDefaults } = createSettingsNavigationActions({
     selectPage,
-    chatAvailable: Boolean(client.chat),
+    chatAvailable: availablePages.some((item) => item.id === "chat"),
     openPanel,
     openHandwriting: client.openHandwriting,
     restoreDefaults,
@@ -357,6 +359,7 @@ function SettingsShell(props: SettingsPageProps) {
                 (page === "input" || page === "about") && (
                   <SetupWarningStrip actions={client.home} />
                 )}
+              {(macosPlatform || linuxShell) && <OobeStatusNotice client={client.oobe} />}
               <SettingsPageStatus
                 error={error}
                 notice={notice}
@@ -405,6 +408,14 @@ function SettingsShell(props: SettingsPageProps) {
                 views={communityViews}
                 pluginView={pluginView}
                 onPluginViewChange={setPluginView}
+                onOpenPlugin={(installed) => {
+                  setPluginOpenRequest((previous) => ({
+                    kind: installed.kind,
+                    id: installed.id,
+                    serial: (previous?.serial ?? 0) + 1,
+                  }));
+                  setPluginView("mine");
+                }}
               />
               {draft && isSettingsFormPage(page) && (
                 <SettingsPreferencesForm
@@ -414,6 +425,7 @@ function SettingsShell(props: SettingsPageProps) {
                   // 社区图库和「制作皮肤」都画在表单之外，选中其一时表单里的皮肤页隐藏。
                   skinCommunityShown={skinCommunityShown || skinEditorShown}
                   pluginCommunityShown={pluginCommunityShown}
+                  pluginOpenRequest={pluginOpenRequest}
                   externalActions={externalActions}
                   onRestoreDefaults={onRestoreDefaults}
                   reloadSettings={reloadSettings}

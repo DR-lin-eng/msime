@@ -61,10 +61,18 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+/** 勾上登录前的隐私政策同意；不勾时验证码、Google 和 Apple 登录都不会发出请求。 */
+async function agreeToPrivacyPolicy(scope: Pick<typeof screen, "findByRole"> = screen) {
+  fireEvent.click(
+    await scope.findByRole("checkbox", { name: "我已阅读并同意《用户协议》和《隐私政策》" }),
+  );
+}
+
 test("code login trims the target, requires six ASCII digits and loads the profile", async () => {
   const client = account();
   const onLoginComplete = vi.fn();
   render(<AccountPage client={client} onLoginComplete={onLoginComplete} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "邮箱登录" }));
   fireEvent.change(screen.getByRole("textbox", { name: "邮箱地址" }), {
     target: { value: "  fixture@example.test  " },
@@ -100,6 +108,7 @@ test("ignores a same-tick duplicate verification-code request", async () => {
     requestCode,
   });
   render(<AccountPage client={client} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "邮箱登录" }));
   fireEvent.change(screen.getByRole("textbox", { name: "邮箱地址" }), {
     target: { value: "fixture@example.test" },
@@ -355,7 +364,8 @@ test("Harmony chat login leaves the composer unfocused and cancel returns to it"
       client={{
         load: async () => preferences,
         save: vi.fn(),
-        host: testHost({ platform: "harmony" }),
+        // 鸿蒙按 AI 生成类资质到位、总闸打开时的样子报 `ai_generation`。
+        host: testHost({ platform: "harmony", ai_generation: true }),
         home: {},
         chat: {
           models: vi.fn().mockRejectedValue({ code: "account_unauthorized" }),
@@ -414,6 +424,7 @@ test("iOS Apple sign-in stays behind the native account client boundary", async 
     appleLogin,
   });
   render(<AccountPage client={client} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "使用 Apple 登录" }));
   await waitFor(() => expect(appleLogin).toHaveBeenCalledTimes(1));
   expect(screen.queryByText(/token|nonce/i)).toBeNull();
@@ -435,6 +446,7 @@ test("an Apple sign-in response from a replaced account client is ignored", asyn
     status: vi.fn().mockResolvedValue({ user: null }),
   });
   const view = render(<AccountPage client={oldClient} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "使用 Apple 登录" }));
   await waitFor(() => expect(oldClient.appleLogin).toHaveBeenCalledTimes(1));
 
@@ -469,6 +481,7 @@ test("desktop Google sign-in runs through the native account client", async () =
     googleLogin,
   });
   render(<AccountPage client={client} onLoginComplete={onLoginComplete} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "使用 Google 登录" }));
   await waitFor(() => expect(googleLogin).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(onLoginComplete).toHaveBeenCalledTimes(1));
@@ -497,6 +510,7 @@ test("a Google sign-in response from a replaced account client is ignored", asyn
     status: vi.fn().mockResolvedValue({ user: null }),
   });
   const view = render(<AccountPage client={oldClient} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "使用 Google 登录" }));
   await waitFor(() => expect(oldClient.googleLogin).toHaveBeenCalledTimes(1));
 
@@ -538,6 +552,7 @@ test("a cancelled Google sign-in stays silent", async () => {
     googleLogin,
   });
   render(<AccountPage client={client} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "使用 Google 登录" }));
   await waitFor(() => expect(googleLogin).toHaveBeenCalledTimes(1));
   await waitFor(() =>
@@ -564,6 +579,7 @@ test("a pending Google sign-in can be abandoned without waiting for the browser"
     googleCancel,
   });
   render(<AccountPage client={client} onCancelLogin={onCancelLogin} />);
+  await agreeToPrivacyPolicy();
   fireEvent.click(await screen.findByRole("button", { name: "使用 Google 登录" }));
   const cancel = await screen.findByRole("button", { name: "取消 Google 登录" });
   expect(
@@ -721,6 +737,20 @@ test("logged-in accounts expose local designs and every community collection", a
   ]);
 });
 
+// 回复模板是高情商回复的提示词：不提供 AI 生成类功能的宿主（鸿蒙版拿到资质之前）「我的内容」里不列这两行。
+test("a host without AI generation lists no reply template collections", async () => {
+  const openCommunity = vi.fn();
+  const client = account({ status: vi.fn().mockResolvedValue({ user }) });
+  render(
+    <AccountPage client={client} onOpenCommunity={openCommunity} communityHasReplies={false} />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "我发布的词库" }));
+  fireEvent.click(screen.getByRole("button", { name: "收藏的词库" }));
+  expect(screen.queryByRole("button", { name: "我发布的回复模板" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "收藏的回复模板" })).toBeNull();
+  expect(openCommunity.mock.calls).toEqual([["published-dictionary"], ["saved-dictionary"]]);
+});
+
 test("a community page without the skin gallery offers only its dictionary and reply collections", async () => {
   const openCommunity = vi.fn();
   const client = account({ status: vi.fn().mockResolvedValue({ user }) });
@@ -862,6 +892,7 @@ test("a successful sign-in after an unreadable session drops the stale clear act
   });
   render(<AccountPage client={client} />);
   expect(await screen.findByRole("button", { name: "清除失效登录状态" })).toBeTruthy();
+  await agreeToPrivacyPolicy();
   fireEvent.click(screen.getByRole("button", { name: "邮箱登录" }));
   fireEvent.change(screen.getByRole("textbox", { name: "邮箱地址" }), {
     target: { value: "fixture@example.test" },
@@ -1515,6 +1546,7 @@ test("Harmony 我的 shows a signed-out card that opens the code sign-in sheet",
   expect(sheet.queryByRole("button", { name: /Apple|Google/ })).toBeNull();
   fireEvent.click(sheet.getByRole("button", { name: "《隐私政策》" }));
   expect(onOpenUrl).toHaveBeenCalledWith("https://msime.app/privacy/");
+  await agreeToPrivacyPolicy(sheet);
 
   fireEvent.click(sheet.getByRole("button", { name: "使用邮箱登录" }));
   const send = sheet.getByRole("button", { name: "发送验证码" }) as HTMLButtonElement;
@@ -1599,6 +1631,7 @@ test("the Harmony sheet signs in with Google through the host and closes", async
   harmonyMe({ client });
   fireEvent.click(await screen.findByRole("button", { name: "未登录，点按登录" }));
   const sheet = within(await screen.findByRole("dialog", { name: "登录水杉" }));
+  await agreeToPrivacyPolicy(sheet);
 
   fireEvent.click(sheet.getByRole("button", { name: "使用 Google 登录" }));
   expect(googleLogin).toHaveBeenCalledOnce();
@@ -1626,6 +1659,7 @@ test("cancelling or closing the Harmony sheet ends a Google sign-in that is wait
   harmonyMe({ client });
   fireEvent.click(await screen.findByRole("button", { name: "未登录，点按登录" }));
   const sheet = within(await screen.findByRole("dialog", { name: "登录水杉" }));
+  await agreeToPrivacyPolicy(sheet);
   fireEvent.click(sheet.getByRole("button", { name: "使用 Google 登录" }));
   fireEvent.click(await sheet.findByRole("button", { name: "取消 Google 登录" }));
   expect(googleCancel).toHaveBeenCalledOnce();
@@ -1854,30 +1888,88 @@ test("Harmony 我的 has no manual 同步 rows even with a settings sync client"
   expect(screen.queryByRole("button", { name: "下载并应用云端设置" })).toBeNull();
 });
 
-// 「绑定 QQ 群助手」对所有平台都开放：鸿蒙手机走手机账号页，2in1 走桌面账号页，两边都要有这张卡片；宿主没提供 qqLinks 时不出现。
-test("the QQ bind card appears on the HarmonyOS phone and 2-in-1 account pages", async () => {
+test.each(["harmony", "ios", "android"] as const)(
+  "%s 手机的 QQ 群助手从同步行推入二级页，返回后收起表单",
+  async (platform) => {
+    window.history.replaceState({ msimeSettings: true, page: "account" }, "");
+    const qqLinks = {
+      list: vi.fn().mockResolvedValue([]),
+      redeem: vi.fn(),
+      remove: vi.fn(),
+    };
+    render(
+      <AccountPage
+        client={account({ status: vi.fn().mockResolvedValue({ user }), qqLinks })}
+        platform={platform}
+      />,
+    );
+    const entry = await screen.findByRole("button", { name: "绑定 QQ 群助手" });
+    expect(
+      within(screen.getByRole("region", { name: "同步" })).getByRole("button", {
+        name: "绑定 QQ 群助手",
+      }),
+    ).toBe(entry);
+    expect(screen.queryByLabelText("绑定码")).toBeNull();
+    expect(qqLinks.list).not.toHaveBeenCalled();
+
+    fireEvent.click(entry);
+    await screen.findByLabelText("绑定码");
+    expect(screen.getAllByRole("heading", { name: "绑定 QQ 群助手" })).toHaveLength(1);
+    expect(window.history.state).toMatchObject({ accountSubpage: "qq-links" });
+    expect(screen.queryByRole("button", { name: "编辑个人资料" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "返回我的" }));
+    await screen.findByRole("button", { name: "编辑个人资料" });
+    expect(screen.queryByLabelText("绑定码")).toBeNull();
+    expect(window.history.state.accountSubpage).toBeUndefined();
+  },
+);
+
+test("鸿蒙 QQ 群助手恢复历史页并展示已有绑定，系统返回手势回到我的", async () => {
+  window.history.replaceState(
+    { msimeSettings: true, page: "account", accountSubpage: "qq-links" },
+    "",
+  );
   const qqLinks = {
-    list: vi.fn().mockResolvedValue([]),
+    list: vi.fn().mockResolvedValue([{ id: "fixture-link", createdAt: "2026-10-17T08:00:00Z" }]),
     redeem: vi.fn(),
     remove: vi.fn(),
   };
-  const withLinks = account({ status: vi.fn().mockResolvedValue({ user }), qqLinks });
-  const phone = render(<AccountPage client={withLinks} platform="harmony" />);
-  expect(await screen.findByRole("heading", { name: "绑定 QQ 群助手" })).toBeTruthy();
-  await waitFor(() => expect(qqLinks.list).toHaveBeenCalled());
-  phone.unmount();
+  harmonyMe({ client: account({ status: vi.fn().mockResolvedValue({ user }), qqLinks }) });
+  await screen.findByRole("button", { name: "解绑" });
+  expect(screen.queryByLabelText("绑定码")).toBeNull();
+  act(() => {
+    window.history.replaceState({ msimeSettings: true, page: "account" }, "");
+    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+  });
+  await screen.findByRole("button", { name: "绑定 QQ 群助手" });
+  expect(screen.queryByRole("button", { name: "解绑" })).toBeNull();
+});
 
-  const tablet = render(<AccountPage client={withLinks} platform="harmony" mobile={false} />);
-  expect(await screen.findByRole("heading", { name: "绑定 QQ 群助手" })).toBeTruthy();
-  tablet.unmount();
+test("鸿蒙未登录时显示禁用的 QQ 群助手入口，不读取绑定", async () => {
+  const qqLinks = { list: vi.fn(), redeem: vi.fn(), remove: vi.fn() };
+  harmonyMe({ client: account({ qqLinks }) });
+  const entry = await screen.findByRole("button", { name: "绑定 QQ 群助手" });
+  expect(entry).toHaveProperty("disabled", true);
+  expect(screen.getByText("登录后可用")).toBeTruthy();
+  fireEvent.click(entry);
+  expect(qqLinks.list).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("绑定码")).toBeNull();
+});
 
-  render(
+test("鸿蒙 2in1 保留 QQ 群助手卡片，缺少宿主能力时不显示入口", async () => {
+  const qqLinks = { list: vi.fn().mockResolvedValue([]), redeem: vi.fn(), remove: vi.fn() };
+  const tablet = render(
     <AccountPage
-      client={account({ status: vi.fn().mockResolvedValue({ user }) })}
+      client={account({ status: vi.fn().mockResolvedValue({ user }), qqLinks })}
       platform="harmony"
+      mobile={false}
     />,
   );
+  expect(await screen.findByRole("heading", { name: "绑定 QQ 群助手" })).toBeTruthy();
+  tablet.unmount();
+  harmonyMe({ client: account({ status: vi.fn().mockResolvedValue({ user }) }) });
   await screen.findByRole("button", { name: "编辑个人资料" });
+  expect(screen.queryByRole("button", { name: "绑定 QQ 群助手" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "绑定 QQ 群助手" })).toBeNull();
 });
 

@@ -131,6 +131,26 @@ int main() {
   const auto none = hold_key_patch(no_hold_key);
   check(!none[0].second && !none[1].second && !none[2].second, "不使用 turns all three off");
 
+  // 缺键、显式关闭和开启的 27 种组合沿用同一优先级；查询不修改旧文档。
+  const std::array<std::wstring_view, 3> hold_names{{L"hotkey_ralt", L"hotkey_rctrl_ralt", L"hotkey_ctrl_win"}};
+  for (int profile = 0; profile < 27; ++profile) {
+    auto remaining = profile;
+    std::map<std::wstring_view, bool> stored;
+    auto expected = no_hold_key;
+    for (size_t index = 0; index < hold_names.size(); ++index) {
+      const auto state = remaining % 3;
+      remaining /= 3;
+      if (state) stored[hold_names[index]] = state == 2;
+      const auto enabled = state ? state == 2 : index == 0;
+      if (expected == no_hold_key && enabled) expected = hold_names[index];
+    }
+    const auto before = stored;
+    check(selected_hold_key(stored) == expected && stored == before,
+          "every missing and explicit hold key profile preserves priority without writes");
+  }
+  check(hold_keys[0].label == L"右 Alt" && hold_keys[1].label == L"右 Ctrl+右 Alt" &&
+            hold_keys[2].label == L"Ctrl+Win", "hold choices preserve Windows labels");
+
   // 「麦克风」下拉：空、auto、windows 是这台主机的后端，不分大小写；别的平台的后端显示成系统默认设备。
   check(capture_backend_supported(L"") && capture_backend_supported(L"auto") &&
             capture_backend_supported(L"Windows") && capture_backend_supported(L"AUTO"),
@@ -178,19 +198,23 @@ int main() {
         "progress");
   check(local_model_stage_label(L"verify") == L"校验中" && local_model_stage_label(L"x") == L"准备中",
         "stage labels");
-  check(local_model_error_code(L"local_model_size_mismatch: a.bin") ==
-                L"local_model_checksum_mismatch" &&
-            local_model_error_code(L"local_model_missing_file: x") == L"local_model_invalid_archive" &&
-            local_model_error_code(L"local_model_install_running") == L"busy" &&
-            local_model_error_code(L"local_model_network: timed out") == L"local_model_network",
-        "host error codes become page codes");
-  check(!local_model_error_message(L"local_model_cancelled") &&
-            local_model_error_message(L"invalid local model root") == std::wstring(L"操作失败，请重试。"),
-        "error messages");
   check(local_model_import_error_message(L"busy") == std::wstring(L"该模型正在安装，请等待完成或先取消。") &&
             local_model_import_error_message(L"local_model_io") ==
                 std::wstring(L"无法写入模型文件，请确认磁盘空间充足。"),
         "import error messages");
+  check(local_model_import_error_message(msime::settings::models::error_code(
+            L"local_model_size_mismatch: selected-model.bin")) ==
+            std::wstring(L"所选文件和模型目录里的校验值不符，可能没下载完整或版本不对，请重新下载后再导入。"),
+        "导入保留专属校验提示");
+  check(local_model_import_error_message(msime::settings::models::error_code(
+            L"local_model_format_mismatch: selected-model.bin")) ==
+            std::wstring(L"所选文件和模型目录里的校验值不符，可能没下载完整或版本不对，请重新下载后再导入。"),
+        "格式错误归一化后保留导入专属校验提示");
+  check(!local_model_import_error_message(msime::settings::models::error_code(
+            L"local_model_cancelled: file selection")) &&
+            local_model_import_error_message(L"new_model_error") ==
+                std::wstring(L"操作失败，请重试。"),
+        "导入复用取消与未知错误的公共处理");
 
   // 「服务配置 ›」的状态（desktopVoiceServiceStatus 的 Windows 分支）：豆包没填时照实说没填，不说「暂用系统识别」。
   check(service_status(L"local", false, true, L"", L"", L"", L"", L"api_key") == L"未选模型" &&

@@ -57,7 +57,7 @@ pub use dictionary::{
 };
 pub use glosses::{
     candidate_glosses, candidate_glosses_with_user, candidate_target_glosses, english_completions,
-    english_corrections, english_phonetics, save_candidate_gloss,
+    english_correction_display, english_corrections, english_phonetics, save_candidate_gloss,
 };
 pub use options::{prepare_options, prepare_options_for, EngineOptions};
 pub use session::{
@@ -66,6 +66,7 @@ pub use session::{
 };
 pub use text::{
     emoji_catalog_filtered_page, emoji_catalog_groups, emoji_catalog_slice, emoji_symbol_groups,
-    handwriting_order_candidates, hanzi_to_pinyin, normalize_full_pinyin, shuangpin_key_hints,
+    encode_shuangpin, handwriting_order_candidates, hanzi_to_pinyin, hanzi_to_pinyin_batch,
+    is_shuangpin_syllable, normalize_full_pinyin, shuangpin_key_hints, shuangpin_uses_semicolon,
     shuangpin_zero_initials, wubi_code_lookup,
 };

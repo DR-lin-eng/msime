@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,7 +34,9 @@ public final class HttpAsrRecognizer {
     private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
 
     /** Why a recognition did not produce text. The caller maps these onto its own outcomes. */
-    public enum Failure { PERMISSION, UNAVAILABLE, CANCELLED, NETWORK, EMPTY }
+    public enum Failure {
+        PERMISSION, UNAVAILABLE, CANCELLED, NETWORK, TIMEOUT, SERVICE_TIMEOUT, LIMIT, SERVICE, EMPTY
+    }
 
     /** Thrown rather than returning null so a caller cannot mistake a failure for silence. */
     public static final class Refused extends Exception {
@@ -54,6 +57,15 @@ public final class HttpAsrRecognizer {
     private final AtomicBoolean cancelled = new AtomicBoolean();
     /** The in-flight upload, if recording has already finished. Cancel must unblock its read. */
     private volatile HttpURLConnection connection;
+
+    /** 约 100 ms 的 16 kHz 单声道 PCM：采集按这个粒度读，聆听面板的音量光圈才跟得上说话。 */
+    private static final int LEVEL_CHUNK_BYTES = 3200;
+    /** 每读到一块 PCM 在录音线程回传 0–1 音量（{@link VoiceAudioLevel#fromPcm16le}）；界面更新由调用方切回主线程。 */
+    private volatile java.util.function.Consumer<Float> levels = level -> { };
+
+    public void levels(java.util.function.Consumer<Float> sink) {
+        levels = sink == null ? level -> { } : sink;
+    }
 
     /** Stop recording and transcribe what has been captured so far. */
     public void stop() {
@@ -118,10 +130,13 @@ public final class HttpAsrRecognizer {
             // Two bytes per sample: the byte budget is the time budget.
             int limit = WavAudio.SAMPLE_RATE * 2 / 1000 * MAX_MILLIS;
             while (!stopped.get() && captured.size() < limit) {
-                int requested = VoiceCapturePolicy.readLength(limit, captured.size(), chunk.length);
+                // 录音缓冲仍按系统最小值开，只是每次读得少一些。
+                int requested = VoiceCapturePolicy.readLength(limit, captured.size(),
+                    Math.min(chunk.length, LEVEL_CHUNK_BYTES));
                 if (requested == 0) break;
                 int read = recorder.read(chunk, 0, requested);
                 if (read < 0) throw new Refused(Failure.UNAVAILABLE);
+                if (read > 0) levels.accept(VoiceAudioLevel.fromPcm16le(chunk, read));
                 captured.write(chunk, 0, read);
             }
             return captured.toByteArray();
@@ -153,7 +168,13 @@ public final class HttpAsrRecognizer {
             }
             if (cancelled.get()) throw new Refused(Failure.CANCELLED);
             int status = opened.getResponseCode();
-            if (!HttpConnectionPolicy.isSuccessful(status)) throw new Refused(Failure.NETWORK);
+            if (!HttpConnectionPolicy.isSuccessful(status)) {
+                throw new Refused(switch (HttpAsrPolicy.statusFailure(status)) {
+                    case TOO_LARGE -> Failure.LIMIT;
+                    case TIMED_OUT -> Failure.SERVICE_TIMEOUT;
+                    case REJECTED -> Failure.SERVICE;
+                });
+            }
             String text;
             try (InputStream input = opened.getInputStream()) {
                 String response = TextPolicy.utf8(
@@ -163,6 +184,8 @@ public final class HttpAsrRecognizer {
             }
             if (text.isEmpty()) throw new Refused(Failure.EMPTY);
             return text;
+        } catch (SocketTimeoutException error) {
+            throw new Refused(Failure.TIMEOUT);
         } catch (IOException error) {
             throw new Refused(Failure.NETWORK);
         } finally {

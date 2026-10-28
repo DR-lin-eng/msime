@@ -29,6 +29,7 @@
 #include "InputSchemeTraits.h"
 #include "FullscreenForeground.h"
 #include "HostApiDiagnosticLine.h"
+#include "HelpcodeRoot.h"
 #include "SoundPackRoot.h"
 #include "PluginPackRoot.h"
 #include "MaintenanceHotkey.h"
@@ -36,6 +37,7 @@
 #include "ModeAuthority.h"
 #include "AppInputModeRules.h"
 #include "InputModeHudWindow.h"
+#include "InputStateHudFeedback.h"
 #include "TypingEffectOverlay.h"
 #include "TypingFeedbackPreference.h"
 #include "ShuangpinKeymapWindow.h"
@@ -54,6 +56,11 @@
 #include "ToolbarModeCommand.h"
 #include "TrayMenuDispatch.h"
 #include "TrayMenuWindow.h"
+#include "UpdateNotifier.h"
+#include "../../common/UpdateRecordDirectory.h"
+#include "DictionarySyncSchedule.h"
+#include "DictionarySyncWorker.h"
+#include "../../common/DictionarySyncDirectory.h"
 #include "VoiceControllerListener.h"
 #include "VoiceHotkey.h"
 #include "VoiceInputSession.h"
@@ -298,12 +305,12 @@ void write_document_atomic(const std::filesystem::path &path, const std::string 
     throw std::runtime_error("Configuration replace failed");
   }
 }
-// The native toolbar and TSF shortcut use the same revisioned store as the
-// settings shell. Read and write on their shared single action worker so
-// neither the UI thread nor the input queue waits on the preferences lock.
+// 原生工具栏和 TSF 快捷键共用带修订号的偏好存储和单次工作线程，界面和输入队列不等存储锁。
 bool persist_traditional_output(const std::filesystem::path &directory,
                                 std::atomic<bool> &state,
-                                std::optional<bool> desired = std::nullopt) {
+                                std::optional<bool> desired = std::nullopt,
+                                std::optional<bool> *changed = nullptr) {
+  if (changed) changed->reset();
   try {
     const auto root = directory.u8string();
     auto loaded = msime::host_api::own_string(
@@ -338,6 +345,7 @@ bool persist_traditional_output(const std::filesystem::path &directory,
         !saved_response.at("value").is_object())
       return false;
     state.store(next, std::memory_order_release);
+    if (changed) *changed = next;
     return true;
   } catch (...) {
     return false;
@@ -454,7 +462,8 @@ bool toggle_stored_flag(const std::filesystem::path &directory,
 }
 // 通过带版本的存储选择输入方案，并像设置页一样维护 last_chinese_scheme：中文方案（包括粤拼、注音和笔画）也是日文、韩文、越南文和藏文切回时回到的方案，选择这些语言之一时记住被替换的中文方案。在它们之间切换保留记住的方案，因为它们都不是存储会接受的中文方案。
 bool store_input_scheme(const std::filesystem::path &directory,
-                        const std::string &scheme) {
+                        const std::string &scheme, bool &changed) {
+  changed = false;
   try {
     const auto root = directory.u8string();
     auto loaded = msime::host_api::own_string(
@@ -489,14 +498,18 @@ bool store_input_scheme(const std::filesystem::path &directory,
     if (!saved)
       return false;
     const auto saved_response = nlohmann::json::parse(saved.get());
-    return saved_response.value("ok", false) &&
-           saved_response.at("value").is_object();
+    changed = saved_response.value("ok", false) &&
+              saved_response.at("value").is_object();
+    return changed;
   } catch (...) {
     return false;
   }
 }
-// Ctrl+Shift+J 交给工作线程的一次请求，目标由 toggle_japanese_scheme 从存储算出，所以不带参数。
-struct JapaneseToggleRequest {};
+// Ctrl+Shift+J 的目标从存储算出，请求只保留完成通知和发起窗口。
+struct JapaneseToggleRequest {
+  std::shared_ptr<std::promise<std::optional<msime::windows::PreferenceSnapshot>>> completion;
+  uintptr_t foreground = reinterpret_cast<uintptr_t>(GetForegroundWindow());
+};
 // Ctrl+Shift+J：从存储读出偏好，按 Engine 实际运行的方案算出目标和要记的 last_chinese_scheme（scheme::japanese_toggle_write），带 revision 写回，和 store_input_scheme 一样维护 last_chinese_scheme。在工作线程上运行，读和写之间别的界面写进去的新修订会让保存失败，这一次按键就不切换，不会覆盖别人的写入。成功时返回写进去的方案，不切换或失败时为空。
 std::optional<std::string> toggle_japanese_scheme(
     const std::filesystem::path &directory,
@@ -626,6 +639,25 @@ TrayMenuPreferences tray_menu_preferences(
   const auto lock = preferences.value("punctuation_lock", std::string("follow"));
   result.punctuation_locked = lock == "chinese" || lock == "english";
   return result;
+}
+// HUD 和菜单共用方案名称，避免双拼、五笔的配置名在两处不一致。
+msime::windows::InputStateHudText scheme_hud(const TrayMenuPreferences &preferences) {
+  msime::windows::TrayMenuState state;
+  state.scheme = preferences.scheme;
+  state.shuangpin_profile = preferences.shuangpin_profile;
+  state.wubi_profile = preferences.wubi_profile;
+  for (const auto &item : msime::windows::tray_menu_scheme_items({}, state)) {
+    const auto *name = msime::windows::tray_menu_scheme(item.command);
+    if (!name || preferences.scheme != name) continue;
+    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        item.label.data(), static_cast<int>(item.label.size()), nullptr, 0);
+    if (count <= 0) break;
+    std::wstring title(static_cast<size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, item.label.data(),
+        static_cast<int>(item.label.size()), title.data(), count) != count) break;
+    return {title, L"输入方案：" + title};
+  }
+  return {};
 }
 // Map the shared preferences onto the settings the TIP keeps in its own
 // globals. The TIP consumes every one of these, but nothing ever sent them, so
@@ -891,21 +923,31 @@ int wmain(int argc, wchar_t **argv) {
   try {
     const auto default_state = production_state_directory();
     std::unique_ptr<ProductionInstance> instance;
+    bool prepared_now = false;
     if (production) {
       instance = std::make_unique<ProductionInstance>();
       if (instance->already_running())
         return 0;
       if (!launch.supervised)
         start_watchdog(executable_directory());
-      const bool prepared_now = prepare_first_run(executable_directory(), default_state,
-                       [](const std::string &request) {
-        auto response = msime::host_api::own_string(
-            msime_client_prepare_host(
-                reinterpret_cast<const uint8_t *>(request.data()), request.size()));
-        if (!response)
-          throw std::runtime_error("Host preparation failed");
-        return std::string(response.get());
-      });
+      // 首次准备失败需要可见的重试入口，不能让无控制台启动只留下标准错误。
+      for (;;) {
+        try {
+          prepared_now = prepare_first_run(executable_directory(), default_state,
+                           [](const std::string &request) {
+            auto response = msime::host_api::own_string(
+                msime_client_prepare_host(
+                    reinterpret_cast<const uint8_t *>(request.data()), request.size()));
+            if (!response)
+              throw std::runtime_error("Host preparation failed");
+            return std::string(response.get());
+          });
+          break;
+        } catch (...) {
+          if (MessageBoxW(nullptr, L"运行资源未能准备完成。请确认安装文件完整、数据目录可写，然后重试。", L"水杉输入法首次准备", MB_RETRYCANCEL | MB_ICONWARNING | MB_SETFOREGROUND) != IDRETRY)
+            throw;
+        }
+      }
       // 只在这次刚准备好状态时采用安装器的选择；已有状态属于用户，文件照样删掉。
       if (const auto cloud = take_installer_cloud_choice(default_state); prepared_now && cloud)
         record_installer_cloud_choice(default_state, *cloud);
@@ -946,6 +988,9 @@ int wmain(int argc, wchar_t **argv) {
     // 不是 full 的版本把版本 id 交给宿主库：它按版本选资源锁、收窄方案，并在状态根里记下版本。full 不带这个键，请求与引入版本之前相同。
     if constexpr (!MSIME_EDITION_IS_FULL)
       bootstrap_document["edition"] = MSIME_EDITION_ID;
+    // 会话用的是这里准备出的文档，runtime-options.json 却只在首次运行时写下。设置窗口、msime-mcp 和各应用里的 TIP 都照那份文件工作，升级换了词库代次后它们还在旧代次上，设置里新增的词条写进旧代次，输入法看不到（#9434）。让宿主库把这次的代次写回文件。
+    if (production)
+      bootstrap_document["runtime_options"] = config_path.u8string();
     const auto bootstrap = bootstrap_document.dump();
     auto response = msime::host_api::own_string(
         msime_client_prepare_host(
@@ -1045,29 +1090,51 @@ int wmain(int argc, wchar_t **argv) {
     // 「鼠标滚轮翻页」同样经原子量发布，候选窗每轮取用，改了设置不用重启 Server。
     auto candidate_mouse_wheel = std::make_shared<std::atomic<bool>>(
         config.navigation.mouse_wheel);
+    // 更新通道（共享偏好 `update_channel`，归一成 stable、beta、nightly），后台更新检查的线程每次调用前读它，同样随偏好发布更新。
+    auto update_channel = std::make_shared<std::pair<std::mutex, std::string>>();
+    update_channel->second = update_channel_preference(prepared.at("value").at("preferences"));
+    // 「我的词条」经 WebDAV 网盘的自动同步（DictionarySyncWorker.h）：先建出来接住偏好里网盘配置的变化和候选窗口删词的通知，受管理的 Server 进入消息循环之前才起工作线程。
+    auto dictionary_sync = std::make_shared<DictionarySyncWorker>(
+        dictionary_sync_configured(prepared.at("value").at("preferences")));
     // The TSF Ctrl+Shift+F route is delivered through the same bounded worker
     // as the toolbar button. It must exist before WindowsServer construction:
     // a newly connected client may dispatch its first key immediately.
     startup_stage = "workers";
+    InputStateHudFeedback hud_feedback;
+    InputStateHudModeTracker hud_mode_tracker;
     CharacterSetClickWorker character_set_clicks(
-        [traditional_output, directory = config.state_root](
+        [traditional_output, &hud_feedback, directory = config.state_root](
             const CharacterSetClick &click) {
-          (void)persist_traditional_output(directory, *traditional_output,
-                                           click.desired);
+          const auto foreground = click.foreground ? click.foreground :
+              reinterpret_cast<uintptr_t>(GetForegroundWindow());
+          std::optional<bool> changed;
+          if (persist_traditional_output(directory, *traditional_output, click.desired, &changed) && changed)
+            hud_feedback.publish(character_set_hud(*changed), {}, foreground);
         });
     // TSF 的 Ctrl+Shift+J 同样经一个有界工作线程写偏好，同样要在 WindowsServer 构造之前就有。写成功后立刻更新托盘看到的方案，并唤醒偏好监视器，让当前会话尽快切换方案。
     auto wake_preferences =
         std::make_shared<std::pair<std::mutex, std::function<void()>>>();
     SingleClickWorker<JapaneseToggleRequest> japanese_toggles(
         [directory = config.state_root, language_dictionaries, tray_preferences,
-         tray_preferences_mutex, wake_preferences](const JapaneseToggleRequest &) {
+         tray_preferences_mutex, wake_preferences, &hud_feedback](const JapaneseToggleRequest &request) {
+          const auto foreground = request.foreground;
           const auto scheme =
               toggle_japanese_scheme(directory, language_dictionaries);
-          if (!scheme)
+          if (!scheme) {
+            request.completion->set_value(std::nullopt);
             return;
+          }
+          // 再读取得至少刚保存的完整修订；不把保存前的快照交给输入队列。
+          try {
+            request.completion->set_value(PreferenceSnapshot::load(directory.u8string()));
+          } catch (...) {
+            request.completion->set_exception(std::current_exception());
+            return;
+          }
           {
             std::lock_guard<std::mutex> lock(*tray_preferences_mutex);
             tray_preferences->scheme = *scheme;
+            hud_feedback.publish(scheme_hud(*tray_preferences), {}, foreground);
           }
           std::lock_guard lock(wake_preferences->first);
           if (wake_preferences->second)
@@ -1113,6 +1180,7 @@ int wmain(int argc, wchar_t **argv) {
                       FanyImeProtocol::UiLessCandidates |
                       FanyImeProtocol::HostOnlineCandidates |
                       FanyImeProtocol::GroupedPanelKeys |
+                      FanyImeProtocol::OrderedPreferences |
                       FanyImeProtocol::GameHostCandidate |
                       FanyImeProtocol::FieldTraits |
                       FanyImeProtocol::JapaneseToggleShortcut)
@@ -1121,6 +1189,7 @@ int wmain(int argc, wchar_t **argv) {
                       FanyImeProtocol::UiLessCandidates |
                       FanyImeProtocol::HostOnlineCandidates |
                       FanyImeProtocol::GroupedPanelKeys |
+                      FanyImeProtocol::OrderedPreferences |
                       FanyImeProtocol::GameHostCandidate |
                       FanyImeProtocol::FieldTraits);
     // 管道对端身份对不上时记下 pid 和错误码，用来区分「DLL 加载了但 Server 拒了连接」和「DLL 根本没加载」，比如反作弊剥掉了 Server 打开游戏进程所需的权限。
@@ -1150,7 +1219,7 @@ int wmain(int argc, wchar_t **argv) {
          input_mode_hud_enabled, input_mode_hud_logo, tsf_config, candidate_layout,
          tsf_config_mutex, tray_preferences, tray_preferences_mutex,
          tsf_config_revision, candidate_theme, toolbar_settings,
-         language_dictionaries](const PreferenceSnapshot &snapshot) {
+         language_dictionaries, update_channel, dictionary_sync](const PreferenceSnapshot &snapshot) {
           const auto preferences =
               nlohmann::json::parse(snapshot.serialized()).at("preferences");
           candidate_theme->publish(preferences);
@@ -1184,6 +1253,13 @@ int wmain(int argc, wchar_t **argv) {
           input_mode_hud_enabled->store(preferences.value("input_mode_hud", true),
                                         std::memory_order_release);
           input_mode_hud_logo->store(hud_show_app_logo(preferences), std::memory_order_release);
+          {
+            auto channel = update_channel_preference(preferences);
+            std::lock_guard<std::mutex> lock(update_channel->first);
+            update_channel->second = std::move(channel);
+          }
+          // 设置窗口测试连接通过并保存了网盘、或者清掉了它：自动同步跟着开始或停下。
+          dictionary_sync->configure(dictionary_sync_configured(preferences));
           // 工具栏、托盘菜单和语音浮层跟随颜色模式，只看全局的 `theme`（见上面三个原子量的说明）。语音浮层在后面才建，所以经原子量交给循环去套用。
           const auto surface_mode =
               surface_theme_mode("follow", preferences.value("theme", std::string("dark")));
@@ -1196,6 +1272,7 @@ int wmain(int argc, wchar_t **argv) {
             const bool dedicated_english = tsf_config->dedicated_english;
             *tsf_config = tsf_local_config(preferences, language_dictionaries);
             tsf_config->dedicated_english = dedicated_english;
+            tsf_config->preference_revision = snapshot.revision();
             tsf_config_revision->mark_changed();
           }
           {
@@ -1241,7 +1318,7 @@ int wmain(int argc, wchar_t **argv) {
           next.endpoint = input.value("asr_endpoint", std::string{});
           next.model = input.value("asr_model", std::string{});
           // Read before the tokens: the slot lookup is keyed on them.
-          next.asr_provider = input.value("asr_provider", std::string{"doubao"});
+          next.asr_provider = input.value("asr_provider", std::string{"local"});
           next.asr_model_path = input.value("asr_model_path", std::string{});
           next.host_options = voice_host_options;
           next.polish_provider = input.value("polish_provider", std::string{});
@@ -1276,21 +1353,53 @@ int wmain(int argc, wchar_t **argv) {
         };
     auto session_options = prepared.at("value");
     name_builtin_sound_packs(session_options, config.state_root);
+    name_builtin_helpcodes(session_options, config.state_root);
     name_official_plugin_packs(session_options, executable_directory());
     startup_stage = "pipe_server";
+    SessionPump::Presentation pump_presentation;
+    pump_presentation.delivered = [&](const FocusLease &lease, const PendingReply &reply,
+                                     const FanyImeNamedpipeData &) {
+      if (reply.dedicated_english_change)
+        hud_feedback.publish(dedicated_english_hud(*reply.dedicated_english_change), lease);
+    };
+    // 单个按键被拒（RequestRejected）只断开那一个客户端，原因写进 Server 日志；不然日志里只剩随后的重连，看不出是哪一项校验没过。
+    pump_presentation.rejected = [&diagnostic_log](const std::string &line) {
+      diagnostic_log.server(line);
+    };
     WindowsServer server(
         options, session_options.dump(),
         production
               ? production_key_handler(
                   [&character_set_clicks](bool desired) {
                     return character_set_clicks.submit(
-                        CharacterSetClick{desired});
+                        CharacterSetClick{desired, reinterpret_cast<uintptr_t>(GetForegroundWindow())});
                   },
-                  [&japanese_toggles] {
-                    return japanese_toggles.submit(JapaneseToggleRequest{});
+                  [&japanese_toggles]() -> PreferenceChange {
+                    auto completion = std::make_shared<std::promise<std::optional<PreferenceSnapshot>>>();
+                    auto result = completion->get_future().share();
+                    if (!japanese_toggles.submit(JapaneseToggleRequest{completion})) return false;
+                    return result;
                   })
             : preview_key_handler(config),
-        [](const FocusRoute &, const FanyImeNamedpipeData &) { return true; });
+        [&](const FocusRoute &route, const FanyImeNamedpipeData &packet) {
+          if (!route.route) return true;
+          std::optional<InputStateHudText> feedback;
+          switch (packet.event_type) {
+          case FanyImePipeEventType::StatusSnapshot:
+          case FanyImePipeEventType::FocusRestored:
+            (void)hud_mode_tracker.observe(*route.route, packet.modifiers_down != 0,
+                                          packet.pinyin_length != 0, false);
+            break;
+          case FanyImePipeEventType::DoubleSingleByteSwitch:
+            feedback = hud_mode_tracker.observe(*route.route, packet.keycode != 0, {}, true);
+            break;
+          case FanyImePipeEventType::PuncSwitch:
+            feedback = hud_mode_tracker.observe(*route.route, {}, packet.keycode != 0, true);
+            break;
+          }
+          if (feedback) hud_feedback.publish(std::move(*feedback), *route.route);
+          return true;
+        }, std::move(pump_presentation));
     // Server 构造期间已可接收切换；安装与调用共用锁，异常展开也先撤销并等完旧回调。
     struct PreferenceWakeBinding {
       decltype(wake_preferences) &callback;
@@ -1400,11 +1509,14 @@ int wmain(int argc, wchar_t **argv) {
           throw std::runtime_error("Candidate selection failed");
         return;
       }
-      if (server.request_candidate_action(
-              click.lease, click.session, click.generation, click.index,
-              click.translation_page, click.action, click.position) ==
-          CandidateActionRequestResult::Failed)
+      const auto acted = server.request_candidate_action(
+          click.lease, click.session, click.generation, click.index,
+          click.translation_page, click.action, click.position);
+      if (acted == CandidateActionRequestResult::Failed)
           throw std::runtime_error("Candidate action failed");
+      // 删掉的可能是「我的词条」里的词：让自动同步记一次本机改动（只记录、不联网），不在这个线程上等它。
+      if (acted == CandidateActionRequestResult::Sent && click.action == CandidateAction::Remove)
+        dictionary_sync->note_local_change();
     });
     CandidatePageWorker pages([&](const CandidatePage &page) {
       if (server.request_page(page) == CandidatePageRequestResult::Failed)
@@ -1412,8 +1524,10 @@ int wmain(int argc, wchar_t **argv) {
     });
     ModeClickWorker mode_clicks([&](const ModeClick &click) {
       if (click.mode == WorkerMode::English && server.dedicated_english_state(click.lease).value_or(false)) {
-        if (!server.exit_dedicated_english(click.lease))
+        bool changed = false;
+        if (!server.exit_dedicated_english(click.lease, &changed))
           throw std::runtime_error("Dedicated English exit failed");
+        if (changed) hud_feedback.publish(dedicated_english_hud(false), click.lease);
         return;
       }
       if (server.request_mode(click.lease, click.mode) == ModeRequestResult::WriteFailed)
@@ -1452,8 +1566,12 @@ int wmain(int argc, wchar_t **argv) {
     // 托盘「英文候选模式」：在焦点会话上设置 Engine 的英文模式，最多等 2 秒，所以不在 UI 线程上做。成功后立刻发布，下一轮循环就把新状态推给 TIP（DedicatedEnglishChanged），重新打开的卡片也不必等 250 毫秒一次的读取。声明在 click_shutdown 之后，先于它析构，等它做完时 Server 仍在运行。
     SingleClickWorker<DedicatedEnglishSwitch> english_switches(
         [&](const DedicatedEnglishSwitch &request) {
-          if (server.set_dedicated_english(request.lease, request.enabled))
+          bool changed = false;
+          if (server.set_dedicated_english(request.lease, request.enabled, &changed)) {
             english_state.publish(request.lease, request.enabled);
+            if (changed)
+              hud_feedback.publish(dedicated_english_hud(request.enabled), request.lease);
+          }
         });
     startup_stage = "candidate_window";
     DesktopCandidateSettings candidate_settings;
@@ -1469,6 +1587,12 @@ int wmain(int argc, wchar_t **argv) {
         [&](const CandidatePresentation &value) { server.candidate_rendered(value.lease, value.render_serial); },
         [&](const FocusLease &lease, bool open) { server.set_candidate_expansion(lease, open); },
         [&](const FocusLease &lease) { return server.candidate_lease_current(lease); }});
+    // 空格、数字键和点选的渲染屏障要等回执时叫醒候选窗立即绘制，屏障的 30 毫秒只花在真正的绘制上，不花在两级 16 毫秒的轮询上（#9519）。守卫声明在 candidates 之后、先于它析构：撤掉之后 Server 不会再调用这个回调。
+    server.set_candidate_render_request([&candidates] { candidates.wake(); });
+    struct CandidateRenderRequestGuard {
+      WindowsServer &server;
+      ~CandidateRenderRequestGuard() { server.set_candidate_render_request({}); }
+    } candidate_render_request_guard{server};
     // The global theme colours the card, the toolbar and the menus. Each surface resolves it in its own mode, and the answers are kept until the theme, the layout or the package on disk changes, so the shared layer's disk read never runs inside a draw.
     startup_stage = "candidate_theme";
     auto current_candidate_theme = candidate_theme_values(
@@ -1680,6 +1804,12 @@ int wmain(int argc, wchar_t **argv) {
       const auto executable = shell_executable(shell_directory, configured_shell, request);
       return executable && launch_shell_surface(*executable, request, shell_context);
     };
+    // 首次准备运行配置后立即打开设置首页。安装器只负责安装文件和启动 Server，
+    // 如果这里不接上，Windows 用户必须自己从开始菜单找到设置窗口，输入法的首次设置
+    // 就没有完成闭环。设置窗口顶部会继续显示“去添加/设为默认”的状态卡；已有状态的
+    // Server 启动（包括 TSF 按需拉起）不重复打扰用户。
+    if (prepared_now && settings_request)
+      (void)launch_shell(*settings_request);
     // 表情和屏幕键盘先找共享应用；它不在或起不来时打开系统自带的表情面板（Win+.）和屏幕键盘（osk.exe），与 macOS 退回系统字符面板和原生屏幕键盘一致，所以这两处入口总是可用。
     const auto open_emoji = [&] {
       const auto request = shell_surface_request(TrayMenuCommand::OpenEmojiPanel);
@@ -1690,7 +1820,7 @@ int wmain(int argc, wchar_t **argv) {
       return (request && launch_shell(*request)) || open_system_screen_keyboard();
     };
     toolbar.set_character_set_action([&] {
-      (void)character_set_clicks.submit(CharacterSetClick{});
+      (void)character_set_clicks.submit(CharacterSetClick{{}, reinterpret_cast<uintptr_t>(GetForegroundWindow())});
     });
     toolbar.set_shell_available(settings_shell.has_value(), preview_shell.has_value());
     toolbar.set_settings_action([&] {
@@ -1724,6 +1854,7 @@ int wmain(int argc, wchar_t **argv) {
       theme_rows.push_back({std::move(id), std::move(title)});
     // 托盘卡片和悬浮工具栏的两个弹出菜单（切换输入方案、右键实用菜单）共用这一个命令处理和这一份状态，所以同一行从哪里点都走同一条路径。
     const auto tray_command = [&](TrayMenuCommand command) -> bool {
+          const auto command_foreground = reinterpret_cast<uintptr_t>(GetForegroundWindow());
           // The mode rows send what the toolbar button for the same mode sends, to the focused TIP, through the same worker. The card never takes focus, so the session the rows were drawn for is still the focused one.
           if (tray_menu_mode_row(command)) {
             const auto view = server.mode_view();
@@ -1752,13 +1883,17 @@ int wmain(int argc, wchar_t **argv) {
               return false;
             std::lock_guard<std::mutex> lock(*tray_preferences_mutex);
             tray_preferences->translations = next;
+            hud_feedback.publish(translations_hud(next), {}, command_foreground);
             return true;
           }
           if (const char *scheme = tray_menu_scheme(command)) {
-            if (!store_input_scheme(config.state_root, scheme))
+            bool changed = false;
+            if (!store_input_scheme(config.state_root, scheme, changed))
               return false;
             std::lock_guard<std::mutex> lock(*tray_preferences_mutex);
             tray_preferences->scheme = scheme;
+            if (changed)
+              hud_feedback.publish(scheme_hud(*tray_preferences), {}, command_foreground);
             return true;
           }
           // 工具栏右键菜单的「隐藏悬浮状态栏」和托盘的工具栏开关写同一个偏好，与 macOS 一样把开关记成关，重启后也不再出现。
@@ -1800,7 +1935,7 @@ int wmain(int argc, wchar_t **argv) {
           }
           // 繁体输出和工具栏的简繁按钮、Ctrl+Shift+F 走同一个工作线程，翻转存储的 traditional_chinese_output。
           if (command == TrayMenuCommand::ToggleTraditionalOutput)
-            return character_set_clicks.submit(CharacterSetClick{});
+            return character_set_clicks.submit(CharacterSetClick{{}, command_foreground});
           // 英文候选模式按 TIP 报告的状态进入或退出 Engine 的英文模式，规则和 TIP 的 Ctrl+Shift+E 相同（tray_menu_dedicated_english_action）。
           if (command == TrayMenuCommand::ToggleDedicatedEnglish) {
             const auto view = server.mode_view();
@@ -2079,7 +2214,10 @@ int wmain(int argc, wchar_t **argv) {
         stopping.store(true);
         return true;
       case MaintenanceAction::ClearCache: {
-        return server.reset_cache();
+        const auto foreground = reinterpret_cast<uintptr_t>(GetForegroundWindow());
+        if (!server.reset_cache()) return false;
+        hud_feedback.publish({L"缓存已清理", L"输入缓存已清理"}, {}, foreground);
+        return true;
       }
       // 与工具栏和托盘的键盘入口走同一条路：共享应用不在或起不来时退回系统屏幕键盘 osk.exe。
       case MaintenanceAction::OpenScreenKeyboard:
@@ -2091,11 +2229,15 @@ int wmain(int argc, wchar_t **argv) {
         if (!view || !view->visible || hotkey.slot >= view->candidates.size())
           return false;
         const auto &candidate = view->candidates[hotkey.slot];
-        return server.request_candidate_action(
-                   view->lease, candidate.session, candidate.generation,
-                   candidate.index, view->translation_page,
-                   CandidateAction::Remove) ==
-               CandidateActionRequestResult::Sent;
+        const bool removed = server.request_candidate_action(
+                                 view->lease, candidate.session, candidate.generation,
+                                 candidate.index, view->translation_page,
+                                 CandidateAction::Remove) ==
+                             CandidateActionRequestResult::Sent;
+        // 与候选菜单的删除相同，记一次「我的词条」的本机改动。
+        if (removed)
+          dictionary_sync->note_local_change();
+        return removed;
       }
       }
       return false;
@@ -2126,6 +2268,58 @@ int wmain(int argc, wchar_t **argv) {
     bool quns_cost_logged = false;
     uint64_t tsf_config_applied_revision = 0;
     uint64_t caps_lock_applied_revision = 0;
+    // 后台更新检查只在受管理的 Server 里做：预览实例是开发和测试用的，不该替用户联网，也不该弹通知。线程五分钟后第一次调用共享层，之后每小时一次（UpdateNotifier.h）；有新版本时弹一个临时的通知区域气泡，点它和托盘的「关于」一样打开设置窗口的「关于」页。记录放在本用户的目录（UpdateRecordDirectory.h）而不是状态根：安装后的状态根整台机器共用，几个用户共用一份「提醒过哪个构建」会让后登录的用户收不到通知。拿不到这个目录或建不出窗口时只记一条诊断，不影响输入。
+    startup_stage = "update_notifier";
+    std::optional<UpdateNotifier> update_notifier;
+    if (production) {
+      try {
+        const auto record_directory = msime::windows::update_record_directory();
+        if (record_directory.empty())
+          throw std::runtime_error("Update record directory unavailable");
+        UpdateNotifier::Options update_options;
+        const auto record_directory_utf8 = record_directory.u8string();
+        update_options.directory.assign(record_directory_utf8.begin(), record_directory_utf8.end());
+#if defined(MSIME_WINDOWS7_CLIENT) && MSIME_WINDOWS7_CLIENT
+        update_options.windows7 = true;
+#endif
+        update_options.architecture = std::string(update_build_architecture());
+        update_options.version = MSIME_WINDOWS_VERSION;
+        update_options.edition = MSIME_EDITION_ID;
+        update_options.product_name = MSIME_EDITION_DISPLAY_NAME;
+        update_options.channel = [update_channel] {
+          std::lock_guard<std::mutex> lock(update_channel->first);
+          return update_channel->second;
+        };
+        update_options.open_about = [&] {
+          const auto request = shell_surface_request(TrayMenuCommand::OpenAbout);
+          return request && launch_shell(*request);
+        };
+        // 诊断日志有意不析构（见上面登记诊断出口处），工作线程在 Server 退出途中晚回来时写它也安全；不经过 notice，它是 wmain 里的局部变量。
+        update_options.log = [log = &diagnostic_log](const std::string &line) { log->server(line); };
+        update_notifier.emplace(std::move(update_options));
+      } catch (const std::exception &) {
+        update_notifier.reset();
+        notice("Update notifier unavailable; continuing without background update checks");
+      }
+    }
+    // 「我的词条」的自动同步同样只在受管理的 Server 里做（预览实例不替用户联网）。同步目录是本用户的 %LOCALAPPDATA%\<本版本的用户目录>\dictionary-sync（DictionarySyncDirectory.h），与设置窗口同一个，一个安装只有一份设备身份；不放状态根，那里整台机器共用、每个用户都能改。偏好里没配网盘时线程只是等着，不调用共享层。拿不到目录或起不了线程时只记一条诊断，不影响输入。
+    startup_stage = "dictionary_sync";
+    if (production) {
+      try {
+        const auto sync_directory = msime::windows::dictionary_sync_directory();
+        if (sync_directory.empty())
+          throw std::runtime_error("Dictionary sync directory unavailable");
+        DictionarySyncWorker::Options sync_options;
+        sync_options.host_options = prepared.at("value");
+        const auto sync_directory_utf8 = sync_directory.u8string();
+        sync_options.directory.assign(sync_directory_utf8.begin(), sync_directory_utf8.end());
+        // 诊断日志有意不析构（见上面登记诊断出口处），工作线程在 Server 退出途中晚回来时写它也安全。
+        sync_options.log = [log = &diagnostic_log](const std::string &line) { log->server(line); };
+        dictionary_sync->start(std::move(sync_options));
+      } catch (const std::exception &) {
+        notice("Dictionary sync unavailable; continuing without automatic dictionary sync");
+      }
+    }
     startup_stage = "message_loop";
     while (!stopping.load() && server.failure() == ControllerFailure::None &&
            !candidates.failed() && !clicks.failed() && !pages.failed() &&
@@ -2321,14 +2515,22 @@ int wmain(int argc, wchar_t **argv) {
                                                                    : WorkerMode::English) !=
                 ModeRequestResult::Sent)
           mode_authority = mode_authority_push_failed(mode_authority);
-        // 用户在同一会话里切换了中英文：在光标旁显示「中」或「英」。光标先取前台线程的系统光标，没有时取这个会话最近一次组字的锚点（TSF 报来的物理像素，是文字底边的左端），都没有时放在屏幕下方居中。
-        if (mode_hud && view &&
-            should_show_input_mode_hud(input_mode_hud_enabled->load(std::memory_order_acquire),
-                                       decision.user_changed,
-                                       presentation != ForegroundPresentation::Windowed)) {
+        // mode_view 也会因锁忙返回空，仍有活动会话时留到下一轮校验，不能误当失焦丢掉提示。
+        std::optional<InputStateHudText> feedback;
+        if (view || !server.mode_active())
+          feedback = hud_feedback.take(view ? std::optional<FocusLease>(view->lease) : std::nullopt,
+                                       reinterpret_cast<uintptr_t>(foreground));
+        if (!feedback && decision.user_changed && view && view->chinese) {
+          std::lock_guard lock(*tray_preferences_mutex);
+          feedback = input_language_hud(*view->chinese, tray_preferences->scheme);
+        }
+        if (mode_hud && should_show_input_mode_hud(
+                input_mode_hud_enabled->load(std::memory_order_acquire), feedback.has_value(),
+                presentation != ForegroundPresentation::Windowed)) {
           auto caret = InputModeHudWindow::system_caret(foreground);
           if (!caret)
             if (const auto shown = server.candidate_view();
+                view &&
                 shown && shown->lease.token == view->lease.token &&
                 shown->lease.epoch == view->lease.epoch &&
                 same_ticket(shown->lease.transport, view->lease.transport) &&
@@ -2337,7 +2539,7 @@ int wmain(int argc, wchar_t **argv) {
               caret = HudRect{shown->caret_anchor_x, shown->caret_anchor_y - line,
                               shown->caret_anchor_x + 1, shown->caret_anchor_y};
             }
-          mode_hud->show(*view->chinese, caret, foreground);
+          mode_hud->show(std::move(*feedback), caret, foreground);
         }
         if (mode_hud && mode_hud->failed() && !mode_hud_failure_reported) {
           mode_hud_failure_reported = true;
@@ -2480,6 +2682,11 @@ int wmain(int argc, wchar_t **argv) {
                                       MWMO_INPUTAVAILABLE) == WAIT_FAILED)
         throw std::runtime_error("Candidate message wait failed");
     }
+    // 先停后台更新检查：它最多等两秒，正在联网时放手让线程自己结束，不拖住下面的停机。
+    if (update_notifier)
+      update_notifier->stop();
+    // 自动同步同理：正在联网时最多等两秒，之后放手。
+    dictionary_sync->stop();
     candidates.stop();
     for (auto &line : candidates.take_diagnostics())
       notice(std::move(line));

@@ -7,6 +7,7 @@ import { SkinGrid } from "../../../../packages/ui/src/settings/skin-grid";
 import type { ExternalSkin } from "../../../../packages/ui/src/skin/external-skins";
 import { offeredThemeCatalog } from "../../../../packages/ui/src/theme/global-theme";
 import { recordSkinSafely } from "../../../../packages/ui/src/settings/typing-statistics-model";
+import { harmonyTouchKeyboardRows } from "../../../../packages/ui/src/keyboard/keyboard-layouts";
 import { testHost } from "../support/host";
 import { saveSettingsNow, settingsFormReady } from "../support/settings-form";
 
@@ -95,6 +96,15 @@ test("内置 lists the built-in themes then the packages, and 我的 starts with
   // 每张卡片都是设计里 390 × 292 画布上的键盘缩略图。
   const thumbnails = document.querySelectorAll("[data-skin-frame] svg[viewBox='0 0 390 292']");
   expect(thumbnails).toHaveLength(builtinTitles.length + 2);
+});
+
+test("手机皮肤缩略图 follows the selected HarmonyOS key face", () => {
+  grid({ touchRows: harmonyTouchKeyboardRows.fourteen_key });
+  const labels = Array.from(document.querySelectorAll("[data-skin-frame] [data-keyboard-key]"))
+    .map((key) => key.getAttribute("data-keyboard-key"))
+    .filter((label): label is string => label !== null);
+  expect(labels).toContain("QW");
+  expect(labels).not.toContain("q");
 });
 
 // 每次应用皮肤的点按都会为「换装达人」徽章上报，id 与 Android 皮肤页记录的一致；已在使用的卡片不上报。
@@ -363,7 +373,8 @@ test("the AI tile opens AI 皮肤抽卡 as a full-screen view the back gesture c
         client={{
           load: vi.fn().mockResolvedValue(initial),
           save: vi.fn(),
-          host: testHost({ platform: "harmony" }),
+          // AI 皮肤只在 AI 生成类资质到位、总闸打开（`ai_generation`）时提供。
+          host: testHost({ platform: "harmony", ai_generation: true }),
           ...skinClients(),
         }}
       />,
@@ -398,7 +409,8 @@ test("the AI view closes locally when its history entry is gone", async () => {
         client={{
           load: vi.fn().mockResolvedValue(initial),
           save: vi.fn(),
-          host: testHost({ platform: "harmony" }),
+          // AI 皮肤只在 AI 生成类资质到位、总闸打开（`ai_generation`）时提供。
+          host: testHost({ platform: "harmony", ai_generation: true }),
           ...skinClients(),
         }}
       />,
@@ -575,7 +587,7 @@ test("desktop hosts and the HarmonyOS 2-in-1 keep the carousel", async () => {
   expect(document.querySelector("[data-skin-grid]")).toBeNull();
 });
 
-// 与 Android 皮肤页一致，鸿蒙手机皮肤页顶部是「内置 / 我的 / 社区」：内置是目录里的主题，我的是 AI 设计入口和自己的皮肤，没有保存的设计时说明去社区获取。
+// 与 Android 皮肤页一致，鸿蒙手机皮肤页顶部是「内置 / 我的 / 社区」：内置是目录里的主题，我的是自己的皮肤，没有保存的设计时说明去社区获取。鸿蒙版拿到 AI 生成类资质之前（`ai_generation` 为 false）「我的」里没有 AI 设计入口，总闸打开时它排在最前（见上面两条 AI 皮肤用例）。
 test("the HarmonyOS phone's 皮肤 page splits into 内置, 我的 and 社区 tabs", async () => {
   render(
     <SettingsPage
@@ -608,7 +620,7 @@ test("the HarmonyOS phone's 皮肤 page splits into 内置, 我的 and 社区 ta
     within(mine)
       .getAllByRole("button")
       .map((button) => button.getAttribute("aria-label") ?? button.lastElementChild!.textContent!),
-  ).toEqual(["AI 设计皮肤，描述一句话生成", "我的皮肤"]);
+  ).toEqual(["我的皮肤"]);
   expect(within(mine).getByText("还没有保存的皮肤。可到社区获取喜欢的皮肤。")).toBeTruthy();
   expect(within(page).queryByRole("button", { name: "跟随系统" })).toBeNull();
 });

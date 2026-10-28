@@ -32,6 +32,7 @@ Status: implemented
 - **收益**：用户看见哪个候选，上屏就是哪个，空格、数字键、点选三条路同时修好；宿主会话仍随之前进，2026-10-16 那次改动的收益不受影响。
 - **代价**：同一页或完整列表出现多个同形候选时拒绝猜测；完整上屏沿既有 Server 回复兜底，部分选择仍需两个会话在同一输入状态。每次选择多一次页内扫描；只有页内不匹配时才取得完整列表，可能触发延迟尾部展开并推进本地 generation。
 - **重访信号**：如果以后候选需要按身份（而不是文字）区分同形项——例如同一个词来自不同来源要分别计数——这条唯一匹配会开始拒绝合法选择，那时需要的是让两个会话共享候选身份，而不是放宽匹配。
+- **后续**：这条规则当时只用在 `Normal` 回复和宿主会话的当前页上。只选一段的回复（`NeedToCreateWord`）、选过一段后的整段上屏、以及滚轮只翻了 Server 那一页的情形仍会选错，[翻页后的键盘选词照 Server 的回复](2026-10-27-windows-paged-selection-follows-server.md)把它扩到所有选词回复，并在当前页找不到时到完整候选列表里找；选词规则现在在 `tsf/HostServerSelection.h`。
 - **未处理**：`runtime-options.json` 里 `preferences.cloud_candidates = false` 与 `config.toml` 的 `true` 相反。文档里的 preferences 是准备那一刻的副本（`lib.rs` 的 `HostOptions::from_document`），`refresh_host_options` 只刷新词库代次。本次不动它。
 
 ## Verification

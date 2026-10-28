@@ -48,7 +48,58 @@ fn full_schema() -> AccountPreferenceSchema {
             value_type: "string".into(),
         },
     );
+    // Android 不导出、只有部分宿主导出的共享偏好（msime-cloud#1277 收录）。
+    for (key, kind) in NEW_SHARED_KEYS {
+        schema.fields.insert(
+            (*key).into(),
+            AccountPreferenceField {
+                value_type: (*kind).into(),
+            },
+        );
+    }
     schema
+}
+
+/// msime-cloud#1277 加进字段表、此前没有宿主导出的共享偏好；两个思考强度和三个快捷键只有 macOS 能改，共享层的宿主都不导出。
+const NEW_SHARED_KEYS: &[(&str, &str)] = &[
+    ("mixed_input.quick_phrase", "boolean"),
+    ("mixed_input.quick_phrase_frequency", "boolean"),
+    ("sentence_association.grammar_model", "string"),
+    ("local_modes.symbol", "boolean"),
+    ("local_modes.date_time_menu", "boolean"),
+    ("second_third_candidate.enabled", "boolean"),
+    ("second_third_candidate.keys", "string"),
+    ("translation.ai", "boolean"),
+    ("ai_assistant.thinking", "string"),
+    ("voice_input.polish_thinking", "string"),
+    ("keybindings.toggle_english_candidates", "string"),
+    ("keybindings.toggle_full_width", "string"),
+    ("keybindings.toggle_punctuation", "string"),
+];
+
+fn exported_new_keys(settings: &BTreeMap<String, AccountPreferenceValue>) -> Vec<&str> {
+    NEW_SHARED_KEYS
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| settings.contains_key(*key))
+        .collect()
+}
+
+/// 和默认值都不同的一组新增共享偏好，用来确认往返之后每一项都应用到了。
+fn new_shared_preferences() -> Preferences {
+    let mut preferences = Preferences::default();
+    preferences.mixed_input.quick_phrase = !preferences.mixed_input.quick_phrase;
+    preferences.mixed_input.quick_phrase_frequency =
+        !preferences.mixed_input.quick_phrase_frequency;
+    preferences.sentence_association.grammar_model =
+        crate::preferences::GrammarModel::BaguwenCompact;
+    preferences.local_modes.symbol = !preferences.local_modes.symbol;
+    preferences.local_modes.date_time_menu = !preferences.local_modes.date_time_menu;
+    preferences.second_third_candidate.enabled = !preferences.second_third_candidate.enabled;
+    preferences.translation_ai = !preferences.translation_ai;
+    preferences.ai_assistant.thinking = "high".into();
+    preferences.voice_input.polish_thinking = "max".into();
+    preferences
 }
 
 fn document(settings: BTreeMap<String, AccountPreferenceValue>) -> AccountPreferences {
@@ -107,9 +158,15 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
     preferences.custom_translation.api_key = "SENTINEL-translation".into();
     preferences.tencent_tmt.secret_id = "SENTINEL-secret-id".into();
     preferences.tencent_tmt.secret_key = "SENTINEL-secret-key".into();
-    // 云剪贴板中继是本机的配置，地址和令牌都不进同步文档。
+    // 云剪贴板中继和 WebDAV 网盘是本机的配置，地址、令牌、账号和应用密码都不进同步文档。
     preferences.cloud_clipboard_relay.url = "https://SENTINEL-relay.example.test".into();
     preferences.cloud_clipboard_relay.token = "SENTINEL-relay-token".into();
+    preferences.cloud_clipboard_webdav.url = "https://SENTINEL-dav.example.test".into();
+    preferences.cloud_clipboard_webdav.username = "SENTINEL-dav-user".into();
+    preferences.cloud_clipboard_webdav.password = "SENTINEL-dav-password".into();
+    preferences.dictionary_sync_webdav.url = "https://SENTINEL-dictionary.example.test".into();
+    preferences.dictionary_sync_webdav.username = "SENTINEL-dictionary-user".into();
+    preferences.dictionary_sync_webdav.password = "SENTINEL-dictionary-password".into();
     let exported = export_android_settings(&preferences, Some(&feedback())).unwrap();
     let keys: Vec<&str> = exported.keys().map(String::as_str).collect();
     assert_eq!(
@@ -138,13 +195,19 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "platform.android.custom_candidate_skin_dark",
             "platform.android.custom_keyboard_skin",
             "platform.android.custom_theme_base",
+            "platform.android.fourteen_key_style",
             "platform.android.global_theme",
             "platform.android.haptic_strength",
             "platform.android.haptics_enabled",
             "platform.android.key_sound_pack",
             "platform.android.keyboard_height_adjustment",
             "platform.android.keyboard_layout",
+            "platform.android.keyboard_skin_dark",
+            "platform.android.keyboard_skin_light",
+            "platform.android.nine_key_style",
             "platform.android.number_keypad_order",
+            "platform.android.number_row",
+            "platform.android.quanpin_shift",
             "platform.android.shuangpin_key_hints",
             "platform.android.sound_enabled",
             "platform.android.theme",
@@ -159,6 +222,7 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "platform.android.touch_key_spacing_tenths",
             "platform.android.touch_row_spacing_tenths",
             "platform.android.twenty_six_key_number_layout",
+            "platform.android.twenty_six_key_style",
             "platform.android.voice_language",
             "platform.android.voice_shortcut",
         ]
@@ -297,6 +361,10 @@ fn settings_sync_round_trips_every_exported_key() {
         touch_number_keypad_order: NumberKeypadOrder::Calculator,
         touch_twenty_six_key_number_layout: TwentySixKeyNumberLayout::NineKey,
         touch_shuangpin_key_hints: !Preferences::default().touch_shuangpin_key_hints,
+        touch_twenty_six_key_style: TouchTwentySixKeyStyle::LongSpace,
+        touch_fourteen_key_style: TouchFourteenKeyStyle::Emoji,
+        touch_nine_key_style: TouchNineKeyStyle::CommaPeriod,
+        touch_number_row: !Preferences::default().touch_number_row,
         ..Preferences::default()
     };
     expected.frequency = FrequencyPreferences {
@@ -1039,7 +1107,7 @@ fn settings_sync_custom_keyboard_skin_library_is_bounded_and_an_array() {
 }
 
 #[test]
-fn settings_sync_desktop_export_is_only_the_shared_input_keys() {
+fn settings_sync_desktop_export_is_the_shared_input_keys_and_its_own_settings() {
     let mut preferences = Preferences {
         scheme: InputScheme::Wubi,
         traditional_chinese_output: true,
@@ -1047,8 +1115,16 @@ fn settings_sync_desktop_export_is_only_the_shared_input_keys() {
     };
     preferences.cloud_clipboard_relay.url = "https://SENTINEL-relay.example.test".into();
     preferences.cloud_clipboard_relay.token = "SENTINEL-relay-token".into();
+    preferences.cloud_clipboard_webdav.url = "https://SENTINEL-dav.example.test".into();
+    preferences.cloud_clipboard_webdav.username = "SENTINEL-dav-user".into();
+    preferences.cloud_clipboard_webdav.password = "SENTINEL-dav-password".into();
+    preferences.dictionary_sync_webdav.url = "https://SENTINEL-dictionary.example.test".into();
+    preferences.dictionary_sync_webdav.username = "SENTINEL-dictionary-user".into();
+    preferences.dictionary_sync_webdav.password = "SENTINEL-dictionary-password".into();
     let exported = export_desktop_settings(&preferences);
-    assert!(exported.keys().all(|key| key.starts_with("input.")));
+    assert!(exported
+        .keys()
+        .all(|key| key.starts_with("input.") || NEW_SHARED_KEYS.iter().any(|(new, _)| new == key)));
     assert!(exported.values().all(|value| !matches!(
         value,
         AccountPreferenceValue::String(text) if text.contains("SENTINEL")
@@ -1058,7 +1134,12 @@ fn settings_sync_desktop_export_is_only_the_shared_input_keys() {
         .into_iter()
         .filter(|(key, _)| key.starts_with("input."))
         .collect();
-    assert_eq!(exported, shared);
+    let exported_input: BTreeMap<_, _> = exported
+        .clone()
+        .into_iter()
+        .filter(|(key, _)| key.starts_with("input."))
+        .collect();
+    assert_eq!(exported_input, shared);
     assert_eq!(
         exported.get("input.character_set"),
         Some(&AccountPreferenceValue::String("traditional".into()))
@@ -1258,4 +1339,274 @@ fn settings_sync_punctuation_styles_round_trip() {
     .unwrap();
     assert_eq!(applied.preferences.quote_style, QuoteStyle::Curly);
     assert!(applied.skipped.is_empty());
+}
+#[test]
+fn android_keyboard_skin_mode_slots_sync_without_overwriting_global_theme() {
+    let local = Preferences {
+        global_theme: GlobalTheme::Night,
+        android_keyboard_skin_light: Some("theme:paper".into()),
+        android_keyboard_skin_dark: Some("design:synthetic-night".into()),
+        ..Preferences::default()
+    };
+    let exported = export_android_settings(&local, None).unwrap();
+    assert_eq!(
+        exported.get("platform.android.keyboard_skin_light"),
+        Some(&AccountPreferenceValue::String("theme:paper".into()))
+    );
+    assert_eq!(
+        exported.get("platform.android.keyboard_skin_dark"),
+        Some(&AccountPreferenceValue::String(
+            "design:synthetic-night".into()
+        ))
+    );
+
+    let cleared = BTreeMap::from([(
+        "platform.android.keyboard_skin_dark".to_owned(),
+        AccountPreferenceValue::String(String::new()),
+    )]);
+    let applied = apply(&local, cleared.clone(), &full_schema());
+    assert_eq!(
+        applied.preferences.android_keyboard_skin_light.as_deref(),
+        Some("theme:paper")
+    );
+    assert_eq!(applied.preferences.android_keyboard_skin_dark, None);
+    assert_eq!(applied.preferences.global_theme, GlobalTheme::Night);
+
+    let mut old_schema = full_schema();
+    old_schema
+        .fields
+        .remove("platform.android.keyboard_skin_dark");
+    let applied = apply(&local, cleared, &old_schema);
+    assert_eq!(
+        applied.preferences.android_keyboard_skin_dark.as_deref(),
+        Some("design:synthetic-night")
+    );
+
+    let invalid = BTreeMap::from([(
+        "platform.android.keyboard_skin_dark".to_owned(),
+        AccountPreferenceValue::String("theme:native".into()),
+    )]);
+    let applied = apply(&local, invalid, &full_schema());
+    assert_eq!(applied.skipped, vec!["platform.android.keyboard_skin_dark"]);
+    assert_eq!(
+        applied.preferences.android_keyboard_skin_dark.as_deref(),
+        Some("design:synthetic-night")
+    );
+}
+
+/// 三种底行样式和数字行按共享偏好的写法上传，读回来还是原值；云端是本机不认识的样式时只跳过那一个键，本机的选择不变。
+#[test]
+fn touch_key_styles_and_number_row_sync_by_their_wire_names() {
+    let defaults = export_android_settings(&Preferences::default(), None).unwrap();
+    assert_eq!(
+        defaults[TWENTY_SIX_KEY_STYLE],
+        AccountPreferenceValue::String("standard".into())
+    );
+    assert_eq!(
+        defaults[FOURTEEN_KEY_STYLE],
+        AccountPreferenceValue::String("standard".into())
+    );
+    assert_eq!(
+        defaults[NINE_KEY_STYLE],
+        AccountPreferenceValue::String("standard".into())
+    );
+    assert_eq!(defaults[NUMBER_ROW], AccountPreferenceValue::Boolean(false));
+
+    for (twenty_six, fourteen, nine) in [
+        (
+            TouchTwentySixKeyStyle::CommaPeriod,
+            TouchFourteenKeyStyle::LongSpace,
+            TouchNineKeyStyle::CommaPeriod,
+        ),
+        (
+            TouchTwentySixKeyStyle::LongSpace,
+            TouchFourteenKeyStyle::Emoji,
+            TouchNineKeyStyle::Emoji,
+        ),
+        (
+            TouchTwentySixKeyStyle::Emoji,
+            TouchFourteenKeyStyle::Standard,
+            TouchNineKeyStyle::Standard,
+        ),
+        (
+            TouchTwentySixKeyStyle::Standard,
+            TouchFourteenKeyStyle::Standard,
+            TouchNineKeyStyle::TallReturn,
+        ),
+    ] {
+        let local = Preferences {
+            touch_twenty_six_key_style: twenty_six,
+            touch_fourteen_key_style: fourteen,
+            touch_nine_key_style: nine,
+            touch_number_row: true,
+            ..Preferences::default()
+        };
+        let exported = export_android_settings(&local, None).unwrap();
+        assert_eq!(
+            exported[TWENTY_SIX_KEY_STYLE],
+            AccountPreferenceValue::String(twenty_six.as_str().into())
+        );
+        assert_eq!(
+            exported[NINE_KEY_STYLE],
+            AccountPreferenceValue::String(nine.as_str().into())
+        );
+        let applied = apply(&Preferences::default(), exported, &full_schema());
+        assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+        assert_eq!(applied.preferences, local);
+    }
+
+    let local = Preferences {
+        touch_twenty_six_key_style: TouchTwentySixKeyStyle::Emoji,
+        touch_fourteen_key_style: TouchFourteenKeyStyle::LongSpace,
+        touch_nine_key_style: TouchNineKeyStyle::CommaPeriod,
+        ..Preferences::default()
+    };
+    let values = BTreeMap::from([
+        (
+            TWENTY_SIX_KEY_STYLE.to_owned(),
+            AccountPreferenceValue::String("split_space".into()),
+        ),
+        (
+            FOURTEEN_KEY_STYLE.to_owned(),
+            AccountPreferenceValue::String("comma_period".into()),
+        ),
+        (
+            NINE_KEY_STYLE.to_owned(),
+            AccountPreferenceValue::String("long_space".into()),
+        ),
+        (NUMBER_ROW.to_owned(), AccountPreferenceValue::Boolean(true)),
+    ]);
+    let applied = apply(&local, values, &full_schema());
+    assert_eq!(
+        applied.skipped,
+        [FOURTEEN_KEY_STYLE, NINE_KEY_STYLE, TWENTY_SIX_KEY_STYLE]
+    );
+    assert_eq!(
+        applied.preferences,
+        Preferences {
+            touch_number_row: true,
+            ..local
+        }
+    );
+}
+
+/// 每个宿主只导出本机设置页能改、运行时也读的新增共享偏好：Android 一个都不导出，Windows 只有语法模型，Linux 是除思考强度和快捷键之外的全部。
+#[test]
+fn settings_sync_new_shared_keys_follow_what_each_host_can_change() {
+    let preferences = new_shared_preferences();
+    let android = export_android_settings(&preferences, Some(&feedback())).unwrap();
+    assert!(exported_new_keys(&android).is_empty());
+    let windows = export_desktop_settings_for(DesktopHost::Windows, &preferences);
+    assert_eq!(
+        exported_new_keys(&windows),
+        ["sentence_association.grammar_model"]
+    );
+    let linux = export_desktop_settings_for(DesktopHost::Linux, &preferences);
+    assert_eq!(
+        exported_new_keys(&linux),
+        [
+            "mixed_input.quick_phrase",
+            "mixed_input.quick_phrase_frequency",
+            "sentence_association.grammar_model",
+            "local_modes.symbol",
+            "local_modes.date_time_menu",
+            "second_third_candidate.enabled",
+            "second_third_candidate.keys",
+            "translation.ai",
+        ]
+    );
+    assert_eq!(
+        linux.get("sentence_association.grammar_model"),
+        Some(&AccountPreferenceValue::String("baguwen_compact".into()))
+    );
+    assert_eq!(
+        linux.get("second_third_candidate.keys"),
+        Some(&AccountPreferenceValue::String("semicolon_quote".into()))
+    );
+}
+
+/// Linux 往返：导出的每一项都应用回来；Windows 只应用语法模型，云端的 `translation.ai` 等不动本机（Windows 运行时读它，设置里却关不掉）。
+#[test]
+fn settings_sync_new_shared_keys_round_trip_on_the_desktop_hosts() {
+    let local = Preferences::default();
+    let remote = new_shared_preferences();
+    let cloud = document(export_desktop_settings_for(DesktopHost::Linux, &remote));
+
+    let linux =
+        apply_desktop_settings_for(DesktopHost::Linux, &local, &cloud, &full_schema()).unwrap();
+    assert!(linux.skipped.is_empty(), "{:?}", linux.skipped);
+    let applied = &linux.preferences;
+    assert_eq!(
+        applied.mixed_input.quick_phrase,
+        remote.mixed_input.quick_phrase
+    );
+    assert_eq!(
+        applied.mixed_input.quick_phrase_frequency,
+        remote.mixed_input.quick_phrase_frequency
+    );
+    assert_eq!(
+        applied.sentence_association.grammar_model,
+        remote.sentence_association.grammar_model
+    );
+    assert_eq!(applied.local_modes.symbol, remote.local_modes.symbol);
+    assert_eq!(
+        applied.local_modes.date_time_menu,
+        remote.local_modes.date_time_menu
+    );
+    assert_eq!(
+        applied.second_third_candidate,
+        remote.second_third_candidate
+    );
+    assert_eq!(applied.translation_ai, remote.translation_ai);
+    // 共享层的宿主不导出也不应用思考强度。
+    assert_eq!(applied.ai_assistant.thinking, local.ai_assistant.thinking);
+    assert_eq!(
+        applied.voice_input.polish_thinking,
+        local.voice_input.polish_thinking
+    );
+
+    let windows =
+        apply_desktop_settings_for(DesktopHost::Windows, &local, &cloud, &full_schema()).unwrap();
+    assert!(windows.skipped.is_empty(), "{:?}", windows.skipped);
+    let mut expected = local.clone();
+    expected.sentence_association.grammar_model = remote.sentence_association.grammar_model;
+    assert_eq!(windows.preferences, expected);
+}
+
+/// 不认识的语法模型和键位只跳过这一个键，同一份文档里别的键照常应用。
+#[test]
+fn settings_sync_unknown_grammar_model_and_candidate_keys_are_skipped() {
+    let local = Preferences::default();
+    let mut settings = export_desktop_settings_for(DesktopHost::Linux, &new_shared_preferences());
+    settings.insert(
+        "sentence_association.grammar_model".into(),
+        AccountPreferenceValue::String("future_model".into()),
+    );
+    settings.insert(
+        "second_third_candidate.keys".into(),
+        AccountPreferenceValue::String("left_right_shift".into()),
+    );
+    let applied = apply_desktop_settings_for(
+        DesktopHost::Linux,
+        &local,
+        &document(settings),
+        &full_schema(),
+    )
+    .unwrap();
+    assert_eq!(
+        applied.skipped,
+        [
+            "second_third_candidate.keys",
+            "sentence_association.grammar_model"
+        ]
+    );
+    assert_eq!(
+        applied.preferences.sentence_association.grammar_model,
+        local.sentence_association.grammar_model
+    );
+    assert!(applied.preferences.second_third_candidate.enabled);
+    assert_eq!(
+        applied.preferences.local_modes.symbol,
+        !local.local_modes.symbol
+    );
 }

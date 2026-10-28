@@ -37,7 +37,7 @@ crates/engine                  输入算法与组合状态（纯 Rust）
 
 Tauri 在 macOS、Linux 和现代 Windows 上还承载共享面板：表情与符号、手写、屏幕键盘、语音、云词库和云剪贴板，Linux 另有本地剪贴板面板（`SurfaceRoute::Clipboard`，`msime-linux-settings --panel clipboard`）。现代 Windows 原生设置窗口里语音、屏幕键盘、手写、云词库和云剪贴板这 5 个面板的入口拉起 Tauri 的 `MSIME.exe`（`platforms/windows/settings/SettingsNavigation.h` 的 `shell_links::all`）；表情与符号面板不从设置窗口打开，由 Server 的托盘菜单和浮动工具栏拉起（`platforms/windows/src/system/ShellSurfaces.h` 的 `shell_surface_request`）。Win7 构建通过显式 `MSIME_WINDOWS7_CLIENT` 配置选择 `panels/win7` 原生面板，覆盖这些功能入口，不依赖 Tauri 或 WebView2；引擎、协议与共享业务归属保持。
 
-由此，一个设置功能要在 `packages/ui` 实现一次，再在每个原生设置平台（Windows、iOS、Android）各实现一次。为了让每个平台的那一份只剩界面，设置项的校验、默认值、持久化和业务逻辑必须放在共享 Rust 层（偏好在 `crates/client-core`，账号、皮肤、词库等在 `crates/client-services`，语音与 AI 在 `crates/client-providers`，都经 `crates/host-api` 提供给原生宿主），原生设置界面不应复制这些规则。这条规则今天还没有全部落实，也没有脚本门禁：Android 的凭据预检（`platforms/android/java/app/msime/android/voice/VoiceProviderPolicy.java`）、润色方案（`VoicePolishSettingsPolicy.java`）仍写在原生界面一侧；新设置功能要先把规则下沉到上面对应的共享 Rust crate。Windows 语音页的服务目录和换服务字段补丁已由 `client-providers::voice::provider_catalog`、`provider_settings` 经 C ABI 提供，原生页只转换字段并保存。Android 的 ASR、润色服务列表与豆包流式接口预设也经同一目录的 JNI 入口读取，Java 只在识别列表前追加系统识别与本地模型；目录不可用时保留当前配置并禁用相关选择入口。 Android 的凭据换槽和换服务时清空地址、模型也由 `provider_settings` 经 `msime_client_voice_provider_update` 的 JNI 适配提供；`clear` 为显式策略，现有宿主缺省的 `fill_defaults` 行为不变。 Android 语音接口预检也通过 `msime_client_voice_endpoint_issue` 复用运行时 URL 校验，并保留移动传输既有的小写协议、无 `@` 输入限制；Java 只适配并严格解析结果，桥接失败不允许保存。Windows 账号页的昵称规范化、校验、默认显示名和长度上限也由 `client-services::account::name` 经 `msime_client_account_name` 提供。
+由此，一个设置功能要在 `packages/ui` 实现一次，再在每个原生设置平台（Windows、iOS、Android）各实现一次。为了让每个平台的那一份只剩界面，设置项的校验、默认值、持久化和业务逻辑必须放在共享 Rust 层（偏好在 `crates/client-core`，账号、皮肤、词库等在 `crates/client-services`，语音与 AI 在 `crates/client-providers`，都经 `crates/host-api` 提供给原生宿主），原生设置界面不应复制这些规则。新设置功能要先把规则下沉到上面对应的共享 Rust crate。Windows 语音页的服务目录和换服务字段补丁已由 `client-providers::voice::provider_catalog`、`provider_settings` 经 C ABI 提供，原生页只转换字段并保存。Android 的 ASR、润色服务列表、润色状态、服务分类、鉴权模式与豆包流式接口预设也经同一目录和共享规则的 JNI 入口读取，Java 只在识别列表前追加系统识别与本地模型，并适配方案、自定义槽位、字段输入和测试标题；目录不可用时保留当前配置并禁用相关选择入口。 Android 的凭据换槽和换服务时清空地址、模型也由 `provider_settings` 经 `msime_client_voice_provider_update` 的 JNI 适配提供；`clear` 为显式策略，现有宿主缺省的 `fill_defaults` 行为不变。 Android 语音接口预检也通过 `msime_client_voice_endpoint_issue` 复用运行时 URL 校验，并保留移动传输既有的小写协议、无 `@` 输入限制；Java 只适配并严格解析结果，桥接失败不允许保存。Windows 账号页的昵称规范化、校验、默认显示名和长度上限也由 `client-services::account::name` 经 `msime_client_account_name` 提供。
 
 云候选服务的 HTTP 配置、模板、响应路径和缓存由 `client-core::cloud::candidates` 持有，Host API 将请求描述符附在在线查询上，各宿主只执行传输；Linux 的在线服务返回原始 JSON 给共享层解析。完整配置和隐私边界见[云候选服务](cloud-candidates.md)。
 
@@ -62,6 +62,8 @@ Tauri 在 macOS、Linux 和现代 Windows 上还承载共享面板：表情与�
 引入新的上游代码、字体、图标、模型或服务 SDK 时，同时提交来源提交、许可证文本、通知位置和分发限制。
 
 OpenCC 七份简繁转换表归 `msime-dictionary/sources/opencc/`，由 `resources/opencc.lock.json` 固定词库仓提交、OpenCC 上游提交及逐文件 SHA-256 与大小。`client-base/build.rs` 在构建主机用 Python 3.10+ 调用 `scripts/fetch_opencc.py` 准备输入，之后仍由 `include_str!` 内嵌。首次构建需要网络；后续复用逐文件校验的 `target/opencc/<commit>/`。离线构建可先运行 `python3 scripts/fetch_opencc.py` 准备缓存，再设置 `MSIME_OPENCC_OFFLINE=1`；也可用 `MSIME_OPENCC_SOURCE_DIR=/path/to/msime-dictionary/sources/opencc` 指定离线检出，字节必须与锁一致。`MSIME_PYTHON` 可指定解释器。运行时转换不读外部文件、不访问网络；许可证仍随各平台打包。
+
+符号数据同样归词库仓：打拼音出符号的名称表和 LaTeX 命令名表是 `msime-dictionary/sources/symbols/` 下的 `symbol-names.tsv`、`latex-symbols.tsv`，改符号名称改那里。`resources/symbol-tables.lock.json` 固定词库仓提交和逐文件 SHA-256 与大小，`scripts/sync_symbol_tables.py` 把它们逐字节同步成仓库里的副本 `crates/engine/src/local/symbol_candidates.tsv`（引擎 `include_str!`）和 `plugins/phrase_table/latex-symbols/symbols.tsv`（官方短语表生成器与符号模式），`scripts/test-symbol-tables.py` 离线核对副本等于锁。和 OpenCC 不同，副本提交进仓库、编译不联网：引擎被 Linux 的 Nix、Debian、RPM 离线打包和网页引擎一起编译，构建期下载会让每条打包流程都要再备一份离线输入。
 
 ## 验证
 
@@ -100,7 +102,7 @@ Rust 改动另需 `cargo fmt` 与 `cargo clippy`；UI 改动另需类型检查�
 - **iOS**：工程由 XcodeGen 从 `platforms/ios/project.yml` 生成，`MSIMEClientTests` 聚合键盘、服务与共享三个单测 target，`MSIMEClientUITests` 跑引导流程和键盘扩展在编辑器里的界面用例；`platforms/ios/build-app.sh` 出模拟器或真机构建。
 - **Android**：`platforms/android/check-host.sh` 在没有 Android 运行时的机器上校验 JNI 契约并跑 JVM 冒烟；`platforms/android/tests/device/smoke.sh` 在专用 AVD 上跑设备套件，设置、打字统计和手写各有开关；`platforms/android/build-apk.sh` 出原生 IME 包。
 - **HarmonyOS**：`platforms/harmony/tests/run.sh` 做类型检查并跑键盘逻辑测试；HAP 由 DevEco 的 `hvigorw assembleHap` 打出，`ohpm install` 和真打包缺一不可——ArkTS 对 `@Builder` 体内声明、对象字面量类型的一批限制只有 `.ets` 真正编译时才报出来。
-- **Linux**：`platforms/linux/build-container.sh` 在固定容器里构建 IBus engine、Fcitx5 插件和全部 provider 入口并跑 ctest；`platforms/linux/tests/tools/check-container.sh` 起独立 D-Bus 与 IBus/Fcitx5 daemon 做隔离验收。
+- **Linux**：`platforms/linux/build-container.sh` 在固定容器里构建 IBus engine、Fcitx5 插件和全部 provider 入口并跑 ctest；`MSIME_PACKAGE_FORMAT=rpm MSIME_PACKAGE_TESTS_ONLY=1 platforms/linux/package-container.sh` 在发版 `.rpm` 用的 Fedora 容器里以 Release 编 full 版并跑同一套 ctest，不出包，PR 上的「Linux native host (Fedora)」就是它；`platforms/linux/tests/tools/check-container.sh` 起独立 D-Bus 与 IBus/Fcitx5 daemon 做隔离验收。
 - **Windows**：`platforms/windows/build-cross.sh` 用 MinGW 交叉构建 host DLL、TSF DLL、Server 和全部原生测试，`platforms/windows/run-tests-wine.sh` 在 Wine 下真跑这些产物；`platforms/windows/Build-Client.ps1` 是 Windows 上的 MSVC 全量构建，安装包由 `platforms/windows/installer/` 的 Inno Setup 脚本和双架构签名链产出。
 
 各平台的构建前置、环境变量和装机步骤见对应的 `platforms/<os>/README.md`，目录与职责总览见 [README](../README.md)。

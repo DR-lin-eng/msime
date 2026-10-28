@@ -10,14 +10,14 @@ struct GreenSwitchToggleStyle: ToggleStyle {
 
 /// The settings pages the 设置 tab opens, in the order and grouping of the mobile design. Phone and iPad read the same list, so a page added here shows up on both.
 enum SettingsPage: String, CaseIterable, Identifiable {
-  case skin, candidate, toolbar, input, ai, phrases, dictionary, layout, voice, handwriting, developer
+  case skin, candidate, toolbar, input, ai, phrases, dictionary, plugins, layout, voice, handwriting, developer
 
   var id: Self { self }
 
   /// 根页面的各分组，对应 Android 的 `KeyboardFragment.buildRows`。移动端设计稿去掉了 键盘，但它仍留在根页面，因为布局、高度、反馈、候选栏 和 键盘工具栏 都在那里；后两个页面从 键盘 和搜索进入，不从根页面进入。
   static let groups: [[SettingsPage]] = [
     [.skin, .layout],
-    [.input, .ai, .dictionary],
+    [.input, .ai, .dictionary, .plugins],
     [.voice, .handwriting],
     [.developer],
   ]
@@ -31,6 +31,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .ai: return "表达"
     case .phrases: return "常用语"
     case .dictionary: return "词库"
+    case .plugins: return "插件"
     case .layout: return "键盘"
     case .voice: return "语音输入"
     case .handwriting: return "手写输入"
@@ -47,6 +48,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .ai: return "character.bubble.fill"
     case .phrases: return "text.bubble.fill"
     case .dictionary: return "book.closed.fill"
+    case .plugins: return "puzzlepiece.extension.fill"
     case .layout: return "keyboard.fill"
     case .voice: return "mic.fill"
     case .handwriting: return "pencil"
@@ -64,7 +66,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .ai: return ["标点", "联想", "英文", "空格"]
     case .phrases: return ["短语", "快捷回复"]
     case .dictionary: return ["词库", "自造词", "学习"]
-    case .layout: return ["键盘", "高度", "间距", "按键音", "振动", "AI", "润色", "回复模板", "端点", "模型", "提示词"]
+    case .plugins: return ["短语表", "指令表", "符号集", "单词本", "音效包", "辅助码表", "社区插件"]
+    case .layout: return ["键盘", "高度", "间距", "按键布局", "数字行", "长空格", "表情键", "按键音", "振动", "AI", "润色", "回复模板", "端点", "模型", "提示词"]
     case .voice: return ["语音", "识别"]
     case .handwriting: return ["手写"]
     case .developer: return ["日志", "诊断", "重置"]
@@ -81,6 +84,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .ai: return "expressionSettingsLink"
     case .phrases: return "commonPhrasesSettingsLink"
     case .dictionary: return "dictionarySettingsLink"
+    case .plugins: return "pluginsSettingsLink"
     case .layout: return "keyboardLayoutLink"
     case .voice: return "voiceSettingsLink"
     case .handwriting: return "handwritingSettingsLink"
@@ -97,6 +101,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .ai: ExpressionSettingsView()
     case .phrases: CommonPhrasesSettingsView()
     case .dictionary: DictionarySettingsView()
+    case .plugins: PluginsSettingsView()
     case .layout: KeyboardLayoutSettingsView()
     case .voice: VoiceSettingsView()
     case .handwriting: HandwritingSettingsView()
@@ -206,10 +211,13 @@ struct SettingsSearchPill: View {
   }
 }
 
-/// 设置 顶部的卡片：app 标志、当前方案、两个设置步骤和 试用键盘 按钮。
+/// 首页顶部的卡片：app 标志、当前方案、两个设置步骤和 试用键盘 按钮。应用名已经是页面的大标题，卡片不再写一遍。
 ///
 /// 宿主 app 无法判断键盘是否已添加、是否已获得完全访问权限 —— iOS 对这两者都没有公开 API，而由键盘写入的标记在用户撤销权限后仍会保留 —— 所以每一步都显示中性的序号标记，而不是设计稿的 ✓ / ! 状态，两个 去开启 链接也始终显示。
 struct KeyboardStatusCard: View {
+  @State private var choicesPending = OnboardingChoices.shared.hasPending
+  @State private var resourcesReady: Bool?
+  @State private var preparingResources = false
   let scheme: ChineseInputScheme
   /// 试用键盘 的行为。试用页是设置导航栈里的 AI 对话二级页，手机和 iPad 都由 `AppNavigation.openChat` 压入。
   let tryout: () -> Void
@@ -223,22 +231,50 @@ struct KeyboardStatusCard: View {
     VStack(alignment: .leading, spacing: 14) {
       HStack(spacing: 12) {
         AppMarkDisc(diameter: 52, markSize: 30)
-        VStack(alignment: .leading, spacing: 2) {
-          Text("水杉输入法").font(.system(size: 17, weight: .semibold))
-          Text(scheme.shortLabel).designSubtext()
-            .accessibilityIdentifier("keyboardStatusScheme")
-        }
+        // 宿主 app 判断不了键盘是否已启用（见上），首行不写「已启用」这类状态，只写当前方案，与共享设置组件没有设置客户端时的卡片一样。
+        Text(scheme.shortLabel).font(.system(size: 17, weight: .semibold))
+          .accessibilityIdentifier("keyboardStatusScheme")
       }
+      Text("请在系统设置中完成以下两步；iOS 无法自动确认键盘列表和完全访问状态。")
+        .font(.system(size: 13))
+        .foregroundStyle(MetasequoiaTheme.sub)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("keyboardStatusManualCheckNotice")
       VStack(alignment: .leading, spacing: 8) {
         setupRow(1, "添加到键盘列表", identifier: "openKeyboardSettingsButton", hint: "设置 → 通用 → 键盘 → 键盘 → 添加新键盘")
         setupRow(2, "允许完全访问", identifier: "openFullAccessSettingsButton", hint: "云候选、云剪贴板和同步需要它，日常输入不联网")
       }
       tryoutButton.padding(.top, 4)
+      if resourcesReady == false {
+        Button("运行资源准备失败，重试准备") { prepareResources() }
+          .disabled(preparingResources)
+          .accessibilityIdentifier("retryOnboardingResources")
+      } else if preparingResources {
+        ProgressView("正在准备运行资源")
+      }
+      if choicesPending {
+        Button("引导选择尚未保存，重试保存") {
+          choicesPending = !OnboardingChoices.shared.sync()
+        }.accessibilityIdentifier("retryPendingOnboardingChoices")
+      }
     }
     .padding(.vertical, 18)
     .padding(.horizontal, 20)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(MetasequoiaTheme.surface, in: RoundedRectangle(cornerRadius: MetasequoiaTheme.cardRadius, style: .continuous))
+    .reloadOnAppearAndActive { prepareResources() }
+  }
+
+  private func prepareResources() {
+    guard !preparingResources else { return }
+    preparingResources = true
+    Task { @MainActor in
+      resourcesReady = await Task.detached(priority: .userInitiated) {
+        MetasequoiaInputSessionBridge.prepareOnboardingResources()
+      }.value
+      preparingResources = false
+      choicesPending = !OnboardingChoices.shared.sync()
+    }
   }
 
   private func setupRow(_ number: Int, _ label: String, identifier: String, hint: String) -> some View {

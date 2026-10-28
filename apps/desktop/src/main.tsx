@@ -70,12 +70,16 @@ import {
   type MentionEntry,
   type ResourcePackClient,
   type ResourcePackStatus,
+  type AuthoredPack,
   type PluginCatalogResult,
   type PluginClient,
   type PluginPackage,
   type ScriptGrantsResult,
+  type ScriptPluginState,
   type ScelText,
   type WubiCodeLookup,
+  type CloudClipboardWebDavPreferences,
+  type DictionarySyncAction,
   UNBATCHED_DICTIONARY_FILE_BYTES,
   StatusMessage,
 } from "@msime/ui";
@@ -95,6 +99,7 @@ import { testDesktopApiCredential } from "./account/credential-test-client";
 import { createAccountCommandClient } from "./account/account-command-client";
 import { isMobileHost } from "./input/mobile-host-capabilities";
 import { createMobileHostServices } from "./core/mobile-host-services";
+import { createDesktopOobeClient } from "./core/oobe-host";
 import {
   createDesktopCandidateSkinCommunity,
   createDesktopCommunityResources,
@@ -201,6 +206,10 @@ const plugins: PluginClient = {
   catalog: () => invoke<PluginCatalogResult>("plugin_catalog"),
   importPack: (source) => invoke<PluginPackage | null>("import_plugin_pack", { source }),
   remove: (kind, id) => invoke<void>("remove_plugin_pack", { kind, id }),
+  // 设置页插件编辑器：生成清单、校验和安装都在 client-services，页面只交换结构化的包。
+  loadAuthoredPack: (kind, id) => invoke<AuthoredPack>("load_authored_plugin_pack", { kind, id }),
+  saveAuthoredPack: (pack, replace) =>
+    invoke<PluginPackage>("save_authored_plugin_pack", { pack, replace }),
   loadMentions: () => invoke<MentionEntry[]>("load_plugin_mentions"),
   saveMentions: (entries) => invoke<void>("save_plugin_mentions", { entries }),
   // 脚本插件的授权：设置应用经 client-services 的 `script_grants` 写入。页面只在宿主声明了 `script_plugins` 时调用。
@@ -208,6 +217,11 @@ const plugins: PluginClient = {
   setScriptGrant: (id, hash, enabled, granted) =>
     invoke<ScriptGrantsResult>("set_script_grant", { id, hash, enabled, granted }),
   reorderScripts: (ids) => invoke<ScriptGrantsResult>("reorder_scripts", { ids }),
+  // 插件详情页的设置值和持久存储：校验和写入都在 client-services 的 `script_settings`、`script_storage`。
+  scriptPluginState: (id) => invoke<ScriptPluginState>("script_plugin_state", { id }),
+  setScriptSettings: (id, values) =>
+    invoke<ScriptPluginState>("set_script_settings", { id, values }),
+  clearScriptData: (id) => invoke<ScriptPluginState>("clear_script_data", { id }),
 };
 const typingStatistics: TypingStatisticsClient = {
   load: () => invoke("load_typing_statistics"),
@@ -273,6 +287,7 @@ const resourcePacks: ResourcePackClient = {
     progress: "resource-pack-progress",
   }),
   remove: (id) => invoke<boolean>("resource_pack_remove", { id }),
+  checkGrammarUpdates: () => invoke("resource_pack_check_grammar_updates"),
 };
 const macosInstallClient: MacosInstallClient = {
   install: (scope) => invoke("run_first_input_source_install", { scope }),
@@ -453,6 +468,7 @@ function DesktopSettings() {
   const linuxHost = useRef(false);
   const linuxUpdateDeferred = useRef(false);
   const [macosInstall, setMacosInstall] = useState(false);
+  const [linuxRepair, setLinuxRepair] = useState(false);
   const [replayOnboarding, setReplayOnboarding] = useState(false);
   // 首启引导准备资源之后重新读到的版本：第一次启动时 HostOptions 由这一步写下，发现宿主能力时还读不到版本。
   const [preparedEdition, setPreparedEdition] = useState<HostCapabilities["edition"]>();
@@ -641,20 +657,46 @@ function DesktopSettings() {
       // 应用启动时补传一次打字统计；没打开上传、没登录或十分钟内传过时宿主什么也不做，失败也不打扰用户。
       if (host?.typing_statistics && isDesktopAccountHost(host.platform))
         void typingStatisticsUpload.sync().catch(() => undefined);
+      const desktopOobe = createDesktopOobeClient(
+        host?.platform,
+        invoke,
+        async () => {
+          if (host?.platform === "linux") await invoke("open_linux_input_method_settings");
+          else if (host?.platform === "macos") await invoke("open_input_source_settings");
+        },
+        async () => {
+          if (host?.platform === "linux") {
+            setLinuxRepair(true);
+            setLinuxSetup(await invoke<LinuxSetupStatus>("linux_setup_status"));
+          } else if (host?.platform === "macos") {
+            await invoke("repair_macos_oobe_resources");
+            desktopOobe?.refresh?.();
+          }
+        },
+      );
       const hosted: SettingsClient = host
         ? {
             ...client,
             host,
+            oobe: desktopOobe ?? client.oobe,
+            // macOS 设置应用的 Sparkle 更新按页面当前选的通道读对应的 appcast；页面不传通道时宿主读稳定版的。
             ...(applicationUpdater
               ? {
-                  checkForApplicationUpdate: () => invoke<void>("application_update_check"),
+                  checkForApplicationUpdate: (channel) =>
+                    invoke<void>(
+                      "application_update_check",
+                      channel === undefined ? {} : { channel },
+                    ),
                 }
               : {}),
-            // Linux 设置应用每天在后台检查一次更新并发通知（不在应用里安装），关于页先显示它找到的新版本。
+            // Linux 设置应用每天在后台检查一次更新并发通知（不在应用里安装），关于页先显示它找到的新版本；页面传来当前选的通道时只要按这个通道找到的版本。
             ...(host.platform === "linux"
               ? {
-                  pendingUpdateCheck: () =>
-                    invoke<UpdateCheckResult | null>("pending_update_check"),
+                  pendingUpdateCheck: (channel) =>
+                    invoke<UpdateCheckResult | null>(
+                      "pending_update_check",
+                      channel === undefined ? {} : { channel },
+                    ),
                 }
               : {}),
             dictionary: isMobileHost(host.platform) ? mobileDictionary : dictionary,
@@ -798,7 +840,22 @@ function DesktopSettings() {
               : {}),
             // 云剪贴板可以改走自建中继：macOS 与 Linux 的设置页和云剪贴板面板都在这个 Tauri 进程里，按偏好选路（`cloud_clipboard_request`）；macOS 输入法菜单启动的面板、原生云剪贴板窗口和表情面板的「发到云剪贴板」也按同一个 C 入口选路。Windows 的设置窗口是原生 WinUI，那一组在它自己的设置页里。
             ...(host.platform === "macos" || host.platform === "linux"
-              ? { cloudClipboardRelay: true }
+              ? {
+                  cloudClipboardRelay: true,
+                  // WebDAV 网盘也经同一条中继路走，保存前的「测试连接」由 Rust 跑（`cloud_clipboard_webdav_probe`）。
+                  probeCloudClipboardWebDav: async (draft: CloudClipboardWebDavPreferences) => {
+                    await invoke("cloud_clipboard_webdav_probe", {
+                      url: draft.url,
+                      username: draft.username,
+                      password: draft.password,
+                    });
+                  },
+                  // 「我的词条」经网盘同步：动作原样交给 Rust（`dictionary_sync`），HostOptions 和与输入法共用的状态目录由宿主补上。
+                  dictionarySync: {
+                    request: (action: DictionarySyncAction) =>
+                      invoke<unknown>("dictionary_sync", { action }),
+                  },
+                }
               : {}),
             ...(host.platform === "linux"
               ? {
@@ -934,6 +991,7 @@ function DesktopSettings() {
   const onboardingActions: OnboardingActions = {
     sogou: dictionary.sogou,
     platform: onboardingPlatform === "ios" ? "ios" : "android",
+    oobe: settingsClient?.oobe,
     prepareResources:
       onboardingPlatform === "android" || !onboardingPlatform
         ? async () => {
@@ -969,14 +1027,21 @@ function DesktopSettings() {
       <LinuxSetupPage
         sogou={dictionary.sogou}
         status={linuxSetup}
+        repair={linuxRepair}
         client={linuxSetupClient}
         edition={settingsClient?.host?.edition}
         onComplete={() => {
           if (linuxSetup.prepared && linuxSetup.dictionaryOutdated)
             linuxUpdateDeferred.current = true;
-          void invoke("leave_linux_setup_window")
-            .catch(() => undefined)
-            .then(() => setLinuxSetup(null));
+          // 宿主返回 true 表示首次配置换了状态目录，设置已交给新进程、本进程即将退出：不再进入设置，免得在旧目录上读写偏好。
+          void invoke<boolean>("leave_linux_setup_window")
+            .catch(() => false)
+            .then((handedOver) => {
+              if (handedOver) return;
+              setLinuxSetup(null);
+              setLinuxRepair(false);
+              settingsClient?.oobe?.refresh?.();
+            });
         }}
       />
     );
@@ -988,7 +1053,10 @@ function DesktopSettings() {
         onComplete={() => {
           void invoke("leave_first_install_window")
             .catch(() => undefined)
-            .then(() => setMacosInstall(false));
+            .then(() => {
+              setMacosInstall(false);
+              settingsClient?.oobe?.refresh?.();
+            });
         }}
       />
     );

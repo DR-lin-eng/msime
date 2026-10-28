@@ -41,7 +41,7 @@ final class ImeTextEditPanel {
     private boolean modeSaving;
     private boolean destroyed;
     private long modeSaveGeneration;
-    private long selectionVersion;
+    private final TextTrackpadSelectionVersion selectionVersion = new TextTrackpadSelectionVersion();
     private int selectionStart = -1;
     private int selectionEnd = -1;
     private boolean previewActive;
@@ -64,7 +64,7 @@ final class ImeTextEditPanel {
         previewReads = new TextTrackpadReadQueue<>(trackpadWorker, s.main::post);
     }
 
-    /** 所有操作同屏可见；中央十字的四角留白，父面板拦截空白处触摸。 */
+    /** 所有操作同屏可见；中央十字下排两角留白，父面板拦截空白处触摸。 */
     LinearLayout build() {
         LinearLayout panel = LayoutPolicy.column(s);
         panel.setContentDescription("文本编辑面板");
@@ -102,21 +102,21 @@ final class ImeTextEditPanel {
             @Override public void active(boolean active) {
                 if (active) {
                     selectionReads.cancel();
-                    selectionVersion++;
+                    selectionVersion.invalidate();
                 }
                 setPreviewActive(active);
             }
         });
         TextTrackpadView currentTrackpad = trackpad;
         movement.addView(currentTrackpad, new FrameLayout.LayoutParams(1, 1));
-        // 触控板只替代中央前三行；两侧七键和底部首尾、换行保持可用。
+        // 触控板替代中央第二、三行；上排行首尾、两侧八键和底部首尾、换行保持可用。
         movement.addOnLayoutChangeListener((view, left, top, right, bottom,
                 oldLeft, oldTop, oldRight, oldBottom) -> {
             int width = right - left, height = bottom - top, margin = s.pixels(3);
             FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                Math.max(1, width * 6 / 10 - 2 * margin), Math.max(1, height * 3 / 4 - 2 * margin));
+                Math.max(1, width * 6 / 10 - 2 * margin), Math.max(1, height / 2 - 2 * margin));
             params.leftMargin = width * 2 / 10 + margin;
-            params.topMargin = margin;
+            params.topMargin = height / 4 + margin;
             currentTrackpad.setLayoutParams(params);
         });
         panel.addView(movement, LayoutPolicy.weightedWidthParams(1));
@@ -154,6 +154,18 @@ final class ImeTextEditPanel {
         if (action == TextEditPanelModel.Action.DELETE) {
             button = s.backspaceKey(run);
             s.imeLetterRows.bindBackspaceRepeat(button, run);
+        } else if (action == TextEditPanelModel.Action.RETURN) {
+            button = new TextEditReturnButton(s);
+            button.setText(spec.label());
+            s.imeStyler.styleButton(button, false);
+            s.bindCountedAction(button, run);
+            button.setOnLongClickListener(ignored -> {
+                if (s.connection == null || s.session == 0 || s.symbolPanel == null
+                        || s.textEditPanel == null || !s.textEditPanel.isShown()) return true;
+                close();
+                s.imePanels.showSymbolPanel();
+                return true;
+            });
         } else {
             button = s.keyboardKey(spec.label(), spec.description(), run);
             if (isArrow(action)) {
@@ -254,6 +266,7 @@ final class ImeTextEditPanel {
         temporaryTrackpad = false;
         stopRepeat();
         selectionReads.cancel();
+        selectionVersion.reset();
         if (trackpad != null) trackpad.cancel();
         setPreviewActive(false);
         selecting = false;
@@ -283,6 +296,9 @@ final class ImeTextEditPanel {
         s.selectionEcho.invalidate();
         if (action == TextEditPanelModel.Action.SELECT) {
             selecting = !selecting;
+        } else if (action == TextEditPanelModel.Action.SELECT_LINE) {
+            selectLine(target);
+            selecting = false;
         } else if (action == TextEditPanelModel.Action.NUMBER_PAD) {
             selecting = false;
             s.showNumberKeyboardFromTextEdit();
@@ -306,6 +322,25 @@ final class ImeTextEditPanel {
             if (TextEditPanelModel.endsSelecting(action)) selecting = false;
         }
         renderState();
+    }
+
+    private void selectLine(InputConnection target) {
+        try {
+            android.view.inputmethod.ExtractedTextRequest request =
+                new android.view.inputmethod.ExtractedTextRequest();
+            android.view.inputmethod.ExtractedText extracted = target.getExtractedText(request, 0);
+            if (extracted == null || extracted.text == null || extracted.startOffset != 0
+                    || extracted.partialStartOffset != -1) {
+                s.notice("当前输入框不支持选择行");
+                return;
+            }
+            TextEditLineSelection.Range range = TextEditLineSelection.range(
+                extracted.text, extracted.selectionStart, extracted.selectionEnd);
+            if (range == null || !target.setSelection(range.start(), range.end()))
+                s.notice("当前输入框不支持选择行");
+        } catch (RuntimeException ignored) {
+            s.notice("当前输入框不支持选择行");
+        }
     }
 
     boolean canSwipeCopyAll() {
@@ -563,7 +598,7 @@ final class ImeTextEditPanel {
     }
 
     void selectionChanged(int start, int end) {
-        selectionVersion++;
+        selectionVersion.reported(start, end);
         selectionStart = start;
         selectionEnd = end;
         refreshPreview();
@@ -628,16 +663,17 @@ final class ImeTextEditPanel {
     private void selectTrackpad(TextTrackpadGesture.Tap tap) {
         InputConnection target = s.connection;
         if (target == null || EditorPolicy.password(s.editorInputType)) return;
-        long version = selectionVersion;
+        long version = selectionVersion.current();
         selectionReads.request(() -> readTrackpadSelection(target, tap), range -> {
-            if (s.connection != target || version != selectionVersion || !ViewPolicy.isVisible(s.textEditPanel)) return;
+            if (s.connection != target || version != selectionVersion.current() || !ViewPolicy.isVisible(s.textEditPanel)) return;
             if (range == null) {
                 s.notice("当前编辑器未提供完整的词或行，仍可长按拖动选择");
                 return;
             }
             s.selectionEcho.invalidate();
             try {
-                if (!target.setSelection(range.start(), range.end())) s.notice("当前输入框不支持选择");
+                if (target.setSelection(range.start(), range.end())) selectionVersion.applied(range.start(), range.end());
+                else s.notice("当前输入框不支持选择");
             }
             catch (RuntimeException ignored) { s.notice("当前输入框不支持选择"); }
         });

@@ -134,14 +134,6 @@ final class ImeStyler {
     }
 
     void applyKeyboardGeometry(View node) {
-        if (node.getTag() instanceof MSIMEInputService.KeyboardHeightRole role
-                && role.rowCount == 3 && role.rowIndex == 1
-                && s.keyboardLayer == KeyboardLayout.Layer.LETTERS
-                && s.displayedTouchLayout(s.view) == KeyboardLayout.EIGHTEEN_KEY_LAYOUT) {
-            // 第二行少一个字母键；两侧补回该键的外边距，让七份权重扣除相同的键距后再分配宽度。
-            ViewPolicy.setHorizontalPaddingPreservingVertical(node,
-                s.halfSpacingPixels(layoutKeySpacingTenths()));
-        }
         if (s.followsKeySpacing(node)
                 && node.getLayoutParams() instanceof android.view.ViewGroup.MarginLayoutParams) {
             android.view.ViewGroup.MarginLayoutParams params =
@@ -224,7 +216,7 @@ final class ImeStyler {
     }
 
     /**
-     * 九键、笔画、手写的三行键块：与 26 键的三行字母键同高（3 × {@link KeyboardGeometry#KEY_ROW_HEIGHT_DP} + 底行以外的那部分键高调整 + 三份行距）。大千四行按四行键高分配。
+     * 九键、笔画的三行键块（手写区按 {@link KeyboardGeometry#handwritingRows} 取行数，走 {@link #adjustRowBlockHeight}）：与 26 键的三行字母键同高（3 × {@link KeyboardGeometry#KEY_ROW_HEIGHT_DP} + 底行以外的那部分键高调整 + 三份行距）。大千四行按四行键高分配。
      */
     void adjustThreeRowBlockHeight(View view) {
         adjustRowBlockHeight(view, 3);

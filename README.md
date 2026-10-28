@@ -118,7 +118,7 @@ cargo test -p msime-engine --locked
 
 ## 固定词库资源
 
-`resources/desktop-dictionary.lock.json` 固定 `metasequoiaime/msime-dictionary` 已发布 `dict-v2.0.24` 的来源、长度和 SHA-256。其中 `msime-mozc_dictionary_oss_README.txt` 与 `msime-mozc_LICENSE.txt` 是日文词库的许可证全文（前者是 IPAdic 与 ICOT 的条款，后者是 Mozc 的三条款 BSD），`msime-scowl_Copyright.txt` 是 `msime-english.db` 里 SCOWL 词表的版权与许可声明，它们的条款都要求随数据一同分发，重新打包时不可省略；详见[第三方组件清单](docs/third-party.md#日文词库的分发义务)。首次下载约 189 MB。词库锁的 `source_commit` 记录这批词库是本仓库哪次提交用 `msime-dict-build` 产出的，其中 `msime-bigram.bin` 与 `msime-trigram.bin` 是整句词格仲裁的语言模型表。表缺失时 engine 不报错，只是整句路径不加权——候选照出，顺序变差，所以换词库版本时要确认 `crates/engine` 还读得了新表，并重跑句子转换评测。开发准备命令：
+`resources/desktop-dictionary.lock.json` 固定 `metasequoiaime/msime-dictionary` 已发布 `dict-v2.0.39` 的来源、长度和 SHA-256。其中 `msime-mozc_dictionary_oss_README.txt` 与 `msime-mozc_LICENSE.txt` 是日文词库的许可证全文（前者是 IPAdic 与 ICOT 的条款，后者是 Mozc 的三条款 BSD），`msime-scowl_Copyright.txt` 是 `msime-english.db` 里 SCOWL 词表的版权与许可声明，它们的条款都要求随数据一同分发，重新打包时不可省略；详见[第三方组件清单](docs/third-party.md#日文词库的分发义务)。首次下载约 270 MB。词库锁的 `source_commit` 记录这批词库是本仓库哪次提交用 `msime-dict-build` 产出的，其中 `msime-bigram.bin` 与 `msime-trigram.bin` 是整句词格仲裁的语言模型表。表缺失时 engine 不报错，只是整句路径不加权——候选照出，顺序变差，所以换词库版本时要确认 `crates/engine` 还读得了新表，并重跑句子转换评测。开发准备命令：
 
 ```sh
 cargo run -p msime-client-core --example install_resources -- target/resources
@@ -156,6 +156,6 @@ Windows 正式版目前由 [msime-windows](https://github.com/metasequoiaime/msi
 
 ## 许可证
 
-源码为 **GPL-3.0-only**，全文见 [LICENSE](LICENSE)。例外是脚本插件的模板与 SDK（[docs/script-plugin-template](docs/script-plugin-template/)）和脚本插件合集（[plugins/script](plugins/script/)）的代码，用 MIT，全文分别在这两个目录的 `LICENSE`：SDK 要编进每个插件，作者照模板写的插件不必因此变成 GPL。插件包里编进的第三方数据按各自的许可证。
+源码为 **GPL-3.0-only**，全文见 [LICENSE](LICENSE)。例外是脚本插件的 SDK（[crates/script-sdk](crates/script-sdk/)）、模板（[docs/script-plugin-template](docs/script-plugin-template/)）和脚本插件合集（[plugins/script](plugins/script/)）的代码，用 MIT，全文分别在这三个目录的 `LICENSE`：SDK 要编进每个插件，作者用它写的插件不必因此变成 GPL。插件包里编进的第三方数据按各自的许可证。
 
 上游代码、词库、模型和各平台 SDK 以各自许可证和通知为准，其中 Android 与 iOS 的手写识别使用 Google ML Kit，按其服务条款授权而非开源许可证。完整对照见[第三方组件清单](docs/third-party.md)。

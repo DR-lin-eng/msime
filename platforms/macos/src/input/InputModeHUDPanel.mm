@@ -139,10 +139,11 @@ NSRect MSIMEInputModeHUDFrame(NSRect caretRect, NSSize panelSize, NSRect visible
 }
 
 - (NSSize)panelSize {
-    // 两个字取较宽者，切换模式时窗口宽度保持稳定。
+    // 单字状态保持稳定宽度，多字状态按完整文本展开，避免长方案名被截断。
     CGFloat glyph = 0.0;
-    for (NSString *text in @[MSIMEInputModeHUDText(NO), MSIMEInputModeHUDText(YES)])
+    for (NSString *text in @[MSIMEInputModeHUDText(NO), MSIMEInputModeHUDText(YES), @"简", @"繁"])
         glyph = std::max(glyph, [text sizeWithAttributes:@{NSFontAttributeName : _label.font}].width);
+    glyph = std::max(glyph, [_label.stringValue sizeWithAttributes:@{NSFontAttributeName : _label.font}].width);
     const CGFloat logo = _logoView.hidden ? 0.0 : kLogoSide + kContentSpacing;
     return NSMakeSize(std::ceil(2.0 * kHorizontalInset + logo + glyph), kHeight);
 }
@@ -193,9 +194,14 @@ NSRect MSIMEInputModeHUDFrame(NSRect caretRect, NSSize panelSize, NSRect visible
 - (NSString *)displayedText { return self.isVisible ? _label.stringValue : nil; }
 
 - (void)showEnglishInputMode:(BOOL)englishInputMode nearCaretRect:(NSRect)caretRect {
-    _label.stringValue = MSIMEInputModeHUDText(englishInputMode);
+    [self showText:MSIMEInputModeHUDText(englishInputMode)
+        announcement:englishInputMode ? @"英文输入" : @"中文输入" nearCaretRect:caretRect];
+}
+
+- (void)showText:(NSString *)text announcement:(NSString *)announcement nearCaretRect:(NSRect)caretRect {
+    _label.stringValue = text;
     NSAccessibilityPostNotificationWithUserInfo(self, NSAccessibilityAnnouncementRequestedNotification,
-                                                 @{NSAccessibilityAnnouncementKey : englishInputMode ? @"英文输入" : @"中文输入"});
+                                                 @{NSAccessibilityAnnouncementKey : announcement});
     NSScreen *screen = MSIMEScreenForPoint(NSMakePoint(NSMidX(caretRect), NSMidY(caretRect)));
     NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900);
     [self setFrame:MSIMEInputModeHUDFrame(caretRect, self.panelSize, visible) display:YES];

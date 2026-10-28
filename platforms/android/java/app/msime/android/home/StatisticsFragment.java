@@ -5,17 +5,18 @@ import app.msime.android.DimensionPolicy;
 import app.msime.android.ThemeColorPolicy;
 import app.msime.android.LayoutPolicy;
 
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.AbsoluteSizeSpan;
 import android.text.style.ForegroundColorSpan;
 import android.view.LayoutInflater;
 import android.view.MenuItem;
-import android.view.SubMenu;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
@@ -24,12 +25,18 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
+import androidx.biometric.BiometricManager;
+import androidx.biometric.BiometricPrompt;
 import app.msime.android.NativeClient;
+import app.msime.android.StatisticsAuthenticationPolicy;
+import app.msime.android.SystemAuthenticators;
+import app.msime.android.AuthenticationPauseTracker;
 import app.msime.android.DrawablePolicy;
 import app.msime.android.JsonPolicy;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DictionaryCollectionsStore;
 import app.msime.android.KeyHeatmapLayout;
+import app.msime.android.TouchKeyStyle;
 import app.msime.android.KeyPressIds;
 import app.msime.android.KeyboardGeometry;
 import app.msime.android.NumberPolicy;
@@ -47,7 +54,6 @@ import app.msime.android.policy.HostOptionsPolicy;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.json.JSONException;
@@ -71,9 +77,10 @@ public final class StatisticsFragment extends HomeTabFragment {
     }
 
     /** 一次读取的结果：统计文档（开关、保留期、逐日按键）和派生指标。两者都可能为 null。 */
-    private record Snapshot(@Nullable TypingStatisticsModel model, @Nullable TypingStatisticsSummary summary) {}
+    /** `layouts` 是按用户当前底行样式和数字行画的两套热力图布局（26 键、9 键）；偏好读不到时为 null，热力图画标准底行。 */
+    private record Snapshot(@Nullable TypingStatisticsModel model, @Nullable TypingStatisticsSummary summary,
+                            @Nullable List<List<List<KeyHeatmapLayout.Key>>> layouts) {}
 
-    private static final Map<String, String> RETENTIONS = retentions();
     private Tab tab = Tab.OVERVIEW;
     @Nullable private TypingStatisticsModel statistics;
     @Nullable private TypingStatisticsSummary summary;
@@ -82,6 +89,13 @@ public final class StatisticsFragment extends HomeTabFragment {
     private boolean uploadBusy;
     /** 按键热力图上次选的布局；null 表示还没选过，按数据决定。 */
     @Nullable private Boolean nineKey;
+    /** 热力图的 26 键和 9 键布局，按用户当前的底行样式与数字行；还没读到偏好时是标准底行。 */
+    private List<List<List<KeyHeatmapLayout.Key>>> heatmapLayouts = List.of(KeyHeatmapLayout.SOFT, KeyHeatmapLayout.NINE);
+    private boolean authorized;
+    /** 最后一次处于已认证状态的时刻（{@link SystemClock#elapsedRealtime()}），跨页面实例共用，见 {@link StatisticsAuthenticationPolicy#withinCooldown}。 */
+    private static long lastAuthorizedMs;
+    @Nullable private BiometricPrompt authentication;
+    private final AuthenticationPauseTracker pause = new AuthenticationPauseTracker();
 
     @Override public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup parent,
                                        @Nullable Bundle state) {
@@ -109,10 +123,73 @@ public final class StatisticsFragment extends HomeTabFragment {
             lock.setTint(ThemeColorPolicy.subText(requireContext()));
             footer.setCompoundDrawablesRelative(lock, null, null, null);
         }
-        reload();
+        requestAuthentication();
     }
 
-    /** 记录开关、保留期、刷新和清空：偶尔才改一次，收在菜单里，不占读数字的地方。 */
+    @Override public void onDestroyView() {
+        if (authentication != null) authentication.cancelAuthentication();
+        authentication = null;
+        rememberAuthorized();
+        authorized = false;
+        pause.reset();
+        super.onDestroyView();
+    }
+
+    private void requestAuthentication() {
+        if (authentication != null) return;
+        Context context = requireContext();
+        if (!StatisticsAuthenticationPreference.enabled(context)) {
+            reload();
+            return;
+        }
+        KeyguardManager keyguard = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
+        if (keyguard == null) {
+            MsToast.show(context, "无法读取系统认证状态，请稍后重试");
+            return;
+        }
+        // 刚认证过（含刚离开统计页或退到后台）时不再弹认证。
+        if (StatisticsAuthenticationPolicy.withinCooldown(lastAuthorizedMs, SystemClock.elapsedRealtime())) {
+            authorized = true;
+            rememberAuthorized();
+            reload();
+            return;
+        }
+        // 未设置锁屏凭据时直接读统计；已配置认证的设备仍需认证成功，临时不可用不算未配置。
+        if (!StatisticsAuthenticationPolicy.requiresAuthentication(authorized, keyguard.isDeviceSecure())) {
+            reload();
+            return;
+        }
+        int authenticators = SystemAuthenticators.allowed();
+        if (BiometricManager.from(context).canAuthenticate(authenticators)
+                != BiometricManager.BIOMETRIC_SUCCESS) {
+            MsToast.show(context, "这台设备没有可用的系统认证");
+            return;
+        }
+        authentication = new BiometricPrompt(this, ContextCompat.getMainExecutor(context),
+            new BiometricPrompt.AuthenticationCallback() {
+                @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+                    authentication = null;
+                    authorized = true;
+                    rememberAuthorized();
+                    if (getView() != null) reload();
+                    authenticationEnded(false);
+                }
+
+                @Override public void onAuthenticationError(int errorCode, CharSequence errorString) {
+                    authentication = null;
+                    authorized = false;
+                    authenticationEnded(AuthenticationPauseTracker.systemCanceled(errorCode, android.os.Build.VERSION.SDK_INT));
+                }
+            });
+        BiometricPrompt.PromptInfo prompt = new BiometricPrompt.PromptInfo.Builder()
+            .setTitle("验证身份")
+            .setSubtitle("统计页面包含本机输入习惯数据")
+            .setAllowedAuthenticators(authenticators)
+            .build();
+        authentication.authenticate(prompt);
+    }
+
+    /** 记录开关、刷新和清空：偶尔才改一次，收在菜单里，不占读数字的地方。每日明细的保留期不在这里改，已存的值照旧生效。 */
     private void showMenu(View anchor) {
         TypingStatisticsModel current = statistics;
         if (current == null) return;
@@ -125,19 +202,6 @@ public final class StatisticsFragment extends HomeTabFragment {
             HostTask.run(this, context -> HostStore.setStatisticsEnabled(context, next), this::adoptModel);
             return true;
         });
-        SubMenu retention = menu.getMenu().addSubMenu("保留每日明细");
-        for (Map.Entry<String, String> entry : RETENTIONS.entrySet()) {
-            String key = entry.getKey();
-            MenuItem item = retention.add(entry.getValue());
-            item.setCheckable(true);
-            item.setChecked(key.equals(current.retention()));
-            item.setOnMenuItemClickListener(ignored -> {
-                HostTask.run(this, context -> HostStore.setStatisticsRetention(context, key),
-                    value -> reload());
-                return true;
-            });
-        }
-        retention.setGroupCheckable(0, true, true);
         menu.getMenu().add("刷新统计").setOnMenuItemClickListener(item -> {
             reload();
             return true;
@@ -151,9 +215,31 @@ public final class StatisticsFragment extends HomeTabFragment {
         menu.show();
     }
 
-    // 键盘在另一个进程里，这个页面不在眼前时它一直在记。
+    @Override public void onPause() {
+        super.onPause();
+        rememberAuthorized();
+        pause.paused(authentication != null);
+    }
+
+    /** 已认证时把冷却的起点挪到现在：看着统计离开或退到后台之后，冷却从离开时算起。 */
+    private void rememberAuthorized() {
+        if (authorized) lastAuthorizedMs = SystemClock.elapsedRealtime();
+    }
+
+    // 键盘在另一个进程里，这个页面不在眼前时它一直在记，所以每次重新可见都重新认证再读一次。例外是暂停时认证还开着：回来时是否重新认证由这次认证的结果决定，见 AuthenticationPauseTracker；认证成功的回调自己会读。
     @Override protected void onBecameVisible() {
-        reload();
+        if (pause.reentersOnVisible(authentication != null)) reenter();
+    }
+
+    private void reenter() {
+        rememberAuthorized();
+        authorized = false;
+        requestAuthentication();
+    }
+
+    /** 认证在离开页面时被系统取消、而页面已经回到眼前：按重新进入处理，否则统计页既没有数据也没有认证窗口。 */
+    private void authenticationEnded(boolean systemCanceled) {
+        if (pause.reentersOnEnd(systemCanceled, isResumed() && !isHidden() && getView() != null)) reenter();
     }
 
     private void reload() {
@@ -205,15 +291,30 @@ public final class StatisticsFragment extends HomeTabFragment {
     /** 工作线程上：读统计文档，取用户词条数，再取派生指标。 */
     private static Snapshot load(Context context) {
         TypingStatisticsModel model = HostStore.loadStatistics(context);
+        List<List<List<KeyHeatmapLayout.Key>>> layouts = heatmapLayouts(context);
         JSONObject action = new JSONObject();
         try {
             action.put("operation", "summary").put("day", LocalDate.now().toString());
             Long words = userWords(context);
             if (words != null) action.put("user_words", words.longValue());
         } catch (JSONException error) {
-            return new Snapshot(model, null);
+            return new Snapshot(model, null, layouts);
         }
-        return new Snapshot(model, TypingStatisticsSummary.from(HostStore.statisticsAction(context, action)));
+        return new Snapshot(model, TypingStatisticsSummary.from(HostStore.statisticsAction(context, action)), layouts);
+    }
+
+    /** 热力图跟着键盘画：读共享偏好里 26 键、九键的底行样式和顶部数字行；读不到时返回 null。 */
+    @Nullable private static List<List<List<KeyHeatmapLayout.Key>>> heatmapLayouts(Context context) {
+        JSONObject snapshot = HostStore.loadPreferences(context);
+        JSONObject preferences = snapshot == null ? null : snapshot.optJSONObject("preferences");
+        if (preferences == null) return null;
+        TouchKeyStyle.Styles styles = TouchKeyStyle.Styles.parse(
+            JsonPolicy.strictString(preferences.opt(TouchKeyStyle.TWENTY_SIX_KEY_PREFERENCE)),
+            JsonPolicy.strictString(preferences.opt(TouchKeyStyle.FOURTEEN_KEY_PREFERENCE)),
+            JsonPolicy.strictString(preferences.opt(TouchKeyStyle.NINE_KEY_PREFERENCE)));
+        return List.of(KeyHeatmapLayout.soft(styles.twentySix(),
+                preferences.optBoolean(TouchKeyStyle.NUMBER_ROW_PREFERENCE, false)),
+            KeyHeatmapLayout.nine(styles.nine()));
     }
 
     /** 用户自己添加的词条数（徽章「造词者」）；词库读不到时返回 null，summary 按 0 计。 */
@@ -238,6 +339,7 @@ public final class StatisticsFragment extends HomeTabFragment {
         if (snapshot != null) {
             if (snapshot.model() != null) statistics = snapshot.model();
             if (snapshot.summary() != null) summary = snapshot.summary();
+            if (snapshot.layouts() != null) heatmapLayouts = snapshot.layouts();
         }
         render();
     }
@@ -361,15 +463,17 @@ public final class StatisticsFragment extends HomeTabFragment {
             ViewGroup.LayoutParams.WRAP_CONTENT, DimensionPolicy.pixels(context, 32)));
         LinearLayout board = card(context, content, 12);
         KeyHeatmapView heatmap = new KeyHeatmapView(context);
+        List<List<List<KeyHeatmapLayout.Key>>> layouts = heatmapLayouts;
+        heatmap.setLayouts(layouts.get(0), layouts.get(1));
         heatmap.setNineKey(nine);
         heatmap.setKeys(presses);
         board.addView(heatmap, LayoutPolicy.matchWidthWrapParams());
         LinearLayout others = card(context, content, 16);
-        otherKeys(context, others, presses, nine);
+        otherKeys(context, others, presses, layouts.get(nine ? 1 : 0));
         layout.setOnSelect(index -> {
             nineKey = index == 1;
             heatmap.setNineKey(nineKey);
-            otherKeys(context, others, presses, nineKey);
+            otherKeys(context, others, presses, layouts.get(index == 1 ? 1 : 0));
         });
 
         Keys keys = value.keys();
@@ -414,9 +518,10 @@ public final class StatisticsFragment extends HomeTabFragment {
     /**
      * 热力图下的「其他键」卡：按过、但当前这套键盘图上没有位置的键（{@link KeyHeatmapLayout#others}），按次数从多到少，每行键名和次数，让每一次按键都能在页面上找到。没有这样的键时整张卡不显示；切换 26 键 / 9 键时重新列。
      */
-    private static void otherKeys(Context context, LinearLayout card, Map<String, Long> presses, boolean nine) {
+    private static void otherKeys(Context context, LinearLayout card, Map<String, Long> presses,
+            List<List<KeyHeatmapLayout.Key>> drawn) {
         card.removeAllViews();
-        List<String> ids = KeyHeatmapLayout.others(presses, nine);
+        List<String> ids = KeyHeatmapLayout.others(presses, drawn);
         ViewPolicy.setVisible(card, !ids.isEmpty());
         if (ids.isEmpty()) return;
         card.addView(ViewPolicy.label(context, "其他键", 15, ThemeColorPolicy.text(context)));
@@ -572,13 +677,4 @@ public final class StatisticsFragment extends HomeTabFragment {
         return text;
     }
 
-    private static Map<String, String> retentions() {
-        LinkedHashMap<String, String> values = new LinkedHashMap<>(5);
-        values.put("forever", "一直保留");
-        values.put("365d", "一年");
-        values.put("180d", "半年");
-        values.put("90d", "90 天");
-        values.put("30d", "30 天");
-        return java.util.Collections.unmodifiableMap(values);
-    }
 }

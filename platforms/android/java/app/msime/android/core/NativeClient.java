@@ -19,6 +19,8 @@ public final class NativeClient {
     private static final int ONLINE_QUERY_LIMIT = 16_384;
     private static final int ENGLISH_COMPLETION_RESPONSE_LIMIT = 262_144;
     private static final int ENGLISH_COMPLETION_RESOURCES_LIMIT = 4 * 1024;
+    /** 候选栏的合并展示上限：原文加至多十一个前缀补全。 */
+    private static final int ENGLISH_SUGGESTION_DISPLAY_LIMIT = 12;
     private static final int SHUANGPIN_PROFILE_LIMIT = 64;
     private static final int SHUANGPIN_HINT_RESPONSE_LIMIT = 65_536;
     /** 与 `client_jni.cpp` 的 `kSmallJsonRequestLimit` 一致。 */
@@ -39,6 +41,8 @@ public final class NativeClient {
     }
     /** May block on the shared file lock. Call on a worker, without a session handle. */
     public static String loadPreferences(String directory) { return TextPolicy.utf8(loadPreferencesRaw(directory.getBytes(StandardCharsets.UTF_8))); }
+    /** 旧布局迁移在共享锁内检查原始字段，不把未知样式误当默认值。 */
+    public static String migrateKeyLayout(String request) { return TextPolicy.utf8(migrateKeyLayoutRaw(request.getBytes(StandardCharsets.UTF_8))); }
     /** The global theme picker entries: ids, titles, appearance and built-in palettes, in picker order. */
     public static String themeCatalog() { return TextPolicy.utf8(themeCatalogRaw()); }
     /** 解析当前主题的单种明暗配色；带 `skins_directory` 的请求会校验包资源，必须在工作线程调用。 */
@@ -168,6 +172,25 @@ public final class NativeClient {
             throw new IllegalStateException("Candidate gloss response is too large");
         return TextPolicy.utf8(result);
     }
+    /** 从同级的固定离线音标表读取读音，只在工作线程调用。 */
+    public static String candidatePronunciations(String request, String resources,
+            String supplementaryResources) {
+        if (supplementaryResources != null && !supplementaryResources.isEmpty()) {
+            try {
+                request = new JSONObject(request).put("supplementary_resources", supplementaryResources).toString();
+            } catch (JSONException error) {
+                throw new IllegalArgumentException("Invalid pronunciation request", error);
+            }
+        }
+        byte[] requestBytes = request.getBytes(StandardCharsets.UTF_8);
+        byte[] resourcesBytes = resources.getBytes(StandardCharsets.UTF_8);
+        if (requestBytes.length > GLOSS_REQUEST_LIMIT || resourcesBytes.length > GLOSS_RESOURCES_LIMIT)
+            throw new IllegalArgumentException("Candidate pronunciation request is too large");
+        byte[] result = candidatePronunciationsRaw(requestBytes, resourcesBytes);
+        if (!HttpBodyPolicy.isWithinLimit(result, GLOSS_RESPONSE_LIMIT))
+            throw new IllegalStateException("Candidate pronunciation response is too large");
+        return TextPolicy.utf8(result);
+    }
     /**
      * 同 {@link #candidateGlosses(String, String)}，另把 {@code stateRoot}（{@code filesDir/bootstrap/state}）写进请求的 {@code state_root}：资源目录旁没有离线释义时，非英语的释义改从下载的 offline-glosses 资源包里读。{@code stateRoot} 为 null 时与原方法相同。Call on a worker.
      */
@@ -180,24 +203,24 @@ public final class NativeClient {
             throw new IllegalArgumentException("Invalid candidate gloss request", error);
         }
     }
-    /** 在工作线程读取固定英文词库的有界补全。 */
-    public static String englishCompletions(String prefix, String resources) {
-        return englishCandidates(prefix, resources, false);
-    }
-
-    /** 共享引擎返回原文第一行及可选的唯一纠错，不改变输入会话。 */
-    public static String englishCorrections(String prefix, String resources) {
+    /** 在工作线程读取候选栏的合并展示：有纠错时为原文与纠错，原文已是完整的词时只有原文，否则原文后接前缀补全。 */
+    public static String englishSuggestions(String prefix, String resources) {
         return englishCandidates(prefix, resources, true);
     }
 
-    private static String englishCandidates(String prefix, String resources, boolean correction) {
+    /** 共享引擎返回原文第一行及可选的唯一纠错，不改变输入会话；空格和标点边界只用这一查询。 */
+    public static String englishCorrections(String prefix, String resources) {
+        return englishCandidates(prefix, resources, false);
+    }
+
+    private static String englishCandidates(String prefix, String resources, boolean completions) {
         if (prefix == null || prefix.isEmpty() || prefix.length() > 128
-                || !prefix.chars().allMatch(value -> TextPolicy.isAsciiLetter(value)
-                    || (correction && value == '\'')))
+                || !prefix.chars().allMatch(value -> TextPolicy.isAsciiLetter(value) || value == '\''))
             throw new IllegalArgumentException("Invalid English completion prefix");
         try {
-            JSONObject request = new JSONObject().put("prefix", prefix).put("limit", correction ? 2 : 12)
-                .put("correction", correction);
+            JSONObject request = new JSONObject().put("prefix", prefix)
+                .put("limit", completions ? ENGLISH_SUGGESTION_DISPLAY_LIMIT : 2).put("correction", true);
+            if (completions) request.put("completions", true);
             byte[] requestBytes = request.toString().getBytes(StandardCharsets.UTF_8);
             byte[] resourcesBytes = resources.getBytes(StandardCharsets.UTF_8);
             if (resourcesBytes.length > ENGLISH_COMPLETION_RESOURCES_LIMIT)
@@ -280,7 +303,7 @@ public final class NativeClient {
     }
 
     /**
-     * 向中继发端到端加密驱动给出的一个请求：请求是 `{url, token, method, path, body}`，`url` 和 `token` 是这次操作开始时从偏好里读到的那一份；返回 `{"ok":true,"value":{"status":…,"body":"…"}}`，状态码和正文原样交回驱动。Rust 只负责校验地址和令牌、把请求限定在中继基地址下的云剪贴板接口、带上令牌、限制响应大小，不读偏好、不读写任何密钥串。请求里有令牌，不要写日志。错误码见 `crates/host-api/include/msime_client.h`。
+     * 向中继发端到端加密驱动给出的一个请求：请求是 `{url, token, method, path, body}`（WebDAV 网盘是 `{backend:"webdav", url, username, password, directory, method, path, body}`），`url` 和 `token` 是这次操作开始时从偏好里读到的那一份；返回 `{"ok":true,"value":{"status":…,"body":"…"}}`，状态码和正文原样交回驱动。Rust 只负责校验地址和令牌、把请求限定在中继基地址下的云剪贴板接口、带上令牌、限制响应大小，不读偏好、不读写任何密钥串。请求里有令牌，不要写日志。错误码见 `crates/host-api/include/msime_client.h`。
      *
      * <p>阻塞在网络上（最多 30 秒），只在工作线程上调用。
      */
@@ -289,6 +312,33 @@ public final class NativeClient {
         if (payload.length > CLOUD_CLIPBOARD_RELAY_REQUEST_LIMIT)
             throw new IllegalArgumentException("Cloud clipboard relay request is too large");
         return TextPolicy.utf8(cloudClipboardRelayExchangeRaw(payload));
+    }
+
+    /**
+     * WebDAV 设置的「测试连接」：请求是 `{url, username, password, directory?}`（设置页里还没保存的草稿；`directory` 是中继密钥串的目录，通过后删掉那里的日志缓存），通过时返回 `{"ok":true,"value":{}}`。不合格是 `webdav_unsupported`，账号或密码不对是 `relay_unauthorized`。格式见 `crates/host-api/include/msime_client.h`。请求里有应用密码，不要写日志。
+     *
+     * <p>阻塞在网络上（大约二十个请求，每个最多 30 秒），只在工作线程上调用。
+     */
+    public static String cloudClipboardWebDavProbe(String request) {
+        byte[] payload = utf8(request);
+        if (payload.length > CLOUD_CLIPBOARD_RELAY_REQUEST_LIMIT)
+            throw new IllegalArgumentException("Cloud clipboard WebDAV probe request is too large");
+        return TextPolicy.utf8(cloudClipboardWebDavProbeRaw(payload));
+    }
+
+    /** 共享 `msime_client_dictionary_sync` 的请求上限：HostOptions 文档里带着整份偏好。 */
+    public static final int DICTIONARY_SYNC_REQUEST_LIMIT = 2 * 1024 * 1024;
+
+    /**
+     * 「我的词条」经 WebDAV 网盘同步（`docs/dictionary-webdav-sync.md`）：请求是 `{options, directory, device_name, action}`，`options` 是 runtime-options.json 那份 HostOptions，`directory` 是两个进程共用的 `noBackupFilesDir/dictionary-sync`，`action` 与返回的 `{"ok":true,"value":…}` 见 `crates/host-api/include/msime_client.h`。网盘的地址、账号和应用密码由 Rust 从偏好的 `dictionary_sync_webdav` 读；「测试连接」（`probe`）的请求里带着设置页草稿里的应用密码，不要写日志。
+     *
+     * <p>除 `status` 外都会阻塞在网络上（每个请求最多 30 秒，整次同步持有本机的同步锁，另一个进程正在同步时最多再等两分钟），只在工作线程上调用，不要在主线程或输入线程上调用。封装见 {@link DictionaryWebDavSync}。
+     */
+    public static String dictionarySync(String request) {
+        byte[] payload = utf8(request);
+        if (payload.length > DICTIONARY_SYNC_REQUEST_LIMIT)
+            throw new IllegalArgumentException("Dictionary sync request is too large");
+        return TextPolicy.utf8(dictionarySyncRaw(payload));
     }
 
     /**
@@ -379,9 +429,10 @@ public final class NativeClient {
     public static final int KEY_GRID_FOURTEEN_KEY = 2;
     /** 全拼十八键，与共享 C ABI 布局编号一致。 */
     public static final int KEY_GRID_EIGHTEEN_KEY = 4;
-    /** 字母组网格的一键：`letter` 是组内的小写字母，宿主送首字母；返回与 {@link #character} 相同的输入响应。 */
+    /** 字母组网格的一键：小写送整组；仅十八键双拼的大写 ASCII 表示精确小写字母。返回与 {@link #character} 相同的输入响应。 */
     public static String gridKey(long session, char letter) {
-        if (letter < 'a' || letter > 'z') throw new IllegalArgumentException("Grid key must be a lowercase letter");
+        if ((letter < 'a' || letter > 'z') && (letter < 'A' || letter > 'Z'))
+            throw new IllegalArgumentException("Grid key must be an ASCII letter");
         return TextPolicy.utf8(gridKeyRaw(session, letter));
     }
     public static String setEnglishMode(long session, boolean enabled) {
@@ -406,6 +457,22 @@ public final class NativeClient {
             throw new IllegalArgumentException("Invalid voice status provider");
         return TextPolicy.utf8(mobileVoiceStatusRaw(utf8(provider), resolved, platformAvailable,
             modelReady, runtimeReady));
+    }
+
+    /** 语音润色设置行的共享状态文案；纯计算，不读写偏好。 */
+    public static String mobileVoicePolishStatus(boolean enabled, boolean configured,
+            boolean hasToken) {
+        return TextPolicy.utf8(mobileVoicePolishStatusRaw(enabled, configured, hasToken));
+    }
+
+    /** 共享语音设置的服务分类和豆包鉴权模式；纯计算，不读写偏好。 */
+    public static String mobileVoicePolicy(String provider, String authMode) {
+        if (provider == null || authMode == null || !TextPolicy.validUnicode(provider)
+                || !TextPolicy.validUnicode(authMode) || provider.length() > 256
+                || authMode.length() > 256 || TextPolicy.utf8Length(provider) > 256
+                || TextPolicy.utf8Length(authMode) > 256)
+            throw new IllegalArgumentException("Invalid voice provider policy");
+        return TextPolicy.utf8(mobileVoicePolicyRaw(utf8(provider), utf8(authMode)));
     }
 
     /** 共享语音服务与豆包流式接口目录；纯计算，不读写偏好、不联网。 */
@@ -959,6 +1026,7 @@ public final class NativeClient {
     private static native byte[] prepareHostRaw(byte[] options);
     private static native byte[] refreshHostRaw(byte[] path);
     private static native byte[] snapshotVersionRaw(byte[] options);
+    private static native byte[] migrateKeyLayoutRaw(byte[] request);
     private static native byte[] loadPreferencesRaw(byte[] directory);
     private static native byte[] telemetryBeginRaw(byte[] request);
     private static native byte[] telemetryEndRaw(byte[] request);
@@ -997,6 +1065,7 @@ public final class NativeClient {
     private static native byte[] vocabularyReviewRaw(byte[] request);
     private static native byte[] emojiCatalogRaw(byte[] query, byte[] resources);
     private static native byte[] candidateGlossesRaw(byte[] request, byte[] resources);
+    private static native byte[] candidatePronunciationsRaw(byte[] request, byte[] resources);
     private static native byte[] englishCompletionsRaw(byte[] request, byte[] resources);
     private static native byte[] polishPromptRaw(byte[] id, byte[] custom1, byte[] custom2,
         byte[] custom3);
@@ -1005,6 +1074,8 @@ public final class NativeClient {
     private static native byte[] cloudClipboardSourceRaw(byte[] directory);
     private static native byte[] cloudClipboardRelayRaw(byte[] request);
     private static native byte[] cloudClipboardRelayExchangeRaw(byte[] request);
+    private static native byte[] cloudClipboardWebDavProbeRaw(byte[] request);
+    private static native byte[] dictionarySyncRaw(byte[] request);
     private static native byte[] doubaoDecodeFrameRaw(byte[] frame);
     private static native byte[] doubaoStartFrameRaw(boolean itn, boolean punctuation, boolean ddc,
         byte[] boostingTableId);
@@ -1023,6 +1094,9 @@ public final class NativeClient {
     private static native byte[] mobileVoiceConfigurationRaw(byte[] directory);
     private static native byte[] mobileVoiceStatusRaw(byte[] provider, boolean resolved,
         boolean platformAvailable, boolean modelReady, boolean runtimeReady);
+    private static native byte[] mobileVoicePolishStatusRaw(boolean enabled, boolean configured,
+        boolean hasToken);
+    private static native byte[] mobileVoicePolicyRaw(byte[] provider, byte[] authMode);
     private static native byte[] voiceProviderCatalogRaw();
     private static native byte[] aiProviderCatalogRaw();
     private static native byte[] aiProviderUpdateRaw(byte[] request);

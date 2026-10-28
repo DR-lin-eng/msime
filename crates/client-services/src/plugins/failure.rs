@@ -35,6 +35,8 @@ impl From<PluginError> for PluginFailure {
             PluginError::Archive(reason) => Self::with_detail("plugin_archive", reason),
             PluginError::Reserved => Self::code("plugin_reserved"),
             PluginError::Storage => Self::code("plugin_storage"),
+            PluginError::Exists => Self::code("plugin_exists"),
+            PluginError::NotEditable(reason) => Self::with_detail("plugin_not_editable", reason),
             PluginError::Io(_) => Self::code("storage"),
         }
     }
@@ -68,6 +70,10 @@ impl From<super::script_grants::ScriptGrantError> for PluginFailure {
             ScriptGrantError::Limit => Self::code("plugin_script_limit"),
             ScriptGrantError::Memory => Self::code("plugin_script_memory"),
             ScriptGrantError::Format => Self::code("plugin_script_grants_format"),
+            ScriptGrantError::SettingInvalid(reason) => {
+                Self::with_detail("plugin_script_setting_invalid", reason)
+            }
+            ScriptGrantError::SettingsFormat => Self::code("plugin_script_settings_format"),
             ScriptGrantError::Storage => Self::code("plugin_storage"),
             ScriptGrantError::Io(_) => Self::code("storage"),
         }

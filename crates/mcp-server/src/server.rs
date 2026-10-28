@@ -1,6 +1,6 @@
 //! The tools, and the limits around the ones that write.
 //!
-//! 每个工具都重新读运行时选项，所以设置页搬走数据目录或改了词库之后，服务器不用重启就能跟上。输入的内容和凭据都不经这里离开输入法：社区工具只发送用户要求发布的那款皮肤，用的是设置应用保存的账号会话，会话里的令牌从不出现在结果里；除快捷短语外的词库内容，只有用户以 --allow-dictionary-read 启动服务器时才读。诊断日志总是可读：里面只有事件名、耗时和错误码，由用户自己打开，Windows TIP 记下的按键在返回前清空；stderr 上的审计行只写工具名和结果，从不写写入了什么。
+//! 每个工具都重新读运行时选项，所以设置页搬走数据目录或改了词库之后，服务器不用重启就能跟上。输入的内容和凭据都不经这里离开输入法：社区工具只发送用户要求发布的那款皮肤或插件包，用的是设置应用保存的账号会话，会话里的令牌从不出现在结果里；除快捷短语外的词库内容，只有用户以 --allow-dictionary-read 启动服务器时才读。诊断日志总是可读：里面只有事件名、耗时和错误码，由用户自己打开，Windows TIP 记下的按键在返回前清空；stderr 上的审计行只写工具名和结果，从不写写入了什么。
 
 use crate::community::{
     self, CommunitySkinList, CommunitySkinRequest, DeletedCommunitySkin, PublishRequest,
@@ -8,6 +8,14 @@ use crate::community::{
 };
 use crate::config::Config;
 use crate::diagnostics::{self, LogRequest, LogView, SwitchRequest, SwitchView};
+use crate::plugin_community::{
+    self, CommunityPluginList, CommunityPluginRequest, DeletedCommunityPlugin,
+    PublishPluginRequest, PublishedPlugin,
+};
+use crate::plugins::{
+    self, BuiltinPaths, CreatePluginRequest, DeletedPlugin, InstallPluginRequest, InstalledPlugin,
+    PluginFiles, PluginList, PluginRequest,
+};
 use crate::preferences::{self, PreferencesChange, PreferencesView};
 use crate::prompts::WRITE_PROMPTS;
 use crate::skins::{
@@ -45,12 +53,17 @@ const WRITE_LOCK: &str = "mcp-write.lock";
 /// 写锁只保存一个毫秒时间戳，拒绝异常膨胀的内容以免无界分配内存。
 const WRITE_LOCK_READ_LIMIT: u64 = 128;
 
-const WRITE_TOOLS: [&str; 7] = [
+const WRITE_TOOLS: [&str; 12] = [
     "create_candidate_skin",
+    "create_plugin",
     "delete_candidate_skin",
+    "delete_community_plugin",
     "delete_community_skin",
+    "delete_plugin",
     "edit_quick_phrases",
+    "install_plugin_folder",
     "publish_candidate_skin",
+    "publish_plugin",
     "set_community_skin_visibility",
     "update_preferences",
 ];
@@ -59,7 +72,7 @@ const DICTIONARY_READ_TOOLS: [&str; 2] = ["list_dictionary_words", "lookup_candi
 /// Offered with --allow-write and --allow-dictionary-read together: an edit or import also tells whether a word is there.
 const DICTIONARY_WRITE_TOOLS: [&str; 2] = ["edit_dictionary_words", "import_dictionary_words"];
 
-const INSTRUCTIONS: &str = "Manages 水杉输入法 (MSIME), a Chinese input method: its quick phrases (a short code the user types that expands to a longer text), a few of its preferences, and aggregate typing statistics. With --allow-dictionary-read it also lists the user's own dictionary words and shows which candidates a code offers and why, which is how to explain a candidate's rank; with --allow-write as well it adds, reweights, removes and imports words. To import a word list the user gives you, read it yourself and send the words, 200 at a time. It also helps with problems the user runs into: lag, a candidate window that is missing or in the wrong place, the input method stopping or switching by itself. The user may not be technical, so do the steps yourself rather than asking them to open files, settings or a terminal: read the log with read_diagnostic_log; if it is off, turn it on with set_diagnostic_log, ask the user in plain words to do again what went wrong and to tell you when they have, then read the log again and explain what you found in plain words. Turn the log off with set_diagnostic_log when you are done. It also lists the user's candidate-window skins and, with --allow-write, makes new ones: write a skin.toml and bounded PNG/JPEG/APNG/GIF/WebP resources with a PNG/JPEG preview, save the images as files, and pass the manifest and the files' paths to create_candidate_skin. update_preferences switches the input method to a skin, get_candidate_skin shows an installed skin's manifest and image files so it can be changed and installed again, and delete_candidate_skin removes one the user no longer wants. The app can sync skins to the user's cloud library as private packages when the user requests sync. With --allow-write, publish_candidate_skin uploads an installed skin to the skin community, public or private, using the account the user signed in to in the 水杉输入法 settings app; this server never signs in to the account itself, so if no one is signed in, ask the user to sign in there. Before publishing publicly, confirm with the user that everyone may see the skin and that they have the right to share its images. list_community_skins lists the account's community skins, set_community_skin_visibility makes one private again and delete_community_skin removes one. Extended resources require explicit server support. Changes take effect in the input method within a few seconds. Apart from set_diagnostic_log, writing tools are only offered when the user started the server with --allow-write.";
+const INSTRUCTIONS: &str = "Manages 水杉输入法 (MSIME), a Chinese input method: its quick phrases (a short code the user types that expands to a longer text), a few of its preferences, and aggregate typing statistics. With --allow-dictionary-read it also lists the user's own dictionary words and shows which candidates a code offers and why, which is how to explain a candidate's rank; with --allow-write as well it adds, reweights, removes and imports words. To import a word list the user gives you, read it yourself and send the words, 200 at a time. It also helps with problems the user runs into: lag, a candidate window that is missing or in the wrong place, the input method stopping or switching by itself. The user may not be technical, so do the steps yourself rather than asking them to open files, settings or a terminal: read the log with read_diagnostic_log; if it is off, turn it on with set_diagnostic_log, ask the user in plain words to do again what went wrong and to tell you when they have, then read the log again and explain what you found in plain words. Turn the log off with set_diagnostic_log when you are done. It also lists the user's candidate-window skins and, with --allow-write, makes new ones: write a skin.toml and bounded PNG/JPEG/APNG/GIF/WebP resources with a PNG/JPEG preview, save the images as files, and pass the manifest and the files' paths to create_candidate_skin. update_preferences switches the input method to a skin, get_candidate_skin shows an installed skin's manifest and image files so it can be changed and installed again, and delete_candidate_skin removes one the user no longer wants. The app can sync skins to the user's cloud library as private packages when the user requests sync. With --allow-write, publish_candidate_skin uploads an installed skin to the skin community, public or private, using the account the user signed in to in the 水杉输入法 settings app; this server never signs in to the account itself, so if no one is signed in, ask the user to sign in there. Before publishing publicly, confirm with the user that everyone may see the skin and that they have the right to share its images. list_community_skins lists the account's community skins, set_community_skin_visibility makes one private again and delete_community_skin removes one. It also lists the user's plugin packs (list_plugins, get_plugin) and, with --allow-write, makes them. The kinds are sound and music packs, command tables (/ commands, such as one that types today's date), typing effects, phrase tables (K-mode phrases, such as an email signature), helpcode tables, word books, symbol sets (such as a group of arrows) and, on desktop, experimental script plugins. For an ordinary request like these, write the plugin.toml yourself by the rules in create_plugin's description, install it with create_plugin, and tell the user in plain words how to turn it on, as its result says: phrase tables and command tables need 启用 in 设置 → 插件 → 我的插件, and K mode or / mode on in 设置 → 输入 → 快捷模式. install_plugin_folder imports a pack folder or .zip, such as a script plugin built with msime-pack, which runs only after the user turns it on and grants it in 设置 → 插件 → 脚本插件（实验）. delete_plugin removes a pack, and publish_plugin shares a data pack with the plugin community, always publicly, once the user agrees. Extended resources require explicit server support. Changes take effect in the input method within a few seconds. Apart from set_diagnostic_log, writing tools are only offered when the user started the server with --allow-write.";
 
 #[derive(Clone)]
 pub struct MsimeServer {
@@ -361,7 +374,7 @@ impl MsimeServer {
 
     #[tool(
         name = "create_candidate_skin",
-        description = "Install a candidate-window skin from a skin.toml and its images. Schema version 1 remains supported; version 2 additionally accepts [animation] with enter/exit/selection = none, fade, fade_scale, slide_up, spring or glow, duration_ms 40-600 and stagger_ms 0-80, and the decoration motion and animated PNG below, with any base. Write each preset you want explicitly: macOS plays only the presets the [animation] table writes, while Windows and the web engine fill omitted ones with a default. The manifest is TOML: id (equal to package_id); name (at most 80 bytes); version; base, the look drawn under it: a built-in theme (system, shuishan, light, paper, night or ink) or an msime-windows built-in look (fluent, wechat, wechat_scroll, graphite, willow_green, autumn_osmanthus or microsoft), whose colours fill the ones the manifest leaves out, or canvas, msime-windows' full-image base, which requires schema_version = 2 (version 1 with canvas is refused) and is drawn on the system base with the canvas look described below; preview, the path of a PNG or JPEG shown in the skin list; optional author, description and [license] code, assets and source (empty author or description reads as not written; syncing these or new bases requires explicit server support); [supports] layouts (horizontal, vertical) and themes (dark, light); [candidate_window] min_width_dip (0-1000), optional corner_radius_dip (0-32), optional [candidate_window.decoration] top_inset_dip, width_dip, image and align (left, center, right), and in schema version 2 motion (none, float, sway, breathe or bounce: a small idle movement of the whole decoration image while the candidate window is on screen) and motion_period_ms (1200-8000, default 3000); the decoration image may be an animated PNG (APNG, at most 120 frames, each frame counted as a whole image toward the pixel limit), which a host with a decoration animation renderer plays with its frame delays and loop count, while other entries show its first frame; reduced-motion settings still win. Frame playback and idle decoration transforms are separate host capabilities. Optional [candidate_window.background] image, fit (cover, contain, stretch) and opacity (0-1). [candidate_window] also accepts msime-windows' font_family (at most 64 bytes, without quotes, backslash, comma, semicolon, braces, angle brackets or backtick), which Windows draws; item_corner_radius_dip (0-16), which macOS also draws; and these msime-windows layout keys, which all hosts validate and render where their native entry supports each primitive: border_width_dip (0-4), shadow (none, soft or strong), backdrop (none, acrylic or mica; Windows draws the system material behind the card, mica as acrylic before Windows 11, and an opaque surface where the material is unavailable, transparency effects are off or high contrast is on), page_arrows, fit_content and expand_panel (true or false; expand_panel puts a button at the end of the horizontal list that opens it into a scrolling grid), expand_rows (2-8), the geometry keys padding, item_gap, item_extra_height, number_inset, item_padding_right and number_gap (0-64 as a number of dip, or 0-4em as a string such as '0.5em'), item_min_width (0-500, or 0-40em), selected_bar_width (0-16, or 0-1em), number_scale and selected_bar_height_em (0-2), selected_bar_inside, item_corners_follow_card, justify_rows and trim_hidden_preedit_gap (true or false), page_arrow_style (chevron or triangle) and preedit_margin_dip (1, 2 or 4 numbers 0-500), and the same geometry keys in [candidate_window.horizontal] or [candidate_window.vertical] for one layout only. Only with base = canvas: [candidate_window.border_image], a nine-slice panel image, with source and optional light_source (PNG/JPEG/APNG/GIF/WebP), slice_dip and optional stretch_dip and width_dip (each 1, 2 or 4 numbers 0-500) and fill (true or false, default true); content_insets_dip (top and bottom 0-200, left and right 0-500), outer_insets_dip (top, right, bottom and left 0-500) and line_gap_dip (0-100); and up to 32 [[candidate_window.decorations]] free widgets, each with image (PNG/JPEG/APNG/GIF/WebP), anchor (top-left, top-right, bottom-left, bottom-right, left, right, top, bottom or center, default right), width_dip and height_dip (above 0, at most 2000), offset_x_dip and offset_y_dip (-2000 to 2000) and z_index (-1000 to 1000, default 2). With any other base these canvas-only keys are ignored. The Web engine and the macOS, Windows, iOS, Android, HarmonyOS 2in1 and Linux X11 candidate windows draw these canvas textures using their platform image codecs; a host without that renderer keeps its existing static or readable opaque canvas look. Linux native rendering requires a real X11 input context, focus and classicui ownership; Wayland, IBus and third-party UIs keep their existing fallback; list_candidate_skins reports such ignored or undrawn keys as notices. 装饰图候选词叠加使用 [candidate_window.decoration] 的 candidate_overlay = true（v1、v2 均可用）：candidate_overlay_index 为整数 0-100，默认 1，0 跟随高亮，越出当前页时不显示；candidate_overlay_font_size_dip 与 candidate_overlay_min_font_size_dip 为 (0,200]，默认 16 与 8；candidate_overlay_max_width_dip 为 0-2000，0 使用装饰框宽；candidate_overlay_color 缺省白色；candidate_overlay_align_h 为 left/center/right、candidate_overlay_align_v 为 top/center/bottom，均默认 center；candidate_overlay_offset_x_dip 与 candidate_overlay_offset_y_dip 为 -2000 至 2000；candidate_overlay_strip_badge 默认 true，只画原文，false 追加独立标注。词太宽时缩小字号，最小字号仍过宽则不换行、允许超框。关闭叠加时忽略其余键；启用需要装饰图片与正尺寸。列表返回声明不代表每个原生宿主已经绘制，须核对目标宿主。 Optional [toolbar] corner_radius_dip (0-32) and icon_corner_radius_dip (0-16, not drawn yet), with [toolbar.dark] and [toolbar.light] colours background, border, handle, divider, icon and hover for the floating toolbar. [toolbar] mode = bar (default) or image is validated on every platform. Image mode needs image (package-relative PNG/APNG/GIF/WebP, never JPEG), image_width_dip and image_height_dip (above 0, at most 2000). Optional [toolbar.button_defaults] width_dip, height_dip and icon_size_dip (above 0, at most 500) and background; [toolbar.button_flow] x_dip/y_dip (0-2000), direction (horizontal or vertical) and gap_dip (0-500). [toolbar.buttons.<key>] accepts visible, x_dip/y_dip, the default look fields and image; keys are status, fullwidth, punctuation, character_set, emoji, screen_keyboard and settings. Status images states are cn, en, ja, caps and en-candidate; fullwidth states full/half; punctuation cn/en; character_set simplified/traditional. The other buttons cannot declare images. A matching state image wins over image, then the host icon. Fixed coordinates do not consume flow; buttons without a complete coordinate pair need flow. User-hidden buttons remain hidden; windows include buttons outside the background. The shared preview renders this layout; native host drawing is a separate capability and must be checked before promising an image toolbar. Bar mode validates but ignores image fields. Community upload stays at 37 images and requires X-MSIME-Candidate-Toolbar: image-v1 for image mode; older deployments keep it local. [candidate.dark] and [candidate.light] colours accent, selected, hover, surface, border, text, number and translation, plus show_selected_bar, which every host draws; the detail colours candidate_text, preedit_text, preedit_caret, preedit_background, preedit_divider, translation_pos, translation_separator, selected_text, selected_number, selected_translation, selected_translation_pos, selected_translation_separator, selected_bar and page_arrow_divider, backdrop_opacity and backdrop_luminosity (numbers 0-1), and a [candidate.dark.menu] or [candidate.light.menu] table with background, border, text and hover for the candidate window's menu, which a host draws where it has that slot and otherwise checks and replaces with the base colours. A colour is text of at most 80 bytes: #RGB, #RGBA, #RRGGBB, #RRGGBBAA, rgb(r, g, b) or rgba(r, g, b, a) with channels 0-255 and alpha 0-1, or transparent; #RRGGBB and #RRGGBBAA are read everywhere, and a colour a host cannot read is not drawn. images (standard base64) and image_files (the absolute path of a file on this computer) together must hold exactly the images the manifest references (the preview, decoration and background images and, with canvas, the border_image sources, each decorations image and every toolbar image), each keyed by the path the manifest uses and given in only one of the two, at most 64 in all, each a .png, .jpg, .jpeg, .apng, .gif or .webp; the preview stays PNG/JPEG. Prefer image_files: write each image to a file with code and pass its path, since base64 copied into the call by hand is easily corrupted. The server only reads those files: it refuses a path with a symbolic link anywhere on the way or that is not a regular file, refuses a file over 1 MiB before reading it, and checks the bytes exactly as it checks base64. Each image is at most 1 MiB and 2048 pixels on each side, all images at most 2 MiB and 8,000,000 pixels, animations at most 120 frames counted as full canvases, and the preview at most 256 KiB. Extended resources and new bases require explicit server support before upload; older deployments leave these skins available locally. A stylesheet is not accepted, so the skin can be synced and shared. Refused when the skin exists, unless replace is true.",
+        description = "Install a candidate-window skin from a skin.toml and its images. Schema version 1 remains supported; version 2 additionally accepts [animation] with enter/exit/selection = none, fade, fade_scale, slide_up, spring or glow, duration_ms 40-600 and stagger_ms 0-80, and the decoration motion and animated PNG below, with any base. Write each preset you want explicitly: macOS plays only the presets the [animation] table writes, while Windows and the web engine fill omitted ones with a default. The manifest is TOML: id (equal to package_id); name (at most 80 bytes); version; base, the look drawn under it: a built-in theme (system, shuishan, light, paper, night or ink) or an msime-windows built-in look (fluent, wechat, wechat_scroll, graphite, willow_green, autumn_osmanthus or microsoft), whose colours fill the ones the manifest leaves out, or canvas, msime-windows' full-image base, which requires schema_version = 2 (version 1 with canvas is refused) and is drawn on the system base with the canvas look described below; preview, the path of a PNG or JPEG shown in the skin list; optional author, description and [license] code, assets and source (empty author or description reads as not written; syncing these or new bases requires explicit server support); [supports] layouts (horizontal, vertical) and themes (dark, light); [candidate_window] min_width_dip (0-1000), optional corner_radius_dip (0-32), optional [candidate_window.decoration] top_inset_dip, width_dip, image and align (left, center, right), and in schema version 2 motion (none, float, sway, breathe or bounce: a small idle movement of the whole decoration image while the candidate window is on screen) and motion_period_ms (1200-8000, default 3000); the decoration image may be an animated PNG (APNG, at most 120 frames, each frame counted as a whole image toward the pixel limit), which a host with a decoration animation renderer plays with its frame delays and loop count, while other entries show its first frame; reduced-motion settings still win. Frame playback and idle decoration transforms are separate host capabilities. Optional [candidate_window.background] image, fit (cover, contain, stretch) and opacity (0-1). [candidate_window] also accepts msime-windows' font_family (at most 64 bytes, without quotes, backslash, comma, semicolon, braces, angle brackets or backtick), which Windows draws; item_corner_radius_dip (0-16), which macOS also draws; and these msime-windows layout keys, which all hosts validate and render where their native entry supports each primitive: border_width_dip (0-4), shadow (none, soft or strong), backdrop (none, acrylic or mica; Windows draws the system material behind the card, mica as acrylic before Windows 11, and an opaque surface where the material is unavailable, transparency effects are off or high contrast is on), page_arrows, fit_content and expand_panel (true or false; expand_panel puts a button at the end of the horizontal list that opens it into a scrolling grid), expand_rows (2-8), the geometry keys padding, item_gap, item_extra_height, number_inset, item_padding_right and number_gap (0-64 as a number of dip, or 0-4em as a string such as '0.5em'), item_min_width (0-500, or 0-40em; a desktop candidate window's cell width, which the iOS, Android and HarmonyOS touch keyboard strips ignore, sizing each candidate to its content), selected_bar_width (0-16, or 0-1em), number_scale and selected_bar_height_em (0-2), selected_bar_inside, item_corners_follow_card, justify_rows and trim_hidden_preedit_gap (true or false), page_arrow_style (chevron or triangle) and preedit_margin_dip (1, 2 or 4 numbers 0-500), and the same geometry keys in [candidate_window.horizontal] or [candidate_window.vertical] for one layout only. Only with base = canvas: [candidate_window.border_image], a nine-slice panel image, with source and optional light_source (PNG/JPEG/APNG/GIF/WebP), slice_dip and optional stretch_dip and width_dip (each 1, 2 or 4 numbers 0-500) and fill (true or false, default true); content_insets_dip (top and bottom 0-200, left and right 0-500), outer_insets_dip (top, right, bottom and left 0-500) and line_gap_dip (0-100); and up to 32 [[candidate_window.decorations]] free widgets, each with image (PNG/JPEG/APNG/GIF/WebP), anchor (top-left, top-right, bottom-left, bottom-right, left, right, top, bottom or center, default right), width_dip and height_dip (above 0, at most 2000), offset_x_dip and offset_y_dip (-2000 to 2000) and z_index (-1000 to 1000, default 2). With any other base these canvas-only keys are ignored. The Web engine and the macOS, Windows, iOS, Android, HarmonyOS 2in1 and Linux X11 candidate windows draw these canvas textures using their platform image codecs; a host without that renderer keeps its existing static or readable opaque canvas look. Linux native rendering requires a real X11 input context, focus and classicui ownership; Wayland, IBus and third-party UIs keep their existing fallback; list_candidate_skins reports such ignored or undrawn keys as notices. 装饰图候选词叠加使用 [candidate_window.decoration] 的 candidate_overlay = true（v1、v2 均可用）：candidate_overlay_index 为整数 0-100，默认 1，0 跟随高亮，越出当前页时不显示；candidate_overlay_font_size_dip 与 candidate_overlay_min_font_size_dip 为 (0,200]，默认 16 与 8；candidate_overlay_max_width_dip 为 0-2000，0 使用装饰框宽；candidate_overlay_color 缺省白色；candidate_overlay_align_h 为 left/center/right、candidate_overlay_align_v 为 top/center/bottom，均默认 center；candidate_overlay_offset_x_dip 与 candidate_overlay_offset_y_dip 为 -2000 至 2000；candidate_overlay_strip_badge 默认 true，只画原文，false 追加独立标注。词太宽时缩小字号，最小字号仍过宽则不换行、允许超框。关闭叠加时忽略其余键；启用需要装饰图片与正尺寸。列表返回声明不代表每个原生宿主已经绘制，须核对目标宿主。 Optional [toolbar] corner_radius_dip (0-32) and icon_corner_radius_dip (0-16, not drawn yet), with [toolbar.dark] and [toolbar.light] colours background, border, handle, divider, icon and hover for the floating toolbar. [toolbar] mode = bar (default) or image is validated on every platform. Image mode needs image (package-relative PNG/APNG/GIF/WebP, never JPEG), image_width_dip and image_height_dip (above 0, at most 2000). Optional [toolbar.button_defaults] width_dip, height_dip and icon_size_dip (above 0, at most 500) and background; [toolbar.button_flow] x_dip/y_dip (0-2000), direction (horizontal or vertical) and gap_dip (0-500). [toolbar.buttons.<key>] accepts visible, x_dip/y_dip, the default look fields and image; keys are status, fullwidth, punctuation, character_set, emoji, screen_keyboard and settings. Status images states are cn, en, ja, caps and en-candidate; fullwidth states full/half; punctuation cn/en; character_set simplified/traditional. The other buttons cannot declare images. A matching state image wins over image, then the host icon. Fixed coordinates do not consume flow; buttons without a complete coordinate pair need flow. User-hidden buttons remain hidden; windows include buttons outside the background. The shared preview renders this layout; native host drawing is a separate capability and must be checked before promising an image toolbar. Bar mode validates but ignores image fields. Community upload stays at 37 images and requires X-MSIME-Candidate-Toolbar: image-v1 for image mode; older deployments keep it local. [candidate.dark] and [candidate.light] colours accent, selected, hover, surface, border, text, number and translation, plus show_selected_bar, which every host draws; the detail colours candidate_text, preedit_text, preedit_caret, preedit_background, preedit_divider, translation_pos, translation_separator, selected_text, selected_number, selected_translation, selected_translation_pos, selected_translation_separator, selected_bar and page_arrow_divider, backdrop_opacity and backdrop_luminosity (numbers 0-1), and a [candidate.dark.menu] or [candidate.light.menu] table with background, border, text and hover for the candidate window's menu, which a host draws where it has that slot and otherwise checks and replaces with the base colours. A colour is text of at most 80 bytes: #RGB, #RGBA, #RRGGBB, #RRGGBBAA, rgb(r, g, b) or rgba(r, g, b, a) with channels 0-255 and alpha 0-1, or transparent; #RRGGBB and #RRGGBBAA are read everywhere, and a colour a host cannot read is not drawn. images (standard base64) and image_files (the absolute path of a file on this computer) together must hold exactly the images the manifest references (the preview, decoration and background images and, with canvas, the border_image sources, each decorations image and every toolbar image), each keyed by the path the manifest uses and given in only one of the two, at most 64 in all, each a .png, .jpg, .jpeg, .apng, .gif or .webp; the preview stays PNG/JPEG. Prefer image_files: write each image to a file with code and pass its path, since base64 copied into the call by hand is easily corrupted. The server only reads those files: it refuses a path with a symbolic link anywhere on the way or that is not a regular file, refuses a file over 1 MiB before reading it, and checks the bytes exactly as it checks base64. Each image is at most 1 MiB and 2048 pixels on each side, all images at most 2 MiB and 8,000,000 pixels, animations at most 120 frames counted as full canvases, and the preview at most 256 KiB. Extended resources and new bases require explicit server support before upload; older deployments leave these skins available locally. A stylesheet is not accepted, so the skin can be synced and shared. Refused when the skin exists, unless replace is true.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -545,6 +558,232 @@ impl MsimeServer {
         .await;
         eprintln!(
             "msime-mcp: delete_community_skin {}",
+            if result.is_ok() { "deleted" } else { "refused" }
+        );
+        result
+    }
+
+    #[tool(
+        name = "list_plugins",
+        description = "List the plugin packs of the input method, the user's own and those that ship with it: kind, id, name, version, licence, author, description, whether it is built in or one of the official packs, a short summary of what it holds and whether the preferences use it now. Also folders under the plugins folder that are not a loadable pack, with the reason, and the current selection: the key sound, melody, music and effect packs, the enabled command and phrase tables, the helpcode tables for quanpin and shuangpin, and whether / mode and K mode are on. The kinds are sound (key sounds or a key melody), music (background music), command_table (/ commands), effect (typing effect parameters), phrase_table (K-mode phrases), helpcode (a helpcode table), wordbook (a book for 背单词), symbol_set (groups for the symbol panel) and, on desktop, script (an experimental sandboxed WebAssembly plugin).",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_plugins(&self) -> Result<Json<PluginList>, String> {
+        let config = self.config.clone();
+        blocking(move || {
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let preferences = plugins::preferences(&state_dir, config.edition(&document)?)?;
+            Ok(Json(plugins::list(
+                &state_dir,
+                &BuiltinPaths::from_options(&document),
+                &preferences,
+            )))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "get_plugin",
+        description = "Read one pack so it can be changed: its whole plugin.toml, the absolute path of its folder, and every other file in it with its size and absolute path. To change a pack, edit the manifest and call create_plugin with replace: true, passing each unchanged file by the path given here in files: every file is read before the pack is replaced. Packs that ship with the input method can be read too, as a model for one of the user's own under another id. Refused for a pack that is not installed and for a folder list_plugins reports as an issue.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_plugin(
+        &self,
+        Parameters(request): Parameters<PluginRequest>,
+    ) -> Result<Json<PluginFiles>, String> {
+        let config = self.config.clone();
+        blocking(move || {
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            plugins::get(&state_dir, &BuiltinPaths::from_options(&document), &request).map(Json)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "create_plugin",
+        description = "Install a data plugin pack from a plugin.toml and its files, by exactly the rules the settings page's import uses, so the settings app accepts what this accepts. A pack is plugin.toml, the audio or data files it names and optional .txt or .md notices (at most 64 KiB each), at most 16 files and nothing else; file names are ASCII letters, digits, `_`, `-` and `.`, starting with a letter or digit, at most 64 bytes. Every manifest has schema_version = 1; kind; id (1-64 bytes of lowercase ASCII letters, digits, `.`, `-` and `_`, starting with a letter or digit; the installed folder is named after it); name (at most 80 bytes); version (at most 32 bytes); license (an SPDX expression such as CC0-1.0, CC-BY-4.0 or MIT); optional author (at most 120 bytes) and description (at most 500 bytes); permissions only [] or left out. Any other key, at the top or inside a kind's table, refuses the pack. Ids reserved for packs that ship with the input method: sound default, twinkle, msime-typewriter, msime-bubble, msime-8bit, msime-woodblock, msime-pentatonic, msime-canon and msime-ode-to-joy, music msime-music-lofi and msime-music-ambient, phrase_table latex-symbols. The kinds: phrase_table (K mode: Shift+K, then a key) has 1-2000 [[phrases]] rows of key (1-32 lowercase ASCII letters) and text (1-199 UTF-16 units, not blank, no control characters, newline or tab); a key may have several texts, a key and text pair appears once; no files. command_table (/ mode) has 1-256 [[commands]] rows of trigger (1-32 lowercase ASCII letters, unique in the pack), title (at most 48 bytes) and template (at most 199 UTF-16 units, no control characters): literal text and the placeholders {date} or {date:FORMAT} (strftime, default %Y-%m-%d), {time} or {time:FORMAT} (default %H:%M) and {weekday}; a lone { or } is refused; no files. symbol_set (the symbol panel) has 1-32 [[groups]] of tab (symbols or kaomoji), title (at most 48 bytes, unique within a tab), optional keywords (at most 256 bytes, for search) and items (1-512 strings of 1-64 UTF-16 units, unique in the group), at most 2048 items in all; no files. effect has [effect] style (flash, sparks or power_mode) and optional intensity (0-100), colors (1-4 '#RRGGBB' strings), duration_ms (60-1500) and particles (0-64); no files. helpcode has [helpcode] table naming a .txt file of lines 字=码 (exactly one non-ASCII character, `=` without spaces, a code of 1-2 lowercase ASCII letters, each character once), # comments and empty lines, UTF-8, at most 1 MiB. wordbook has [wordbook] file naming a .tsv file of word<TAB>meaning or word<TAB>phonetic<TAB>meaning lines (word 1-64 characters, phonetic at most 64 and may be empty, meaning 1-256, no control characters, each word once, 1-20000 words), UTF-8, at most 4 MiB; a word book's id is only lowercase letters, digits and `-`, not starting or ending with `-`, at most 59 characters, and its name at most 64 characters. sound has mode = 'keys' (the default) with [sounds] default (required) and optional space, enter, backspace, commit and achievement, or mode = 'sequence' with [sequence] sample, semitones (1-128 integers from -24 to 24) and optional advance (key or commit); samples are RIFF/WAVE .wav files, at most 8 distinct, each at most 512 KiB and 1.5 seconds, 4 MiB together. music has [music] tracks, 1-8 distinct .wav or .ogg files, each at most 16 MiB and 15 minutes, 64 MiB together. Data files, audio and notices come in files (the name in the pack to the absolute path of a file on this computer, which the server only reads: it refuses a path with a symbolic link anywhere on the way or that is not a regular file, and a file over 16 MiB before reading it) or texts (the name to its UTF-8 text, at most 1 MiB each, for a helpcode table, a word book or a notice), each name in only one of the two. A script plugin (kind = \"script\") is refused here: build its folder with msime-pack and import it with install_plugin_folder. Refused when a pack of the same kind and id is installed, unless replace is true; a refusal says which rule failed, in Chinese. The result says what the user has to do for the pack to take effect, for example turning on 启用 for a phrase or command table in 设置 → 插件 → 我的插件 and K mode or / mode in 设置 → 输入 → 快捷模式; tell the user in plain words. Only offered when the user started the server with --allow-write.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn create_plugin(
+        &self,
+        Parameters(request): Parameters<CreatePluginRequest>,
+    ) -> Result<Json<InstalledPlugin>, String> {
+        let guard = self.claim_write()?;
+        let config = self.config.clone();
+        let result = blocking(move || {
+            let _guard = guard;
+            let _shared = claim_shared_write(&config)?;
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let preferences = plugins::preferences(&state_dir, config.edition(&document)?)?;
+            plugins::create(&state_dir, &preferences, &request).map(Json)
+        })
+        .await;
+        eprintln!(
+            "msime-mcp: create_plugin {}",
+            match &result {
+                Ok(installed) if installed.0.replaced => "replaced",
+                Ok(_) => "installed",
+                Err(_) => "refused",
+            }
+        );
+        result
+    }
+
+    #[tool(
+        name = "install_plugin_folder",
+        description = "Import a pack that already exists on this computer, a folder or a .zip holding its files at the top level or inside one folder, by the rules of the settings page's import. This is how a script plugin built with msime-pack is installed, and how a data pack the user downloaded or made elsewhere is installed. path is an absolute path with no symbolic link on the way; the server only reads it. Refused when a pack of the same kind and id is installed, unless replace is true. A script plugin does not run after this: tell the user plainly that it stays off until they turn it on and grant the capabilities it asks for in 设置 → 插件 → 脚本插件（实验）. This server never grants capabilities. Only offered when the user started the server with --allow-write.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn install_plugin_folder(
+        &self,
+        Parameters(request): Parameters<InstallPluginRequest>,
+    ) -> Result<Json<InstalledPlugin>, String> {
+        let guard = self.claim_write()?;
+        let config = self.config.clone();
+        let result = blocking(move || {
+            let _guard = guard;
+            let _shared = claim_shared_write(&config)?;
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let preferences = plugins::preferences(&state_dir, config.edition(&document)?)?;
+            plugins::install_folder(&state_dir, &preferences, &request).map(Json)
+        })
+        .await;
+        eprintln!(
+            "msime-mcp: install_plugin_folder {}",
+            match &result {
+                Ok(installed) if installed.0.replaced => "replaced",
+                Ok(_) => "installed",
+                Err(_) => "refused",
+            }
+        );
+        result
+    }
+
+    #[tool(
+        name = "delete_plugin",
+        description = "Delete a pack the user installed: its folder under the plugins folder, with everything in it. Refused for packs that ship with the input method (the built-in sound and music packs and the official packs) and for a pack that is not installed. A deleted script plugin's grant is removed with it. When the preferences still select or enable the pack, the result says where; the input method then falls back to the default there, as after the settings page removes a pack in use. Confirm with the user first. Only offered when the user started the server with --allow-write.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn delete_plugin(
+        &self,
+        Parameters(request): Parameters<PluginRequest>,
+    ) -> Result<Json<DeletedPlugin>, String> {
+        let guard = self.claim_write()?;
+        let config = self.config.clone();
+        let result = blocking(move || {
+            let _guard = guard;
+            let _shared = claim_shared_write(&config)?;
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let preferences = plugins::preferences(&state_dir, config.edition(&document)?)?;
+            plugins::delete(&state_dir, &preferences, &request).map(Json)
+        })
+        .await;
+        eprintln!(
+            "msime-mcp: delete_plugin {}",
+            if result.is_ok() { "deleted" } else { "refused" }
+        );
+        result
+    }
+
+    #[tool(
+        name = "publish_plugin",
+        description = "Publish an installed data pack the user made (not one that ships with the input method, not a script plugin) to the 水杉输入法 plugin community, using the account the user signed in to in the 水杉输入法 settings app. This server never signs in or handles passwords: when no one is signed in it says so, and you ask the user to sign in there and try again. Publishing is always public: everyone can see, download and rate the pack. Before publishing, ask the user in plain words to confirm that everyone may see it, that they made its audio and text or have the right to share them, and that others may download and use it under the licence in its manifest; a pack downloaded from the community is not theirs to publish. name (1-32 characters) and description (at most 280) are the listing's title and text, by default the manifest's name and description. The pack is checked on this computer by the rules of the settings app's publish dialog before anything is sent; zipped it may be at most 8 MB. An account publishes at most 20 packs, 32 MB together, and at most 10 times an hour; list_community_plugins shows what it has published. Only offered when the user started the server with --allow-write.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn publish_plugin(
+        &self,
+        Parameters(request): Parameters<PublishPluginRequest>,
+    ) -> Result<Json<PublishedPlugin>, String> {
+        let guard = self.claim_write()?;
+        let config = self.config.clone();
+        let result = blocking(move || {
+            let _guard = guard;
+            let _shared = claim_shared_write(&config)?;
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let community = plugin_community::community(&state_dir, config.edition(&document)?)?;
+            plugin_community::publish(&state_dir, &community, &request).map(Json)
+        })
+        .await;
+        eprintln!(
+            "msime-mcp: publish_plugin {}",
+            if result.is_ok() {
+                "published"
+            } else {
+                "refused"
+            }
+        );
+        result
+    }
+
+    #[tool(
+        name = "list_community_plugins",
+        description = "List the plugin packs the signed-in account published to the community, removed ones included: community id, kind, plugin id, title, version, downloads and when it was published. Uses the account the user signed in to in the 水杉输入法 settings app; this server never signs in itself, so when no one is signed in, ask the user to sign in there.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn list_community_plugins(&self) -> Result<Json<CommunityPluginList>, String> {
+        let config = self.config.clone();
+        blocking(move || {
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let community = plugin_community::community(&state_dir, config.edition(&document)?)?;
+            plugin_community::list(&community).map(Json)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "delete_community_plugin",
+        description = "Delete a pack the signed-in account published from the plugin community for good, with its downloads and ratings; copies other people installed stay on their computers, and the pack installed here is left alone. Takes the community id list_community_plugins or publish_plugin gave. Confirm with the user first. Only offered when the user started the server with --allow-write.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn delete_community_plugin(
+        &self,
+        Parameters(request): Parameters<CommunityPluginRequest>,
+    ) -> Result<Json<DeletedCommunityPlugin>, String> {
+        let guard = self.claim_write()?;
+        let config = self.config.clone();
+        let result = blocking(move || {
+            let _guard = guard;
+            let _shared = claim_shared_write(&config)?;
+            let document = config.read_options()?;
+            let state_dir = config.state_dir(&document)?;
+            let community = plugin_community::community(&state_dir, config.edition(&document)?)?;
+            plugin_community::delete(&community, &request).map(Json)
+        })
+        .await;
+        eprintln!(
+            "msime-mcp: delete_community_plugin {}",
             if result.is_ok() { "deleted" } else { "refused" }
         );
         result
@@ -919,10 +1158,13 @@ mod tests {
             names(&server(false)),
             [
                 "get_candidate_skin",
+                "get_plugin",
                 "get_preferences",
                 "get_typing_statistics",
                 "list_candidate_skins",
+                "list_community_plugins",
                 "list_community_skins",
+                "list_plugins",
                 "list_quick_phrases",
                 "read_diagnostic_log",
                 "set_diagnostic_log"
@@ -932,16 +1174,24 @@ mod tests {
             names(&server(true)),
             [
                 "create_candidate_skin",
+                "create_plugin",
                 "delete_candidate_skin",
+                "delete_community_plugin",
                 "delete_community_skin",
+                "delete_plugin",
                 "edit_quick_phrases",
                 "get_candidate_skin",
+                "get_plugin",
                 "get_preferences",
                 "get_typing_statistics",
+                "install_plugin_folder",
                 "list_candidate_skins",
+                "list_community_plugins",
                 "list_community_skins",
+                "list_plugins",
                 "list_quick_phrases",
                 "publish_candidate_skin",
+                "publish_plugin",
                 "read_diagnostic_log",
                 "set_community_skin_visibility",
                 "set_diagnostic_log",
@@ -952,11 +1202,14 @@ mod tests {
             names(&server_with(false, true)),
             [
                 "get_candidate_skin",
+                "get_plugin",
                 "get_preferences",
                 "get_typing_statistics",
                 "list_candidate_skins",
+                "list_community_plugins",
                 "list_community_skins",
                 "list_dictionary_words",
+                "list_plugins",
                 "list_quick_phrases",
                 "lookup_candidates",
                 "read_diagnostic_log",
@@ -967,20 +1220,28 @@ mod tests {
             names(&server_with(true, true)),
             [
                 "create_candidate_skin",
+                "create_plugin",
                 "delete_candidate_skin",
+                "delete_community_plugin",
                 "delete_community_skin",
+                "delete_plugin",
                 "edit_dictionary_words",
                 "edit_quick_phrases",
                 "get_candidate_skin",
+                "get_plugin",
                 "get_preferences",
                 "get_typing_statistics",
                 "import_dictionary_words",
+                "install_plugin_folder",
                 "list_candidate_skins",
+                "list_community_plugins",
                 "list_community_skins",
                 "list_dictionary_words",
+                "list_plugins",
                 "list_quick_phrases",
                 "lookup_candidates",
                 "publish_candidate_skin",
+                "publish_plugin",
                 "read_diagnostic_log",
                 "set_community_skin_visibility",
                 "set_diagnostic_log",
@@ -1123,6 +1384,60 @@ mod tests {
         // 服务器说明仍然声明它不登录。
         assert!(INSTRUCTIONS.contains("this server never signs in to the account itself"));
         assert!(INSTRUCTIONS.contains("confirm with the user"));
+    }
+
+    #[test]
+    fn plugin_tools_explain_enabling_grants_and_publishing() {
+        let description = |name: &str| {
+            server(true)
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.description)
+                .unwrap()
+                .to_string()
+        };
+        let create = description("create_plugin");
+        for word in [
+            "by exactly the rules the settings page's import uses",
+            "[[phrases]]",
+            "[[commands]]",
+            "{weekday}",
+            "[[groups]]",
+            "[helpcode] table",
+            "[wordbook] file",
+            "RIFF/WAVE .wav files",
+            "refuses a path with a symbolic link anywhere on the way",
+            "A script plugin (kind = \"script\") is refused here",
+            "设置 → 输入 → 快捷模式",
+        ] {
+            assert!(create.contains(word), "{word}");
+        }
+        let install = description("install_plugin_folder");
+        assert!(install.contains("设置 → 插件 → 脚本插件（实验）"));
+        assert!(install.contains("This server never grants capabilities"));
+        let publish = description("publish_plugin");
+        for word in [
+            "This server never signs in or handles passwords",
+            "Publishing is always public",
+            "ask the user in plain words to confirm",
+            "Only offered when the user started the server with --allow-write",
+        ] {
+            assert!(publish.contains(word), "{word}");
+        }
+        assert!(description("delete_plugin").contains("Confirm with the user first"));
+        assert!(description("delete_community_plugin").contains("Confirm with the user first"));
+        assert!(description("list_community_plugins").contains("this server never signs in"));
+        // 服务器说明告诉代理自己写清单、装好之后怎么打开。
+        for word in [
+            "write the plugin.toml yourself by the rules in create_plugin's description",
+            "设置 → 插件 → 我的插件",
+            "K mode or / mode on in 设置 → 输入 → 快捷模式",
+            "脚本插件（实验）",
+        ] {
+            assert!(INSTRUCTIONS.contains(word), "{word}");
+        }
     }
 
     #[test]

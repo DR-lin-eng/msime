@@ -44,6 +44,7 @@ function renderSettings({
   feedback,
   devices = false,
   voiceHotkeys,
+  aiGeneration,
 }: {
   page: string;
   preferences?: Record<string, unknown>;
@@ -53,6 +54,8 @@ function renderSettings({
   voiceHotkeys?: boolean;
   /** 宿主能列出录音设备，语音页显示「录音设备」分组。 */
   devices?: boolean;
+  /** 宿主报的 `ai_generation`；缺省按鸿蒙现在的值（关），语音页没有 AI 润色。 */
+  aiGeneration?: boolean;
 }) {
   const save = vi.fn().mockImplementation(async (_revision: number, next: unknown) => ({
     ...snapshot(),
@@ -74,6 +77,7 @@ function renderSettings({
           touch_toolbar_tools: mobile,
           voice_capture_devices: devices,
           ...(voiceHotkeys === undefined ? {} : { voice_hotkeys: voiceHotkeys }),
+          ...(aiGeneration === undefined ? {} : { ai_generation: aiGeneration }),
         }),
         ...(devices ? { listVoiceCaptureDevices: vi.fn().mockResolvedValue([]) } : {}),
         openSystemKeyboardSettings: vi.fn(),
@@ -398,6 +402,8 @@ test("automatic punctuation is Doubao's and is greyed out with the reason elsewh
 test("the polish scheme sheet keeps the custom slots and shows the stored one", async () => {
   const { save } = renderSettings({
     page: "voice",
+    // AI 润色只在 AI 生成类资质到位、总闸打开（`ai_generation`）时提供。
+    aiGeneration: true,
     preferences: {
       voice_input: {
         enabled: true,
@@ -423,6 +429,33 @@ test("the polish scheme sheet keeps the custom slots and shows the stored one", 
   await waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls.at(-1)?.[1].voice_input.polish_prompt_id).toBe("custom_3");
 });
+
+// 鸿蒙版拿到 AI 生成类资质之前（`ai_generation` 为 false）：存下的润色开关打开了，服务配置里也没有「文本润色」这一组，手机和 2in1 都一样。
+test.each([true, false])(
+  "HarmonyOS without AI generation has no AI polish group (phone: %s)",
+  async (mobile) => {
+    renderSettings({
+      page: "voice",
+      mobile,
+      preferences: {
+        voice_input: {
+          enabled: true,
+          language: "",
+          asr_provider: "doubao",
+          polish_enabled: true,
+          polish_text: true,
+        },
+      },
+    });
+    await settingsFormReady();
+    fireEvent.click(screen.getByRole("button", { name: /^服务配置/ }));
+    // 识别服务照常在，只是没有润色。
+    expect((await screen.findAllByText("识别服务")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("region", { name: "文本润色" })).toBeNull();
+    expect(screen.queryByText("启用润色")).toBeNull();
+    expect(screen.queryByText("润色方案")).toBeNull();
+  },
+);
 
 test("the 2-in-1 keeps the desktop voice page", async () => {
   renderSettings({
@@ -576,7 +609,7 @@ test("the phone keyboard page opens with 布局 and its Chinese keyboard choice"
   expect(saved.touch_keyboard_schemes.enabled).toContain("nine_key");
 });
 
-test("the Chinese keyboard row offers 26, 14 and 9 keys for 全拼 and 26 and 9 for 日语", async () => {
+test("the Chinese keyboard row offers 26, 14, 18 and 9 keys for 全拼 and 26 and 9 for 日语", async () => {
   const { save } = renderSettings({ page: "screen-keyboard", feedback: padFeedback });
   await settingsFormReady();
   const quanpin = openSheet("中文键盘");
@@ -585,7 +618,7 @@ test("the Chinese keyboard row offers 26, 14 and 9 keys for 全拼 and 26 and 9 
       .getAllByRole("button")
       .filter((button) => button.hasAttribute("data-sheet-option"))
       .map((button) => button.textContent),
-  ).toEqual(["26 键", "14 键", "9 键"]);
+  ).toEqual(["26 键", "14 键", "18 键", "9 键"]);
   fireEvent.click(within(quanpin).getByRole("button", { name: "14 键" }));
   expect(shownValue("中文键盘").textContent).toContain("14 键");
   const preview = screen.getByRole("group", { name: "屏幕键盘预览" });
@@ -616,12 +649,83 @@ test("the Chinese keyboard row offers 26, 14 and 9 keys for 全拼 and 26 and 9 
 test("a scheme with one keyboard says where to change it", async () => {
   renderSettings({
     page: "screen-keyboard",
-    preferences: { scheme: "shuangpin", touch_keyboard_layout: "twenty_six_key" },
+    preferences: { scheme: "korean", touch_keyboard_layout: "twenty_six_key" },
   });
   await settingsFormReady();
   const row = shownValue("中文键盘") as HTMLButtonElement;
   expect(row.disabled).toBe(true);
   expect(row.textContent).toContain("当前方案只有一种键盘，在「输入」里换方案");
+});
+
+// 五笔的 26 / 14 键只写 `touch_wubi_layout`：方案、86 / 98 版和启用列表都不动，预览画 14 键键面。
+test("the Wubi keyboard row offers 26 and 14 keys and writes only touch_wubi_layout", async () => {
+  const { save } = renderSettings({
+    page: "screen-keyboard",
+    feedback: padFeedback,
+    preferences: {
+      scheme: "wubi",
+      wubi_profile: "wubi98",
+      touch_keyboard_layout: "twenty_six_key",
+      touch_keyboard_schemes: { enabled: ["quanpin", "wubi"], selected: "wubi" },
+    },
+  });
+  await settingsFormReady();
+  expect(screen.queryByText("当前方案只有一种键盘，在「输入」里换方案")).toBeNull();
+  expect(shownValue("五笔键盘").textContent).toContain("26 键");
+  const preview = screen.getByRole("group", { name: "屏幕键盘预览" });
+  expect(within(preview).getByText("q")).toBeTruthy();
+  const sheet = openSheet("五笔键盘");
+  expect(
+    within(sheet)
+      .getAllByRole("button")
+      .filter((button) => button.hasAttribute("data-sheet-option"))
+      .map((button) => button.textContent),
+  ).toEqual(["26 键", "14 键"]);
+  fireEvent.click(within(sheet).getByRole("button", { name: "14 键" }));
+  expect(shownValue("五笔键盘").textContent).toContain("14 键");
+  for (const label of ["QW", "ZX", "L", "符"]) {
+    expect(within(preview).getByText(label)).toBeTruthy();
+  }
+  expect(within(preview).queryByText("L;")).toBeNull();
+  expect(within(preview).queryByText("q")).toBeNull();
+  saveSettingsNow();
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  const saved = save.mock.calls.at(-1)?.[1];
+  expect(saved.touch_wubi_layout).toBe("fourteen_key");
+  expect(saved.scheme).toBe("wubi");
+  expect(saved.wubi_profile).toBe("wubi98");
+  expect(saved.touch_keyboard_layout).toBe("twenty_six_key");
+  expect(saved.touch_keyboard_schemes).toEqual({ enabled: ["quanpin", "wubi"], selected: "wubi" });
+  expect(saved.touch_shuangpin_layout).toBeUndefined();
+});
+
+test("a saved Wubi 14-key layout is shown and previewed, and quanpin ignores it", async () => {
+  renderSettings({
+    page: "screen-keyboard",
+    preferences: {
+      scheme: "wubi",
+      touch_keyboard_layout: "twenty_six_key",
+      touch_wubi_layout: "fourteen_key",
+    },
+  });
+  await settingsFormReady();
+  expect(shownValue("五笔键盘").textContent).toContain("14 键");
+  const preview = screen.getByRole("group", { name: "屏幕键盘预览" });
+  expect(within(preview).getByText("QW")).toBeTruthy();
+  cleanup();
+
+  renderSettings({
+    page: "screen-keyboard",
+    preferences: {
+      scheme: "quanpin",
+      touch_keyboard_layout: "twenty_six_key",
+      touch_wubi_layout: "fourteen_key",
+    },
+  });
+  await settingsFormReady();
+  expect(screen.queryByText("五笔键盘")).toBeNull();
+  expect(shownValue("中文键盘").textContent).toContain("26 键");
+  expect(within(screen.getByRole("group", { name: "屏幕键盘预览" })).getByText("q")).toBeTruthy();
 });
 
 test("the phone keyboard page edits which toolbar tools are shown and whether the row is hidden", async () => {
@@ -671,4 +775,16 @@ test("the 2-in-1 keyboard page keeps the preview above 尺寸", async () => {
   const page = screen.getByRole("group", { name: "键盘与手写" });
   expect(groupTitles(page).slice(0, 2)).toEqual(["屏幕键盘", "尺寸"]);
   expect(within(page).queryByText("中文键盘")).toBeNull();
+});
+
+test("the 2-in-1 keyboard page offers no Wubi 14-key layout", async () => {
+  renderSettings({
+    page: "screen-keyboard",
+    mobile: false,
+    preferences: { scheme: "wubi", touch_wubi_layout: "fourteen_key" },
+  });
+  await settingsFormReady();
+  const page = screen.getByRole("group", { name: "键盘与手写" });
+  expect(within(page).queryByText("五笔键盘")).toBeNull();
+  expect(within(page).queryByText("QW")).toBeNull();
 });

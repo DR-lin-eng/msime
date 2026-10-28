@@ -243,6 +243,60 @@ test("the HarmonyOS phone walks the design's steps and 跳过 keeps the keyboard
   );
 });
 
+test("a replayed HarmonyOS flow shows the saved gloss setting and leaves it alone when untouched", async () => {
+  const onSkip = vi.fn().mockResolvedValue(undefined);
+  render(
+    <WelcomeFlowPage
+      actions={makeActions({ platform: "harmony" })}
+      onComplete={vi.fn().mockResolvedValue(undefined)}
+      onSkip={onSkip}
+      savedEnglishGloss
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+  await screen.findByRole("heading", { name: "选一套输入方案" });
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+  await screen.findByRole("heading", { name: "候选下方就是译文" });
+  // 已在设置里开着释义：开关和示例按已保存的偏好显示，而不是关着。
+  expect((screen.getByRole("switch", { name: "显示英文释义" }) as HTMLInputElement).checked).toBe(
+    true,
+  );
+  expect(screen.getByText("candidate")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+
+  // 没碰开关：仍不写回释义设置。
+  await waitFor(() =>
+    expect(onSkip).toHaveBeenCalledWith("quanpin", {
+      candidateEnglishGloss: undefined,
+      openAccount: false,
+    }),
+  );
+});
+
+test("鸿蒙跳过保存失败时保留方案并可重试", async () => {
+  const onSkip = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("synthetic save failure"))
+    .mockResolvedValue(undefined);
+  render(
+    <WelcomeFlowPage
+      actions={makeActions({ platform: "harmony" })}
+      onComplete={vi.fn().mockResolvedValue(undefined)}
+      onSkip={onSkip}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+  await screen.findByRole("heading", { name: "选一套输入方案" });
+  fireEvent.click(screen.getByRole("radio", { name: /双拼.*默认小鹤/ }));
+  fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("操作失败");
+  expect(screen.getByRole("radio", { name: /双拼/ }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+  await waitFor(() => expect(onSkip).toHaveBeenCalledTimes(2));
+  expect(onSkip.mock.calls[1]).toEqual(onSkip.mock.calls[0]);
+});
+
 test("跳过 before choosing a keyboard asks the host to keep the saved scheme", async () => {
   const onSkip = vi.fn().mockResolvedValue(undefined);
   render(

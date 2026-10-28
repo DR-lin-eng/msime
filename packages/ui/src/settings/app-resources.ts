@@ -1,5 +1,6 @@
 export const logo = new URL("../assets/msime.svg", import.meta.url).href;
 export const settingsIcon = new URL("../assets/settings.svg", import.meta.url).href;
+export const homeIcon = new URL("../assets/home.svg", import.meta.url).href;
 
 export const feedbackIcons = {
   github: new URL("../assets/github.svg", import.meta.url).href,
@@ -47,6 +48,7 @@ const sharedLicenseUrl = "https://github.com/metasequoiaime/msime/blob/develop/L
 const sharedPrivacyUrl = "https://msime.app/privacy/";
 export const licenseUrl = sharedLicenseUrl;
 export const privacyUrl = sharedPrivacyUrl;
+export const termsUrl = "https://msime.app/terms/";
 export const androidPrivacyUrl = sharedPrivacyUrl;
 export const linuxLicenseUrl = sharedLicenseUrl;
 export const linuxIssuesUrl = "https://github.com/metasequoiaime/msime/issues";

@@ -66,6 +66,91 @@ pub enum InputScheme {
     Stroke,
 }
 
+/// 桌面应用（Windows、macOS、Linux）检查更新时跟的发布通道：稳定版只认正式发布，测试版另外接受 develop 发出的 `-beta` 预发布，每日构建再接受滚动的 `nightly` 发布。选择规则在 `msime_client_services::update_check`，macOS 的 Sparkle 按它选 appcast。
+///
+/// 读文档时不认识的值（以后的版本加的通道、手改的文件）按稳定版读，不让整份偏好读不出来；等于默认值时不写进文档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+    Nightly,
+}
+
+impl UpdateChannel {
+    /// 文档和宿主请求里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+            Self::Nightly => "nightly",
+        }
+    }
+
+    /// 严格解析：只认 `stable`、`beta`、`nightly`，其他值为 `None`。宿主请求用它，写错的通道名直接报错；偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "stable" => Some(Self::Stable),
+            "beta" => Some(Self::Beta),
+            "nightly" => Some(Self::Nightly),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for UpdateChannel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串按稳定版；不是字符串（数字、对象）照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
+}
+
+/// 候选词翻译（在线、系统、账号和 AI 翻译服务，以及只为候选词翻译查的离线词典）画在哪些候选下面。「显示英文释义」开关的离线释义不受它限制，照旧每个候选都有。
+///
+/// 新装和缺这个键的旧文档都是「仅当前高亮」：维护者认为每个候选都带一行译文太乱，而且只问高亮的那一个也省翻译接口的调用。读文档时不认识的值同样按「仅当前高亮」读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateTranslationScope {
+    /// 只翻译当前高亮的候选：没移动过高亮时是第一个，用方向键、Tab 或鼠标悬停移动高亮后跟着高亮走。
+    #[default]
+    Highlighted,
+    /// 当前页每个候选都翻译，这个选项出现以前的行为。
+    All,
+}
+
+impl CandidateTranslationScope {
+    /// 文档和宿主请求里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Highlighted => "highlighted",
+            Self::All => "all",
+        }
+    }
+
+    /// 严格解析：只认 `highlighted`、`all`，其他值为 `None`。偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "highlighted" => Some(Self::Highlighted),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CandidateTranslationScope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串按默认的「仅当前高亮」；不是字符串照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
+}
+
 /// Presentation layout for touch keyboard hosts. Desktop hosts preserve but ignore it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -78,7 +163,7 @@ pub enum TouchKeyboardLayout {
     FourteenKey,
     /// 九键双拼：数字键上每个音节固定两位（声母一位、韵母一位），表由 `nine_key_shuangpin_profile` 选，与九键共用九宫格会话（#6572）。引擎方案是全拼，不配别的方案。
     NineKeyShuangpin,
-    /// 全拼十八键；目前只由 Android 原生宿主自动启用，其他宿主保留偏好。
+    /// 全拼十八键；Android 和 iOS 原生宿主创建会话时按它自动开启十八键全拼网格（host-api 的 `layout_key_grid_for`），鸿蒙宿主自己按它调用 `msime_client_set_key_grid`，其他宿主保留但忽略这个偏好。
     EighteenKey,
 }
 
@@ -95,6 +180,173 @@ pub enum TouchShuangpinLayout {
 impl TouchShuangpinLayout {
     fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// 触屏五笔的字母键布局；与全拼、双拼的布局独立保存，切换 86 / 98 码表后仍保留选择。14 键与全拼 14 键同一个键面，引擎按组展开五笔码表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchWubiLayout {
+    #[default]
+    TwentySixKey,
+    FourteenKey,
+}
+
+impl TouchWubiLayout {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 中文 26 键字母层（全拼、26 键双拼、五笔 26 键、粤拼等）底行的排法；英文 26 键、iPad 全尺寸键盘和鸿蒙 2in1 的整排键盘不受它影响。桌面宿主原样保留、不使用。
+///
+/// 读文档时不认识的值按默认读，不是字符串照样报错，与 [`CandidateTranslationScope`] 一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchTwentySixKeyStyle {
+    /// 现有底行：123 | 符 | 空格 | ，（长按出。）| 中/英 | 回车。
+    #[default]
+    Standard,
+    /// 空格两侧各一个标点：123 | 符 | ， | 空格 | 。 | 中/英 | 回车。
+    CommaPeriod,
+    /// 长空格：123 | ， | 长空格 | 中/英 | 回车，符号入口移到工具栏；接替 Android 本机设置 `platform.android.long_space_layout`。
+    LongSpace,
+    /// 表情键：123 | 😀 | 空格 | ， | 中/英 | 回车，符号经长按 123 进入。
+    Emoji,
+}
+
+impl TouchTwentySixKeyStyle {
+    /// 文档和同步键里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::CommaPeriod => "comma_period",
+            Self::LongSpace => "long_space",
+            Self::Emoji => "emoji",
+        }
+    }
+
+    /// 严格解析：只认四种写法，其他值为 `None`。偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "comma_period" => Some(Self::CommaPeriod),
+            "long_space" => Some(Self::LongSpace),
+            "emoji" => Some(Self::Emoji),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for TouchTwentySixKeyStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串（较新版本加的样式）按现有底行读；不是字符串照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
+}
+
+/// 14 键与 18 键字母层（全拼、双拼、五笔 14 键共用）底行的排法。桌面宿主原样保留、不使用。
+///
+/// 读文档时不认识的值按默认读，不是字符串照样报错，与 [`CandidateTranslationScope`] 一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchFourteenKeyStyle {
+    /// 现有底行：123 | ， | 空格 | 。 | 中/英 | 回车。
+    #[default]
+    Standard,
+    /// 长空格：123 | ， | 长空格 | 中/英 | 回车。
+    LongSpace,
+    /// 表情键：123 | 😀 | 空格 | ， | 中/英 | 回车。
+    Emoji,
+}
+
+impl TouchFourteenKeyStyle {
+    /// 文档和同步键里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::LongSpace => "long_space",
+            Self::Emoji => "emoji",
+        }
+    }
+
+    /// 严格解析：只认三种写法，其他值为 `None`。偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "long_space" => Some(Self::LongSpace),
+            "emoji" => Some(Self::Emoji),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for TouchFourteenKeyStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串按现有底行读；不是字符串照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
+}
+
+/// 九键字母层（拼音九键、九键双拼、笔画共用这一框架）底行的排法；除 [`Self::TallReturn`] 外，左侧符号栏和右侧功能列不变。桌面宿主原样保留、不使用。
+///
+/// 读文档时不认识的值按默认读，不是字符串照样报错，与 [`CandidateTranslationScope`] 一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchNineKeyStyle {
+    /// 现有底行：符 | 123 | 空格 | 中/英 | 回车。
+    #[default]
+    Standard,
+    /// 空格两侧各一个标点：符 | 123 | ， | 空格 | 。 | 中/英 | 回车。
+    CommaPeriod,
+    /// 表情键：符 | 123 | 😀 | 空格 | 中/英 | 回车。
+    Emoji,
+    /// 右侧大回车：左列是跨三行的符号栏，栏下方底行放 符（与符号栏同宽）；中间是 3×3 九宫格，格下方底行 123 | 🌐 | 空格 | 中/英 恰好与九宫格同宽，空格占剩余宽度；右列（与现有右列同宽）自上而下是 ⌫、重输，回车跨第三行和底行（两倍高、中间无缝）。现有右列的 ！ 键去掉，只在这个样式里把 ！ 接在符号栏默认字母符号表的末尾，自定义的符号栏列表原样使用。九键数字层照同一框架：符 留在符号栏下方，123 的位置放切换键，空格的位置放 0（空格放哪按各端现有数字层规则），回车仍是两倍高。中/英 与回车不在同一行，不让出回车的点击区。较旧的版本不认识这个值，按现有底行读。
+    TallReturn,
+}
+
+impl TouchNineKeyStyle {
+    /// 文档和同步键里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::CommaPeriod => "comma_period",
+            Self::Emoji => "emoji",
+            Self::TallReturn => "tall_return",
+        }
+    }
+
+    /// 严格解析：只认四种写法，其他值为 `None`。偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standard" => Some(Self::Standard),
+            "comma_period" => Some(Self::CommaPeriod),
+            "emoji" => Some(Self::Emoji),
+            "tall_return" => Some(Self::TallReturn),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for TouchNineKeyStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串按现有底行读；不是字符串照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
     }
 }
 
@@ -120,12 +372,38 @@ pub enum TextEditButton {
     Space,
     NumberPad,
     Delete,
+    SelectLine,
 }
 
-/// 从左列上到下，再到右列前三格；换行固定在右下角。
+/// 从左列上到下，再到右列前三格，最后一个放在左下角；换行固定在右下角。
 pub fn default_text_edit_button_order() -> Vec<TextEditButton> {
     use TextEditButton::*;
-    vec![Copy, Paste, SelectAll, Cut, Space, NumberPad, Delete]
+    vec![
+        Copy, Paste, SelectAll, Cut, Space, NumberPad, Delete, SelectLine,
+    ]
+}
+
+/// 读进来的排列总能变成一份完整的排列：本版本认识的动作按第一次出现的位置保留，不认识的名字（更新的版本加的动作）、重复的动作和不是字符串的元素丢掉，缺的动作按默认排列的先后接在末尾，用户排好的顺序不动。
+///
+/// 这只是面板上按钮的先后，却在偏好文档里和输入方案放在一起：#9802 加了「选择行」以后，旧文档只列着七个动作，整份偏好通不过 [`Preferences::validate`]，iOS 键盘、HarmonyOS 和 Windows 的 Server 都准备不了运行时，用户打不了字（#9975 先补上了缺的动作）。反过来，旧版本读到新版本写的排列，会因为不认识新动作同样整份读不了。所以读的时候一律放宽：丢掉一个本版本画不出来的按钮，更新的版本读回去时会把它接在末尾补上。不是数组时照旧报错。直接交给 [`Preferences::validate`] 的结构体仍按完整、不重复的排列严格校验。
+fn deserialize_text_edit_button_order<'de, D>(d: D) -> Result<Vec<TextEditButton>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut order = Vec::new();
+    for value in Vec::<serde_json::Value>::deserialize(d)? {
+        if let Ok(button) = serde_json::from_value::<TextEditButton>(value) {
+            if !order.contains(&button) {
+                order.push(button);
+            }
+        }
+    }
+    for button in default_text_edit_button_order() {
+        if !order.contains(&button) {
+            order.push(button);
+        }
+    }
+    Ok(order)
 }
 
 /// 触屏 26 键按「123」切到的数字层。桌面宿主原样保留、不使用。
@@ -400,6 +678,17 @@ fn is_system_theme(theme: &crate::theme::GlobalTheme) -> bool {
     *theme == crate::theme::GlobalTheme::System
 }
 
+/// Android 键盘模式槽位只存短引用，不复制设计与照片；设计 id 只作为库查找键使用。
+pub fn valid_android_keyboard_skin_choice(value: &str) -> bool {
+    if let Some(id) = value.strip_prefix("theme:") {
+        return crate::theme::GlobalTheme::from_id(id)
+            .is_some_and(|theme| theme != crate::theme::GlobalTheme::Native);
+    }
+    value
+        .strip_prefix("design:")
+        .is_some_and(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+}
+
 impl CustomTheme {
     /// The same checks `Preferences::validate` applies to `custom_theme`, for hosts that receive a custom theme outside a preferences document.
     pub fn validate(&self) -> Result<(), PreferencesError> {
@@ -525,13 +814,15 @@ pub enum TouchKeyboardScheme {
     FourteenKey,
     /// 九键双拼（`InputScheme::Quanpin` 配 `TouchKeyboardLayout::NineKeyShuangpin`，表由 `nine_key_shuangpin_profile` 选）。默认不启用。
     NineKeyShuangpin,
-    /// Android 全拼十八键；默认不启用，由用户选择布局。
+    /// 全拼十八键（`InputScheme::Quanpin` 配 `TouchKeyboardLayout::EighteenKey`），Android、iOS 和鸿蒙的触屏键盘都有；默认不启用，由用户选择布局。
     EighteenKey,
+    /// 粤语双拼 26 键：与粤拼共用词典，按选中入口显式解释同形两键码。
+    CantoneseShuangpin,
 }
 
 impl TouchKeyboardScheme {
     /// Every touch scheme in picker order. Schemes are appended, never reordered.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Quanpin,
         Self::NineKey,
         Self::Xiaohe,
@@ -552,6 +843,7 @@ impl TouchKeyboardScheme {
         Self::FourteenKey,
         Self::NineKeyShuangpin,
         Self::EighteenKey,
+        Self::CantoneseShuangpin,
     ];
 
     /// 新装时键盘显示的方案：只有中文方案（拼音、双拼、五笔和手写）。日文（9 键和 26 键）、韩文、粤拼、注音（大千和 9 键）、越南文、藏文和笔画都由用户自己在「添加语言」里打开：日文词典和语言词库在 Android 上按需下载，默认不启用它们，新装用户就不会看到一个还没有词典的键盘。全拼 14 键也不默认启用：它是全拼的另一种键面，由用户在全拼的布局选择或「添加语言」里打开。
@@ -594,21 +886,30 @@ pub struct TouchKeyboardSchemePreferences {
     pub selected: Option<TouchKeyboardScheme>,
 }
 
-/// 文档里可能出现的方案取值：现行方案，加上已经退役的 `thoughtful_reply`。高情商回复曾是一个触屏方案，现在改为键盘工具栏上的工具，旧文档里留下的这个取值在读入时迁移掉，而不是让整份偏好读取失败。其它不认识的取值（比如更新版本写入的方案）仍然报错，保持文档原样不动。
+/// 文档里可能出现的方案取值：现行方案，已经退役的 `thoughtful_reply`，以及本版本不认识的名字。
+///
+/// 高情商回复曾是一个触屏方案，现在改为键盘工具栏上的工具，旧文档里留下的这个取值在读入时迁移掉。不认识的名字是更新的版本加的方案（这个枚举几天里就加过十八键、粤语双拼几个值），降级、从每日构建退回正式版、macOS 输入法比设置应用新时都会读到：读入时同样丢掉，而不是让整份偏好读不了、连带输入运行时起不来。丢掉的名字在读盘时记下、保存时接回列表末尾（[`newer_list_values`]），更新的版本读回去时用户启用的方案还在；退役的取值不接回。
 #[derive(Deserialize)]
 enum StoredTouchKeyboardScheme {
     #[serde(rename = "thoughtful_reply")]
     RetiredThoughtfulReply,
     #[serde(untagged)]
     Current(TouchKeyboardScheme),
+    #[serde(untagged)]
+    Newer(#[allow(dead_code)] String),
 }
 
 impl StoredTouchKeyboardScheme {
     fn current(self) -> Option<TouchKeyboardScheme> {
         match self {
-            Self::RetiredThoughtfulReply => None,
+            Self::RetiredThoughtfulReply | Self::Newer(_) => None,
             Self::Current(scheme) => Some(scheme),
         }
+    }
+
+    /// 文档里的这个取值是更新的版本写下的方案名：读盘时要记下、保存时接回。
+    fn is_newer(value: &serde_json::Value) -> bool {
+        matches!(Self::deserialize(value), Ok(Self::Newer(_)))
     }
 }
 
@@ -633,7 +934,7 @@ impl From<StoredTouchKeyboardSchemePreferences> for TouchKeyboardSchemePreferenc
                     .into_iter()
                     .filter_map(StoredTouchKeyboardScheme::current)
                     .collect();
-                // 列表里只剩退役方案时，按各平台对空列表的约定回到全拼 26 键；原本就存成空列表的文档不在这里补，仍由 `validate` 拒绝。
+                // 列表里只剩退役方案或本版本不认识的方案时，按各平台对空列表的约定回到全拼 26 键；原本就存成空列表的文档不在这里补，仍由 `validate` 拒绝。
                 if enabled.is_empty() && stored_count > 0 {
                     enabled.insert(TouchKeyboardScheme::Quanpin);
                 }
@@ -644,11 +945,15 @@ impl From<StoredTouchKeyboardSchemePreferences> for TouchKeyboardSchemePreferenc
             enabled,
             selected: None,
         };
-        preferences.selected = stored.selected.map(|selected| {
-            selected
-                .current()
-                .unwrap_or_else(|| preferences.first_enabled())
-        });
+        preferences.selected = match stored.selected {
+            None => None,
+            Some(StoredTouchKeyboardScheme::Current(scheme)) => Some(scheme),
+            Some(StoredTouchKeyboardScheme::RetiredThoughtfulReply) => {
+                Some(preferences.first_enabled())
+            }
+            // 更新的版本选中的方案本版本画不出来，当作没选；原值在读盘时记下，本版本没选别的方案就在保存时放回（见 [`newer_list_values`]）。
+            Some(StoredTouchKeyboardScheme::Newer(_)) => None,
+        };
         preferences
     }
 }
@@ -854,6 +1159,21 @@ impl From<ChineseScheme> for InputScheme {
             ChineseScheme::Stroke => Self::Stroke,
         }
     }
+}
+
+/// 韩语实体键盘布局；缺少字段时保留两套式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KoreanLayout {
+    #[default]
+    Dubeolsik,
+    Romaja,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KoreanPreferences {
+    pub layout: KoreanLayout,
 }
 
 /// How Vietnamese letters and tones are typed. The Engine code is the declaration order (`vietnamese_input_method`).
@@ -1215,6 +1535,12 @@ pub struct Preferences {
     /// The one theme that colours the candidate window, toolbar, menus and touch keyboard on every host. `theme` above stays the light/dark mode the `system` theme and the settings window follow.
     #[serde(default)]
     pub global_theme: crate::theme::GlobalTheme,
+    /// Android 键盘浅色皮肤选择：`theme:<id>` 或 `design:<本机设计库 id>`；缺省时沿用 `global_theme`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_keyboard_skin_light: Option<String>,
+    /// Android 键盘深色皮肤选择；格式同浅色槽位，缺省时沿用 `global_theme`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_keyboard_skin_dark: Option<String>,
     #[serde(default)]
     pub custom_theme: CustomTheme,
     #[serde(default)]
@@ -1224,6 +1550,9 @@ pub struct Preferences {
     /// Show the current/total page text in Linux candidate panels, independently of preedit. On macOS it also governs the ‹ › page arrows beside that text, so with the logo and the reading hidden too the card loses its top row. Paging by key and wheel is unaffected on both.
     #[serde(default = "enabled_by_default")]
     pub show_candidate_page_number: bool,
+    /// macOS 候选窗首行的输入状态文字和枝叶装饰，独立于拼音预编辑开关。
+    #[serde(default = "enabled_by_default")]
+    pub show_candidate_status: bool,
     #[serde(default)]
     pub tsf_preedit_style: PreeditStyle,
     #[serde(default)]
@@ -1286,6 +1615,9 @@ pub struct Preferences {
     /// Android 和 iOS 双拼键盘的 26 / 14 键选择；默认 26 键，其他宿主保留该字段。
     #[serde(default, skip_serializing_if = "TouchShuangpinLayout::is_default")]
     pub touch_shuangpin_layout: TouchShuangpinLayout,
+    /// Android、iOS 和鸿蒙五笔键盘的 26 / 14 键选择；默认 26 键且不写进文档，其他宿主保留该字段。
+    #[serde(default, skip_serializing_if = "TouchWubiLayout::is_default")]
+    pub touch_wubi_layout: TouchWubiLayout,
     /// 触屏键盘列出哪些方案、选中哪一个；桌面宿主原样保留、不使用。
     ///
     /// 总是写进文档，哪怕等于默认值：以前的版本在等于默认值时省略它，于是文档里没有它只能说明是以前的版本写的，按以前的默认列表读（[`TouchKeyboardScheme::LEGACY_DEFAULT_ENABLED`]）。新装的默认值已经不同，再省略就分不出这两种文档。
@@ -1309,8 +1641,11 @@ pub struct Preferences {
     /// 九宫格数字层按电话还是计算器排列；字母层不受影响。
     #[serde(default)]
     pub touch_number_keypad_order: NumberKeypadOrder,
-    /// Android 文本编辑面板七个侧边动作的完整排列；其他宿主保留但不使用。
-    #[serde(default = "default_text_edit_button_order")]
+    /// Android 文本编辑面板全部侧边动作的完整排列；其他宿主保留但不使用。读入时丢掉不认识和重复的动作、补上缺的动作（见 `deserialize_text_edit_button_order`）。
+    #[serde(
+        default = "default_text_edit_button_order",
+        deserialize_with = "deserialize_text_edit_button_order"
+    )]
     pub touch_text_edit_button_order: Vec<TextEditButton>,
     /// 26 键按「123」时出一行 1 到 0 的数字符号页，还是九宫格那样的 3×3 数字层。
     #[serde(default)]
@@ -1324,6 +1659,21 @@ pub struct Preferences {
     /// 触屏键盘的拼写写进输入框还是只画在候选栏；缺这个键的旧文档读作输入框。
     #[serde(default)]
     pub touch_spelling_position: TouchSpellingPosition,
+    /// 全拼 26 键组字时第三排左端的 ⇧ 默认画「分词」（送 `'` 断音节）；打开后保留 Shift，点一下臂辅助码（Shift+字母）。九键、14 键和 18 键有自己的分词键，不受它影响。默认关，即原有分词行为。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub touch_quanpin_shift: bool,
+    /// 手机触屏中文 26 键字母层（全拼、26 键双拼、五笔 26 键、粤拼等）底行的样式，见 [`TouchTwentySixKeyStyle`]；英文 26 键、iPad 全尺寸键盘和鸿蒙 2in1 不受它影响。默认即现有底行且不写进文档。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "TouchTwentySixKeyStyle::is_default")]
+    pub touch_twenty_six_key_style: TouchTwentySixKeyStyle,
+    /// 手机触屏 14 键与 18 键字母层（全拼、双拼、五笔 14 键）底行的样式，见 [`TouchFourteenKeyStyle`]。默认即现有底行且不写进文档。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "TouchFourteenKeyStyle::is_default")]
+    pub touch_fourteen_key_style: TouchFourteenKeyStyle,
+    /// 手机触屏九键字母层（拼音九键、九键双拼、笔画）底行的样式，见 [`TouchNineKeyStyle`]；除右侧大回车样式外，左侧符号栏和右侧功能列不变。默认即现有底行且不写进文档。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "TouchNineKeyStyle::is_default")]
+    pub touch_nine_key_style: TouchNineKeyStyle,
+    /// 手机触屏 26 键、14 键和 18 键字母层上方加一行 1 到 0（九键和手写不加）；窗口太矮（如手机横屏）时由宿主按自己的高度门槛不画，存着的值不变。接替 Android 本机设置 `platform.android.number_row`。默认关且不写进文档。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub touch_number_row: bool,
     /// 仅 Android 使用，其他宿主原样保留。
     #[serde(default)]
     pub android_text_trackpad: TextTrackpadPreferences,
@@ -1360,10 +1710,23 @@ pub struct Preferences {
     /// The Vietnamese input method and tone placement.
     #[serde(default)]
     pub vietnamese: VietnamesePreferences,
+    /// 可选韩语布局；宿主未声明能力时仍运行两套式。
+    #[serde(default)]
+    pub korean: KoreanPreferences,
     /// 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字，选一个字后剩下的拼写接着组字。默认关闭。
     #[serde(default)]
     pub single_character_only: bool,
+    /// 移动光标后编辑光标后的部分（桌面宿主）：全拼、双拼的组字光标停在中间时，光标前的原文固定为当前的最佳转换，候选改为光标后那段的候选，首选是整句。默认关；关着时不写进文档，没有这个键的旧文档和旧版本都读作关。手机宿主不读它（host-api 只在桌面交给 Engine）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub caret_edit_suffix: bool,
     pub candidate_page_size: u8,
+    /// macOS 横排候选的数量模式；竖排和其他宿主保留原有分页。
+    #[serde(default)]
+    pub candidate_count_mode: CandidateCountMode,
+    #[serde(default = "default_candidate_max_width")]
+    pub candidate_max_width: u16,
+    #[serde(default = "default_candidate_columns")]
+    pub candidate_columns: u8,
     /// Linux IBus can release the number row to the application while a
     /// candidate list is visible. Other hosts preserve this preference even
     /// when their native candidate presenter does not expose the switch.
@@ -1523,6 +1886,12 @@ pub struct Preferences {
     pub frequency: FrequencyPreferences,
     #[serde(default)]
     pub mixed_input: MixedInputPreferences,
+    /// 连续多语言输入的语言集合；默认关闭，只有至少两种不同语言时才交给 Engine。
+    #[serde(
+        default,
+        skip_serializing_if = "MultilingualInputPreferences::is_default"
+    )]
+    pub multilingual_input: MultilingualInputPreferences,
     #[serde(default)]
     pub local_modes: LocalModePreferences,
     /// Sound packs, background music, achievements and the enabled command tables. Left out of the document while every part is at its default, so a build from before plugins still reads a document that never touched them; the packs themselves and the @ name list live under the plugins directory, not here.
@@ -1545,6 +1914,18 @@ pub struct Preferences {
         skip_serializing_if = "CloudClipboardRelayPreferences::is_default"
     )]
     pub cloud_clipboard_relay: CloudClipboardRelayPreferences,
+    /// 云剪贴板存到用户的 WebDAV 网盘（`docs/cloud-clipboard-webdav.md`）：地址为空表示不用。与 [`Self::cloud_clipboard_relay`] 只能二选一；配置了就只走网盘，不再碰账号。应用密码和中继令牌一样明文存在这份文档里、列在 [`Preferences::credential_slots`]，账号在诊断快照里也换成 [`REDACTED`]；整组不进设置文件导出和账号设置同步，没配置时不写进文档。
+    #[serde(
+        default,
+        skip_serializing_if = "CloudClipboardWebDavPreferences::is_default"
+    )]
+    pub cloud_clipboard_webdav: CloudClipboardWebDavPreferences,
+    /// 「我的词条」同步到用户的 WebDAV 网盘（`docs/dictionary-webdav-sync.md`）：地址为空表示不同步。与云剪贴板的网盘各配各的，可以是同一个网盘账号，也可以不是。应用密码列在 [`Preferences::credential_slots`]，账号在诊断快照里换成 [`REDACTED`]；整组不进设置文件导出、账号设置同步和 MCP，没配置时不写进文档。
+    #[serde(
+        default,
+        skip_serializing_if = "DictionarySyncWebDavPreferences::is_default"
+    )]
+    pub dictionary_sync_webdav: DictionarySyncWebDavPreferences,
     /// 向所选云候选服务发送当前组字。新装默认关闭；旧文档缺开关时沿用开启行为。
     #[serde(default = "enabled_by_default")]
     pub cloud_candidates: bool,
@@ -1560,6 +1941,9 @@ pub struct Preferences {
     /// 新装默认关闭候选翻译；旧文档缺字段时仍沿用原有开启行为，显式保存的选择不变。
     #[serde(default = "enabled_by_default")]
     pub candidate_translations: bool,
+    /// 候选词翻译的范围，见 [`CandidateTranslationScope`]。新装和缺字段的旧文档都是「仅当前高亮」。
+    #[serde(default)]
+    pub candidate_translation_scope: CandidateTranslationScope,
     /// Show bounded offline English glosses from the packaged Engine dictionary.
     #[serde(default)]
     pub candidate_english_gloss: bool,
@@ -1608,6 +1992,9 @@ pub struct Preferences {
     /// 向 `https://api.msime.app/v1/telemetry/events` 发送匿名使用报告（每日活跃、会话结束、崩溃摘要；见 `telemetry` 和 PRIVACY.md）。默认开启；关闭后停止全部上报并清空本地队列。读取方把缺失的键当作开启。
     #[serde(default = "enabled_by_default")]
     pub usage_reporting: bool,
+    /// 桌面应用检查更新跟哪个发布通道，见 [`UpdateChannel`]。只属于本机：不随设置文件走（`settings_document::LOCAL_SECTIONS`），也不进账号同步。等于稳定版时不写进文档，没有这个键的旧文档按稳定版读。
+    #[serde(default, skip_serializing_if = "UpdateChannel::is_default")]
+    pub update_channel: UpdateChannel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1635,6 +2022,7 @@ pub struct VoiceInputPreferences {
     pub capture_device: String,
     #[serde(default = "default_commit_mode")]
     pub commit_mode: String,
+    /// 识别服务，取值见 [`ASR_PROVIDERS`]。出厂默认是 `local`（本地模型，离线）：音频不离开设备、不需要 API Key，下载或导入模型后即可使用；已保存的选择原样保留，只有新文档取这个值。
     #[serde(default)]
     pub asr_provider: String,
     #[serde(default)]
@@ -1737,7 +2125,7 @@ impl Default for VoiceInputPreferences {
             capture_backend: String::new(),
             capture_device: String::new(),
             commit_mode: "tsf".into(),
-            asr_provider: "doubao".into(),
+            asr_provider: "local".into(),
             asr_app_key: String::new(),
             doubao_auth_mode: default_doubao_auth_mode(),
             asr_token: String::new(),
@@ -1898,6 +2286,8 @@ pub struct DiagnosticLogPreferences {
     pub server: bool,
     /// In-process TSF preedit and input latency, buffered and batched out.
     pub tsf: bool,
+    /// 允许 `msime-mcp candidates` 在终端里按用户的设置和词库打出一串按键的候选（#9663）。候选来自用户自己的词库，等于把打过的词交给任何能运行这个命令的程序，所以缺省关闭，只在桌面「维护与诊断」里由用户打开。和诊断日志一样只属于本机：不随云同步、不进设置文件（键名在 `diagnostic_log` 下，两处的本机清单已经按这个名字排除）。MCP 的偏好工具不提供这一项，助手不能自己把它打开。
+    pub command_line_candidates: bool,
 }
 
 /// Windows 游戏兼容：游戏声明自己画候选却不画时，由水杉的候选窗显示。DLL 在每次激活时读取，对已打开的游戏要重新激活输入法才生效。各项都等于默认值时不写进文档，没有这个键的旧版本照样能读。
@@ -2136,6 +2526,22 @@ pub enum CandidateLayout {
     Horizontal,
     #[default]
     Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateCountMode {
+    #[default]
+    Fixed,
+    Adaptive,
+}
+
+fn default_candidate_max_width() -> u16 {
+    420
+}
+
+fn default_candidate_columns() -> u8 {
+    6
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2421,6 +2827,60 @@ pub struct AchievementPreferences {
 /// 中英混输默认的补全与英文领先门槛；26 键中更短的完整词仍可选。调低会让常见简拼被英文词抢走首选（见 `.agents/notes/implemented/feature/2026-10-12-mixed-english-leads-unsegmentable-input.md`）；不读偏好的宿主固定用它（`HostPlatform::reads_mixed_input_minimum_prefix`）。
 pub const DEFAULT_MIXED_INPUT_MINIMUM_PREFIX: u8 = 5;
 
+/// 连续多语言解码支持的语言；不依赖 Engine 或宿主的输入方案枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MultilingualLanguage {
+    Chinese,
+    English,
+    Japanese,
+}
+
+/// 连续多语言输入的共享偏好。默认关闭，避免未完成接线的宿主改变行为。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MultilingualInputPreferences {
+    pub enabled: bool,
+    pub languages: Vec<MultilingualLanguage>,
+}
+
+impl Default for MultilingualInputPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            languages: vec![
+                MultilingualLanguage::Chinese,
+                MultilingualLanguage::English,
+                MultilingualLanguage::Japanese,
+            ],
+        }
+    }
+}
+
+impl MultilingualInputPreferences {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// 只返回已打开且至少包含两种不同语言的集合，并按用户配置顺序去重。
+    pub fn active_languages(&self) -> Vec<MultilingualLanguage> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut active = Vec::with_capacity(3);
+        for language in &self.languages {
+            if !active.contains(language) {
+                active.push(*language);
+            }
+        }
+        if active.len() >= 2 {
+            active
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MixedInputPreferences {
     /// 候选混输总开关（Windows `utility.mixed_candidates`）：关掉后英文、emoji、颜文字、符号、日文、快捷短语和行内日期时间都不再混进普通候选，各分开关的原值保留。后加的成员，开着时不写进文档，旧版本和没有这个键的文档都按开处理。
@@ -2442,7 +2902,7 @@ pub struct MixedInputPreferences {
     /// 打拼音出符号：全拼、双拼整段打出符号的名称时（`zhengfu`、`pingfangmi`），在候选里接着那个词给出符号（± ㎡）。后加的成员，所有宿主默认开；缺这个键的旧文档读作开，只有用户关掉时才写进文档（`"symbols": false`），开着时文档逐字节不变，旧版本和只写前四项的宿主都还能读。
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
     pub symbols: bool,
-    /// 快捷短语混进普通候选（Windows `utility.quick_phrase_candidates`，出厂关）：普通组字的编码精确等于某条快捷短语的编码时，短语追加在普通候选之后。只对声明 `HostCapabilities::quick_phrase_candidates` 的宿主（macOS、Linux）生效，它们此前无条件混入，所以缺这个键的旧文档读作开；新装默认关，与 Windows 出厂一致，开着时不写进文档。
+    /// 快捷短语混进普通候选（Windows `utility.quick_phrase_candidates`，出厂关）：普通组字的编码精确等于某条快捷短语的编码时，短语混进普通候选：没有学习记录时落在首页最后几格（普通候选不满一页时接在它们之后），学过之后按 `quick_phrase_frequency` 学下来的位置。只对声明 `HostCapabilities::quick_phrase_candidates` 的宿主（macOS、Linux）生效，它们此前无条件混入，所以缺这个键的旧文档读作开；新装默认关，与 Windows 出厂一致，开着时不写进文档。
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
     pub quick_phrase: bool,
     /// 快捷短语参与调频（Windows `utility.quick_phrase_frequency`，出厂开）：常越过整组快捷短语选别的候选时整组后退，最多退到首页末位；选中组内短语时整组前移。默认开，与 Windows 出厂一致；只在混输打开时起作用，缺这个键的旧文档读作开。
@@ -2637,6 +3097,23 @@ pub fn valid_relay_token(token: &str) -> bool {
     (MIN_TOKEN_CHARS..=MAX_TOKEN_CHARS).contains(&token.len()) && crate::is_ascii_graphic(token)
 }
 
+const MAX_WEBDAV_CREDENTIAL_BYTES: usize = 256;
+
+/// WebDAV 账号是否可用：1 到 256 字节，不含控制字符，也不含冒号（HTTP Basic 鉴权用冒号分隔账号和密码）。坚果云的账号是登录邮箱。
+pub fn valid_webdav_username(username: &str) -> bool {
+    !username.is_empty()
+        && username.len() <= MAX_WEBDAV_CREDENTIAL_BYTES
+        && !username.contains(':')
+        && !username.chars().any(char::is_control)
+}
+
+/// WebDAV 应用密码是否可用：1 到 256 字节，不含控制字符。
+pub fn valid_webdav_password(password: &str) -> bool {
+    !password.is_empty()
+        && password.len() <= MAX_WEBDAV_CREDENTIAL_BYTES
+        && !password.chars().any(char::is_control)
+}
+
 #[doc(hidden)]
 pub fn parse_relay_url(url: &str) -> Option<url::Url> {
     if url.is_empty() || !crate::text::is_bounded_text(url, MAX_URL_BYTES) {
@@ -2676,6 +3153,66 @@ impl CloudClipboardRelayPreferences {
 
     fn validate(&self) -> bool {
         self.is_default() || (valid_relay_url(&self.url) && valid_relay_token(&self.token))
+    }
+}
+
+/// 存放云剪贴板的 WebDAV 网盘：用户选的文件夹地址、网盘账号和应用密码，三项要么都空（不用），要么都合规。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CloudClipboardWebDavPreferences {
+    /// 文件夹地址，例如坚果云的根地址 `https://dav.jianguoyun.com/dav/`（客户端在它下面自己建 `msime-clipboard/`）；规则与中继地址相同（[`valid_relay_url`]）。
+    pub url: String,
+    /// 网盘账号；规则见 [`valid_webdav_username`]。
+    pub username: String,
+    /// 应用密码（坚果云、Nextcloud 都要求第三方应用用它，而不是登录密码）；规则见 [`valid_webdav_password`]。
+    pub password: String,
+}
+
+impl CloudClipboardWebDavPreferences {
+    fn is_default(&self) -> bool {
+        self.url.is_empty() && self.username.is_empty() && self.password.is_empty()
+    }
+
+    /// 是否配置了网盘。配置了就只走网盘。
+    pub fn is_configured(&self) -> bool {
+        !self.url.is_empty()
+    }
+
+    fn validate(&self) -> bool {
+        self.is_default()
+            || (valid_relay_url(&self.url)
+                && valid_webdav_username(&self.username)
+                && valid_webdav_password(&self.password))
+    }
+}
+
+/// 存放「我的词条」的 WebDAV 网盘：用户选的文件夹地址、网盘账号和应用密码，三项要么都空（不同步），要么都合规。规则与 [`CloudClipboardWebDavPreferences`] 相同，客户端在文件夹下自己建 `msime-dictionary/`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DictionarySyncWebDavPreferences {
+    /// 文件夹地址；规则见 [`valid_relay_url`]。
+    pub url: String,
+    /// 网盘账号；规则见 [`valid_webdav_username`]。
+    pub username: String,
+    /// 应用密码；规则见 [`valid_webdav_password`]。
+    pub password: String,
+}
+
+impl DictionarySyncWebDavPreferences {
+    fn is_default(&self) -> bool {
+        self.url.is_empty() && self.username.is_empty() && self.password.is_empty()
+    }
+
+    /// 是否配置了词库同步。
+    pub fn is_configured(&self) -> bool {
+        !self.url.is_empty()
+    }
+
+    fn validate(&self) -> bool {
+        self.is_default()
+            || (valid_relay_url(&self.url)
+                && valid_webdav_username(&self.username)
+                && valid_webdav_password(&self.password))
     }
 }
 
@@ -3242,6 +3779,9 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             candidate_window_fit_content: false,
+            candidate_count_mode: CandidateCountMode::default(),
+            candidate_max_width: default_candidate_max_width(),
+            candidate_columns: default_candidate_columns(),
             default_ime_mode: DefaultImeMode::default(),
             ime_mode_scope: ImeModeScope::default(),
             app_input_mode_rules: BTreeMap::new(),
@@ -3266,10 +3806,13 @@ impl Default for Preferences {
             menu_theme: SettingsTheme::default(),
             // 新装在所有平台都跟随系统。触屏键盘的跟随系统皮肤按应用主题当前季节取色，键盘与应用界面是同一套颜色；原先触屏默认的薄荷晨光是固定配色，秋冬季节和应用主题对不上。
             global_theme: crate::theme::GlobalTheme::default(),
+            android_keyboard_skin_light: None,
+            android_keyboard_skin_dark: None,
             custom_theme: CustomTheme::default(),
             candidate_layout: CandidateLayout::default(),
             candidate_preedit_style: CandidatePreeditStyle::default(),
             show_candidate_page_number: true,
+            show_candidate_status: true,
             tsf_preedit_style: PreeditStyle::default(),
             diagnostic_log: DiagnosticLogPreferences::default(),
             candidate_follow_cursor: true,
@@ -3290,6 +3833,7 @@ impl Default for Preferences {
             touch_keyboard_layout: TouchKeyboardLayout::default(),
             touch_keyboard_split_portrait: false,
             touch_shuangpin_layout: TouchShuangpinLayout::default(),
+            touch_wubi_layout: TouchWubiLayout::default(),
             touch_keyboard_schemes: TouchKeyboardSchemePreferences::default(),
             touch_keyboard_width_percent: default_touch_keyboard_width_percent(),
             touch_key_spacing_tenths: default_touch_key_spacing_tenths(),
@@ -3303,6 +3847,11 @@ impl Default for Preferences {
             touch_shuangpin_key_hints: false,
             touch_japanese_toggle_input: true,
             touch_spelling_position: TouchSpellingPosition::default(),
+            touch_quanpin_shift: false,
+            touch_twenty_six_key_style: TouchTwentySixKeyStyle::default(),
+            touch_fourteen_key_style: TouchFourteenKeyStyle::default(),
+            touch_nine_key_style: TouchNineKeyStyle::default(),
+            touch_number_row: false,
             touch_quick_punctuation_symbols: default_touch_quick_symbols(),
             touch_toolbar: TouchToolbarPreferences::default(),
             harmony_toolbar: HarmonyToolbarPreferences::default(),
@@ -3314,7 +3863,9 @@ impl Default for Preferences {
             shuangpin_preedit_uses_raw: true,
             shuangpin_keymap_hint: None,
             vietnamese: VietnamesePreferences::default(),
+            korean: KoreanPreferences::default(),
             single_character_only: false,
+            caret_edit_suffix: false,
             candidate_page_size: 6,
             number_row_selection: true,
             candidate_font_size: default_candidate_font_size(),
@@ -3369,17 +3920,21 @@ impl Default for Preferences {
             escape_keeps_selected_word: false,
             frequency: FrequencyPreferences::default(),
             mixed_input: MixedInputPreferences::default(),
+            multilingual_input: MultilingualInputPreferences::default(),
             local_modes: LocalModePreferences::default(),
             plugins: PluginPreferences::default(),
             game_compatibility: GameCompatibilityPreferences::default(),
             clipboard_history: false,
             clipboard_history_limit: default_clipboard_history_limit(),
             cloud_clipboard_relay: CloudClipboardRelayPreferences::default(),
+            cloud_clipboard_webdav: CloudClipboardWebDavPreferences::default(),
+            dictionary_sync_webdav: DictionarySyncWebDavPreferences::default(),
             // 会把输入内容发出设备的两条路径新装都关闭，由 Windows、macOS、Linux 的首次询问或各平台的设置开关打开。
             cloud_candidates: false,
             cloud_candidate_provider: Default::default(),
             network: crate::network::NetworkPreferences::default(),
             candidate_translations: false,
+            candidate_translation_scope: CandidateTranslationScope::Highlighted,
             candidate_english_gloss: false,
             candidate_pronunciation: false,
             // 候选释义与角标的显示默认值对齐 Windows v0.11.1 的出厂配置。
@@ -3395,6 +3950,7 @@ impl Default for Preferences {
             translation_account: false,
             translation_ai: false,
             usage_reporting: true,
+            update_channel: UpdateChannel::Stable,
         }
     }
 }
@@ -3460,7 +4016,8 @@ fn is_true(value: &bool) -> bool {
 pub struct FuzzyPinyinPreferences {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
+    /// 读入时丢掉更新的版本加的规则，而不是让整份偏好读不了；丢掉的规则在读盘时记下、保存时接回（见 [`newer_list_values`]）。
+    #[serde(default, deserialize_with = "deserialize_known_elements")]
     pub rules: BTreeSet<FuzzyPinyinRule>,
     /// Internal marker used to distinguish first enable from an intentionally
     /// empty rule selection. It is persisted but never rendered by the UI.
@@ -3642,12 +4199,15 @@ pub struct HelpcodePreferences {
     /// Linux 的辅助码前导键；空串保留 Shift 加字母。
     #[serde(default)]
     pub trigger_key: String,
-    /// Windows `shuangpin_helpcode`/`quanpin_helpcode` 出厂关、门禁 pin 出厂开，本仓沿用开；缺这个键的旧文档读作开。
+    /// 已有辅助码对象缺这个键时仍读作开；新建偏好的全拼默认开、双拼默认关，保留用户已有设置。
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     pub schema: HelpcodeSchema,
     #[serde(default = "enabled_by_default")]
     pub show_in_candidate_window: bool,
+    /// 一码辅助码严格排除不匹配候选；默认关闭，保持已有的一码重排行为。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strict_filter: bool,
     /// 双拼专属的辅助码触发方式，对应 Windows v0.11.1 `[helpcode]` 组里 `shuangpin_helpcode_direct` 起的十一枚键；`quanpin_helpcode` 不读这一段。等于默认值时不写进文档，旧文档缺这一段时按 [`ShuangpinHelpcodeModes::default`] 处理。
     #[serde(default, skip_serializing_if = "ShuangpinHelpcodeModes::is_default")]
     pub modes: ShuangpinHelpcodeModes,
@@ -3660,6 +4220,7 @@ impl Default for HelpcodePreferences {
             schema: HelpcodeSchema::default(),
             trigger_key: String::new(),
             show_in_candidate_window: true,
+            strict_filter: false,
             modes: ShuangpinHelpcodeModes::default(),
         }
     }
@@ -3740,6 +4301,7 @@ fn default_quanpin_helpcode() -> HelpcodePreferences {
         schema: HelpcodeSchema::Ziranma,
         trigger_key: String::new(),
         show_in_candidate_window: false,
+        strict_filter: false,
         modes: ShuangpinHelpcodeModes::default(),
     }
 }
@@ -3789,10 +4351,11 @@ pub fn valid_model_mirror(mirror: &str) -> bool {
 
 fn default_shuangpin_helpcode() -> HelpcodePreferences {
     HelpcodePreferences {
-        enabled: true,
+        enabled: false,
         schema: HelpcodeSchema::Lantian,
         trigger_key: String::new(),
         show_in_candidate_window: true,
+        strict_filter: false,
         modes: ShuangpinHelpcodeModes::default(),
     }
 }
@@ -3932,6 +4495,8 @@ impl Preferences {
 
         // 中继的地址和令牌成对保留，理由与上面的服务地址相同。
         next.cloud_clipboard_relay = self.cloud_clipboard_relay.clone();
+        next.cloud_clipboard_webdav = self.cloud_clipboard_webdav.clone();
+        next.dictionary_sync_webdav = self.dictionary_sync_webdav.clone();
         next.cloud_candidate_provider = self.cloud_candidate_provider.clone();
         // 代理是为了让这台机器连得上服务：恢复默认设置把服务凭据留下了，代理地址跟着留下，否则所有出口会一起断。
         next.network = self.network.clone();
@@ -3942,7 +4507,7 @@ impl Preferences {
     }
 
     /// 偏好里的全部服务凭据（token、密钥、应用 id），按文档里的路径列出。恢复默认设置时原样保留的、导出诊断包时换成 [`REDACTED`] 的，都是这一份清单；`preferences/tests.rs` 用字段名兜底，新加的凭据字段不进清单测试就失败。
-    pub fn credential_slots(&mut self) -> [(&'static str, CredentialSlot<'_>); 13] {
+    pub fn credential_slots(&mut self) -> [(&'static str, CredentialSlot<'_>); 15] {
         [
             (
                 "voice_input.asr_app_key",
@@ -3996,6 +4561,14 @@ impl Preferences {
                 "cloud_clipboard_relay.token",
                 CredentialSlot::Text(&mut self.cloud_clipboard_relay.token),
             ),
+            (
+                "cloud_clipboard_webdav.password",
+                CredentialSlot::Text(&mut self.cloud_clipboard_webdav.password),
+            ),
+            (
+                "dictionary_sync_webdav.password",
+                CredentialSlot::Text(&mut self.dictionary_sync_webdav.password),
+            ),
         ]
     }
 
@@ -4024,6 +4597,17 @@ impl Preferences {
         }
         // 自定义地址、请求头和模板都可能含不以敏感词命名的令牌，整组不进入诊断。
         value["cloud_candidate_provider"] = REDACTED.into();
+        // 网盘账号常是登录邮箱，不是凭据也不进诊断。
+        for section in ["cloud_clipboard_webdav", "dictionary_sync_webdav"] {
+            if let Some(webdav) = value
+                .get_mut(section)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if webdav.contains_key("username") {
+                    webdav.insert("username".to_owned(), REDACTED.into());
+                }
+            }
+        }
         redact_sensitive_keys(&mut value);
         for pointer in DIAGNOSTIC_ENDPOINTS {
             if let Some(slot) = value.pointer_mut(pointer) {
@@ -4156,6 +4740,15 @@ impl Preferences {
         if !self.cloud_clipboard_relay.validate() {
             return Err(PreferencesError::InvalidCloudClipboardRelay);
         }
+        if !self.cloud_clipboard_webdav.validate()
+            || (self.cloud_clipboard_webdav.is_configured()
+                && self.cloud_clipboard_relay.is_configured())
+        {
+            return Err(PreferencesError::InvalidCloudClipboardWebDav);
+        }
+        if !self.dictionary_sync_webdav.validate() {
+            return Err(PreferencesError::InvalidDictionarySyncWebDav);
+        }
         if !(1..=10).contains(&self.frequency.trigger_count)
             || !(1..=10).contains(&self.frequency.linear_step)
         {
@@ -4163,6 +4756,11 @@ impl Preferences {
         }
         if !(1..=MAX_CANDIDATE_PAGE_SIZE).contains(&self.candidate_page_size) {
             return Err(PreferencesError::InvalidPageSize);
+        }
+        if !(160..=1200).contains(&self.candidate_max_width)
+            || !(1..=10).contains(&self.candidate_columns)
+        {
+            return Err(PreferencesError::InvalidAdaptiveCandidateLayout);
         }
         if !self.android_text_trackpad.validate() {
             return Err(PreferencesError::InvalidTextTrackpad);
@@ -4180,6 +4778,16 @@ impl Preferences {
             return Err(PreferencesError::InvalidTouchQuickSymbols);
         }
         self.custom_theme.validate()?;
+        if [
+            &self.android_keyboard_skin_light,
+            &self.android_keyboard_skin_dark,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !valid_android_keyboard_skin_choice(value))
+        {
+            return Err(PreferencesError::InvalidAndroidKeyboardSkinChoice);
+        }
         if self.touch_keyboard_schemes.enabled.is_empty()
             || self
                 .touch_keyboard_schemes
@@ -4309,7 +4917,7 @@ impl PreferencesSnapshot {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PreferencesError {
-    #[error("text edit button order must contain each of the seven side actions once")]
+    #[error("text edit button order must contain each side action once")]
     InvalidTextEditButtonOrder,
     #[error("辅助码触发键必须为空或 ; / \\ ` = 中的一个标点")]
     InvalidHelpcodeTriggerKey,
@@ -4319,7 +4927,9 @@ pub enum PreferencesError {
     InvalidFloatingToolbar,
     #[error("AI assistant provider or candidate limit is invalid")]
     InvalidAiAssistant,
-    #[error("网络代理地址必须是 host:port（可带 http:// 或 https:// 前缀），不能包含用户名、路径、查询或片段")]
+    #[error(
+        "网络代理地址必须是 host:port（可带 http:// 或 https:// 前缀），不能包含用户名、路径、查询或片段"
+    )]
     InvalidNetwork,
     #[error("voice recognition or polishing provider is not supported")]
     InvalidVoiceInput,
@@ -4331,6 +4941,8 @@ pub enum PreferencesError {
     InvalidNiuTrans,
     #[error("candidate page size must be between 1 and 10")]
     InvalidPageSize,
+    #[error("候选词框最大宽度须为 160–1200pt，每行候选词列数须为 1–10")]
+    InvalidAdaptiveCandidateLayout,
     #[error("触屏键盘宽度必须为 75–100%，键距为 0–12 dp，行距为 0–16 dp，高度调整为 -12–48 dp")]
     InvalidTouchKeyboardSpacing,
     #[error("触控板水平步长须为 4–48 dp，垂直步长须为 8–96 dp")]
@@ -4347,11 +4959,15 @@ pub enum PreferencesError {
     InvalidNineKeyShuangpinCustomProfile,
     #[error("custom theme keyboard design is invalid")]
     InvalidTouchKeyboardSkinDesign,
+    #[error("Android 键盘皮肤选择不是有效主题或设计库 id")]
+    InvalidAndroidKeyboardSkinChoice,
     #[error("custom theme base must be system or a built-in theme")]
     InvalidCustomThemeBase,
     #[error("candidate font size must be between 12 and 32")]
     InvalidCandidateFontSize,
-    #[error("candidate window scale must be 50-200%, opacity 50-100%, corner radius 0-32 and padding 0-16")]
+    #[error(
+        "candidate window scale must be 50-200%, opacity 50-100%, corner radius 0-32 and padding 0-16"
+    )]
     InvalidCandidateWindowStyle,
     #[error("candidate text color must be #RRGGBB or omitted")]
     InvalidCandidateTextColor,
@@ -4367,7 +4983,9 @@ pub enum PreferencesError {
     InvalidCandidateSurfaceColor,
     #[error("candidate border color must be #RRGGBB or omitted")]
     InvalidCandidateBorderColor,
-    #[error("candidate font family must be non-empty, contain no control characters, and be at most 128 bytes")]
+    #[error(
+        "candidate font family must be non-empty, contain no control characters, and be at most 128 bytes"
+    )]
     InvalidCandidateFontFamily,
     #[error("custom theme candidate skin identifier is invalid")]
     InvalidCandidateSkin,
@@ -4383,16 +5001,34 @@ pub enum PreferencesError {
     InvalidMixedInput,
     #[error("plugin settings are invalid")]
     InvalidPlugins,
-    #[error("game compatibility process names must be distinct .exe base names of at most 64 characters, at most 32 in total")]
+    #[error(
+        "game compatibility process names must be distinct .exe base names of at most 64 characters, at most 32 in total"
+    )]
     InvalidGameCompatibility,
-    #[error("app input mode rules must use distinct application identifiers of at most 64 bytes without control characters or path separators, at most 32 in total")]
+    #[error(
+        "app input mode rules must use distinct application identifiers of at most 64 bytes without control characters or path separators, at most 32 in total"
+    )]
     InvalidAppInputModeRules,
-    #[error("vim mode app identifiers must be distinct of at most 64 bytes without control characters or path separators, at most 32 in total")]
+    #[error(
+        "vim mode app identifiers must be distinct of at most 64 bytes without control characters or path separators, at most 32 in total"
+    )]
     InvalidVimModeApps,
-    #[error("cross-commit spacing app identifiers must be distinct of at most 64 bytes without control characters or path separators, at most 32 in total")]
+    #[error(
+        "cross-commit spacing app identifiers must be distinct of at most 64 bytes without control characters or path separators, at most 32 in total"
+    )]
     InvalidCrossCommitSpacingApps,
-    #[error("cloud clipboard relay needs an https address (http only for loopback) without query, fragment or credentials, and a token of 16-256 printable ASCII characters")]
+    #[error(
+        "cloud clipboard relay needs an https address (http only for loopback) without query, fragment or credentials, and a token of 16-256 printable ASCII characters"
+    )]
     InvalidCloudClipboardRelay,
+    #[error(
+        "cloud clipboard webdav needs an https address (http only for loopback) without query, fragment or credentials, an account without a colon and an app password, and cannot be set together with a relay"
+    )]
+    InvalidCloudClipboardWebDav,
+    #[error(
+        "dictionary sync webdav needs an https address (http only for loopback) without query, fragment or credentials, an account without a colon and an app password"
+    )]
+    InvalidDictionarySyncWebDav,
     #[error(
         "云候选配置无效：请检查地址、方法、请求头、JSON 模板、响应路径和超时（100–10000 毫秒）"
     )]
@@ -4411,6 +5047,16 @@ pub enum PreferencesError {
     Io(#[from] std::io::Error),
     #[error("invalid preferences document: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// [`PreferencesStore::load_for_runtime`] 读到的偏好。
+#[derive(Debug)]
+pub struct RuntimePreferences {
+    pub snapshot: PreferencesSnapshot,
+    /// 严格读取失败的原因。`Some` 时 `snapshot` 是在内存里从文档救下来的偏好，盘上的文件原样未动，宿主应当经诊断出口报告它。
+    pub load_error: Option<PreferencesError>,
+    /// 文档里写着、却没能整段保留下来的顶层设置键（整段取了默认值，或只留下了部分字段），按键名排序；`load_error` 为 `None` 时为空。整份文档都用不了（不是 JSON、更新的文档格式）时是 `["*"]`。只有键名，不带取值：诊断日志里不该出现用户填的内容。
+    pub not_kept: Vec<String>,
 }
 
 /// What `PreferencesStore::recover` did.
@@ -4569,9 +5215,13 @@ impl PreferencesStore {
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
-        let document: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let (mut snapshot, unknown) =
+        let mut document: serde_json::Value = serde_json::from_slice(&bytes)?;
+        settle_newer_values_on_read(&mut document);
+        let (mut snapshot, mut unknown) =
             deserialize_keeping_unknown::<PreferencesSnapshot>(&document, &["preferences"])?;
+        if let Some(preferences) = document.get("preferences") {
+            unknown.extend(newer_list_values(preferences));
+        }
         if snapshot.format_version != 1 {
             return Err(PreferencesError::UnsupportedFormat);
         }
@@ -4592,6 +5242,61 @@ impl PreferencesStore {
     pub fn load(&self) -> Result<PreferencesSnapshot, PreferencesError> {
         let _lock = self.lock()?;
         self.read_locked()
+    }
+
+    /// 输入运行时（准备宿主、建会话）读偏好：[`Self::load`] 读得了就是它的结果；读不了而且不是存储故障时，不让用户因此打不了字，在内存里从文档救下本版本认得的设置，其余取本存储所属版本的默认值，连同读不了的原因一起交出。
+    ///
+    /// 一份偏好文档里只要有一个键通不过（更新的版本写的取值、旧版本写下而本版本校验更严的值、写坏的字节），整份就读不了；以前宿主把这当成准备失败，iOS 键盘、HarmonyOS 和 Windows 的 Server 因此完全打不了字（#9802）。读不了的文件仍然不改写、不拿默认值盖掉，理由与 [`Self::recover_malformed`] 相同：它多半出自更新的版本，悄悄改写会丢掉那个版本的设置。降级只发生在内存里：之后任何保存都会在锁里重新严格读一遍（[`Self::save`]），文档读不了就写不进去，设置界面照旧经 [`Self::load`] 读到错误、由用户决定是否修复（[`Self::recover`]）。
+    ///
+    /// 救下的快照沿用文档里的修订号（读不出时为 0）：修复或更新的版本改写文件后修订号前进，宿主照常重新读取。
+    ///
+    /// `format_version` 不是 1 的文档整份取默认值、不逐键救：更新的文档格式可能改了同名键的含义，按 v1 的含义应用它会悄悄做错事。
+    pub fn load_for_runtime(&self) -> Result<RuntimePreferences, PreferencesError> {
+        let _lock = self.lock()?;
+        let failure = match self.read_locked() {
+            Ok(snapshot) => {
+                return Ok(RuntimePreferences {
+                    snapshot,
+                    load_error: None,
+                    not_kept: Vec::new(),
+                })
+            }
+            Err(PreferencesError::Io(error)) => return Err(PreferencesError::Io(error)),
+            Err(failure) => failure,
+        };
+        let document = match crate::bounded_io::read_bounded_file(
+            crate::storage::open_private_file_in(&self.path())?,
+            MAX_DOCUMENT_BYTES,
+            || PreferencesError::DocumentTooLarge,
+        ) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).ok(),
+            Err(PreferencesError::DocumentTooLarge) => None,
+            Err(error) => return Err(error),
+        };
+        let revision = document
+            .as_ref()
+            .and_then(|document| document.get("revision"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let document = document.filter(|document| {
+            document
+                .get("format_version")
+                .is_none_or(|version| version.as_u64() == Some(1))
+        });
+        let (preferences, not_kept) = match document {
+            Some(document) => Preferences::salvaged_from(document, self.default_preferences())?,
+            None => (self.default_preferences(), vec!["*".to_owned()]),
+        };
+        crate::network::install(&preferences.network);
+        Ok(RuntimePreferences {
+            snapshot: PreferencesSnapshot {
+                format_version: 1,
+                revision,
+                preferences,
+            },
+            load_error: Some(failure),
+            not_kept,
+        })
     }
 
     /// None means the writer lock is busy; retry later without using defaults.
@@ -4641,6 +5346,78 @@ impl PreferencesStore {
     ) -> Result<PreferencesSnapshot, PreferencesError> {
         let _lock = self.lock()?;
         let (current, unknown) = self.read_locked_keeping_unknown()?;
+        self.save_locked(current, &unknown, expected_revision, preferences)
+    }
+
+    /// 把 Android 本机旧开关迁进共享偏好；在同一把锁里核对修订号和原始字段。
+    /// 较新版本写入的样式不能被宽松反序列化后的默认值覆盖，迁移数字行时也要原样保留。
+    pub fn migrate_android_key_layout(
+        &self,
+        expected_revision: u64,
+        long_space: bool,
+        number_row: bool,
+    ) -> Result<PreferencesSnapshot, PreferencesError> {
+        let _lock = self.lock()?;
+        let (current, mut unknown) = self.read_locked_keeping_unknown()?;
+        if current.revision != expected_revision {
+            return Err(PreferencesError::Conflict);
+        }
+        let document: serde_json::Value = match crate::storage::open_private_file_in(&self.path()) {
+            Ok(file) => {
+                let bytes = crate::bounded_io::read_bounded_file(file, MAX_DOCUMENT_BYTES, || {
+                    PreferencesError::DocumentTooLarge
+                })?;
+                serde_json::from_slice(&bytes)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(error) => return Err(error.into()),
+        };
+        let mut preferences = current.preferences.clone();
+        let style = document.pointer("/preferences/touch_twenty_six_key_style");
+        if long_space && style.is_none_or(|value| value.as_str() == Some("standard")) {
+            preferences.touch_twenty_six_key_style = TouchTwentySixKeyStyle::LongSpace;
+        }
+        if number_row
+            && document
+                .pointer("/preferences/touch_number_row")
+                .is_none_or(|value| value.as_bool() == Some(false))
+        {
+            preferences.touch_number_row = true;
+        }
+        // 只在此次迁移接回未知样式，不改变设置页主动选择新样式的保存规则。
+        for (key, is_known) in [
+            (
+                "touch_twenty_six_key_style",
+                TouchTwentySixKeyStyle::parse(
+                    style
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("standard"),
+                )
+                .is_some(),
+            ),
+            (
+                "touch_fourteen_key_style",
+                document
+                    .pointer("/preferences/touch_fourteen_key_style")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|value| TouchFourteenKeyStyle::parse(value).is_some()),
+            ),
+            (
+                "touch_nine_key_style",
+                document
+                    .pointer("/preferences/touch_nine_key_style")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|value| TouchNineKeyStyle::parse(value).is_some()),
+            ),
+        ] {
+            if !is_known {
+                unknown.push(UnknownPreferenceField {
+                    path: vec![key.into()],
+                    value: document["preferences"][key].clone(),
+                    elements: false,
+                });
+            }
+        }
         self.save_locked(current, &unknown, expected_revision, preferences)
     }
 
@@ -4718,14 +5495,10 @@ impl PreferencesStore {
                 .ok_or(PreferencesError::RevisionExhausted)?,
             preferences,
         };
-        let mut document = serde_json::to_value(&snapshot)?;
-        if let Some(preferences) = document.get_mut("preferences") {
-            restore_unknown_fields(preferences, unknown);
-        }
         atomic_write(
             &self.directory,
             &self.path(),
-            &serde_json::to_vec_pretty(&document)?,
+            &serde_json::to_vec_pretty(&document_for_disk(&snapshot, unknown)?)?,
         )?;
         // 保存后立刻生效：设置页保存完不用等下一次读取，本进程接着发出的请求就用新代理。
         crate::network::install(&snapshot.preferences.network);
@@ -4763,9 +5536,13 @@ impl PreferencesStore {
             return Err(failure);
         }
         let backup_path = self.write_backup(&bytes, time::OffsetDateTime::now_utc())?;
-        let (preferences, salvaged) = match &document {
-            Some(document) => salvage_preferences(document, self.default_preferences())?,
-            None => (self.default_preferences(), false),
+        // 本版本不认识的键和列表元素（多半出自更新的版本）照保存时那样放回去：修复只换掉读不了的取值，不顺手抹掉更新的版本的设置。
+        let (preferences, salvaged, unknown) = match &document {
+            Some(document) => {
+                let salvage = salvage_preferences(document, self.default_preferences())?;
+                (salvage.preferences, salvage.kept, salvage.unknown)
+            }
+            None => (self.default_preferences(), false, Vec::new()),
         };
         let revision = match document
             .as_ref()
@@ -4790,7 +5567,7 @@ impl PreferencesStore {
         atomic_write(
             &self.directory,
             &self.path(),
-            &serde_json::to_vec_pretty(&snapshot)?,
+            &serde_json::to_vec_pretty(&document_for_disk(&snapshot, &unknown)?)?,
         )?;
         Ok(RecoveryOutcome::Recovered {
             snapshot,
@@ -4875,6 +5652,82 @@ impl PreferencesStore {
     }
 }
 
+/// 枚举列表里的一个元素：本版本认识的取值，或者别的字符串（更新的版本加的取值）。不是字符串的元素仍然报错。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum KnownOrNewer<T> {
+    Known(T),
+    Newer(#[allow(dead_code)] String),
+}
+
+/// 枚举集合的宽松读法：只留本版本认识的取值，更新的版本加的名字丢掉，见 [`newer_list_values`]。
+fn deserialize_known_elements<'de, D, T>(d: D) -> Result<BTreeSet<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Ord,
+{
+    Ok(Vec::<KnownOrNewer<T>>::deserialize(d)?
+        .into_iter()
+        .filter_map(|element| match element {
+            KnownOrNewer::Known(value) => Some(value),
+            KnownOrNewer::Newer(_) => None,
+        })
+        .collect())
+}
+
+/// 判断列表里的一个元素是不是更新的版本写下的取值。
+type IsNewerValue = fn(&serde_json::Value) -> bool;
+
+/// 读入时丢掉更新版本取值、保存时要接回的枚举列表：从 `preferences` 对象起的路径，和判断一个元素是不是更新的版本写下的名字的办法。只收两种文档总会写出这个列表的字段，接回时列表一定在；只决定先后的列表（文本编辑面板的排列）不在这里，丢掉的动作由更新的版本自己补回。
+const NEWER_VALUE_LISTS: [(&[&str], IsNewerValue); 2] = [
+    (
+        &["touch_keyboard_schemes", "enabled"],
+        StoredTouchKeyboardScheme::is_newer,
+    ),
+    (&["fuzzy_pinyin", "rules"], is_newer_fuzzy_pinyin_rule),
+];
+
+fn is_newer_fuzzy_pinyin_rule(value: &serde_json::Value) -> bool {
+    value.is_string() && FuzzyPinyinRule::deserialize(value).is_err()
+}
+
+/// `preferences`（偏好文档里的 `preferences` 对象）里更新的版本写下、本版本读入时丢掉的取值，作为 [`UnknownPreferenceField`] 交出，保存时原样接回：[`NEWER_VALUE_LISTS`] 里各列表不认识的元素，以及选中的触屏方案是本版本不认识的方案时它的原值。
+///
+/// 偏好结构的宽松读法只保证读得进来；不接回的话，本版本一保存，用户在更新的版本里启用的方案、模糊音规则就没了。
+pub(crate) fn newer_list_values(preferences: &serde_json::Value) -> Vec<UnknownPreferenceField> {
+    let mut newer = Vec::new();
+    for (path, is_newer) in NEWER_VALUE_LISTS {
+        let Some(serde_json::Value::Array(elements)) = path
+            .iter()
+            .try_fold(preferences, |node, key| node.get(*key))
+        else {
+            continue;
+        };
+        let values: Vec<_> = elements
+            .iter()
+            .filter(|value| is_newer(value))
+            .cloned()
+            .collect();
+        if !values.is_empty() {
+            newer.push(UnknownPreferenceField {
+                path: path.iter().map(|key| key.to_string()).collect(),
+                value: serde_json::Value::Array(values),
+                elements: true,
+            });
+        }
+    }
+    if let Some(selected) = preferences.pointer("/touch_keyboard_schemes/selected") {
+        if StoredTouchKeyboardScheme::is_newer(selected) {
+            newer.push(UnknownPreferenceField {
+                path: vec!["touch_keyboard_schemes".into(), "selected".into()],
+                value: selected.clone(),
+                elements: false,
+            });
+        }
+    }
+    newer
+}
+
 /// 偏好文档里本版本不认识的一个键：从 `preferences` 对象起的键路径和它的原值。
 ///
 /// 偏好文档由好几个程序各自按自己的版本读写：macOS 的输入法由 Sparkle 单独更新，设置应用和 `msime-mcp` 不跟着变，Windows、Linux 的宿主也会写设置页不认识的键。偏好结构因此不拒绝未知键，读取时记下它们，保存时放回原处，旧版本读得了新版本的文档，也不会把新版本的设置抹掉。
@@ -4882,6 +5735,8 @@ impl PreferencesStore {
 pub(crate) struct UnknownPreferenceField {
     path: Vec<String>,
     value: serde_json::Value,
+    /// `value` 是数组 `path` 里本版本不认识、读入时丢掉的那些元素（[`newer_list_values`]），保存时接回本版本写出的同一个数组末尾；否则 `value` 是这个键的原值。
+    elements: bool,
 }
 
 /// 把 `document` 反序列化成 `T`，同时收集 `prefix`（逐级的对象键）之下本版本不认识的键。路径经过数组元素的键不收集：数组整个属于一个已知字段，元素位置在新旧版本之间没有对应关系。
@@ -4912,6 +5767,7 @@ pub(crate) fn deserialize_keeping_unknown<T: serde::de::DeserializeOwned>(
             Some(UnknownPreferenceField {
                 path: rest.to_vec(),
                 value,
+                elements: false,
             })
         })
         .collect();
@@ -4934,7 +5790,26 @@ fn object_key_path(path: &serde_ignored::Path<'_>) -> Option<Vec<String>> {
     }
 }
 
-/// 把读取时记下的未知键放回本版本写出的偏好对象。父对象这次没有写出（取默认值时省略）就不放：凭一个未知键重建半个已知对象，读它的版本会缺字段；本版本已经写出同名的键时以本版本为准。
+/// 写进 preferences.json 的文档：快照本身，加上读盘时记下的未知键和列表元素（[`restore_unknown_fields`]）。
+///
+/// 文本编辑面板的排列等于默认排列时不写出。已经发出去的 Android 0.6.0、HarmonyOS 0.3.0-beta、macOS 0.55.0 和 Linux 0.14.0 只认识七个动作，读到带「选择行」的排列会整份读不了、打不了字（`tests/fixtures/released-preferences` 里是它们写下的文档）；那些版本给这个键配了默认值，缺这个键时用自己的七个动作。从每日构建退回正式版、在设置同步或导入之外拿新文档给旧版本读，只要用户没在 Android 上排过顺序就都读得了。只省在盘上：经 FFI 交给宿主的快照照旧带着完整排列，Android 的面板和排序页直接读它。
+fn document_for_disk(
+    snapshot: &PreferencesSnapshot,
+    unknown: &[UnknownPreferenceField],
+) -> Result<serde_json::Value, PreferencesError> {
+    let mut document = serde_json::to_value(snapshot)?;
+    if let Some(serde_json::Value::Object(preferences)) = document.get_mut("preferences") {
+        if snapshot.preferences.touch_text_edit_button_order == default_text_edit_button_order() {
+            preferences.remove("touch_text_edit_button_order");
+        }
+    }
+    if let Some(preferences) = document.get_mut("preferences") {
+        restore_unknown_fields(preferences, unknown);
+    }
+    Ok(document)
+}
+
+/// 把读取时记下的未知键放回本版本写出的偏好对象。父对象这次没有写出（取默认值时省略）就不放：凭一个未知键重建半个已知对象，读它的版本会缺字段；本版本已经写出同名的键时以本版本为准。列表里不认识的元素接在本版本写出的同一个列表末尾，列表里已经有的不重复接。
 fn restore_unknown_fields(preferences: &mut serde_json::Value, unknown: &[UnknownPreferenceField]) {
     for field in unknown {
         let Some((key, parents)) = field.path.split_last() else {
@@ -4946,6 +5821,19 @@ fn restore_unknown_fields(preferences: &mut serde_json::Value, unknown: &[Unknow
         else {
             continue;
         };
+        if field.elements {
+            let (Some(serde_json::Value::Array(list)), serde_json::Value::Array(values)) =
+                (parent.get_mut(key.as_str()), &field.value)
+            else {
+                continue;
+            };
+            for value in values {
+                if !list.contains(value) {
+                    list.push(value.clone());
+                }
+            }
+            continue;
+        }
         parent
             .entry(key.clone())
             .or_insert_with(|| field.value.clone());
@@ -4958,22 +5846,177 @@ fn acceptable_preferences(candidate: &serde_json::Map<String, serde_json::Value>
         .is_ok_and(|preferences| preferences.validate().is_ok())
 }
 
-/// Carry every setting of a damaged document that the current schema accepts onto the defaults, one top-level key at a time, retrying a rejected section one field at a time. Returns the result and whether anything was kept.
+/// 读盘时把更新的版本才有的标量取值换成本版本的取值，免得一个键让整份文档读不了；只用于读磁盘，设置提交仍由枚举反序列化严格校验。目前只有韩文布局：更新的版本的未知布局回退到两套式。
+fn settle_newer_values_on_read(document: &mut serde_json::Value) {
+    if let Some(layout) = document.pointer_mut("/preferences/korean/layout") {
+        if layout
+            .as_str()
+            .is_some_and(|value| !matches!(value, "dubeolsik" | "romaja"))
+        {
+            *layout = "dubeolsik".into();
+        }
+    }
+}
+
+impl Preferences {
+    /// 从一份读不了的偏好文档（`{"preferences": {...}}`，或者偏好对象本身）里救下本版本认得的设置，其余取 `default`，只在内存里，不碰任何文件；同时交出没能整段保留的顶层键（见 [`RuntimePreferences::not_kept`]）。逐键的取舍与 [`PreferencesStore::recover`] 相同，另外按 [`Self::close_destinations_not_kept`] 关掉去向没能保留的联网功能；结果总能通过 [`Self::validate`]。输入运行时拿它在偏好读不了时照常运行（[`PreferencesStore::load_for_runtime`]，以及宿主选项里的偏好副本读不了、又没有实时文档可读的时候）。
+    pub fn salvaged_from(
+        mut document: serde_json::Value,
+        default: Preferences,
+    ) -> Result<(Preferences, Vec<String>), PreferencesError> {
+        if document.get("preferences").is_none() {
+            document = serde_json::json!({ "preferences": document });
+        }
+        settle_newer_values_on_read(&mut document);
+        let Salvage {
+            mut preferences,
+            not_kept,
+            ..
+        } = salvage_preferences(&document, default)?;
+        preferences.voice_input.retire_unavailable_asr_model();
+        if let Some(source) = document.get("preferences") {
+            preferences.close_destinations_not_kept(source);
+        }
+        Ok((preferences, not_kept.into_iter().collect()))
+    }
+
+    /// 逐键救下的偏好里，决定把内容发到哪里的设置（云候选的来源和地址、AI 服务商和地址、语音识别和润色的服务商和地址、自定义翻译的地址、代理）文档里写着、却换成了默认值时，关掉用它的联网功能，而不是让这个功能拿着默认的去向照常发请求：用户选的是自己的云候选服务，救下的开关却把组字发给默认的 Google；用户填了自定义代理，救下的却是跟随系统、绕开了代理。代理无法完整保留时使用运行时的必须代理状态（[`ProxyMode::CustomRequired`](crate::network::ProxyMode::CustomRequired)），并关闭发送用户内容的功能；地址不可用时远程客户端构造失败。
+    ///
+    /// 只用于输入运行时在内存里救下的偏好：用户在设置页点的修复（[`PreferencesStore::recover`]）写下的结果用户看得见、改得了，不在这里替他关。`source` 是文档里的偏好对象。
+    fn close_destinations_not_kept(&mut self, source: &serde_json::Value) {
+        fn replaced<T: Serialize>(source: &serde_json::Value, pointer: &str, kept: &T) -> bool {
+            if let Some(written) = source.pointer(pointer) {
+                return serde_json::to_value(kept).ok().as_ref() != Some(written);
+            }
+            // 叶子缺失可能是真正缺省，也可能是父段损坏；只有前者沿用默认去向。
+            let mut ancestor = pointer;
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                if let Some(written) = source.pointer(parent) {
+                    return !written.is_object();
+                }
+                ancestor = parent;
+            }
+            false
+        }
+        let cloud = &self.cloud_candidate_provider;
+        if replaced(source, "/cloud_candidate_provider/source", &cloud.source)
+            || replaced(
+                source,
+                "/cloud_candidate_provider/endpoint",
+                &cloud.endpoint,
+            )
+        {
+            self.cloud_candidates = false;
+        }
+        let ai = &self.ai_assistant;
+        if replaced(source, "/ai_assistant/provider", &ai.provider)
+            || replaced(source, "/ai_assistant/endpoint", &ai.endpoint)
+            || replaced(source, "/ai_assistant/endpoints", &ai.endpoints)
+        {
+            self.ai_assistant.enabled = false;
+            self.translation_ai = false;
+        }
+        let voice = &self.voice_input;
+        if replaced(source, "/voice_input/asr_provider", &voice.asr_provider)
+            || replaced(source, "/voice_input/asr_endpoint", &voice.asr_endpoint)
+        {
+            self.voice_input.enabled = false;
+        }
+        let voice = &self.voice_input;
+        if replaced(
+            source,
+            "/voice_input/polish_provider",
+            &voice.polish_provider,
+        ) || replaced(
+            source,
+            "/voice_input/polish_endpoint",
+            &voice.polish_endpoint,
+        ) {
+            self.voice_input.polish_enabled = false;
+        }
+        if replaced(
+            source,
+            "/custom_translation/endpoint",
+            &self.custom_translation.endpoint,
+        ) {
+            self.custom_translation.enabled = false;
+        }
+        let written_mode = source
+            .pointer("/network/proxy_mode")
+            .and_then(serde_json::Value::as_str);
+        let selected_unreadable_mode =
+            replaced(source, "/network/proxy_mode", &self.network.proxy_mode);
+        let selected_unreadable_server = written_mode == Some("custom")
+            && replaced(source, "/network/proxy_server", &self.network.proxy_server);
+        if selected_unreadable_mode || selected_unreadable_server {
+            self.network.proxy_mode = crate::network::ProxyMode::CustomRequired;
+            // 原生宿主也可能执行联网请求；不能只依赖 Rust HTTP 客户端拒绝构造。
+            self.cloud_candidates = false;
+            self.ai_assistant.enabled = false;
+            self.translation_ai = false;
+            self.translation_account = false;
+            self.voice_input.enabled = false;
+            self.voice_input.polish_enabled = false;
+            self.custom_translation.enabled = false;
+            self.tencent_tmt.enabled = false;
+            self.niutrans.enabled = false;
+        }
+    }
+
+    /// 宿主或设置页提交来保存的偏好（保存接口收到的 JSON）。
+    ///
+    /// 读盘时的宽松读法（排列里丢掉不认识和重复的动作、启用列表和模糊音规则里丢掉不认识的取值）是为了读得了别的版本写下的文档，提交来的偏好却出自本版本的设置页或宿主：那里的名字和 Rust 对不上是宿主的毛病，照样整理成合法的值再存下，只会从「保存失败」变成「改了却不生效」。所以这里照旧严格：排列必须是本版本动作的完整、不重复排列，启用列表、选中项和模糊音规则里不能有本版本不认识的名字。
+    pub fn from_submission(value: serde_json::Value) -> Result<Preferences, PreferencesError> {
+        if let Some(newer) = newer_list_values(&value).first() {
+            return Err(PreferencesError::Json(serde::de::Error::custom(
+                format_args!("unknown value {} in {}", newer.value, newer.path.join(".")),
+            )));
+        }
+        let order = value
+            .get("touch_text_edit_button_order")
+            .map(Vec::<TextEditButton>::deserialize)
+            .transpose()?;
+        let preferences: Preferences = serde_json::from_value(value)?;
+        if order.is_some_and(|order| order != preferences.touch_text_edit_button_order) {
+            return Err(PreferencesError::InvalidTextEditButtonOrder);
+        }
+        Ok(preferences)
+    }
+}
+
+/// [`salvage_preferences`] 的结果。
+struct Salvage {
+    preferences: Preferences,
+    /// 至少保留下了文档里的一个设置。
+    kept: bool,
+    /// 文档里有、却没能整段保留的顶层键：整段取了默认值，或者只留下了部分字段。
+    not_kept: BTreeSet<String>,
+    /// 文档里本版本不认识的键和列表元素，修复写回时原样放回（与 [`PreferencesStore::save`] 相同）。
+    unknown: Vec<UnknownPreferenceField>,
+}
+
+/// 以默认偏好垫底，逐个顶层键保留本版本能接受的设置，整段被拒时再逐字段尝试；同时交出保留状态、未完整保留的段落及未知键和列表元素。
 ///
 /// `default` 是垫底的默认偏好，即存储所属版本的默认值。
 fn salvage_preferences(
     document: &serde_json::Value,
     default: Preferences,
-) -> Result<(Preferences, bool), PreferencesError> {
+) -> Result<Salvage, PreferencesError> {
+    let nothing_kept = |preferences| Salvage {
+        preferences,
+        kept: false,
+        not_kept: BTreeSet::from(["*".to_owned()]),
+        unknown: Vec::new(),
+    };
     let serde_json::Value::Object(mut salvaged) = serde_json::to_value(&default)? else {
-        return Ok((default, false));
+        return Ok(nothing_kept(default));
     };
     // A snapshot keeps its settings under `preferences`; a bare settings object at the root is accepted too.
     let source = match document.get("preferences") {
         Some(serde_json::Value::Object(source)) => source.clone(),
         _ => match document {
             serde_json::Value::Object(source) => source.clone(),
-            _ => return Ok((default, false)),
+            _ => return Ok(nothing_kept(default)),
         },
     };
     // 损坏的文档里没有触屏方案列表时，它出自以前的版本（现在的版本总是写出列表），垫底值里也去掉这个键，读回来按以前的默认列表，与这份文档还能正常读取时相同。
@@ -4985,6 +6028,7 @@ fn salvage_preferences(
         salvaged.remove("smart_punctuation_migrated");
     }
     let mut kept = false;
+    let mut not_kept = BTreeSet::new();
     for (key, value) in &source {
         let mut candidate = salvaged.clone();
         candidate.insert(key.clone(), value.clone());
@@ -4993,6 +6037,7 @@ fn salvage_preferences(
             kept = true;
             continue;
         }
+        not_kept.insert(key.clone());
         let serde_json::Value::Object(fields) = value else {
             continue;
         };
@@ -5016,10 +6061,17 @@ fn salvage_preferences(
             kept = true;
         }
     }
-    // Every step above was accepted by the same check, so this cannot fail on the salvaged map.
-    let mut preferences: Preferences = serde_json::from_value(serde_json::Value::Object(salvaged))?;
+    // 每一步均经过相同校验，最终映射可反序列化；同时收集随映射保留的未知键，让显式修复能够放回。
+    let (mut preferences, mut unknown) =
+        deserialize_keeping_unknown::<Preferences>(&serde_json::Value::Object(salvaged), &[])?;
+    unknown.extend(newer_list_values(&serde_json::Value::Object(source)));
     preferences.settle_smart_punctuation_default(SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT);
-    Ok((preferences, kept))
+    Ok(Salvage {
+        preferences,
+        kept,
+        not_kept,
+        unknown,
+    })
 }
 
 fn atomic_write(directory: &Path, path: &Path, contents: &[u8]) -> Result<(), PreferencesError> {
@@ -5042,7 +6094,7 @@ fn atomic_write(directory: &Path, path: &Path, contents: &[u8]) -> Result<(), Pr
         let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
         temporary.write_all(contents)?;
         temporary.as_file().sync_all()?;
-        temporary.persist(path).map_err(|error| error.error)?;
+        crate::storage::persist_replacing(temporary, path).map_err(|error| error.error)?;
         Ok(())
     }
 }
@@ -5159,12 +6211,14 @@ pub fn is_sensitive_key(name: &str) -> bool {
 }
 
 /// 用户可以自填的服务地址。地址本身不是凭据，但有的服务把密钥放在查询串或 `user:password@` 里，诊断快照只留协议、主机、端口和路径。
-const DIAGNOSTIC_ENDPOINTS: [&str; 5] = [
+const DIAGNOSTIC_ENDPOINTS: [&str; 7] = [
     "/voice_input/asr_endpoint",
     "/voice_input/polish_endpoint",
     "/ai_assistant/endpoint",
     "/custom_translation/endpoint",
     "/cloud_clipboard_relay/url",
+    "/cloud_clipboard_webdav/url",
+    "/dictionary_sync_webdav/url",
 ];
 
 /// 去掉地址里的用户信息、查询串和片段；解析不了的地址整个换成 [`REDACTED`]，因为看不出密钥藏在哪。

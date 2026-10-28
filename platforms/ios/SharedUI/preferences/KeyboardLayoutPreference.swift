@@ -16,6 +16,8 @@ enum KeyboardLayoutPreference {
   static let cursorSwipeKey = "keyboard.gesture.cursorSwipe"
   static let spaceVoiceKey = "keyboard.gesture.spaceVoice"
   static let swipeSymbolsKey = "keyboard.gesture.swipeSymbols"
+  static let swipeSymbolsDirectionKey = "keyboard.gesture.swipeSymbolsDirection"
+  enum SwipeDirection: String { case up, down }
   static let quickPunctuationSymbolsKey = "keyboard.quickPunctuationSymbols"
   static var defaultQuickPunctuationSymbols: [String] { normalizeQuickPunctuationSymbols([]) }
   static let hideLanguageKeyKey = "keyboard.bottom.hideLanguageKey"
@@ -119,6 +121,30 @@ enum KeyboardLayoutPreference {
     return true
   }
 
+  /// 「组字时保留 Shift」：全拼 26 键组字时第三排左端的 ⇧ 默认换成「分词」（送 `'` 断音节）；打开后保留 Shift，点一下臂辅助码（Shift+字母）。共享文档里是 `touch_quanpin_shift`，缺省为关；键盘从 App Group 镜像读。九键、14 键和 18 键的分词键不受它影响。
+  static let quanpinShiftDocumentKey = "touch_quanpin_shift"
+  static let quanpinShiftKey = "keyboard.quanpin.shift"
+
+  /// 文档里缺这一项或不是布尔值时按关，与 client-core 的默认值一致。
+  static func sharedQuanpinShift(in preferences: [String: Any]?) -> Bool {
+    preferences?[quanpinShiftDocumentKey] as? Bool ?? false
+  }
+
+  static var quanpinShift: Bool {
+    get { defaults.object(forKey: quanpinShiftKey) as? Bool ?? false }
+    set { defaults.set(newValue, forKey: quanpinShiftKey) }
+  }
+
+  /// 把「组字时保留 Shift」写进共享文档，只改这一项；文档接受了才更新 App Group 镜像。
+  @discardableResult
+  static func saveQuanpinShift(_ enabled: Bool, stateRoot: URL? = nil) -> Bool {
+    guard MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot, { document in
+      document[quanpinShiftDocumentKey] = enabled
+    }) else { return false }
+    quanpinShift = enabled
+    return true
+  }
+
   /// `resetToDefaults`, for the shared document as well.
   @discardableResult
   static func resetGeometry(stateRoot: URL? = nil) -> Bool {
@@ -165,10 +191,15 @@ enum KeyboardLayoutPreference {
     get { defaults.object(forKey: spaceVoiceKey) as? Bool ?? true }
     set { defaults.set(newValue, forKey: spaceVoiceKey) }
   }
-  /// 「滑动输入符号」：在字母键上下滑输入右上角的角标符号。默认开，与 Android 的 `platform.android.swipe_down_symbols` 相同；关掉后长按字母键仍能输入角标，与 Android 一致。只存在本机 App Group，不随设置同步。
+  /// 「滑动输入符号」：沿设定方向滑动字母键，输入右上角的角标符号。默认开，与 Android 的 `platform.android.swipe_down_symbols` 相同；关掉后长按字母键仍能输入角标，与 Android 一致。只存在本机 App Group，不随设置同步。
   static var swipeSymbols: Bool {
     get { defaults.object(forKey: swipeSymbolsKey) as? Bool ?? true }
     set { defaults.set(newValue, forKey: swipeSymbolsKey) }
+  }
+  /// 三端 26 键默认上滑输入角标，保留用户明确选择的下滑方向；只保存在本机 App Group。
+  static var swipeSymbolsDirection: SwipeDirection {
+    get { SwipeDirection(rawValue: defaults.string(forKey: swipeSymbolsDirectionKey) ?? "") ?? .up }
+    set { defaults.set(newValue.rawValue, forKey: swipeSymbolsDirectionKey) }
   }
   /// App Group 仅缓存共享文档的快捷符号，默认值和校验由 Rust 提供。
   static var quickPunctuationSymbols: [String] {
@@ -287,9 +318,10 @@ enum KeyboardHeightPercent {
     max(1, CGFloat(rows) * keyHeight + CGFloat(max(rows - 1, 0)) * rowSpacing)
   }
 
-  /// 手机键盘或全宽 iPad 键盘的竖屏按键区，后者的数字行多出第五行。
-  static func portraitKeyBlockHeight(tablet: Bool, numberRow: Bool, rowSpacing: CGFloat) -> CGFloat {
-    keyBlockHeight(keyHeight: portraitKeyHeight(tablet: tablet), rows: tablet && numberRow ? 5 : 4, rowSpacing: rowSpacing)
+  /// 手机键盘或全宽 iPad 键盘的竖屏按键区，后者的数字行多出第五行。手机画「按键布局」的顶部数字行时（`phoneNumberRow`）同样多一排。
+  static func portraitKeyBlockHeight(tablet: Bool, numberRow: Bool, rowSpacing: CGFloat, phoneNumberRow: Bool = false) -> CGFloat {
+    keyBlockHeight(keyHeight: portraitKeyHeight(tablet: tablet), rows: (tablet ? numberRow : phoneNumberRow) ? 5 : 4,
+                   rowSpacing: rowSpacing)
   }
 
   /// 把以点为单位的存储调整量换算成它在 `keyBlock` 上画出的百分比。

@@ -41,6 +41,10 @@ public:
   void candidate_rendered(const FocusLease &lease, uint64_t generation) {
     controller_->candidate_rendered(lease, generation);
   }
+  // 见 SessionController::set_candidate_render_request。
+  void set_candidate_render_request(std::function<void()> request) {
+    controller_->set_candidate_render_request(std::move(request));
+  }
   std::optional<ModePresentation> mode_view() { return controller_->mode_view(); }
   bool mode_active() { return controller_->mode_active(); }
   bool focus_current(const FocusLease &lease) {
@@ -85,11 +89,11 @@ public:
   std::optional<bool> dedicated_english_state(const FocusLease &lease) {
     return controller_->dedicated_english_state(lease);
   }
-  bool exit_dedicated_english(const FocusLease &lease) {
-    return controller_->exit_dedicated_english(lease);
+  bool exit_dedicated_english(const FocusLease &lease, bool *changed = nullptr) {
+    return controller_->exit_dedicated_english(lease, changed);
   }
-  bool set_dedicated_english(const FocusLease &lease, bool enabled) {
-    return controller_->set_dedicated_english(lease, enabled);
+  bool set_dedicated_english(const FocusLease &lease, bool enabled, bool *changed = nullptr) {
+    return controller_->set_dedicated_english(lease, enabled, changed);
   }
   std::vector<PipeTicket> current_tsf_tickets() {
     return transport_->current_tickets();

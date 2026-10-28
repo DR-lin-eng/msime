@@ -2593,7 +2593,6 @@ public final class MSIMEInputService extends InputMethodService {
             // 会把它画在组字与候选条的读音前面，两件事必须一起做：请求了却不画，用户已经选中的字
             // 既不在文档里也不在屏幕上（scripts/test-phrase-preedit-hosts.py 守的就是这一半状态）。
             options.put("phrase_preedit", true);
-            int drawnLayout = displayedTouchLayout(view);
             String created = NativeClient.create(options.toString());
             JSONObject response = new JSONObject(created);
             if ("dictionary maintenance busy".equals(response.optString("error"))
@@ -2630,8 +2629,8 @@ public final class MSIMEInputService extends InputMethodService {
             view = value(NativeClient.setEnglishMode(session, dedicatedEnglish));
             applyCharacterWidth(fullWidthPreference);
             applyChinesePunctuation(chinesePunctuationPreference);
-            // The rows were drawn before the session existed, from no view at all; a scheme with its own surface (the Korean keycaps) has to replace them now that the view says which one applies.
-            if (displayedTouchLayout(view) != drawnLayout) {
+            // focus 可能先按会话的临时中英状态重画键区；恢复编辑器模式后，以实际画出的键区为准，不能比较建会话前预测的布局。
+            if (displayedTouchLayout(view) != imeLetterRows.drawnTouchLayout()) {
                 letterCase.reset();
                 imeLetterRows.rebuildKeyRows();
             }
@@ -11069,7 +11068,8 @@ public final class MSIMEInputService extends InputMethodService {
         // 拼音九键和九键双拼之间换了、或九键双拼换了表：同一个触屏布局，按新键面重建。
         // 借用的数字九宫格上切了中/英：触屏布局没变，也要换回对应的键面。
         // 九键外框换了是否画右侧大回车（设置页换了九键样式、进出密码框），或大回车外框的地球键变了：外框连同底行整块重建。
-        if (imeLetterRows.splitStale() || imeLayoutRows.sidebarStale()
+        if (imeLetterRows.drawnTouchLayout() != displayedTouchLayout(view)
+                || imeLetterRows.splitStale() || imeLayoutRows.sidebarStale()
                 || imeLetterRows.layerPunctuationStale() || imeLetterRows.numberRowStale()
                 || imeLayoutRows.shuangpinStale() || imeLetterRows.languageNumberSwapStale()
                 || imeLetterRows.numberPadStale() || imeLayoutRows.tallReturnStale())

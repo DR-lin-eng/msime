@@ -39,7 +39,7 @@ public abstract class HomeTabFragment extends Fragment {
     /**
      * 换 tab 前清栈时，替换回退栈记录里的回退动画；其余时候返回 null，照常用记录里的动画。
      *
-     * <p>那一次弹栈里动到的页面都马上要离开屏幕：详情页被移走，弹回来的 tab 根页紧接着被切 tab 藏起来。动画一旦开始，FragmentManager 要等它播完才真正移走或藏起视图，所以这里给一段零时长、全透明的动画，让它们在下一帧之前就不再画出来，不和目标 tab 的淡入叠在一起。返回 null 不行：那样会退回去加载记录里的 fade_through 动画。
+     * <p>那一次弹栈里动到的页面都马上要离开屏幕：详情页被移走，弹回来的 tab 根页紧接着被切 tab 藏起来。动画一旦开始，被移走的视图要等动画结束才离开容器，被藏起来的视图虽然已是 GONE，父布局在动画结束前也照样画它，所以这里给一段零时长、全透明的动画：仍要画的那一帧是透明的，不和目标 tab 的淡入叠在一起。返回 null 不行：那样会退回去加载记录里的 fade_through 动画。
      *
      * <p>不继承这个类、却会被压进 `home_content` 回退栈的页面（{@link CommunityFragment}）也要在自己的 `onCreateAnimation` 里调它。
      */

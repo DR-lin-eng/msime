@@ -322,7 +322,12 @@ public final class TypingPage extends ReloadingDetailPage {
             on -> savePreferences(values -> values.put(backspace.key(), on)));
         InputFeatureToggle cloud = InputFeatureToggle.CLOUD_CANDIDATES;
         JSONObject cloudProvider = preferences.optJSONObject("cloud_candidate_provider");
-        chinese.toggle(cloud.title(), "仅将当前拼写发送给 " + cloudRecipient(cloudProvider) + "；不发送已上屏内容、词库或历史", preferences.optBoolean(cloud.key(), cloud.enabledByDefault()),
+        boolean cloudPrediction = cloudProvider != null && "custom".equals(cloudProvider.optString("source"))
+            && cloudProvider.optBoolean("prediction_enabled", false);
+        String cloudDescription = cloudPrediction
+            ? "将当前拼写和另行开启的上屏后联想文本发送给 " + cloudRecipient(cloudProvider) + "；不发送词库或输入历史"
+            : "仅将当前拼写发送给 " + cloudRecipient(cloudProvider) + "；不发送已上屏内容、词库或历史";
+        chinese.toggle(cloud.title(), cloudDescription, preferences.optBoolean(cloud.key(), cloud.enabledByDefault()),
             checked -> savePreferences(values -> values.put(cloud.key(), checked)));
         cloudProviderSettings(target, preferences);
         // 临时日语读日文词典；词典没在本机时 host-api 会关掉它，键盘菜单里也置灰，这里给出下载入口。和桌面一样，不会因为它自己去下载。
@@ -669,12 +674,19 @@ public final class TypingPage extends ReloadingDetailPage {
             OptionSheet sheet = new OptionSheet(requireContext(), "云候选来源", null);
             sheet.option("Google input-tools", "google".equals(provider.optString("source")),
                 () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "google")));
+            sheet.option("百度输入法", "baidu".equals(provider.optString("source")),
+                () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "baidu")));
             sheet.option("自定义 HTTP 接口", "custom".equals(provider.optString("source")), () -> {
                 if (provider.optString("endpoint").isEmpty()) editCloudField(provider, "endpoint", "接口地址", true);
                 else savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "custom"));
             });
             sheet.show();
         });
+        if ("custom".equals(provider.optString("source"))) {
+            group.toggle("允许上屏后云预测", "另将刚上屏的最多 64 个汉字发送到此服务；需要开启「上屏后联想」",
+                provider.optBoolean("prediction_enabled", false),
+                enabled -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("prediction_enabled", enabled)));
+        }
         group.nav("接口地址", "HTTPS 或本机 HTTP；GET 地址用 {query} 表示当前拼写", null,
             () -> editCloudField(provider, "endpoint", "接口地址", false));
         group.nav("请求方法", null, provider.optString("method"), () -> {
@@ -689,7 +701,7 @@ public final class TypingPage extends ReloadingDetailPage {
             () -> editCloudField(provider, "body_template", "请求体模板（JSON）", false));
         group.nav("响应格式", null, provider.optString("response_format"), () -> {
             OptionSheet sheet = new OptionSheet(requireContext(), "响应格式", null);
-            String[][] formats = {{"candidates", "标准 candidates 数组"}, {"google", "Google input-tools"}, {"json_path", "JSON 路径"}};
+            String[][] formats = {{"candidates", "标准 candidates 数组"}, {"google", "Google input-tools"}, {"baidu", "百度输入法"}, {"json_path", "JSON 路径"}};
             for (String[] format : formats) sheet.option(format[1], format[0].equals(provider.optString("response_format")),
                 () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("response_format", format[0])));
             sheet.show();
@@ -716,6 +728,7 @@ public final class TypingPage extends ReloadingDetailPage {
     }
 
     private static String cloudRecipient(JSONObject provider) {
+        if (provider != null && "baidu".equals(provider.optString("source"))) return "百度输入法（olimenew.baidu.com）";
         if (provider == null || !"custom".equals(provider.optString("source"))) return "Google input-tools（inputtools.google.com）";
         String host = Uri.parse(provider.optString("endpoint").replace("{query}", "query")).getHost();
         return host == null ? "所选自定义服务" : host;

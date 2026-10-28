@@ -253,6 +253,8 @@ final class EmailSuffixKeyboardTests: XCTestCase {
     addTeardownBlock {
       if !startedInEnglish { language.sendActions(for: .primaryActionTriggered) }
     }
+    // 文档在创建控制器后才挂上；模式切换本身不读取它，需模拟宿主的上下文变化回调。
+    controller.textDidChange(nil)
     return controller
   }
 

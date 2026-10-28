@@ -927,8 +927,7 @@ impl BackendAccountClient {
                 .flush()
                 .and_then(|_| temporary.as_file().sync_all())
                 .map_err(|_| AccountError::Unavailable)?;
-            temporary
-                .persist(destination)
+            crate::storage::persist_replacing(temporary, destination)
                 .map_err(|_| AccountError::Unavailable)?;
             Ok(bytes)
         }

@@ -27,6 +27,7 @@ Status: implemented
 - `CandidateSkinResolver`：轮询中的后续读取（`fresh` 为假）先对 `preferences.json` 和两个槽位指名的候选包目录做 stat（`CandidateSkinStamp`：inode、修改时间、大小，包目录逐个条目，外加 skins 根目录），都与上次整套读取时相同就交回上次的响应，不调 `loadPreferences`、`resolveTheme`、`skinPackage`、`skinResource`。戳在读之前取，读的过程中被改则下一轮重读；读或解析失败不缓存；包目录条目超过 `MAX_PACKAGE_ENTRIES`（256）时不给戳，每轮照常整套读。
 - `PreferencesReloader`：`start` 之后的第一次读取 must 是 `fresh` 真读，所以每次键盘显示仍整套重新校验一遍皮肤包。同一目录这一轮首次读取还没交付时再 `start` 只换接收者、不另起一轮。新增 `startAfter`：建会话时刚应用过实时偏好，一秒后再按平常节奏轮询。
 - `MSIMEInputService.reloadPreferences`：响应与上次整套应用成功的完全相同，且文档之外的输入（会话、目录、本地设置、月份、系统明暗、学习开关、键盘内调高度、剪贴板模式与存储、候选包解析结果、设计库文件戳）都没变、`preferencesNotice` 为空时直接返回。任何来源的 `applyPreferencesSnapshot` 开头都清空这份记录，建会话和停会话时也清空。
+- `clearOnlineProvider` 只把 `msime_client_clear_online_candidates` 操作结果内的 `view` 放进视图字段，先确认 `applied`。这个接口的 `value` 是 `{applied, view}`，不是视图本身；误存外层后方案号和网格都读不到，键区回落成 QWERTY。原来每秒重复应用偏好会纠正它，跳过重复应用后错误会一直保留，因此去重必须同时修正这条返回契约。
 - `themeSkin` 的缓存键按设计对象记下内容散列（`WeakHashMap`，身份语义），同一份快照的四块面板不再各自序列化照片。
 
 ### 候选条（idx 3、4、12）
@@ -91,4 +92,5 @@ Rust PR 自己在会话失焦和销毁时就把攒着的统计交给后台线程
 - Rust：`candidate_range` 的 input-runtime 与 host-api 用例（一批之内不放尾部、越过末尾才放并换代，真实全拼引擎与整代复制逐行一致、可经 `select_any_candidate` 选中）随实现一起挪进了共享 Rust PR，在那里的全量 `cargo test` 里跑，结果记在那篇笔记。
 - `StaleCandidateDeviceSmoke` 的按钮实例是 `ContactCandidateButton`，`bindStripCandidateButton` 声明的参数则是 `KeyboardPressButton`；反射按声明类型查找，不能用运行时子类的 `getClass()`，否则还没进入旧回调断言就抛 `NoSuchMethodException`。九键双拼套件等待可用的真实语言键出现后再建立中文前置条件，避免把冷启动第一帧当成已恢复的语言状态。保留所有组码、上屏及候选复用断言。
 - `ClipboardExportDeviceSmoke` 显式开启 `touch_toolbar.clipboard` 并恢复原值：它与 `clipboard_history` 是独立开关，共享默认值为关闭，只开启历史记录不会出现工具栏入口。`TextEditRecentClipboardDeviceSmoke` 经正式 JNI 解析补齐序列化省略的默认排列，不再把缺少默认键当作格式损坏。三项反射、语言和默认值修复连同导出入口前置条件经严格 `javac --release 17 -Xlint:all -Werror`、DEX 与 APK 签名构建通过。十八键真实横滑前等待按键范围稳定，并拆开右滑、取消、回中心、反向各阶段的诊断；这些手势断言仍需设备重跑。
-- 缺口：API 35 CI 已构建 APK 并运行设备套件，本轮整套仍有失败，尚未完成最终验收。没有任何耗电、发热或帧时间的实测数字，上面的「收益」都是按调用次数和数据量推算的。需要真机补的：低端机上键盘可见 5 分钟的 `:ime` CPU 时间增量（`adb shell top`、`dumpsys batterystats`）；释义异步到达时点候选、长按菜单、读屏描述；换皮肤和明暗后再打开表情、符号、剪贴板、更多工具面板是否是新皮肤；自定义主题下的手写键区；聊天应用发送后的重启连接、密码框与数字框之间切换、隐私开关切换；`TYPE_NULL` 弹幕框的九键和 26 键中文；装删资源包后对同一输入框重启连接。
+- 清除在线候选的返回契约修复由原版设备套件验证：专用 API 28、35 AVD 上的十八键全拼、九键双拼、十八键双拼各完整通过，覆盖禁用云候选、切方案、编辑器回落与几何；API 35 的 `NineKeyNumericLayoutDeviceSmoke` 在按锁校验并临时配置笔画资源后也完整通过，配置在测试后恢复。修复前的诊断只记录布局、方案和网格，实际观察到 `scheme=-1`、`grid=none` 与 QWERTY 回落；修复后没有保留临时诊断日志。
+- 覆盖边界：上述原版专项不替代 API 35 CI 的整套验收，整套结果见对应 PR。没有任何耗电、发热或帧时间的实测数字，上面的「收益」都是按调用次数和数据量推算的。需要真机补的：低端机上键盘可见 5 分钟的 `:ime` CPU 时间增量（`adb shell top`、`dumpsys batterystats`）；释义异步到达时点候选、长按菜单、读屏描述；换皮肤和明暗后再打开表情、符号、剪贴板、更多工具面板是否是新皮肤；自定义主题下的手写键区；聊天应用发送后的重启连接、密码框与数字框之间切换、隐私开关切换；`TYPE_NULL` 弹幕框的九键和 26 键中文；装删资源包后对同一输入框重启连接。

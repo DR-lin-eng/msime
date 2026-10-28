@@ -4380,8 +4380,12 @@ public final class MSIMEInputService extends InputMethodService {
         try {
             JSONObject envelope = new JSONObject(NativeClient.clearOnlineCandidates(session, source));
             if (JsonPolicy.strictTrue(envelope.opt("ok"))) {
-                JSONObject next = envelope.optJSONObject("value");
-                if (next != null) view = next;
+                JSONObject result = envelope.optJSONObject("value");
+                // 清除候选返回的是 {applied, view}，外层操作结果不能当作候选视图；偏好未变时轮询不会重新应用快照来纠正它。
+                if (result != null && JsonPolicy.strictTrue(result.opt("applied"))) {
+                    JSONObject next = result.optJSONObject("view");
+                    if (next != null) view = next;
+                }
             }
         } catch (JSONException | RuntimeException | LinkageError ignored) {
             // Optional provider rows are display state; a failed cleanup must not end the IME.

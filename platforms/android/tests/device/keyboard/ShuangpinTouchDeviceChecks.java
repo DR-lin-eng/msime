@@ -65,7 +65,7 @@ final class ShuangpinTouchDeviceChecks {
             editor();
 
             t.stage = "shuangpin touch: portrait geometry matches the keys";
-            JSONObject portrait = geometry(false, 0);
+            geometry(false);
             emit("android-portrait");
 
             t.stage = "shuangpin touch: an off-centre press composes the key it lands on";
@@ -116,11 +116,13 @@ final class ShuangpinTouchDeviceChecks {
             clear(6);
 
             t.stage = "shuangpin touch: Microsoft double-pinyin registers its ; key";
+            // 服务重建后几何代次可以从 1 开始；删除旧导出，按新文件确认这次注册。
+            Files.deleteIfExists(exported.toPath());
             scheme("microsoft");
             t.restartIme();
             editor();
             t.await(t.described("微软双拼 ing").and(AccessibilityNodeInfo::isVisibleToUser));
-            geometry(true, portrait.getInt("id"));
+            geometry(true);
             emit("android-portrait-microsoft");
             t.stage = "shuangpin touch: the ; key carries its touch-down";
             center("b");
@@ -161,16 +163,16 @@ final class ShuangpinTouchDeviceChecks {
     }
 
     /**
-     * 等宿主写出注册的几何（代次比 `previousId` 新），并核对它就是屏幕上的键：每个字母键的中心减去几何里的中心是同一个偏移（按键区的原点），宽高与无障碍树里的键一致（各差不到 1 像素）。`semicolon` 是不是该有 `;` 键。
+     * 等宿主在旧文件被删除后写出有效代次的几何，并核对它就是屏幕上的键：每个字母键的中心减去几何里的中心是同一个偏移（按键区的原点），宽高与无障碍树里的键一致（各差不到 1 像素）。`semicolon` 是不是该有 `;` 键。代次只在同一服务实例内递增，不跨重启比较。
      */
-    private JSONObject geometry(boolean semicolon, int previousId) throws Exception {
+    private JSONObject geometry(boolean semicolon) throws Exception {
         JSONObject json = null;
         long deadline = SystemClock.uptimeMillis() + 15000;
         while (SystemClock.uptimeMillis() < deadline) {
             if (exported.isFile()) {
                 String text = new String(Files.readAllBytes(exported.toPath()), StandardCharsets.UTF_8);
                 JSONObject candidate = new JSONObject(text);
-                if (candidate.getInt("id") > previousId && candidate.isNull("semicolon") != semicolon) {
+                if (candidate.getInt("id") > 0 && candidate.isNull("semicolon") != semicolon) {
                     json = candidate;
                     exportedText = text;
                     break;

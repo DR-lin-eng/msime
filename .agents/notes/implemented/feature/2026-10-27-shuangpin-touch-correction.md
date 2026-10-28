@@ -24,21 +24,21 @@ Status: implemented
   - `KeyGeometry` 按 26 个字母键键宽、键高的中位数归一，保存 a..z、`;` 和重复键的键心；`KeyGeometry::from_json` 是宿主 JSON 的唯一解析。
   - `KeyTouch { dx, dy, copy }`：相对被按键中心的偏移，单位 1/20 键，在入口量化并钳到 ±30；`copy` 是这个字母的第几个实例，分离键盘上两边各有一个 G、V 时才不是 0。打分和缓存签名用同一个量化值。
 - **runtime**：`InputEngine` 加两个默认空实现的 setter（`set_key_touch`、`set_key_geometry`）。`Runtime` 自己持有几何（`Arc`），在 `replace_engine_with_touch_layout` 里紧挨 `set_rescoring_context` 重新下发，宿主空闲时重建引擎后触点照样有效。`Runtime::key_touch` 按代次和坐标算出触点，host-api 和评测都用它。没有新增 `Action` 变体。
-- **引擎内的生命周期**：`session::Session::set_key_touch` 把触点放进 `InputSession.pending_touch`。`character` 先把它取出来，只有走到 `dispatch_character` 末尾、这一键是小写字母或 `;` 时才在 `handle_key` 之前交给方案（`handle_key` 会同步刷新候选）；其余路径（改字、光标处插入、本地模式、网址、辅助码前导键、九宫格数字）都丢掉它。`command`、`select`、`grid_key`、`glide`、`punctuation` 一开头清掉它，所以被 `candidate_shortcut` 之类改道的按键不会把触点留给后面的字母。
+- **引擎内的生命周期**：`session::Session::set_key_touch` 把触点放进 `InputSession.pending_touch`。`character` 先把它取出来，只有走到 `dispatch_character` 末尾、这一键是小写字母或 `;` 时才在 `handle_key` 之前交给方案（`handle_key` 会同步刷新候选）；其余路径（改字、光标处插入、本地模式、网址、辅助码前导键、九宫格数字）都丢掉它。`command`、`select`、`grid_key`、`glide`、`punctuation` 一开头清掉它，所以被 `candidate_shortcut` 之类改道的按键不会把触点留给后面的字母。其余会改动组字或改道按键的公开入口（`select_edge`、`finish`、`set_caret`、`candidate_key`、`conversion_left_from`、`pin`、`remove`、`fix_position`、`clear_position`、九宫格的两个入口、`expand_initial_candidates`、`reset_context`、`switch_scheme`、`set_key_grid`、`set_dedicated_english`、`set_key_geometry`）同样一开头清掉它；只改配置的 setter 不碰它。runtime 派发 `Action::Character` 时在 `engine.character` 之前不调这些入口，宿主的「设触点、派发、清触点」照样成立。
 - **`ShuangpinScheme.touches`** 与 `raw` 逐字节对齐，一个触点都没有时保持为空，不为全 `None` 占位，桌面每键不多一次分配。`'`、大写字母（辅助码）和标记不带触点；退格截掉；`set_raw_input` 先认新旧串的公共后缀、再在剩下的部分里认公共前缀，这两段保留触点，中间新出现的字节没有触点。先认后缀是因为部分选词吃掉前缀、撤销补回前缀是确定的改动：叠词 `xpxp`（谢谢）选走第一个字剩下 `xp`，先认前缀会让它拿到刚选走那两键的触点，按别的按键的落点给剩下的音节计价。光标处删改相同的相邻字母（`hh`）分不清是哪一个，触点可能互换，长度和其余位置仍对得上。几何的布局或代次变化（包括注册和清除）会清掉已记录触点和待用触点，保留 `raw`；没有所属布局的旧偏移不能交给新几何解释。相同几何重复下发保留触点，避免会话重复绑定方案时丢失当前输入的落点。
 - **`QueryRequest`** 新增 `key_touches`、`key_geometry`、`touch_tuning`。只有注册了几何、至少一个触点、输入里没有 `'`、句中辅助码没有改写输入串时，`key_touches` 才非空；否则必须是空 Vec 而不是全 `None`。光标前缀查询、撤回选词后重打和模糊音的替代拼写都拿不到触点，按平面表算。
-- **`ShuangpinDictionary`** 在每次查询前收下请求的触点（`set_key_touches`，`query`、`insert_online_words`、`expand_initial_candidates` 都先调它）。只对带触点那串输入的前缀用触点；系列缓存、整句缓存、辅助码缓存的键追加这一段的触点签名（几何代次加逐位量化触点），没有触点时签名为空，键与以前相同。计价参数变了就清掉整句答案。
+- **`ShuangpinDictionary`** 在每次查询前收下请求的触点（`set_key_touches`，`query`、`insert_online_words`、`expand_initial_candidates` 都先调它）。只对带触点那串输入的前缀用触点；系列缓存、整句缓存、辅助码缓存的键追加这一段的触点签名（几何代次、几何内容指纹 `KeyGeometry::fingerprint` 加逐位量化触点），没有触点时签名为空，键与以前相同。只带代次不够：方案层把同代次、内容不同的几何当新几何处理，同样的量化触点在挪过键的布局下计价不同，缓存却会命中旧布局算出的行。计价参数变了就清掉整句答案。
 
 ### 计价
 
 - 罚分：`pen(j) = clamp(B + s·(d²(P, c_j) − d²(P, c_k)), P_MIN, P_MAX)`。P 是还原出的落点，c_k 是被按的那个实例，c_j 取候选键离落点最近的实例；`d² = (Δx/σx)² + ((Δy − b_y)/σy)²`。单位就是词网格边的自然对数分，纠错边从对数概率里扣它，`decode_typo_on_graph_with_policy` 不改。
-- 变体集（`collect_priced_shuangpin_typo_edges`）：平面表原有的邻键永不丢弃，只按罚分排；分离键盘上平面表说相邻、几何上相距超过 3 个键的那几对（T 和 Y、G 和 H）不算邻键；七份参考布局里不分离的那几份，平面表邻键最远相距 2.25 个键，分离布局里分在两半的相距 8 个键以上。平面表里没有的键（真实布局下的斜邻键、微软的 `;`）罚分不超过 `P_CUT` 时加进来。对调、没有触点的位置照旧付 20。同一个音节由几种改法得到时取最低价。解码用每个方案一张 27×27 的解码表，和变体表一样按方案地址缓存。
+- 变体集（`collect_priced_shuangpin_typo_edges`）：平面表原有的邻键永不丢弃，只按罚分排；分离键盘上平面表说相邻、几何上相距超过 3 个键的那几对（T 和 Y、G 和 H）不算邻键；七份参考布局里不分离的那几份，平面表邻键最远相距 2.25 个键，分离布局里分在两半的相距 8 个键以上。平面表里没有的键（真实布局下的斜邻键、微软的 `;`）罚分不超过 `P_CUT` 时加进来。对调、没有触点的位置照旧付 20。同一个音节由几种改法得到时取最低价。解码用每个方案一张 27×27 的解码表，和平面变体表放在按方案地址缓存的同一个条目里，一个方案只泄漏一份、只有一把锁。每个位置的计价变体（`priced_shuangpin_variants`）每次查询只算一次，规划纠错边和判断落点是否支持纠错整句共用。
 - 规划（`quanpin::typo_edges::collect_priced_span_typo_edges`）：所有位置的所有变体按罚分全局升序排，同价时弱位置优先，再生成跨度键，直到 96 个键的预算。全拼的 `plan_keys_with` 和 `collect_span_typo_edges` 一行没改。
 - 不做：一次只换一个音节、只产出一条纠错整句，这是召回上限。
 
 ### 座位
 
-- 纠错整句的分数（已扣罚分）不比字面整句低出 `show_margin`，而且它改动的每一键在落点下改过去的价都不超过 `show_penalty`（`touch_supports_correction` 按纠错读音逐音节对回两键码，查这一键的计价变体）时，这一行标上 `WordItem::touch_supported`。快照带一列与候选同步排列的 `candidate_touch_supported`（一行都没有时为空），runtime 调 `ordering::runner_up_order_with(scheme, rows, &candidate_touch_supported)`：标上的纠错行不算整句读法，留在引擎给的座位上（整句块之后），前三条字面读法照旧，其余读法照旧挪到表尾。没标上的纠错行和没有触点的表一样沉底，网页引擎和桌面不受影响。按行而不是按整张表：开了模糊音时，替代拼写按平面表查出的纠错整句也带 `corrected_from`，却没有触点、没过闸；整张表一个标志会让它跟着主纠错行一起逃过沉底。
+- 纠错整句的分数（已扣罚分）不比字面整句低出 `show_margin`，而且它改动的每一键在落点下改过去的价都不超过 `show_penalty`（`touch_supports_correction` 按纠错读音逐音节对回两键码，在规划纠错边时算好的那一份计价变体里查这一键，不重新计价）时，这一行标上 `WordItem::touch_supported`。快照带一列与候选同步排列的 `candidate_touch_supported`（一行都没有时为空），runtime 调 `ordering::runner_up_order_with(scheme, rows, &candidate_touch_supported)`：标上的纠错行不算整句读法，留在引擎给的座位上（整句块之后），前三条字面读法照旧，其余读法照旧挪到表尾。没标上的纠错行和没有触点的表一样沉底，网页引擎和桌面不受影响。按行而不是按整张表：开了模糊音时，替代拼写按平面表查出的纠错整句也带 `corrected_from`，却没有触点、没过闸；整张表一个标志会让它跟着主纠错行一起逃过沉底。
 - 纠错整句仍不抢首选：`typo_sentence_seat`、`keep_typo_sentence_off_first_seat`、`corrections_may_lead` 都没动，旧评测的 `top1_changed` 为 0，只能说明原本排第一的金标准没有降位；实际首选是否变化由单独比较候选文本的 `--assert-top1-unchanged` 检查。
 
 ### 参数（暂定）
@@ -75,6 +75,10 @@ Status: implemented
 - **计价参数经 `host::Options`（`EngineOptions`）下发**：方案原本这样写。`EngineOptions` 刻意没有 `Default`，每个构造点都列全字段，加一个只给评测用的字段要改十几处，宿主的 JSON 也得决定要不要认它。改成 `host::Session::set_touch_tuning` 这个只在 Rust 侧可调的 setter，经请求带给词典，效果相同。
 - **`KeyTouch` 只记 (dx, dy)**：方案的写法。分离键盘上同一个字母有两个实例，只记偏移还原不出落点在哪一边，所以多记一个实例序号。
 - **平面表的邻键在任何布局下都保留**：方案说「永不丢弃」，又要求「分离布局下 t、y 不产生替换」。两者在分离键盘上冲突；按几何距离判断后，普通布局下平面表的每个邻键仍都保留，只有分在两半的那几对被去掉。阈值起初定为 2 个键，量了七份参考布局才发现微软双拼那几份第二行多一个 `;`、键距变宽，J 和 M 相距 2.14–2.25 个键，会被误删，于是放到 3。
+
+- **触点经 `Action::Character` 传递**（评审提出）：语义上最干净，但 `Action::Character` 有约 140 个构造点（runtime、host-api、各宿主桥、测试、评测），每一处都要补一个字段或改成新变体，而且桌面宿主永远不带触点。方案选了旁路（`set_key_touch` 加原路派发再清掉），这一期不改；旁路的风险是待用触点被别的入口带到下一个字母，靠所有非字符入口一开头清掉来封住，并有测试逐个入口核对。
+- **从全拼的 `plan_keys_with` 抽出与 `plan_priced_keys` 共用的弱位置和跨度生成**（评审提出）：两者有一段重复。但方案要求全拼的规划代码一行不改，全拼纠错整句的结果要逐字节不变，抽公共函数等于改全拼的规划；这一期保留重复，等全拼也接触点时再合。
+- **重新设计逐行的 `candidate_touch_supported` 列**（评审提出：把它并进更通用的逐行标志，或不再在每个平行数组里同步）：现在这一列只在有落点支持的行时才非空，桌面永远为空。PR3 让落点支持的纠错整句有条件地坐首选时，本来就要一个逐行标志，届时一起重新设计，这一期不动。
 
 ## Consequences
 
@@ -126,3 +130,11 @@ Status: implemented
 - 将本轮资源目录的全部文件逐项按本分支 `desktop-dictionary.lock.json` 校验大小与 SHA-256 后，使用 `sentences-v1 --limit 12`、小鹤和微软、none/clean、σ=0.25、b=0、种子 20261027 实跑；两方案各 12 条，修正后的 `--assert-top1-unchanged` 通过。这里只验证 24 条 clean 用例，没有重跑完整的 60760 条。
 
 - 本轮完整 `bash scripts/verify-local.sh --quick` 退出 0：Windows 可移植用例、仓库契约与笔记、Rust workspace、Android 目标及 Java 宿主、WASM、Linux 设置应用和原生门禁（112 项、0 失败）、macOS 原生编译及 Apple 桥通过。缺 MinGW 的 Windows 原生/pipe-only 与缺暂存输入的鸿蒙 HAP 按规则跳过，不计设备验收；本轮没有补跑 iOS 原生套件或完整触点基线。
+
+### PR #10083 第二轮评审修正
+
+- 改了什么：触点缓存签名加上几何内容指纹（`KeyGeometry::fingerprint`，构造时对归一单位和键心的位模式求哈希，-0.0 归成 0.0，内容 `==` 相同则指纹相同）；`select_edge`、`finish`、`set_caret` 等其余非字符入口一开头清掉待用触点；`touch_supports_correction` 复用规划纠错边时算好的计价变体；在线行写入辅助码缓存改用 `signed_key`；英文词典、日文 provider、韩文汉字的原地复用路径清掉 `touch_supported`；解码表并进变体表的按方案缓存条目；`Runtime::key_geometry_id` 改成只在测试里编译。没有触点时以上每一处的结果和分配都与修改前相同。
+- 新增和调整的回归，修正前都失败、修正后通过：`session::tests::a_same_id_geometry_with_moved_keys_does_not_reuse_cached_touch_rows`（同代次把 r 挪走、同样的量化触点，不再拿到旧布局的落点支持行；换回原布局答案照旧）、`session::tests::non_character_entries_discard_the_pending_touch`（17 个入口逐个核对，另有不调入口时触点照常交给下一个字母的对照）、`korean::hanja` 与 `japanese::provider` 的 `query_into_reuses_existing_candidate_rows`、`dictionary::english::keypad_append_tests::ordinary_decoder_reuses_and_resets_rows_like_frozen_entry`。另加 `touch::tests::the_fingerprint_follows_the_content_not_the_id`。
+- 第一次全量跑出 `shuangpin::dictionary::online_cache_update_tests` 两项分配计数失败：改用 `signed_key` 时 `into_owned()` 在签名为空时多复制了一次键。改成签名为空时直接用原键后通过，分配次数与修改前相同。
+- 结果（Mac Studio，`rbuild`）：`cargo test -p msime-engine --lib` 2720 项通过、57 项忽略；`--test golden` 31 项通过；`cargo test -p msime-input-runtime --lib` 通过；`--example convert_eval --example rerank_latency` 23 / 16 项通过；`cargo test -p msime-host-api --no-fail-fast` 库测试 1008 项通过、2 项失败，仍是上面记过的 `listing_reports_every_pack_and_checks_the_state_root` 和 `a_command_gets_the_local_time_to_the_minute`；`cargo clippy -p msime-engine -p msime-input-runtime -p msime-host-api --all-targets -- -D warnings` 无警告；`cargo check --manifest-path fuzz/Cargo.toml --target-dir target/fuzz --bins` 通过。
+- 评测：资源目录用 `msime-client-core` 的 `install_resources` 按本分支 `desktop-dictionary.lock.json` 下载并逐项校验（generation `7356c4a4…`，stderr 打出 `no settled model at …`）。整句族四个集合，小鹤和微软 × none、clean、noisy、realistic，σ=0.25、b=0，种子 20261027，`--jobs 2 --assert-top1-unchanged`，退出 0；`--report` 写出的 8 组与提交的 `baseline-shuangpin-touch-sentences.json` 里对应的 8 组逐项相同，每组的三行在基线里逐字出现。完整的 125 组和词级族没有重跑；没有在真机或模拟器上验证。

@@ -29,6 +29,8 @@ pub struct KeyGeometry {
     unit: (f32, f32),
     /// 归一后的键心：先是 a 到 z，有 `;` 时接着是它，最后是重复键。
     keys: Vec<(u8, f32, f32)>,
+    /// `unit` 和 `keys` 的内容指纹（[`Self::fingerprint`]），构造时算好。
+    fingerprint: u64,
 }
 
 /// 宿主给的一个键：`[cx, cy, w, h]`，宿主坐标。
@@ -115,10 +117,12 @@ impl KeyGeometry {
         {
             return Err(KeyGeometryError::InvalidRect);
         }
+        let fingerprint = content_fingerprint(unit, &normalized_keys);
         Ok(Self {
             id,
             unit,
             keys: normalized_keys,
+            fingerprint,
         })
     }
 
@@ -162,6 +166,11 @@ impl KeyGeometry {
 
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// 几何内容（归一单位和每个键心）的指纹。宿主可能用同一个代次下发内容不同的几何，方案层把它当新几何处理；按触点计价的缓存键要带上它，才不会把旧布局算出的答案交给新布局。内容相同（`==`）的几何指纹相同。
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     /// 有没有 `;` 键（宿主只在微软双拼下显示它）。
@@ -293,6 +302,21 @@ impl Default for TouchTuning {
 /// 有限且不超过 [`COORDINATE_LIMIT`]；NaN 不满足。
 fn within_limit(value: f32) -> bool {
     value.abs() <= COORDINATE_LIMIT
+}
+
+/// `unit` 和 `keys` 的位模式的哈希。先加 0.0 把 -0.0 归成 0.0，内容按 `==` 相同的几何指纹也相同（NaN 在构造时已被拒绝）。
+fn content_fingerprint(unit: (f32, f32), keys: &[(u8, f32, f32)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let bits = |value: f32| (value + 0.0).to_bits();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bits(unit.0).hash(&mut hasher);
+    bits(unit.1).hash(&mut hasher);
+    for &(key, x, y) in keys {
+        key.hash(&mut hasher);
+        bits(x).hash(&mut hasher);
+        bits(y).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn distance_squared((ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {

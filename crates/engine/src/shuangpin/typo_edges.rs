@@ -38,7 +38,7 @@ pub fn collect_shuangpin_typo_edges(
     autocorrect_types: u32,
 ) -> Vec<TypoEdge> {
     debug_assert_eq!(codes.len(), segments.len());
-    let table = typo_table(profile);
+    let table = &profile_tables(profile).typos;
     collect_span_typo_edges(
         database,
         span_cache,
@@ -50,75 +50,65 @@ pub fn collect_shuangpin_typo_edges(
     )
 }
 
-/// 带触点时的纠错边。`touches` 与这段输入逐字节对齐：第 i 个两键码 `codes[i]` 是第 2i、2i+1 个按键。每个位置的变体按落点计价后交给按罚分全局排序的规划（`collect_priced_span_typo_edges`）。
-#[allow(clippy::too_many_arguments)]
-pub fn collect_priced_shuangpin_typo_edges(
-    database: &PinyinDatabase,
-    span_cache: &mut FifoCache<String, Vec<DictRow>>,
+/// 带触点时每个两键码按落点计过价的变体，`[i]` 对应 `codes[i]`。`touches` 与这段输入逐字节对齐：第 i 个两键码 `codes[i]` 是第 2i、2i+1 个按键。纠错边的规划（[`collect_priced_shuangpin_typo_edges`]）和落点支持的判断（[`touch_supports_correction`]）共用这一份，不重复计价。
+pub(crate) fn priced_shuangpin_variants(
     profile: &'static ShuangpinProfile,
     codes: &[&str],
     touches: &[Option<KeyTouch>],
     geometry: &KeyGeometry,
     tuning: &TouchTuning,
-    segments: &[String],
-    literal_best: &SentencePath,
     autocorrect_types: u32,
-) -> Vec<TypoEdge> {
-    debug_assert_eq!(codes.len(), segments.len());
+) -> Vec<Vec<PricedTypo<'static>>> {
     debug_assert_eq!(touches.len(), codes.len() * 2);
-    let decoded = decode_table(profile);
+    let decoded = &profile_tables(profile).decoded;
     let types = autocorrect_types & SHUANGPIN_TYPO_TYPES;
-    let variants: Vec<Vec<PricedTypo<'static>>> = codes
+    codes
         .iter()
         .enumerate()
         .map(|(position, code)| {
             let touched = [touches[2 * position], touches[2 * position + 1]];
             priced_variants(decoded, code.as_bytes(), touched, geometry, tuning, types)
         })
-        .collect();
+        .collect()
+}
+
+/// 带触点时的纠错边。`variants` 是 [`priced_shuangpin_variants`] 给出的每个位置的变体，交给按罚分全局排序的规划（`collect_priced_span_typo_edges`）。
+pub(crate) fn collect_priced_shuangpin_typo_edges(
+    database: &PinyinDatabase,
+    span_cache: &mut FifoCache<String, Vec<DictRow>>,
+    variants: &[Vec<PricedTypo<'static>>],
+    segments: &[String],
+    literal_best: &SentencePath,
+) -> Vec<TypoEdge> {
+    debug_assert_eq!(variants.len(), segments.len());
     collect_priced_span_typo_edges(database, span_cache, segments, literal_best, |position| {
         variants[position].as_slice()
     })
 }
 
-/// 纠错整句改动过的每个音节，在这一键的落点下改过去的价都不超过 `TouchTuning::show_penalty`：落点本身支持这次改正。`corrected_key` 是纠错整句的读音（逐音节以 `'` 相连），音节数与 `segments` 不同、或某个改动不在这个两键码的变体里时为假。
-#[allow(clippy::too_many_arguments)]
-pub fn touch_supports_correction(
-    profile: &'static ShuangpinProfile,
-    codes: &[&str],
-    touches: &[Option<KeyTouch>],
-    geometry: &KeyGeometry,
+/// 纠错整句改动过的每个音节，在这一键的落点下改过去的价都不超过 `TouchTuning::show_penalty`：落点本身支持这次改正。`variants` 是规划纠错边时算好的那一份（[`priced_shuangpin_variants`]）。`corrected_key` 是纠错整句的读音（逐音节以 `'` 相连），音节数与 `segments` 不同、或某个改动不在这个两键码的变体里时为假。
+pub(crate) fn touch_supports_correction(
+    variants: &[Vec<PricedTypo<'static>>],
     tuning: &TouchTuning,
     segments: &[String],
     corrected_key: &str,
-    autocorrect_types: u32,
 ) -> bool {
     let corrected: Vec<&str> = corrected_key.split('\'').collect();
-    if corrected.len() != segments.len() || codes.len() != segments.len() {
+    if corrected.len() != segments.len() || variants.len() != segments.len() {
         return false;
     }
-    let decoded = decode_table(profile);
-    let types = autocorrect_types & SHUANGPIN_TYPO_TYPES;
     corrected
         .iter()
         .zip(segments)
-        .enumerate()
-        .all(|(position, (corrected, literal))| {
+        .zip(variants)
+        .all(|((corrected, literal), variants)| {
             let corrected = normalized_syllable(corrected);
             if corrected == normalized_syllable(literal) {
                 return true;
             }
-            let touched = [touches[2 * position], touches[2 * position + 1]];
-            priced_variants(
-                decoded,
-                codes[position].as_bytes(),
-                touched,
-                geometry,
-                tuning,
-                types,
-            )
-            .iter()
-            .any(|variant| variant.syllable == corrected && variant.penalty <= tuning.show_penalty)
+            variants.iter().any(|variant| {
+                variant.syllable == corrected && variant.penalty <= tuning.show_penalty
+            })
         })
 }
 
@@ -221,28 +211,6 @@ fn decoded_syllable(table: &'static DecodeTable, [first, second]: [u8; 2]) -> Op
     table[index].as_deref()
 }
 
-/// 方案的解码表，与变体表一样按方案的地址第一次用到时整表算好、留到进程结束（见 `typo_table`）。
-fn decode_table(profile: &'static ShuangpinProfile) -> &'static DecodeTable {
-    static TABLES: Mutex<Vec<(&'static ShuangpinProfile, &'static DecodeTable)>> =
-        Mutex::new(Vec::new());
-    let mut tables = TABLES.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(&(_, table)) = tables
-        .iter()
-        .find(|(known, _)| std::ptr::eq(*known, profile))
-    {
-        return table;
-    }
-    let mut table = Vec::with_capacity(CODE_KEYS.len() * CODE_KEYS.len());
-    for &first in CODE_KEYS {
-        for &second in CODE_KEYS {
-            table.push(decode(profile, &[first, second]));
-        }
-    }
-    let table: &'static DecodeTable = Box::leak(Box::new(table));
-    tables.push((profile, table));
-    table
-}
-
 type TypoTable = HashMap<String, Vec<SyllableTypo>>;
 
 /// 一个两键编码在方案下可能想打的音节，便宜的类型在前；不是合法编码时为空。
@@ -250,30 +218,38 @@ fn table_typos(table: &'static TypoTable, code: &str) -> &'static [SyllableTypo]
     table.get(code).map_or(&[], Vec::as_slice)
 }
 
-/// 方案的变体表，第一次用到时整表算好。按方案的地址区分而不是按 `kind`：自定义方案的 `kind` 都是 `Custom`，键位却各不相同；`custom::custom_profile` 让同一张表总是同一个地址、换了键位就是另一个地址，所以每张表只算一次，改了键位也不会拿到旧键位算出的变体。表和自定义方案一样留到进程结束，数量不超过进程里实际用来打字的方案数。
-fn typo_table(profile: &'static ShuangpinProfile) -> &'static TypoTable {
-    static TABLES: Mutex<Vec<(&'static ShuangpinProfile, &'static TypoTable)>> =
+/// 一个方案的两张表：平面变体表（没有触点时用）和两键码解码表（按触点计价时用）。
+struct ProfileTables {
+    typos: TypoTable,
+    decoded: DecodeTable,
+}
+
+/// 方案的变体表和解码表，第一次用到时整表算好，同一个条目、同一把锁。按方案的地址区分而不是按 `kind`：自定义方案的 `kind` 都是 `Custom`，键位却各不相同；`custom::custom_profile` 让同一张表总是同一个地址、换了键位就是另一个地址，所以每张表只算一次，改了键位也不会拿到旧键位算出的变体。表和自定义方案一样留到进程结束，数量不超过进程里实际用来打字的方案数。
+fn profile_tables(profile: &'static ShuangpinProfile) -> &'static ProfileTables {
+    static TABLES: Mutex<Vec<(&'static ShuangpinProfile, &'static ProfileTables)>> =
         Mutex::new(Vec::new());
     let mut tables = TABLES.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(&(_, table)) = tables
+    if let Some(&(_, entry)) = tables
         .iter()
         .find(|(known, _)| std::ptr::eq(*known, profile))
     {
-        return table;
+        return entry;
     }
-    let mut table = HashMap::new();
+    let mut typos = HashMap::new();
+    let mut decoded = Vec::with_capacity(CODE_KEYS.len() * CODE_KEYS.len());
     for &first in CODE_KEYS {
         for &second in CODE_KEYS {
             let code = [first, second];
-            let typos = compute_code_typos(profile, &code);
-            if !typos.is_empty() {
-                table.insert(String::from_utf8_lossy(&code).into_owned(), typos);
+            let code_typos = compute_code_typos(profile, &code);
+            if !code_typos.is_empty() {
+                typos.insert(String::from_utf8_lossy(&code).into_owned(), code_typos);
             }
+            decoded.push(decode(profile, &code));
         }
     }
-    let table: &'static TypoTable = Box::leak(Box::new(table));
-    tables.push((profile, table));
-    table
+    let entry: &'static ProfileTables = Box::leak(Box::new(ProfileTables { typos, decoded }));
+    tables.push((profile, entry));
+    entry
 }
 
 fn compute_code_typos(profile: &ShuangpinProfile, code: &[u8; 2]) -> Vec<SyllableTypo> {
@@ -353,7 +329,7 @@ mod tests {
     use crate::types::{ShuangpinCustomTable, ShuangpinProfileKind};
 
     fn code_typos(profile: &'static ShuangpinProfile, code: &str) -> &'static [SyllableTypo] {
-        table_typos(typo_table(profile), code)
+        table_typos(&profile_tables(profile).typos, code)
     }
 
     fn syllables(kind: ShuangpinProfileKind, code: &str) -> Vec<(&'static str, SyllableTypoKind)> {
@@ -476,7 +452,7 @@ mod tests {
     ) -> Vec<(&'static str, f64)> {
         let xiaohe = profile(ShuangpinProfileKind::Xiaohe).unwrap();
         priced_variants(
-            decode_table(xiaohe),
+            &profile_tables(xiaohe).decoded,
             code.as_bytes(),
             touches,
             geometry,

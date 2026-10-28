@@ -11,8 +11,8 @@ use super::query::{
     trim_trailing_letters_preserve_delimiters,
 };
 use super::typo_edges::{
-    collect_priced_shuangpin_typo_edges, collect_shuangpin_typo_edges, touch_supports_correction,
-    SHUANGPIN_TYPO_TYPES,
+    collect_priced_shuangpin_typo_edges, collect_shuangpin_typo_edges, priced_shuangpin_variants,
+    touch_supports_correction, SHUANGPIN_TYPO_TYPES,
 };
 use super::utils::{convert_seg_shuangpin_to_seg_complete_pinyin, pinyin_segmentation};
 use super::ShuangpinProfile;
@@ -200,13 +200,19 @@ impl ShuangpinDictionary {
         self.key_geometry = Some(Arc::clone(geometry));
     }
 
-    /// `touched` 这段输入的触点签名：几何代次加上每个位置量化后的触点。`touched` 不是带触点的那串输入的前缀（模糊音替换过的拼写、直接辅助码去掉辅码的串）或这一段一个触点都没有时为空，缓存键和没有触点时一样。
+    /// `touched` 这段输入的触点签名：几何代次和内容指纹，加上每个位置量化后的触点。代次不够：宿主可能用同一个代次下发挪过键的几何，同样的量化触点在新布局下计价不同，只认代次会把旧布局算出的答案当缓存命中。`touched` 不是带触点的那串输入的前缀（模糊音替换过的拼写、直接辅助码去掉辅码的串）或这一段一个触点都没有时为空，缓存键和没有触点时一样。
     fn touch_signature(&self, touched: &str) -> Option<String> {
+        use std::fmt::Write as _;
         let touches = touch_slice(&self.key_touches, &self.touch_input, touched)?;
         let geometry = self.key_geometry.as_ref()?;
-        let mut signature = String::with_capacity(12 + touches.len() * 4);
+        let mut signature = String::with_capacity(32 + touches.len() * 4);
         signature.push('\u{2}');
-        signature.push_str(&geometry.id().to_string());
+        let _ = write!(
+            signature,
+            "{}:{:016x}",
+            geometry.id(),
+            geometry.fingerprint()
+        );
         for touch in touches {
             match touch {
                 Some(touch) => {
@@ -605,19 +611,28 @@ impl ShuangpinDictionary {
             .zip(self.key_geometry.as_deref());
         let tuning = self.touch_tuning;
         let span_cache = &mut self.typo_span_cache;
+        // 按落点计价的变体第一次规划纠错边时算一次，之后判断落点是否支持纠错整句时直接复用。
+        let mut priced = None;
         let mut typo_edges = |literal_best: &SentencePath| match touched {
-            Some((touches, geometry)) => collect_priced_shuangpin_typo_edges(
-                database,
-                span_cache,
-                profile,
-                codes.as_slice(),
-                touches,
-                geometry,
-                &tuning,
-                segments,
-                literal_best,
-                types,
-            ),
+            Some((touches, geometry)) => {
+                let variants = priced.get_or_insert_with(|| {
+                    priced_shuangpin_variants(
+                        profile,
+                        codes.as_slice(),
+                        touches,
+                        geometry,
+                        &tuning,
+                        types,
+                    )
+                });
+                collect_priced_shuangpin_typo_edges(
+                    database,
+                    span_cache,
+                    variants,
+                    segments,
+                    literal_best,
+                )
+            }
             None => collect_shuangpin_typo_edges(
                 database,
                 span_cache,
@@ -662,18 +677,14 @@ impl ShuangpinDictionary {
             typo.key,
         );
         sentence.sentence_association = true;
-        // 落点支持的改正才留在座位上：分数不比字面整句低太多，而且改动的每一键都是落点支持的改法。
-        let touch_supported = touched.is_some_and(|(touches, geometry)| {
+        // 落点支持的改正才留在座位上：分数不比字面整句低太多，而且改动的每一键都是落点支持的改法。纠错整句来自上面的纠错边，带触点时 `priced` 已经算好。
+        let touch_supported = priced.as_deref().is_some_and(|variants| {
             typo.score >= typo.literal_score - tuning.show_margin
                 && touch_supports_correction(
-                    profile,
-                    codes.as_slice(),
-                    touches,
-                    geometry,
+                    variants,
                     &tuning,
                     segments,
                     sentence.canonical_pinyin.as_str(),
-                    types,
                 )
         });
         sentence.touch_supported = touch_supported;
@@ -861,18 +872,13 @@ impl ShuangpinDictionary {
             };
             replace_cached_online_candidate_batch(list, raw, words, source)
         };
-        // 键与 `generate_with_helpcodes` 一致：约束签名和 `raw` 的触点签名；两者都为空时原键不复制。
-        let touch = self.touch_signature(raw);
+        // 键与 `generate_with_helpcodes` 一致：约束签名和 `raw` 的触点签名（`signed_key`）；两者都为空时原键直接用，不复制。
         let sign = |key: String| {
-            if self.syllable_helpcodes_signature.is_empty() && touch.is_none() {
-                key
-            } else {
-                format!(
-                    "{key}{}{}",
-                    self.syllable_helpcodes_signature,
-                    touch.as_deref().unwrap_or_default()
-                )
-            }
+            let signed = match self.signed_key(&key, raw) {
+                std::borrow::Cow::Owned(signed) => Some(signed),
+                std::borrow::Cow::Borrowed(_) => None,
+            };
+            signed.unwrap_or(key)
         };
         if !help_codes.is_empty() {
             let key = sign(self.sentence_cache_key(&double_helpcode_cache_key(raw, help_codes)));

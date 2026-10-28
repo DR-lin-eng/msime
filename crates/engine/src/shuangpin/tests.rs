@@ -1146,7 +1146,7 @@ fn a_helpcode_never_moves_the_typo_sentence_to_the_first_seat() {
     }
 }
 
-// ---- touch-priced typo sentences (#10018) ----
+// ---- 按落点计价的纠错整句（#10018） ----
 
 /// QWERTY 的字母键，键宽 10、键高 14，每排比上一排右移半个键。
 fn qwerty_geometry() -> Arc<KeyGeometry> {

@@ -300,3 +300,33 @@ fn split_layouts_pick_the_nearest_copy_and_drop_neighbours_across_the_gap() {
         .unwrap();
     assert!((split_penalty - qwerty_penalty).abs() < 1e-6);
 }
+
+#[test]
+fn the_fingerprint_follows_the_content_not_the_id() {
+    // 内容相同、分别构造（含 -0.0 与 0.0）的几何指纹相同，代次不进指纹。
+    let mut signed_zero = qwerty_keys();
+    signed_zero[0][1] = -0.0;
+    let mut zero = qwerty_keys();
+    zero[0][1] = 0.0;
+    let left = KeyGeometry::new(7, &signed_zero, None, &[]).unwrap();
+    let right = KeyGeometry::new(8, &zero, None, &[]).unwrap();
+    assert_eq!(left.fingerprint(), right.fingerprint());
+    // 同一个代次挪了一个键、加了 `;` 或重复键，指纹都变。
+    let mut moved = qwerty_keys();
+    moved[usize::from(b'r' - b'a')][0] += 5.0;
+    let base = qwerty();
+    for changed in [
+        KeyGeometry::new(7, &moved, None, &[]).unwrap(),
+        KeyGeometry::new(7, &qwerty_keys(), Some([100.0, 21.0, 10.0, 14.0]), &[]).unwrap(),
+        KeyGeometry::new(
+            7,
+            &qwerty_keys(),
+            None,
+            &[(b'g', [110.0, 21.0, 10.0, 14.0])],
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(changed.id(), base.id());
+        assert_ne!(changed.fingerprint(), base.fingerprint());
+    }
+}

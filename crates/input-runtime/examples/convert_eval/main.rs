@@ -388,6 +388,9 @@ fn parse_tuning(text: &str) -> Result<TouchTuning, String> {
     if tuning.sigma_x <= 0.0 || tuning.sigma_y <= 0.0 {
         return Err("--touch-tuning: sigma_x and sigma_y must be positive".into());
     }
+    if tuning.min_penalty > tuning.max_penalty {
+        return Err("--touch-tuning: min must not exceed max".into());
+    }
     Ok(tuning)
 }
 
@@ -1168,5 +1171,16 @@ mod top1_tests {
         run.observe_top1(TouchMode::Clean, &reference, &empty);
         run.observe_top1(TouchMode::Clean, &empty, &reference);
         assert_eq!(run.clean_top1_changed, 2);
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+
+    #[test]
+    fn reversed_penalty_range_is_rejected_before_evaluation() {
+        assert!(parse_tuning("min=20,max=10").is_err());
+        assert!(parse_tuning("min=10,max=10").is_ok());
     }
 }

@@ -1316,7 +1316,7 @@ final class ImeLetterRows {
             case COMMA -> {
                 key = s.keyboardKey(text, layerKey.description(), () -> s.type(','));
                 s.keyId(key, "Comma");
-                s.imeBottomRow.bindCommaDownSwipe(key);
+                s.imeBottomRow.bindCommaSwipe(key);
             }
             case DELETE -> {
                 key = s.deleteButton;

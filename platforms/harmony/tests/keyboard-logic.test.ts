@@ -234,6 +234,7 @@ import {
 } from "../entry/src/main/ets/keyboard/input/GlideTypingPolicy";
 import {
   EnglishCompletions,
+  EnglishRefresh,
   EnglishReplacement,
   EnglishSuggestionPolicy,
 } from "../entry/src/main/ets/keyboard/input/EnglishSuggestionPolicy";
@@ -255,6 +256,7 @@ import {
 import { ShuangpinKeyHintPolicy } from "../entry/src/main/ets/keyboard/input/ShuangpinKeyHintPolicy";
 import { EditorPolicy, EditorTraits } from "../entry/src/main/ets/keyboard/input/EditorPolicy";
 import { EditEchoLedger } from "../entry/src/main/ets/keyboard/input/EditEchoLedger";
+import { CaretContextEcho } from "../entry/src/main/ets/keyboard/input/CaretContextEcho";
 import { KeyboardSkin } from "../entry/src/main/ets/keyboard/skin/KeyboardSkin";
 import {
   GlobalTheme,
@@ -282,6 +284,11 @@ import {
   supportedPhoto,
 } from "../entry/src/main/ets/keyboard/skin/CustomKeyboardSkin";
 import { DictionaryMaintenancePolicy } from "../entry/src/main/ets/keyboard/DictionaryMaintenancePolicy";
+import {
+  IDLE_DICTIONARY_RETRY_MAX_MS,
+  IDLE_DICTIONARY_RETRY_MS,
+  IdleDictionaryRetryPolicy,
+} from "../entry/src/main/ets/keyboard/IdleDictionaryRetryPolicy";
 import { KeyAccessibilityPolicy } from "../entry/src/main/ets/keyboard/input/KeyAccessibilityPolicy";
 import { OsVersionPolicy } from "../entry/src/main/ets/keyboard/input/OsVersionPolicy";
 import {
@@ -1667,6 +1674,19 @@ group("bounds handwriting points and rejects empty recognition requests", () => 
     tablet.x === HANDWRITING_CANVAS_SIZE && tablet.y < HANDWRITING_CANVAS_SIZE,
     "a pad wider than 420vp still maps inside the canvas",
   );
+  // 书写中按段补画只对不透明墨色成立，半透明或认不出的颜色要整幅重画。
+  check(
+    ["#000000", "#FFFFFF", "#2F6FDB", "#fff", "#FF1A1A1A", "#ff1a1a1a", "#F123"].every(
+      (ink: string): boolean => HandwritingStrokePolicy.opaqueInk(ink),
+    ),
+    "opaque inks are drawn segment by segment while writing",
+  );
+  check(
+    ["#991A1A1A", "#00000000", "#8123", "rgba(0,0,0,0.5)", "black", "", "#12345", "#GGGGGG"].every(
+      (ink: string): boolean => !HandwritingStrokePolicy.opaqueInk(ink),
+    ),
+    "translucent or unrecognised inks fall back to redrawing the whole pad",
+  );
   check(!HandwritingStrokePolicy.canRecognize([]), "empty ink does not trigger OCR");
   check(
     HandwritingStrokePolicy.canRecognize([{ points: [point] }]),
@@ -1786,6 +1806,44 @@ group("personal imports and cloud downloads are queued while the keyboard is ope
       `${operation} still goes to the Engine`,
     );
   }
+});
+
+console.log("IdleDictionaryRetryPolicy");
+
+group("词库队列卡住时重建会话的重试从两秒翻倍退避到五分钟", () => {
+  check(IdleDictionaryRetryPolicy.delay(0) === IDLE_DICTIONARY_RETRY_MS, "有进展时两秒后接着处理");
+  check(
+    IdleDictionaryRetryPolicy.delay(1) === IDLE_DICTIONARY_RETRY_MS,
+    "第一次失败仍按两秒重试，偶发的忙碌不多等",
+  );
+  check(IdleDictionaryRetryPolicy.delay(2) === 4000, "第二次连续失败等四秒");
+  check(IdleDictionaryRetryPolicy.delay(3) === 8000, "第三次等八秒");
+  check(IdleDictionaryRetryPolicy.delay(8) === 256000, "第八次等 256 秒");
+  check(IdleDictionaryRetryPolicy.delay(9) === IDLE_DICTIONARY_RETRY_MAX_MS, "再往后封顶五分钟");
+  check(
+    IdleDictionaryRetryPolicy.delay(10000) === IDLE_DICTIONARY_RETRY_MAX_MS,
+    "一直失败也不超过五分钟，不会溢出",
+  );
+  let previous = 0;
+  for (let stalls = 0; stalls < 64; stalls++) {
+    const delay = IdleDictionaryRetryPolicy.delay(stalls);
+    check(delay >= previous && delay >= IDLE_DICTIONARY_RETRY_MS, `退避不缩短（${stalls} 次）`);
+    previous = delay;
+  }
+});
+
+group("个人词库排空只有真有进展才算进展", () => {
+  check(IdleDictionaryRetryPolicy.drain(0, 0, 5) === "settled", "队列空了又没有送出新的一批就结束");
+  check(IdleDictionaryRetryPolicy.drain(0, 0, -1) === "settled", "第一次就空也结束");
+  check(IdleDictionaryRetryPolicy.drain(0, 3, 0) === "progress", "命名词库又送进一批要接着排空");
+  check(
+    IdleDictionaryRetryPolicy.drain(200, 0, -1) === "progress",
+    "第一次同步不知道上次剩多少，按有进展算",
+  );
+  check(IdleDictionaryRetryPolicy.drain(72, 0, 200) === "progress", "剩下的比上次少是进展");
+  check(IdleDictionaryRetryPolicy.drain(200, 128, 200) === "progress", "送出新的一批也是进展");
+  check(IdleDictionaryRetryPolicy.drain(200, 0, 200) === "stalled", "剩下的条数原地不动就是卡住了");
+  check(IdleDictionaryRetryPolicy.drain(201, 0, 200) === "stalled", "剩得更多又没有送出也是卡住");
 });
 
 group("polishing acts on what is in front of the caret, and only if it still is", () => {
@@ -7599,6 +7657,58 @@ group("a completion reply is bounded before it reaches the strip", () => {
     ) === null,
     "an implausibly long word is refused",
   );
+  check(good !== null && !good.corrected, "不带 completions 的答案没有纠错标记");
+});
+
+group("手机候选栏的合并展示按 corrected 区分纠错与补全", () => {
+  const corrected: EnglishCompletions | null = EnglishSuggestionPolicy.decode(
+    '{"ok":true,"value":{"corrected":true,"items":["teh","the"],"prefix":"teh"}}',
+  );
+  check(
+    corrected !== null && corrected.corrected && corrected.items.join(",") === "teh,the",
+    "有纠错时第二行是纠错",
+  );
+  const completions: EnglishCompletions | null = EnglishSuggestionPolicy.decode(
+    '{"ok":true,"value":{"corrected":false,"items":["eng","English","engine"],"prefix":"eng"}}',
+  );
+  check(
+    completions !== null &&
+      !completions.corrected &&
+      completions.items.join(",") === "eng,English,engine",
+    "没有纠错时原文后接前缀补全，按引擎顺序展示",
+  );
+  check(
+    EnglishSuggestionPolicy.decode(
+      '{"ok":true,"value":{"corrected":true,"items":["teh"],"prefix":"teh"}}',
+    ) === null,
+    "标为纠错却没有恰好两行的答案不可信",
+  );
+  check(EnglishSuggestionPolicy.DISPLAY_LIMIT === 12, "与 Android、iOS 的合并展示上限相同");
+});
+
+group("选区回报重新核对当前词而不是清空英文建议", () => {
+  // 编辑器在每次 insertTextSync 之后都回报一次选区变化，此时当前词就是刚查询的词。
+  check(
+    EnglishSuggestionPolicy.refresh("teh", "teh", true) === EnglishRefresh.KEEP,
+    "上屏后的选区回声保留刚出的建议和进行中的查询",
+  );
+  check(
+    EnglishSuggestionPolicy.refresh("tehx", "teh", true) === EnglishRefresh.QUERY,
+    "当前词变了就重新查询",
+  );
+  check(
+    EnglishSuggestionPolicy.refresh("hello", "", true) === EnglishRefresh.QUERY,
+    "光标移到另一个词后按那个词查询",
+  );
+  check(
+    EnglishSuggestionPolicy.refresh("", "teh", true) === EnglishRefresh.CLEAR,
+    "光标前没有词时收起建议",
+  );
+  check(
+    EnglishSuggestionPolicy.refresh("i", "", true) === EnglishRefresh.QUERY &&
+      EnglishSuggestionPolicy.refresh("i", "", false) === EnglishRefresh.CLEAR,
+    "单字母只在手机纠错模式下可查询",
+  );
 });
 
 group("the settings page and the keyboard agree on what the loudest haptic is called", () => {
@@ -9345,6 +9455,98 @@ group("editor change echoes preserve keyboard-owned composition", () => {
     ledger.reserve(10000);
   }
   check(ledger.pending(10000) === EditEchoLedger.MAX_PENDING, "reservations are bounded");
+});
+
+// 直接英文每个字母同步上屏后已经按新的上文匹配过邮箱后缀；编辑器随后的选区回报只是这次上屏的回声，不必再同步跨进程读一次。其他情况都照常重读。
+group(
+  "a selection echo of the keyboard's own synchronous edit reuses the context read after it",
+  () => {
+    const echo = new CaretContextEcho();
+    echo.textChanged(false, false, 3);
+    check(
+      !echo.selectionChanged(true),
+      "the first report from an editor has nothing to compare its length with",
+    );
+    echo.edited(false);
+    echo.read();
+    echo.textChanged(true, true, 4);
+    check(
+      echo.selectionChanged(true),
+      "a letter written synchronously and read afterwards is still current at its echo",
+    );
+    check(
+      !echo.selectionChanged(true),
+      "the echo flag is spent by the selection change that follows its text change",
+    );
+
+    echo.edited(false);
+    echo.textChanged(true, true, 5);
+    check(!echo.selectionChanged(true), "an edit made after the last read is not covered by it");
+
+    echo.read();
+    echo.textChanged(false, false, 0);
+    check(!echo.selectionChanged(true), "a change the host made is always read again");
+
+    echo.edited(false);
+    echo.read();
+    echo.textChanged(true, false, 1);
+    check(
+      !echo.selectionChanged(false),
+      "while another edit still waits for its echo the editor may not show the read text",
+    );
+
+    echo.reset();
+    echo.textChanged(false, false, 1);
+    echo.edited(true);
+    echo.read();
+    echo.textChanged(true, true, 2);
+    check(
+      !echo.selectionChanged(true),
+      "a read taken before an asynchronous insert had landed does not count",
+    );
+    echo.read();
+    echo.textChanged(true, true, 3);
+    check(echo.selectionChanged(true), "once its echo has arrived, a later read counts again");
+
+    echo.edited(false);
+    echo.read();
+    echo.unread();
+    echo.textChanged(true, true, 4);
+    check(
+      !echo.selectionChanged(true),
+      "suffixes cleared or matched without a read are refreshed at the echo",
+    );
+
+    echo.edited(false);
+    echo.read();
+    echo.reset();
+    echo.textChanged(true, true, 5);
+    check(!echo.selectionChanged(true), "a new editor starts with no trusted read");
+  },
+);
+
+// 上屏时多记的一笔（没有改动的结束预上屏、光标在开头时的删除）要到过期才作废；这期间用户点到别处，编辑器发来的 `textChange` 会被记账当成回声。点光标不改文字长度，所以照常重读，后缀跟着新光标走。
+group("a caret tap that consumes a leftover echo reservation is still read again", () => {
+  const ledger = new EditEchoLedger();
+  const echo = new CaretContextEcho();
+  echo.textChanged(false, false, 4);
+  ledger.reserve(1000);
+  echo.edited(false);
+  ledger.reserve(1000);
+  echo.edited(false);
+  check(ledger.acknowledge(1010), "the commit's echo consumes the older reservation");
+  echo.textChanged(true, ledger.pending(1010) === 0, 6);
+  check(
+    !echo.selectionChanged(ledger.pending(1010) === 0),
+    "the leftover reservation keeps the commit echo unsettled",
+  );
+  echo.read();
+  check(ledger.acknowledge(1500), "the tap is taken for the leftover reservation's echo");
+  echo.textChanged(true, ledger.pending(1500) === 0, 6);
+  check(
+    !echo.selectionChanged(ledger.pending(1500) === 0),
+    "a text change that kept the length is a caret move, not an edit echo",
+  );
 });
 
 group("a password field never sees a composition buffer", () => {

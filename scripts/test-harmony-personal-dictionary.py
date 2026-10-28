@@ -40,15 +40,9 @@ def main() -> int:
         and ".take(limit)" in store,
         "idle sync before Engine session": start < drain < create,
         "drain result adopted": "this.personalDictionarySettled = this.drainPersonalDictionary(options)" in session
-        or (
-            "const drained: PersonalDictionaryDrain = this.drainPersonalDictionary(options)" in session
-            and "this.personalDictionarySettled = drained === 'settled'" in session
-        )
-        or (
-            "const drained: boolean = this.drainPersonalDictionary(options)" in session
-            and "const mirrored: boolean = this.syncUserWords(options)" in session
-            and "this.personalDictionarySettled = drained && mirrored" in session
-        ),
+        or "const drained: PersonalDictionaryDrain = this.drainPersonalDictionary(options)" in session
+        and "this.personalDictionarySettled = drained === 'settled' && mirrored" in session
+        and "const mirrored: boolean = this.syncUserWords(options)" in session,
         "two-second yield": "IDLE_DICTIONARY_RETRY_MS: number = 2000" in session
         or "IDLE_DICTIONARY_RETRY_MS: number = 2000" in retry_policy
         and "IdleDictionaryRetryPolicy.delay(this.personalDictionaryStalls)" in scheduler,

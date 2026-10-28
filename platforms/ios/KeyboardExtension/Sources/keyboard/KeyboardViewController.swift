@@ -5227,6 +5227,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     switch event {
     case .listening(let text):
       voicePanel?.showListening(text)
+    case .level(let level):
+      voicePanel?.setLevel(level)
     case .recognizing(let text, let message):
       voicePanel?.showRecognizing(text: text, message: message)
     case .finished(let text):

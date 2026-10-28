@@ -46,7 +46,7 @@ Status: implemented
 - 两份都是 5 个内置方案 × {none, clean, noisy, realistic} × σ{0, 0.15, 0.25, 0.35} × b{0, 0.1}，开 `--autocorrect`，用 `android-portrait` 和 `android-portrait-microsoft` 两份几何，种子 20261027。完整命令写在 `resources/eval/README.md`「双拼与触屏误触」。引擎接上触点之后，两份文件存的是送落点那一臂（[双拼触点纠错](../feature/2026-10-27-shuangpin-touch-correction.md)），下面「平面表基线」一节的数字加 `--no-touch-points` 复现。
 - 资源目录只有 `desktop-dictionary.lock.json` 那一组文件加 `sentence-model.safetensors`，没有 settled 模型 `sentence-model-desktop.safetensors`（它由另一份锁 `settled-model.lock.json` 发布）。`convert_eval` 见到那个文件就挂上 settled 重排，排序会变，两份基线就对不上，并不是产品改了。所以复跑时 stderr 必须打出 `no settled model at ...`。10-09 那篇笔记的全拼验证特意加了这个文件，照它准备资源目录会得到 `eval baseline mismatch`。
 - 在 Mac Studio 上，整句族一次跑完要一到五小时，看同时跑的 CI 有多少（负载 50 左右时约一小时，负载在 300–780 之间时约五小时），词级族要 5 分钟。所以两份基线不进 `verify-local.sh`，由改双拼纠错的那一期自己跑、自己对照。
-- `rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 realistic（或 `--touch-mode` 指定的模式）合成误触。在这个方案里编不出来的用例不计时（打空串只量到一次 `Cancel`，会把每键开销往下拉），条数打在 stderr；noisy 下没有一键可能按错、只能按想按的键原样打的用例照样计时，条数也打在 stderr。
+- `rerank_latency` 接受同样的 `--scheme shuangpin --shuangpin-profile --autocorrect`，再给 `--key-geometry` 和 `--touch-sigma` 时按 realistic（或 `--touch-mode` 指定的模式）合成误触；σ 和偏置与 `convert_eval` 共用同一套校验，拒绝非有限值和负的 σ，偏置可以为负。编不出来的用例不计时，空串白占一条预热和一行用例数；noisy 下没有一键可能按错的用例也不计时，不能退回想按的键，否则误触的计时里混着没按错的用例。两种条数一种一行打在 stderr，去掉一条用例不挪动其余用例的随机数流；一条不剩时以 `no eligible keystrokes to measure` 失败，不把空样本当作过了预算。
 
 ### 参考布局
 
@@ -108,7 +108,7 @@ Status: implemented
   - 方案和模式的种子标签值与一次抽样结果被钉住；方案按引擎的 `;` 判据挑几何，同一种几何给了两份时报错；σ 拒绝负数和非有限值，偏置接受负数，`-0` 记成 0；
   - 分桶与对照计数；
   - 报告只留方案实际用上的几何、按 `--key-geometry` 给出的顺序，只跑 none 时一份不留；同一种几何给了两份时，方案用不上它、或只跑 none 也照样报错；
-  - `rerank_latency` 编不出来的用例不计时、计数并打出条数，跳过一条不挪动其余用例的随机数流；noisy 下没有一键可能按错的用例原样打并计数，σ 大时不计；全拼不跳过、不打条数；
+  - `rerank_latency` 编不出来的用例（26 键双拼和九键双拼）不计时、计数并打出条数，跳过一条不挪动其余用例的随机数流；noisy 下没有一键可能按错的用例不退回想按的键，不计时并计数，σ 大时一条不剔除；全拼不跳过、不打条数；
   - `shuangpin_keys` 的切音节与歧义丢弃，以及歧义按与方案无关的音节表判断（`dena` 在五个方案上都丢掉，首道双拼的 `den` 整条丢掉而不改打另一种切法；按方案编不编得出来切时这一项失败）。
 - `cargo test -p msime-engine --lib host::` 124 项通过，含新增的 `encode_shuangpin_uses_the_named_builtin_profile`、`shuangpin_syllables_do_not_depend_on_the_profile` 和 `shuangpin_uses_semicolon_follows_the_builtin_table`。`cargo clippy -p msime-input-runtime -p msime-engine --all-targets -- -D warnings` 无警告。
 - **G0**：分支和 merge-base（`ad2e677c96`）的 `convert_eval` 各跑一遍现有 11 组，输出逐字节相同。其中 sentences、harvested、neutral、words、nine-key 五组与仓库里提交的基线不一致，merge-base 自己也一样，是基线落后于 develop，与这次改动无关，这里不更新它们。

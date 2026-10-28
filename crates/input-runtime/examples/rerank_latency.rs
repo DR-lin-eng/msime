@@ -179,48 +179,54 @@ fn type_case(
     Ok(())
 }
 
-/// 算好按键的用例，和没打的、原样打的条数。
+/// 算好按键的用例，和不计时的条数。
 struct Typed {
     /// 要计时的用例，`keys` 已填好，送落点时 `points` 也填好。
     cases: Vec<Case>,
-    /// 26 键双拼下编不出来、不计时的条数。
+    /// 编不出来、不计时的条数。
     unencodable: usize,
-    /// noisy 下没有一键可能按错、按想按的键原样打的条数，照样计时。
+    /// noisy 下没有一键可能按错、不计时的条数。
     unmissable: usize,
 }
 
 impl Typed {
-    /// 打在 stderr 的条数说明：双拼下总有编不出来的那一行，noisy 下再加原样打的那一行。
+    /// 打在 stderr 的条数说明，一种原因一行：26 键双拼下总有编不出来的那一行，网格上有编不出来的才打；noisy 下再加没有一键可能按错的那一行。
     fn notes(
         &self,
         shuangpin: Option<ShuangpinProfileKind>,
         mode: Option<TouchMode>,
     ) -> Vec<String> {
         let mut lines = Vec::new();
-        if let Some(profile) = shuangpin {
-            lines.push(format!(
-                "{}: {} of {} cases do not encode and are not timed",
-                profile.name(),
+        let encoded = self.cases.len() + self.unmissable;
+        let unencodable = |label: &str| {
+            format!(
+                "{label}: {} of {} cases do not encode and are not timed",
                 self.unencodable,
-                self.cases.len() + self.unencodable
-            ));
+                encoded + self.unencodable
+            )
+        };
+        match shuangpin {
+            Some(profile) => lines.push(unencodable(profile.name())),
+            None if self.unencodable > 0 => lines.push(unencodable("--grid")),
+            None => {}
         }
-        if mode == Some(TouchMode::Noisy) {
+        if let (Some(profile), Some(TouchMode::Noisy)) = (shuangpin, mode) {
             lines.push(format!(
-                "noisy: {} of {} timed cases have no key that can be missed and are typed as aimed",
+                "{}: {} of {} encoded cases have no key that can be missed in noisy mode and are not timed",
+                profile.name(),
                 self.unmissable,
-                self.cases.len()
+                encoded
             ));
         }
         lines
     }
 }
 
-/// 两臂打同样的键，所以按键在开始计时前算好。给了 `grid` 时把字母换成它所在键的组码再输入（`'` 不输入），与 `convert_eval --grid` 相同；九键双拼按音节最少的切法编码，切不开的用例打空串。
+/// 两臂打同样的键，所以按键在开始计时前算好。给了 `grid` 时把字母换成它所在键的组码再输入（`'` 不输入），与 `convert_eval --grid` 相同；九键双拼按音节最少的切法编码。
 ///
 /// 合成误触时每键同时抽出落点，`touch_points` 为真才记进 `points`；按到的键与不送落点时逐个相同。
 ///
-/// 26 键双拼编不出来的用例（切不开，或有音节在这个方案里编不出来）不计时：打空串只量到一次 `Cancel`，会把每键的开销往下拉。noisy 下没有一键可能按错的用例（σ 太小，按错的概率在积分里为 0）只能按想按的键原样打，照样计时但要计数，否则 noisy 的数字里混着没按错的用例却看不出来。随机数流仍按抽子集后的序号取，去掉编不出来的用例不会挪动其余用例的流。
+/// 编不出来的用例（九键双拼切不开；26 键双拼切不开，或有音节在这个方案里编不出来）不计时，否则空串白占一条预热和一行用例数。noisy 下没有一键可能按错的用例（σ 太小，按错的概率在积分里为 0）也不计时：退回想按的键会让 noisy 的数字混进没按错的用例。两者都计数。随机数流按抽子集后的序号取，去掉一条用例不会挪动其余用例的流。
 fn encode_cases(
     cases: Vec<Case>,
     shuangpin: Option<ShuangpinProfileKind>,
@@ -255,16 +261,20 @@ fn encode_cases(
                             }
                             None => {
                                 typed.unmissable += 1;
-                                intended
+                                continue;
                             }
                         }
                     }
                     None => intended,
                 }
             }
-            (None, Some(grid)) => grid_keys::grid_keys(grid, &case.input, None)
-                .unwrap_or_default()
-                .into_bytes(),
+            (None, Some(grid)) => {
+                let Some(keys) = grid_keys::grid_keys(grid, &case.input, None) else {
+                    typed.unencodable += 1;
+                    continue;
+                };
+                keys.into_bytes()
+            }
             (None, None) => case.input.bytes().collect(),
         };
         typed.cases.push(case);
@@ -411,6 +421,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     for line in typed.notes(shuangpin, touch.as_ref().map(|(_, mode, _)| *mode)) {
         eprintln!("{line}");
+    }
+    // 全部不计时就没有可比的样本，不能当作过了预算。
+    if typed.cases.is_empty() {
+        return Err("no eligible keystrokes to measure".into());
     }
     let cases = typed.cases;
 
@@ -711,7 +725,7 @@ mod tests {
             assert_eq!(flat.keys, typed.keys, "{}", typed.input);
             assert!(flat.points.is_empty(), "{}", typed.input);
         }
-        // realistic 不加条件，不计「原样打」。
+        // realistic 不加条件，不因没有错键剔除。
         assert_eq!(typed.unmissable, 0);
         assert_eq!(
             typed.notes(XIAOHE, Some(TouchMode::Realistic)),
@@ -720,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn noisy_cases_with_no_key_to_miss_are_typed_as_aimed_and_counted() {
+    fn impossible_noisy_cases_do_not_fall_back_to_clean_keys() {
         let cases = || vec![case("nihao"), case("zhongguo"), case("xyz")];
         let still = TouchNoise::new(&android_portrait(), 0.0, 0.0);
         let typed = encode_cases(
@@ -732,18 +746,18 @@ mod tests {
             1,
         )
         .unwrap();
+        // σ 为 0 时没有一键可能按错，这两条不退回想按的键，不计时、计数；`main` 见到一条不剩就报错。
+        assert!(typed.cases.is_empty());
         assert_eq!(typed.unmissable, 2);
         assert_eq!(typed.unencodable, 1);
-        assert_eq!(typed.cases[0].keys, intended("nihao"));
-        assert_eq!(typed.cases[1].keys, intended("zhongguo"));
         assert_eq!(
             typed.notes(XIAOHE, Some(TouchMode::Noisy)),
             [
                 "xiaohe: 1 of 3 cases do not encode and are not timed",
-                "noisy: 2 of 2 timed cases have no key that can be missed and are typed as aimed",
+                "xiaohe: 2 of 2 encoded cases have no key that can be missed in noisy mode and are not timed",
             ]
         );
-        // σ 大到每键都可能按错时，noisy 的每条都至少按错一键，不计「原样打」。
+        // σ 大到每键都可能按错时，noisy 的每条都至少按错一键，一条不剔除。
         let shaky = TouchNoise::new(&android_portrait(), 0.35, 0.0);
         let typed = encode_cases(
             cases(),
@@ -755,13 +769,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(typed.unmissable, 0);
+        assert_eq!(inputs(&typed), ["nihao", "zhongguo"]);
         for case in &typed.cases {
             assert_ne!(case.keys, intended(&case.input), "{}", case.input);
         }
         assert_eq!(
             typed.notes(XIAOHE, Some(TouchMode::Noisy))[1],
-            "noisy: 0 of 2 timed cases have no key that can be missed and are typed as aimed"
+            "xiaohe: 0 of 2 encoded cases have no key that can be missed in noisy mode and are not timed"
         );
+    }
+
+    #[test]
+    fn grid_cases_that_do_not_encode_are_skipped_and_counted() {
+        let grid = grid_keys::parse_grid("shuangpin-migala2").unwrap();
+        let typed = encode_cases(
+            vec![case("nihao"), case("xyz")],
+            None,
+            Some(grid),
+            None,
+            true,
+            1,
+        )
+        .unwrap();
+        assert_eq!(inputs(&typed), ["nihao"]);
+        assert_eq!(typed.unencodable, 1);
+        assert_eq!(
+            typed.notes(None, None),
+            ["--grid: 1 of 2 cases do not encode and are not timed"]
+        );
+        // 全拼九键每条都编得出来，不打条数。
+        let typed = encode_cases(
+            vec![case("nihao"), case("xyz")],
+            None,
+            Some(KeyGrid::NineKey),
+            None,
+            true,
+            1,
+        )
+        .unwrap();
+        assert_eq!(inputs(&typed), ["nihao", "xyz"]);
+        assert!(typed.notes(None, None).is_empty());
     }
 
     #[test]

@@ -300,7 +300,7 @@ drop_gestures_body=$(sed -n '/^  private dropLetterGestures(): void {$/,/^  }$/p
 if ! grep -qF 'this.recordLetterTouch($$.letter, event);' "$view" \
   || ! grep -qF 'event.target.area.globalPosition.x' <<< "$record_touch_body" \
   || ! grep -qF 'this.pendingTouches.down(letter, touch.windowX, touch.windowY, key, Date.now());' <<< "$record_touch_body" \
-  || ! grep -A1 -F 'event.type === TouchType.Cancel' <<< "$record_touch_body" | grep -qF 'this.pendingTouches.cancel(letter);' \
+  || ! grep -qF 'this.pendingTouches.cancel(letter);' <<< "$(grep -A1 -F 'event.type === TouchType.Cancel' <<< "$record_touch_body")" \
   || ! grep -qF 'this.pendingTouches.clear();' <<< "$drop_gestures_body" \
   || ! grep -qF "letter !== ';'" <<< "$glide_key_body" \
   || ! grep -qF 'this.semicolonKey = rect;' <<< "$glide_key_body" \

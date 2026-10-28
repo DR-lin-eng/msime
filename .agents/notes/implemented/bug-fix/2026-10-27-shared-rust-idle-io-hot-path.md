@@ -123,3 +123,5 @@ Linux 原生整合验证发现 `linux-typing-statistics` 仍假定每次 `record
 完整 `bash scripts/verify-local.sh --quick` 在 Linux 输入统计测试修正后退出 0：Windows 便携原生测试 176 项通过、2 项宿主差异排除；Rust 工作区、Android Rust 目标、WASM 与严格 Clippy、Android Java、鸿蒙共享设置页、Linux 设置外壳与原生门禁、macOS 原生构建、共享 Apple 桥均通过。Linux CTest 111 项实际通过、1 项环境条件跳过；full/wubi 生产目标、安装暂存及路径隔离也通过。MinGW 和 Windows 原生构建未配置，鸿蒙完整打包输入未暂存，相关阶段按脚本规则跳过，不计通过。另用本分支真实 Host API 链接的 macOS `typing-statistics`、`key-press-statistics`、`session-smoke`、`dictionary-runtime` 四项 CTest 全部通过。
 
 缺口：没有在任何真机上测过耗电、发热或卡顿。验证办法是在低端 Android 机上对比改动前后 `:ime` 进程的 CPU 时间增量（`adb shell top -p <pid>`、`dumpsys batterystats`）、`/proc/<pid>/io` 的写入量，以及聚焦到可打字的 trace。Windows 7 面板的 flush 改动只在 C++ 源码层面跟随，没有在 Windows 7 上运行。三条宿主 PR 的编译和宿主侧测试记在各自的笔记里，都没有装机复测。
+
+后续偏好宽松读取合入后的整合：保留逐字节快照复用接口，同时让普通读取与缓存未命中共用 `settle_newer_values_on_read` 和未知列表元素收集；新增运行时降级入口与缓存接口并存，存储错误仍拒绝。缓存用例补上新版本文本编辑动作的文件，要求缓存读取与普通读取一致，改坏文件仍报错。整合后的命令结果另行记录，不沿用整合前的通过结论。

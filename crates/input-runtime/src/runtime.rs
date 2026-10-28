@@ -11,6 +11,7 @@ use msime_engine::ordering::{
 pub(crate) use msime_engine::ordering::{
     reorders_candidates as runtime_reorders_candidates, LATTICE_SOURCE,
 };
+use msime_engine::time::Instant;
 use msime_engine::SchemeType;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -175,6 +176,8 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) settled_reranker: Option<Reranker>,
     /// Whether [`Runtime::rerank_settled`] runs the settled model: the product's desktop sentence model switch. On unless a host turns it off, so a caller that attaches a model and says nothing else gets it.
     pub(crate) settled_rerank_enabled: bool,
+    /// 记录输入线程是否正处于系统负载或上一键超时造成的降级窗口。
+    load_monitor: LoadMonitor,
     // 开关和模型分别拥有不复用的身份，防止在途评分跨配置发布或恢复旧模型。
     settled_settings_epoch: Arc<()>,
     settled_model_epoch: Arc<()>,
@@ -501,7 +504,7 @@ impl Runtime<Session> {
             // state.  AI suggestions intentionally do not use this guard:
             // Windows accepts them for an otherwise eligible pinyin query
             // even when the local dictionary returned no rows.
-            || (source == 0 && self.cached.candidates.is_empty())
+            || (source == 0 && self.cached.candidates.is_empty() && query.mode != msime_engine::OnlineInputMode::Prediction)
             || (source == 0 && (!cloud_candidates || !query.cloud_eligible))
             || (source == 1 && !query.ai_eligible)
         {
@@ -534,7 +537,11 @@ impl Runtime<Session> {
     ) -> Result<bool, RuntimeError> {
         let cloud_candidates = query.cloud_candidates;
         let limit = if source == 0 {
-            1
+            if query.mode == msime_engine::OnlineInputMode::Prediction {
+                8
+            } else {
+                1
+            }
         } else {
             query.ai_candidate_limit()
         };
@@ -563,7 +570,11 @@ impl Runtime<Session> {
     ) -> Result<bool, RuntimeError> {
         let cloud_candidates = query.cloud_candidates;
         let limit = if source == 0 {
-            1
+            if query.mode == msime_engine::OnlineInputMode::Prediction {
+                8
+            } else {
+                1
+            }
         } else {
             query.ai_candidate_limit()
         };
@@ -627,7 +638,9 @@ impl Runtime<Session> {
                 .iter()
                 .any(|text| text.is_empty() || !msime_client_core::is_bounded_text(text, 4096))
             || source > 1
-            || (source == 0 && self.cached.candidates.is_empty())
+            || (source == 0
+                && self.cached.candidates.is_empty()
+                && query.mode != msime_engine::OnlineInputMode::Prediction)
             || (source == 0 && (!cloud_candidates || !query.cloud_eligible))
             || (source == 1 && !query.ai_eligible)
         {
@@ -1030,6 +1043,7 @@ impl<E: InputEngine> Runtime<E> {
             reranker: None,
             settled_reranker: None,
             settled_rerank_enabled: true,
+            load_monitor: LoadMonitor::default(),
             settled_settings_epoch: Arc::new(()),
             settled_model_epoch: Arc::new(()),
             focused: false,
@@ -1223,6 +1237,7 @@ impl<E: InputEngine> Runtime<E> {
         !self.settled_rerank_enabled
             || self.settled_reranker.is_none()
             || self.is_idle()
+            || self.load_monitor.should_shed()
             || self.generation.checked_add(1).is_none()
     }
 
@@ -2471,7 +2486,12 @@ impl<E: InputEngine> Runtime<E> {
         if self.cached.prediction {
             return false;
         }
-        let mut moved = self.rerank();
+        // 基础词典候选仍然照常发布；模型重排属于可选工作，在调度压力下让出输入线程。
+        let mut moved = if self.load_monitor.should_shed() {
+            false
+        } else {
+            self.rerank()
+        };
         moved |= self.demote_runner_up_readings();
         moved |= self.normalize_online_slots();
         moved
@@ -2910,23 +2930,34 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     pub fn dispatch(&mut self, action: Action) -> Result<Transition, RuntimeError> {
+        self.load_monitor.begin();
+        let started = Instant::now();
         // 桌面上只有派发类调用运行脚本插件的候选变换，旁路调用只重放，见 `transform` 模块。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        {
-            self.dispatch_live(action)
-        }
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        )))]
-        {
-            self.dispatch_action(action)
-        }
+        let result = {
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            {
+                self.dispatch_live(action)
+            }
+            #[cfg(not(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            )))]
+            {
+                self.dispatch_action(action)
+            }
+        };
+        self.load_monitor.finish(started.elapsed());
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_load_shed_for_test(&mut self) {
+        self.load_monitor.force_shed();
     }
 
     /// 旁路与字符动作由 Host API 在同一次会话调用内设置、派发并清除。

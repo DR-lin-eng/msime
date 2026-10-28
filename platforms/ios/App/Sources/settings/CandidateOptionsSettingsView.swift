@@ -227,6 +227,8 @@ struct CandidateOptionsSettingsView: View {
     let provider = preferences["cloud_candidate_provider"] as? [String: Any] ?? [:]
     if provider["source"] as? String == "custom", let endpoint = provider["endpoint"] as? String {
       cloudRecipient = URL(string: endpoint.replacingOccurrences(of: "{query}", with: "query"))?.host ?? "所选自定义服务"
+    } else if provider["source"] as? String == "baidu" {
+      cloudRecipient = "百度输入法（olimenew.baidu.com）"
     } else { cloudRecipient = "Google input-tools（inputtools.google.com）" }
     let mixed = preferences["mixed_input"] as? [String: Any] ?? [:]
     mixedEnabled = mixed["enabled"] as? Bool ?? true
@@ -327,6 +329,7 @@ private struct CloudCandidateServiceSettingsView: View {
       Section {
         Picker("云候选来源", selection: $source) {
           Text("Google input-tools").tag("google")
+          Text("百度输入法").tag("baidu")
           Text("自定义 HTTP 接口").tag("custom")
         }
         .accessibilityIdentifier("cloudCandidateSource")
@@ -353,6 +356,7 @@ private struct CloudCandidateServiceSettingsView: View {
           Picker("响应格式", selection: $responseFormat) {
             Text("标准 candidates 数组").tag("candidates")
             Text("Google input-tools").tag("google")
+            Text("百度输入法").tag("baidu")
             Text("JSON 路径").tag("json_path")
           }
           if responseFormat == "json_path" {

@@ -30,4 +30,4 @@ Status: implemented
 - **代价**：每次按下多一次按键区内的记录（数组写，无分配）；每次按键区布局多量一遍 27 个键；点击时多一次策略判断。几何只在布局真的变了时才过 JNI。
 - **不变**：桌面、实体键盘、九键、14/18 键、全拼和五笔一行没改调用；没有落点或不满足条件时仍调 `msime_client_character`，引擎侧保证代次不符时逐字节相同。滑行的测量结果与抽出前相同（多加的可见性判断对字母键恒成立）。
 - **验证**：`check-host.sh` 通过，含 `TouchPointPolicySmoke`（路由条件、取用即清、过期、时钟倒流、多指、槽位淘汰、按身份匹配、抬起离键判断、几何 JSON 与拒绝）和一处钉住「`NativeClient.touchCharacter` 只在 `type(char, View)` 的最后一步调用」的检查；NDK 对 `client_jni.cpp` 的语法检查通过。APK 在 Mac Studio 上经 `rbuild` 构建，`verify-native.sh` 通过；专用 API 35 模拟器（`emulator-5580`）上 `MicrosoftShuangpinDeviceSmoke -e shuangpin-touch true` 通过：导出的几何与无障碍树里 26 个键（和微软的 `;`）位置一致，键的边角和键距里的真实触摸组字是命中的键，纠错行随落点出现、前后两遍无障碍点击都不出现，微软 `;` 带落点仍是韵母。`DeviceSmoke`、`MicrosoftShuangpinDeviceSmoke`、`LetterHintPunctuationDeviceSmoke`（`letter-hold`、`letter-swipe`）、`CandidatePanelDeviceSmoke -e strip-partial-selection` 在同一台模拟器上通过。
-- **没覆盖**：API 28 模拟器、真机盲打、分离键盘与横屏的几何（重复键的导出只有 JVM 冒烟覆盖），以及滑行输入在设备上的回归（只改了测量的出处）。计价参数还没有用这里导出的真机几何重扫。
+- **没覆盖**：API 28 模拟器、真机盲打、分离键盘与横屏的几何（重复键的导出只有 JVM 冒烟覆盖），以及滑行输入在设备上的回归（只改了测量的出处）。计价参数已经用这里导出的模拟器几何重扫，见[双拼触点纠错](2026-10-27-shuangpin-touch-correction.md)的 PR1b 一节；真机几何还没有导出过。

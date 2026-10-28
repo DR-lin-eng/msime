@@ -69,8 +69,10 @@ public final class StaleCandidateDeviceSmoke extends Instrumentation {
                 Method newStrip = candidates.getClass().getDeclaredMethod("newStripCandidateButton");
                 newStrip.setAccessible(true);
                 Button staleStrip = (Button) newStrip.invoke(candidates);
+                // 实例是 ContactCandidateButton 子类，反射查找必须使用方法声明的 KeyboardPressButton 参数。
                 Method bindStrip = candidates.getClass().getDeclaredMethod("bindStripCandidateButton",
-                    staleStrip.getClass(), JSONObject.class, JSONObject.class, int.class);
+                    loader.loadClass("app.msime.android.KeyboardPressButton"), JSONObject.class,
+                    JSONObject.class, int.class);
                 bindStrip.setAccessible(true);
                 bindStrip.invoke(candidates, staleStrip, old,
                     old.getJSONArray("candidates").getJSONObject(0), 0);

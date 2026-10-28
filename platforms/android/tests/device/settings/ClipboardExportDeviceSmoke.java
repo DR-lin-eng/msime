@@ -93,11 +93,15 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         Path local = settingsFile();
         Files.write(state("local"), Files.exists(local) ? Files.readAllBytes(local) : new byte[0]);
         Files.write(state("history"), Files.exists(history()) ? Files.readAllBytes(history()) : new byte[0]);
-        Files.write(state("enabled"), new byte[] {(byte) (preferences().getJSONObject("preferences")
-            .optBoolean("clipboard_history", false) ? 1 : 0)});
+        JSONObject initialPreferences = preferences().getJSONObject("preferences");
+        Files.write(state("enabled"), new byte[] {
+            (byte) (initialPreferences.optBoolean("clipboard_history", false) ? 1 : 0),
+            (byte) (initialPreferences.getJSONObject("touch_toolbar").getBoolean("clipboard") ? 1 : 0)});
         clearPendingSyntheticExports();
         put(null);
         enabled(true);
+        // 历史记录与工具栏入口是独立开关；默认入口隐藏，设备验收必须显式开启并在结束时恢复。
+        clipboardToolbar(true);
         seed();
         openPage();
         stage = "export without device credential is refused";
@@ -447,6 +451,12 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         snapshot.getJSONObject("preferences").put("clipboard_history", value);
         check(host.getMethod("savePreferences", Context.class, JSONObject.class).invoke(null, getTargetContext(), snapshot) != null, "privacy save");
     }
+    private void clipboardToolbar(boolean value) throws Exception {
+        JSONObject snapshot = preferences();
+        snapshot.getJSONObject("preferences").getJSONObject("touch_toolbar").put("clipboard", value);
+        check(host.getMethod("savePreferences", Context.class, JSONObject.class)
+            .invoke(null, getTargetContext(), snapshot) != null, "clipboard toolbar save");
+    }
     private String export() throws Exception { return (String) getTargetContext().getClassLoader()
         .loadClass("app.msime.android.ClipboardExport").getMethod("export", Context.class).invoke(null, getTargetContext()); }
     private void restore() throws Exception {
@@ -457,7 +467,9 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         }
         if (!Files.exists(state("local"))) return;
         for (Uri uri : downloadsUnchecked().keySet()) getTargetContext().getContentResolver().delete(uri, null, null);
-        enabled(Files.readAllBytes(state("enabled"))[0] == 1);
+        byte[] originalPreferences = Files.readAllBytes(state("enabled"));
+        enabled(originalPreferences[0] == 1);
+        clipboardToolbar(originalPreferences[1] == 1);
         restoreFile(settingsFile(), Files.readAllBytes(state("local")));
         restoreFile(history(), Files.readAllBytes(state("history")));
         for (String part : new String[] {"local", "history", "enabled"}) Files.deleteIfExists(state(part));

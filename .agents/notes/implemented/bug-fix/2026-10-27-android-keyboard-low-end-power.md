@@ -82,10 +82,12 @@ Rust PR 自己在会话失焦和销毁时就把攒着的统计交给后台线程
 
 ## Verification
 
-- `CandidateExpansionDeviceSmoke` 按新的候选读取边界分别覆盖：收起面板时逐键请求释义不换代；展开面板时释义与手动展开仍释放暂扣候选并同步当前代次。每轮隔离面板状态，避免上一轮展开状态影响下一轮。设备执行结果待补。
+- `CandidateExpansionDeviceSmoke` 按新的候选读取边界分别覆盖：收起面板时逐键请求释义不换代；展开面板时释义与手动展开仍释放暂扣候选并同步当前代次。每轮隔离面板状态，避免上一轮展开状态影响下一轮。API 35 运行 `40647464497` 的实际输出 `shoudao gloss and panel expansion, rapid typing and repeated candidate selection` 通过；同轮整套设备验收仍有失败，不把这一项通过写成整套通过。
 
 - 审查整合共享 Rust 来源修复后的 `bash scripts/verify-local.sh --quick` 完整通过：Windows 便携测试 176 项、仓库契约、笔记、Rust workspace、Android 目标及 JVM 冒烟、WASM 与严格 clippy、Linux 设置外壳和原生宿主（CTest 汇总 112 项，含环境条件跳过）、macOS 原生构建及 Apple 桥均通过。鸿蒙完整 HAP、MinGW 原生宿主和 Windows 专用配置因本机缺少输入或工具链跳过；鸿蒙设置包因这个工作树未安装前端依赖跳过。
 
 - `ANDROID_SDK_ROOT=$HOME/Library/Android/sdk bash platforms/android/check-host.sh` 退出 0：292 项 JVM 冒烟、248 份设备测试源码编译、宿主资源检查通过。新增或扩充的冒烟：`CandidateSkinStampSmoke`（原地改写、原子替换、装包、换嵌套图片、根目录新增包时戳变化，条目过多不给戳）、`PreferencesSmoke`（同目录合并、`fresh` 只在每轮第一次、`startAfter`）、`EditorReadCacheSmoke`、`InputViewRefreshPolicySmoke`（推迟建会话、留会话的判断，隐私与学习开关不一致必须重建）、`SelectionEchoTrackerSmoke`、`DictionarySnapshotBacklogSmoke`、`PendingTypingStatisticsSmoke`、`ImePrivacyGateSmoke`（原地追加、写满仍丢最旧行、硬链接断言照常）。视图层改动 JVM 碰不到，`check-host.sh` 加了接线守卫（候选条从池子取按钮、`keepsChipFace`、`applySkin` 跳过 GONE 并挂兜底、渲染器不再 `postInvalidateOnAnimation`、快照延后与销毁补做、统计 flush 三处接线）。`CandidateCanvasDeviceSmoke` 补上帧边界、有限循环停止和减弱动效断言，但没有在设备上跑。
 - Rust：`candidate_range` 的 input-runtime 与 host-api 用例（一批之内不放尾部、越过末尾才放并换代，真实全拼引擎与整代复制逐行一致、可经 `select_any_candidate` 选中）随实现一起挪进了共享 Rust PR，在那里的全量 `cargo test` 里跑，结果记在那篇笔记。
-- 缺口：没有构建 APK，没有在任何设备或模拟器上运行，没有任何耗电、发热或帧时间的实测数字，上面的「收益」都是按调用次数和数据量推算的。需要真机补的：低端机上键盘可见 5 分钟的 `:ime` CPU 时间增量（`adb shell top`、`dumpsys batterystats`）；释义异步到达时点候选、长按菜单、读屏描述；换皮肤和明暗后再打开表情、符号、剪贴板、更多工具面板是否是新皮肤；自定义主题下的手写键区；聊天应用发送后的重启连接、密码框与数字框之间切换、隐私开关切换；`TYPE_NULL` 弹幕框的九键和 26 键中文；装删资源包后对同一输入框重启连接。
+- `StaleCandidateDeviceSmoke` 的按钮实例是 `ContactCandidateButton`，`bindStripCandidateButton` 声明的参数则是 `KeyboardPressButton`；反射按声明类型查找，不能用运行时子类的 `getClass()`，否则还没进入旧回调断言就抛 `NoSuchMethodException`。九键双拼套件等待可用的真实语言键出现后再建立中文前置条件，避免把冷启动第一帧当成已恢复的语言状态。保留所有组码、上屏及候选复用断言。
+- `ClipboardExportDeviceSmoke` 显式开启 `touch_toolbar.clipboard` 并恢复原值：它与 `clipboard_history` 是独立开关，共享默认值为关闭，只开启历史记录不会出现工具栏入口。`TextEditRecentClipboardDeviceSmoke` 经正式 JNI 解析补齐序列化省略的默认排列，不再把缺少默认键当作格式损坏。三项反射、语言和默认值修复连同导出入口前置条件经严格 `javac --release 17 -Xlint:all -Werror`、DEX 与 APK 签名构建通过。十八键真实横滑前等待按键范围稳定，并拆开右滑、取消、回中心、反向各阶段的诊断；这些手势断言仍需设备重跑。
+- 缺口：API 35 CI 已构建 APK 并运行设备套件，本轮整套仍有失败，尚未完成最终验收。没有任何耗电、发热或帧时间的实测数字，上面的「收益」都是按调用次数和数据量推算的。需要真机补的：低端机上键盘可见 5 分钟的 `:ime` CPU 时间增量（`adb shell top`、`dumpsys batterystats`）；释义异步到达时点候选、长按菜单、读屏描述；换皮肤和明暗后再打开表情、符号、剪贴板、更多工具面板是否是新皮肤；自定义主题下的手写键区；聊天应用发送后的重启连接、密码框与数字框之间切换、隐私开关切换；`TYPE_NULL` 弹幕框的九键和 26 键中文；装删资源包后对同一输入框重启连接。

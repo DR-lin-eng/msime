@@ -183,19 +183,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if biases.is_empty() {
             biases.push(0.0);
         }
-        let mut layouts = geometry
+        let layouts = geometry
             .iter()
             .map(|path| KeyLayout::load(path))
             .collect::<Result<Vec<_>, _>>()?;
-        // 先按全部几何给每个方案挑一份，同一种给了几份的在这里报错；然后只留挑中的，报告里不列没用上的几何。
-        let mut used = vec![false; layouts.len()];
-        if touches {
-            for profile in &profiles {
-                used[touch_noise::layout_for(&layouts, *profile)?] = true;
-            }
-        }
-        let mut used = used.into_iter();
-        layouts.retain(|_| used.next().unwrap_or(false));
+        // 同一种给了几份的在这里报错；只留方案挑中的，报告里不列没用上的几何。
+        let layouts = touch_noise::select_layouts(layouts, &profiles, touches)?;
         Some(ShuangpinEval {
             profiles,
             layouts,

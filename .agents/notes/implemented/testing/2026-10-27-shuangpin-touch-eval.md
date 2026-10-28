@@ -19,7 +19,7 @@ Status: implemented
 ### 触点合成（`touch_noise.rs`）
 
 - 几何文件就是将来宿主下发给引擎的 JSON 形状：`id`（非零代次）、`keys`（a 到 z 的 `[cx, cy, w, h]`）、`semicolon`、`duplicates`（分离键盘的重复键）。读入时校验数值有限、宽高为正、26 个字母齐全，不合格整份拒绝。
-- 宿主只在方案用 `;` 键时显示它（内置方案里只有微软双拼），第二行因此多一个键、键宽也不同，所以每个平台一份不带 `;` 的和一份 `-microsoft`；用 `;` 的方案取带 `;` 的那份，其余方案取不带的。用不用 `;` 按引擎的 `ShuangpinProfile::uses_semicolon_key`（经 `host::shuangpin_uses_semicolon`）判断，与会话决定宿主显不显示 `;` 的是同一条判据，评测工具里不另写「等于微软双拼」。同一种给了不止一份时报错，不默默取第一份；报告的 `geometry` 只列实际用上的几何。挑几何和解析方案名放在 `touch_noise.rs`，两个工具共用。
+- 宿主只在方案用 `;` 键时显示它（内置方案里只有微软双拼），第二行因此多一个键、键宽也不同，所以每个平台一份不带 `;` 的和一份 `-microsoft`；用 `;` 的方案取带 `;` 的那份，其余方案取不带的。用不用 `;` 按引擎的 `ShuangpinProfile::uses_semicolon_key`（经 `host::shuangpin_uses_semicolon`）判断，与会话决定宿主显不显示 `;` 的是同一条判据，评测工具里不另写「等于微软双拼」。同一种给了不止一份时报错，不默默取第一份，而且不看这次跑的方案用不用得上它、也不看是不是只跑 none，几何能不能用不随这次选了哪些方案变；报告的 `geometry` 只列实际用上的几何。挑几何和解析方案名放在 `touch_noise.rs`，两个工具共用。
 - 落点服从 N(键心 + (0, b), σ²)，σ 和 b 以键为单位，按键宽、键高的中位数归一。落在矩形里就是按到它，落在键距或字母区外归最近的键。
 - 每个想按的键有一行「按到各键的概率」，每个按到的键下面挂着落在它上面的格。它用网格积分一次算好：±5σ 的方格按 σ/8 划格，格心密度为权，按格心命中的键归类后归一。抽一键只用一个均匀随机数：先定按到哪个键，剩下的那一截再在这个键的格里定落点（格心），触点模式把它当按下点送给引擎（见[双拼触点纠错](../feature/2026-10-27-shuangpin-touch-correction.md)）。按到的键和只抽键时用的是同一个随机数、同一次比较，`--no-touch-points` 的报告因此与引擎收到触点之前的平面表基线逐字节相同。
 - 四种模式：
@@ -103,10 +103,12 @@ Status: implemented
 
 ## Verification
 
-- `cargo test -p msime-input-runtime --example convert_eval --example rerank_latency`：23 / 18 项通过。新增几类测试：
+- `cargo test -p msime-input-runtime --example convert_eval --example rerank_latency`：25 / 24 项通过。新增几类测试：
   - 落点模型：键距归最近的键、σ=0 永不按错、行分布归一且随 σ 变宽、偏置让第一排更容易按到第二排、noisy 每条都有错且 clean 一条都没有、同种子同结果、坏几何被拒；
   - 方案和模式的种子标签值与一次抽样结果被钉住；方案按引擎的 `;` 判据挑几何，同一种几何给了两份时报错；σ 拒绝负数和非有限值，偏置接受负数，`-0` 记成 0；
   - 分桶与对照计数；
+  - 报告只留方案实际用上的几何、按 `--key-geometry` 给出的顺序，只跑 none 时一份不留；同一种几何给了两份时，方案用不上它、或只跑 none 也照样报错；
+  - `rerank_latency` 编不出来的用例不计时、计数并打出条数，跳过一条不挪动其余用例的随机数流；noisy 下没有一键可能按错的用例原样打并计数，σ 大时不计；全拼不跳过、不打条数；
   - `shuangpin_keys` 的切音节与歧义丢弃，以及歧义按与方案无关的音节表判断（`dena` 在五个方案上都丢掉，首道双拼的 `den` 整条丢掉而不改打另一种切法；按方案编不编得出来切时这一项失败）。
 - `cargo test -p msime-engine --lib host::` 124 项通过，含新增的 `encode_shuangpin_uses_the_named_builtin_profile`、`shuangpin_syllables_do_not_depend_on_the_profile` 和 `shuangpin_uses_semicolon_follows_the_builtin_table`。`cargo clippy -p msime-input-runtime -p msime-engine --all-targets -- -D warnings` 无警告。
 - **G0**：分支和 merge-base（`ad2e677c96`）的 `convert_eval` 各跑一遍现有 11 组，输出逐字节相同。其中 sentences、harvested、neutral、words、nine-key 五组与仓库里提交的基线不一致，merge-base 自己也一样，是基线落后于 develop，与这次改动无关，这里不更新它们。

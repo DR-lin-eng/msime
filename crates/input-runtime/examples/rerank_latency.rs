@@ -179,6 +179,99 @@ fn type_case(
     Ok(())
 }
 
+/// 算好按键的用例，和没打的、原样打的条数。
+struct Typed {
+    /// 要计时的用例，`keys` 已填好，送落点时 `points` 也填好。
+    cases: Vec<Case>,
+    /// 26 键双拼下编不出来、不计时的条数。
+    unencodable: usize,
+    /// noisy 下没有一键可能按错、按想按的键原样打的条数，照样计时。
+    unmissable: usize,
+}
+
+impl Typed {
+    /// 打在 stderr 的条数说明：双拼下总有编不出来的那一行，noisy 下再加原样打的那一行。
+    fn notes(
+        &self,
+        shuangpin: Option<ShuangpinProfileKind>,
+        mode: Option<TouchMode>,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(profile) = shuangpin {
+            lines.push(format!(
+                "{}: {} of {} cases do not encode and are not timed",
+                profile.name(),
+                self.unencodable,
+                self.cases.len() + self.unencodable
+            ));
+        }
+        if mode == Some(TouchMode::Noisy) {
+            lines.push(format!(
+                "noisy: {} of {} timed cases have no key that can be missed and are typed as aimed",
+                self.unmissable,
+                self.cases.len()
+            ));
+        }
+        lines
+    }
+}
+
+/// 两臂打同样的键，所以按键在开始计时前算好。给了 `grid` 时把字母换成它所在键的组码再输入（`'` 不输入），与 `convert_eval --grid` 相同；九键双拼按音节最少的切法编码，切不开的用例打空串。
+///
+/// 合成误触时每键同时抽出落点，`touch_points` 为真才记进 `points`；按到的键与不送落点时逐个相同。
+///
+/// 26 键双拼编不出来的用例（切不开，或有音节在这个方案里编不出来）不计时：打空串只量到一次 `Cancel`，会把每键的开销往下拉。noisy 下没有一键可能按错的用例（σ 太小，按错的概率在积分里为 0）只能按想按的键原样打，照样计时但要计数，否则 noisy 的数字里混着没按错的用例却看不出来。随机数流仍按抽子集后的序号取，去掉编不出来的用例不会挪动其余用例的流。
+fn encode_cases(
+    cases: Vec<Case>,
+    shuangpin: Option<ShuangpinProfileKind>,
+    grid: Option<KeyGrid>,
+    touch: Option<(&TouchNoise, TouchMode)>,
+    touch_points: bool,
+    seed: u64,
+) -> Result<Typed, String> {
+    let mut typed = Typed {
+        cases: Vec::with_capacity(cases.len()),
+        unencodable: 0,
+        unmissable: 0,
+    };
+    for (position, mut case) in cases.into_iter().enumerate() {
+        case.keys = match (shuangpin, grid) {
+            (Some(profile), _) => {
+                let Some(intended) = grid_keys::shuangpin_keys(profile.name(), &case.input, None)
+                else {
+                    typed.unencodable += 1;
+                    continue;
+                };
+                let intended = intended.into_bytes();
+                match touch {
+                    Some((noise, mode)) => {
+                        let mut rng = touch_noise::case_rng(seed, &[position as u64]);
+                        match noise.synthesize_touches(mode, &intended, &mut rng)? {
+                            Some(touches) => {
+                                if touch_points {
+                                    case.points = touches.iter().map(|(_, point)| *point).collect();
+                                }
+                                touches.into_iter().map(|(key, _)| key).collect()
+                            }
+                            None => {
+                                typed.unmissable += 1;
+                                intended
+                            }
+                        }
+                    }
+                    None => intended,
+                }
+            }
+            (None, Some(grid)) => grid_keys::grid_keys(grid, &case.input, None)
+                .unwrap_or_default()
+                .into_bytes(),
+            (None, None) => case.input.bytes().collect(),
+        };
+        typed.cases.push(case);
+    }
+    Ok(typed)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut resources: Option<PathBuf> = None;
@@ -273,7 +366,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .map(|path| KeyLayout::load(path))
                 .collect::<Result<Vec<_>, _>>()?;
-            let layout = &layouts[touch_noise::layout_for(&layouts, profile)?];
+            let layouts = touch_noise::select_layouts(layouts, &[profile], true)?;
+            // 只选了一个方案且要合成误触，留下的恰好一份。
+            let layout = &layouts[0];
             let mode = touch_mode.unwrap_or(TouchMode::Realistic);
             eprintln!(
                 "typing {} keys with {} touches on {} at sigma {sigma}, bias {bias}",
@@ -306,61 +401,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stride = cases.len().div_ceil(limit.max(1));
         cases = cases.into_iter().step_by(stride.max(1)).collect();
     }
-    // 两臂打同样的键，所以按键在开始计时前算好。给了 `grid` 时把字母换成它所在键的组码再输入（`'` 不输入），与 `convert_eval --grid` 相同；九键双拼按音节最少的切法编码，切不开的用例打空串。
-    //
-    // 26 键双拼编不出来的用例（切不开，或有音节在这个方案里编不出来）不计时：打空串只量到一次 `Cancel`，会把每键的开销往下拉。noisy 下没有一键可能按错的用例（σ 太小，按错的概率在积分里为 0）只能按想按的键原样打，照样计时但要计数，否则 noisy 的数字里混着没按错的用例却看不出来。随机数流仍按抽子集后的序号取，去掉编不出来的用例不会挪动其余用例的流。
-    let mut unencodable = 0usize;
-    let mut unmissable = 0usize;
-    let mut typed = Vec::with_capacity(cases.len());
-    for (position, mut case) in cases.into_iter().enumerate() {
-        case.keys = match (shuangpin, grid) {
-            (Some(profile), _) => {
-                let Some(intended) = grid_keys::shuangpin_keys(profile.name(), &case.input, None)
-                else {
-                    unencodable += 1;
-                    continue;
-                };
-                let intended = intended.into_bytes();
-                match &touch {
-                    Some((noise, mode, _)) => {
-                        let mut rng = touch_noise::case_rng(seed, &[position as u64]);
-                        match noise.synthesize_touches(*mode, &intended, &mut rng)? {
-                            Some(touches) => {
-                                if touch_points {
-                                    case.points = touches.iter().map(|(_, point)| *point).collect();
-                                }
-                                touches.into_iter().map(|(key, _)| key).collect()
-                            }
-                            None => {
-                                unmissable += 1;
-                                intended
-                            }
-                        }
-                    }
-                    None => intended,
-                }
-            }
-            (None, Some(grid)) => grid_keys::grid_keys(grid, &case.input, None)
-                .unwrap_or_default()
-                .into_bytes(),
-            (None, None) => case.input.bytes().collect(),
-        };
-        typed.push(case);
+    let typed = encode_cases(
+        cases,
+        shuangpin,
+        grid,
+        touch.as_ref().map(|(noise, mode, _)| (noise, *mode)),
+        touch_points,
+        seed,
+    )?;
+    for line in typed.notes(shuangpin, touch.as_ref().map(|(_, mode, _)| *mode)) {
+        eprintln!("{line}");
     }
-    if let Some(profile) = shuangpin {
-        eprintln!(
-            "{}: {unencodable} of {} cases do not encode and are not timed",
-            profile.name(),
-            typed.len() + unencodable
-        );
-    }
-    if let Some((_, TouchMode::Noisy, _)) = &touch {
-        eprintln!(
-            "noisy: {unmissable} of {} timed cases have no key that can be missed and are typed as aimed",
-            typed.len()
-        );
-    }
-    let cases = typed;
+    let cases = typed.cases;
 
     let state = tempfile::tempdir()?;
     let mut options = msime_engine::host::prepare_options(
@@ -564,4 +616,160 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "p{GATE_PERCENTILE:.0} with the model is {observed:.2}ms, within the {budget_ms:.2}ms budget"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(input: &str) -> Case {
+        Case {
+            id: input.to_owned(),
+            input: input.to_owned(),
+            keys: Vec::new(),
+            points: Vec::new(),
+        }
+    }
+
+    fn android_portrait() -> KeyLayout {
+        KeyLayout::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../resources/eval/key-geometry/android-portrait.json"),
+        )
+        .unwrap()
+    }
+
+    fn intended(input: &str) -> Vec<u8> {
+        grid_keys::shuangpin_keys("xiaohe", input, None)
+            .unwrap()
+            .into_bytes()
+    }
+
+    fn inputs(typed: &Typed) -> Vec<&str> {
+        typed.cases.iter().map(|case| case.input.as_str()).collect()
+    }
+
+    const XIAOHE: Option<ShuangpinProfileKind> = Some(ShuangpinProfileKind::Xiaohe);
+
+    #[test]
+    fn shuangpin_cases_that_do_not_encode_are_skipped_and_counted() {
+        let typed = encode_cases(
+            vec![case("nihao"), case("xyz"), case("zhongguo")],
+            XIAOHE,
+            None,
+            None,
+            true,
+            1,
+        )
+        .unwrap();
+        assert_eq!(typed.unencodable, 1);
+        assert_eq!(typed.unmissable, 0);
+        assert_eq!(inputs(&typed), ["nihao", "zhongguo"]);
+        assert_eq!(typed.cases[0].keys, intended("nihao"));
+        assert_eq!(typed.cases[1].keys, intended("zhongguo"));
+        assert_eq!(
+            typed.notes(XIAOHE, None),
+            ["xiaohe: 1 of 3 cases do not encode and are not timed"]
+        );
+    }
+
+    #[test]
+    fn a_skipped_case_does_not_move_the_streams_of_the_others() {
+        let noise = TouchNoise::new(&android_portrait(), 0.35, 0.1);
+        let seed = 20261027;
+        let encode = |touch_points| {
+            encode_cases(
+                vec![case("nihao"), case("xyz"), case("zhongguo")],
+                XIAOHE,
+                None,
+                Some((&noise, TouchMode::Realistic)),
+                touch_points,
+                seed,
+            )
+            .unwrap()
+        };
+        let typed = encode(true);
+        assert_eq!(inputs(&typed), ["nihao", "zhongguo"]);
+        // 第三条用例仍取序号 2 的流，不因为第二条没打而改取序号 1 的。
+        for (typed, position) in typed.cases.iter().zip([0u64, 2]) {
+            let expected = noise
+                .synthesize_touches(
+                    TouchMode::Realistic,
+                    &intended(&typed.input),
+                    &mut touch_noise::case_rng(seed, &[position]),
+                )
+                .unwrap()
+                .unwrap();
+            let keys: Vec<u8> = expected.iter().map(|(key, _)| *key).collect();
+            let points: Vec<Point> = expected.iter().map(|(_, point)| *point).collect();
+            assert_eq!(typed.keys, keys, "{}", typed.input);
+            assert_eq!(typed.points, points, "{}", typed.input);
+        }
+        // 不送落点时按到的键逐个相同，只是不记落点。
+        let flat = encode(false);
+        for (flat, typed) in flat.cases.iter().zip(&typed.cases) {
+            assert_eq!(flat.keys, typed.keys, "{}", typed.input);
+            assert!(flat.points.is_empty(), "{}", typed.input);
+        }
+        // realistic 不加条件，不计「原样打」。
+        assert_eq!(typed.unmissable, 0);
+        assert_eq!(
+            typed.notes(XIAOHE, Some(TouchMode::Realistic)),
+            ["xiaohe: 1 of 3 cases do not encode and are not timed"]
+        );
+    }
+
+    #[test]
+    fn noisy_cases_with_no_key_to_miss_are_typed_as_aimed_and_counted() {
+        let cases = || vec![case("nihao"), case("zhongguo"), case("xyz")];
+        let still = TouchNoise::new(&android_portrait(), 0.0, 0.0);
+        let typed = encode_cases(
+            cases(),
+            XIAOHE,
+            None,
+            Some((&still, TouchMode::Noisy)),
+            true,
+            1,
+        )
+        .unwrap();
+        assert_eq!(typed.unmissable, 2);
+        assert_eq!(typed.unencodable, 1);
+        assert_eq!(typed.cases[0].keys, intended("nihao"));
+        assert_eq!(typed.cases[1].keys, intended("zhongguo"));
+        assert_eq!(
+            typed.notes(XIAOHE, Some(TouchMode::Noisy)),
+            [
+                "xiaohe: 1 of 3 cases do not encode and are not timed",
+                "noisy: 2 of 2 timed cases have no key that can be missed and are typed as aimed",
+            ]
+        );
+        // σ 大到每键都可能按错时，noisy 的每条都至少按错一键，不计「原样打」。
+        let shaky = TouchNoise::new(&android_portrait(), 0.35, 0.0);
+        let typed = encode_cases(
+            cases(),
+            XIAOHE,
+            None,
+            Some((&shaky, TouchMode::Noisy)),
+            true,
+            1,
+        )
+        .unwrap();
+        assert_eq!(typed.unmissable, 0);
+        for case in &typed.cases {
+            assert_ne!(case.keys, intended(&case.input), "{}", case.input);
+        }
+        assert_eq!(
+            typed.notes(XIAOHE, Some(TouchMode::Noisy))[1],
+            "noisy: 0 of 2 timed cases have no key that can be missed and are typed as aimed"
+        );
+    }
+
+    #[test]
+    fn quanpin_cases_are_all_timed_and_print_no_notes() {
+        let typed =
+            encode_cases(vec![case("nihao"), case("xyz")], None, None, None, true, 1).unwrap();
+        assert_eq!(inputs(&typed), ["nihao", "xyz"]);
+        assert_eq!(typed.cases[1].keys, b"xyz");
+        assert!(typed.notes(None, None).is_empty());
+    }
 }

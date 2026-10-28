@@ -210,6 +210,37 @@ pub fn layout_for(layouts: &[KeyLayout], profile: ShuangpinProfileKind) -> Resul
     }
 }
 
+/// 从 `--key-geometry` 给的几何里留下 `profiles` 实际用上的那几份，按给出的顺序；报告的 `geometry` 照它列。带 `;` 和不带 `;` 的各最多给一份，同一种给了不止一份时先报错，不看这次选的方案用不用得上它、也不看是不是只跑 none：几何能不能用不该取决于这次跑了哪些方案。`touches` 为假（只跑 none）时不按键位合成误触，一份都用不上，返回空。
+pub fn select_layouts(
+    mut layouts: Vec<KeyLayout>,
+    profiles: &[ShuangpinProfileKind],
+    touches: bool,
+) -> Result<Vec<KeyLayout>, String> {
+    for semicolon in [false, true] {
+        let names: Vec<&str> = layouts
+            .iter()
+            .filter(|layout| layout.has_semicolon() == semicolon)
+            .map(|layout| layout.name.as_str())
+            .collect();
+        if names.len() > 1 {
+            let with = if semicolon { "with" } else { "without" };
+            return Err(format!(
+                "several --key-geometry files {with} a ; key ({}); give at most one geometry with a ; key and one without",
+                names.join(", ")
+            ));
+        }
+    }
+    let mut used = vec![false; layouts.len()];
+    if touches {
+        for profile in profiles {
+            used[layout_for(&layouts, *profile)?] = true;
+        }
+    }
+    let mut used = used.into_iter();
+    layouts.retain(|_| used.next().unwrap_or(false));
+    Ok(layouts)
+}
+
 /// `--touch-sigma` 的一个值：有限、不小于 0。
 pub fn parse_sigma(text: &str) -> Result<f64, String> {
     parse_finite(text)
@@ -739,6 +770,75 @@ mod tests {
             layout_for(&ambiguous, ShuangpinProfileKind::Microsoft),
             Ok(1)
         );
+    }
+
+    /// [`test_layout`] 换个名字，好看出留下的是哪份。
+    fn named_layout(name: &str, semicolon: bool) -> KeyLayout {
+        let mut layout = test_layout(semicolon);
+        layout.name = name.to_owned();
+        layout
+    }
+
+    #[test]
+    fn only_the_layouts_the_profiles_use_are_kept_in_order() {
+        let given = || {
+            vec![
+                named_layout("plain", false),
+                named_layout("microsoft", true),
+            ]
+        };
+        let names = |kept: Result<Vec<KeyLayout>, String>| {
+            kept.unwrap()
+                .into_iter()
+                .map(|layout| layout.name)
+                .collect::<Vec<_>>()
+        };
+        use ShuangpinProfileKind::{Microsoft, Xiaohe, Ziranma};
+        assert_eq!(names(select_layouts(given(), &[Xiaohe], true)), ["plain"]);
+        assert_eq!(
+            names(select_layouts(given(), &[Xiaohe, Ziranma], true)),
+            ["plain"]
+        );
+        assert_eq!(
+            names(select_layouts(given(), &[Microsoft], true)),
+            ["microsoft"]
+        );
+        // 按 `--key-geometry` 给出的顺序列，不按方案的顺序。
+        assert_eq!(
+            names(select_layouts(given(), &[Microsoft, Xiaohe], true)),
+            ["plain", "microsoft"]
+        );
+        // 只跑 none 时不合成误触，一份都用不上。
+        assert!(names(select_layouts(given(), &[Xiaohe, Microsoft], false)).is_empty());
+        // 方案要的那种没给。
+        assert!(select_layouts(vec![named_layout("plain", false)], &[Microsoft], true).is_err());
+    }
+
+    #[test]
+    fn a_kind_of_layout_given_twice_is_rejected_even_when_unused() {
+        let twice_without = || {
+            vec![
+                named_layout("a", false),
+                named_layout("b", true),
+                named_layout("c", false),
+            ]
+        };
+        // 微软双拼只用带 `;` 的那份，不带 `;` 的给了两份照样报错；只跑 none 时也一样。
+        for (profiles, touches) in [
+            (&[ShuangpinProfileKind::Xiaohe][..], true),
+            (&[ShuangpinProfileKind::Microsoft][..], true),
+            (&[ShuangpinProfileKind::Xiaohe][..], false),
+        ] {
+            let error = select_layouts(twice_without(), profiles, touches)
+                .err()
+                .unwrap();
+            assert!(error.contains("without a ; key (a, c)"), "{error}");
+        }
+        let twice_with = vec![named_layout("a", true), named_layout("b", true)];
+        let error = select_layouts(twice_with, &[ShuangpinProfileKind::Xiaohe], false)
+            .err()
+            .unwrap();
+        assert!(error.contains("with a ; key (a, b)"), "{error}");
     }
 
     #[test]

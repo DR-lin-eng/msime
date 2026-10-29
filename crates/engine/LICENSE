@@ -1,6 +1,6 @@
 This directory (the msime-engine crate) is licensed under the Mozilla Public License, version 2.0, whose full text follows. It is not "Incompatible With Secondary Licenses": Exhibit B is not attached, so the code stays combinable with the GPL-3.0-only rest of the repository (MPL-2.0 section 3.3).
 
-Some data files and adapted code inside this crate keep their own licenses instead; README.md lists them file by file, and the license field of Cargo.toml is the SPDX expression of the whole package.
+Some data files and adapted code inside this crate keep their own licenses instead; README.md lists them file by file, and the license field of Cargo.toml is the SPDX expression of the code and of the data compiled into the engine. Test fixtures that only the tests read are not covered by this license or by that expression: tests/golden/real holds candidate lists recorded against dictionaries with GPL-3.0 data, and src/handwriting/testdata holds output of the handwriting reference implementation; they stay under the repository's GPL-3.0-only and are left out of the package published to crates.io.
 
 Exhibit A - Source Code Form License Notice
 -------------------------------------------

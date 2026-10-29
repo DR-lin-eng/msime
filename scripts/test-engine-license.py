@@ -4,7 +4,7 @@
 The two crates are licensed under MPL-2.0 without Exhibit B while the rest of the repository is GPL-3.0-only (crates/engine/README.md, the 许可证 section). So:
 
 - each crate's LICENSE is the Exhibit A notice followed by resources/licenses/MPL-2.0.txt verbatim, says Exhibit B is not attached, and its src/lib.rs opens with the same notice;
-- the license field of crates/path-trust/Cargo.toml is MPL-2.0, and that of crates/engine/Cargo.toml is the SPDX expression of every licence inside the package: MPL-2.0 for the code plus the licences of the data files and adapted code listed in EMBEDDED and ADAPTED below, no more and no fewer, and no GPL or LGPL;
+- the license field of crates/path-trust/Cargo.toml is MPL-2.0, and that of crates/engine/Cargo.toml is the SPDX expression of the code and the data compiled into the engine: MPL-2.0 for the code plus the licences of the data files and adapted code listed in EMBEDDED and ADAPTED below, no more and no fewer, and no GPL or LGPL;
 - every data file the engine compiles in with include_str! or include_bytes! from inside its own directory is either in EMBEDDED or is test data, every EMBEDDED and ADAPTED file is named in the crate README's table, and nothing compiled in reaches outside the crate (cargo package cannot carry such a file);
 - the licence texts those files need ship in every channel that lists notices by hand, and the inbound "GPL-3.0-only OR MPL-2.0" rule is stated where contributors read it;
 - the distribution metadata lists the engine's licences.
@@ -184,6 +184,9 @@ def main() -> int:
         check(gentoo_names <= listed, f"{ebuild} LICENSE lacks {sorted(gentoo_names - listed)}")
     copyright_text = (packaging / "debian/copyright").read_text(encoding="utf-8")
     check(re.search(r"^Files: crates/engine/\* crates/path-trust/\*\n(?:.+\n)*?License: MPL-2.0$", copyright_text, re.MULTILINE) is not None, "debian/copyright has no MPL-2.0 stanza for crates/engine and crates/path-trust")
+    # 录自 GPL-3.0 词库的金样和手写参考输出只给测试读，不在 MPL-2.0 之内；DEP-5 以最后一个匹配的段为准，所以这一段要排在 crates/engine/* 之后。
+    fixtures = re.search(r"^Files: crates/engine/tests/golden/real/\* crates/engine/src/handwriting/testdata/\*\n(?:.+\n)*?License: GPL-3.0-only$", copyright_text, re.MULTILINE)
+    check(fixtures is not None and fixtures.start() > copyright_text.index("Files: crates/engine/* crates/path-trust/*"), "debian/copyright does not keep the engine's test fixtures under GPL-3.0-only after the crates/engine/* stanza")
     nix = (ROOT / "platforms/linux/nix/fcitx5.nix").read_text(encoding="utf-8")
     # 后三项不是引擎的，是同一个派生编进或链接的 Wayland 协议代码与 Rust 依赖，rpm/msime.spec 的 License 也列着。
     for attribute in ("mpl20", "cc-by-30", "unicode-30", "bsd2", "bsd3", "wtfpl", "llvm-exception", "hpnd", "isc", "zlib"):

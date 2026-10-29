@@ -82,6 +82,13 @@ License: MPL-2.0 and Apache-2.0 with LLVM exception
 Comment:
  A step-by-step reproduction of sorts from LLVM libc++; the license text is resources/licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt.
 
+Files: crates/engine/tests/golden/real/* crates/engine/src/handwriting/testdata/*
+Copyright: 2026 Metasequoia IME contributors
+ iDvel and the rime-ice contributors, and the other authors of the dictionary data listed in resources/licenses/msime-engine-dictionary-NOTICE.md
+License: GPL-3.0-only
+Comment:
+ Test fixtures that only the engine's tests read, not compiled into the engine and outside its MPL-2.0: tests/golden/real holds candidate lists recorded against the dictionaries of tools/engine-golden/README.md, whose pinyin and English data come from rime-ice (GPL-3.0), and src/handwriting/testdata holds output of the zinnia-based handwriting reference implementation. They stay under the repository's GPL-3.0-only.
+
 Files: crates/script-sdk/* docs/script-plugin-template/* plugins/script/* plugins/phrase_table/*
 Copyright: 2026 Metasequoia IME contributors
 License: MIT

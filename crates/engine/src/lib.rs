@@ -76,7 +76,7 @@ pub use punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
 pub use types::{
     autocorrect_type, fuzzy_rule, request_autocorrect_mask, CandidateEdge, CandidateSource,
-    Command, CommandTranslationQuery, EnglishInputOptions, FrequencyAdjustmentMode,
+    Command, CommandTranslationQuery, EnglishInputOptions, FirstPageRows, FrequencyAdjustmentMode,
     FrequencyAdjustmentOptions, FuzzyPinyinOptions, KeyResult, LocalInputMode, LocalModeOptions,
     MixedExpressiveOptions, NineKeyShuangpinKind, NineKeyShuangpinTable, OnlineInputMode,
     OnlineQuery, PersonalDictionaryEntry, PersonalDictionaryKind, PluginCommand,

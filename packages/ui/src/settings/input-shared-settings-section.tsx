@@ -9,9 +9,11 @@ import type { FrequencyPreferences } from "./frequency-preferences";
 import { ImeModeScopeSection } from "./ime-mode-scope-section";
 import { InputModeHudSection } from "./input-mode-hud-section";
 import { LearningSection } from "./learning-section";
+import { MultilingualInputSection } from "./multilingual-input-section";
 import { MixedInputMoreRows, MixedInputSection } from "./mixed-input-section";
 import type { MixedInputPreferences } from "./mixed-input-preferences";
 import { SingleCharacterOnlySection } from "./single-character-only-section";
+import { CaretEditSuffixSection } from "./caret-edit-suffix-section";
 import { SwitchRow } from "./switch-row";
 import { TraditionalChineseOutputSection } from "./traditional-chinese-output-section";
 import { WordCharacterSection } from "./word-character-section";
@@ -44,8 +46,12 @@ export interface InputSharedSettingsSectionProps {
   showMixedInputMinimumPrefix?: boolean;
   /** 本版本带临时日文，决定是否列出日文混输开关；见 `MixedInputMoreRowsProps.temporaryJapanese`。缺省为 true。 */
   temporaryJapanese?: boolean;
+  /** 本版本提供全拼时才显示连续多语言设置。 */
+  showMultilingualInput?: boolean;
   /** 宿主能把快捷短语混进普通候选（`HostCapabilities.quick_phrase_candidates`），决定是否列出快捷短语混输与调频开关。缺省为 false。 */
   quickPhraseCandidates?: boolean;
+  /** 宿主提供「移动光标后编辑光标后的部分」（`HostCapabilities.caret_edit_suffix`，桌面宿主），决定是否在「更多选项」开头、快捷短语混输之前列出它。缺省为 false。 */
+  caretEditSuffix?: boolean;
   /** 放在「候选与联想」组的「学习选词习惯」之前。 */
   beforeLearning?: ReactNode;
   /** 「候选与联想」组里学习开关之后的行。 */
@@ -62,8 +68,10 @@ export interface InputSharedSettingsSectionProps {
   crossCommitSpacing?: ReactNode;
   beforeFrequency?: ReactNode;
   afterFrequency?: ReactNode;
-  /** 鸿蒙手机的「输入」页只把主要分组留在视野内：这里的每个分组都放进末尾「更多」分组的同一个「更多选项」折叠中，「中文输出」单选不放，因为该页以「中文字符集」提供它。 */
+  /** 把这里的共享分组整体收进末尾「更多」分组的同一个「更多选项」折叠中；折叠时不显示「中文输出」单选，由调用方提供等价的中文字符集控件。 */
   foldIntoMore?: boolean;
+  /** 是否显示「中文输出」单选；HarmonyOS 手机已经在「中文」组提供「中文字符集」。 */
+  showTraditionalOutput?: boolean;
   /** 宿主能按 OpenCC 变体做繁体转换（`HostCapabilities.traditional_chinese_variants`），「中文输出」单选列出台湾正体和台湾用词。 */
   traditionalChineseVariants?: boolean;
   onPreferencesChange: (patch: Partial<Preferences>) => void;
@@ -86,7 +94,9 @@ export function InputSharedSettingsSection({
   onMixedInputChange,
   showMixedInputMinimumPrefix = true,
   temporaryJapanese = true,
+  showMultilingualInput = false,
   quickPhraseCandidates = false,
+  caretEditSuffix = false,
   beforeLearning,
   afterLearning,
   candidatesMore,
@@ -97,6 +107,7 @@ export function InputSharedSettingsSection({
   beforeFrequency,
   afterFrequency,
   foldIntoMore = false,
+  showTraditionalOutput = true,
   traditionalChineseVariants = false,
   onPreferencesChange,
 }: InputSharedSettingsSectionProps) {
@@ -165,15 +176,28 @@ export function InputSharedSettingsSection({
     />
   );
 
-  // 少有人改的候选行收进组末的「更多选项」。鸿蒙手机已经把整页收在一个「更多选项」里，那里不再套一层，混输各行和只出单字仍在学习开关之前。
+  // 少有人改的候选行收进组末的「更多选项」；整体折叠时这里不再套第二层，混输各行和只出单字仍在学习开关之前。
   const candidatesMoreRows = (
     <>
+      {caretEditSuffix && (
+        <CaretEditSuffixSection
+          value={preferences.caret_edit_suffix}
+          onChange={(caret_edit_suffix) => onPreferencesChange({ caret_edit_suffix })}
+        />
+      )}
       {mixedInput && onMixedInputChange && (
         <MixedInputMoreRows
           preferences={mixedInput}
           temporaryJapanese={temporaryJapanese}
           quickPhraseCandidates={quickPhraseCandidates}
           onChange={onMixedInputChange}
+        />
+      )}
+      {showMultilingualInput && (
+        <MultilingualInputSection
+          preferences={preferences.multilingual_input}
+          temporaryJapanese={temporaryJapanese}
+          onChange={(multilingual_input) => onPreferencesChange({ multilingual_input })}
         />
       )}
       <SingleCharacterOnlySection
@@ -299,7 +323,7 @@ export function InputSharedSettingsSection({
         "output",
         <GroupList title="输出">
           {foldIntoMore && outputExtra}
-          {!foldIntoMore && traditionalOutputRow}
+          {!foldIntoMore && showTraditionalOutput && traditionalOutputRow}
           <ChineseEnglishSpacingSection
             value={preferences.chinese_english_spacing}
             onChange={(chinese_english_spacing) => onPreferencesChange({ chinese_english_spacing })}

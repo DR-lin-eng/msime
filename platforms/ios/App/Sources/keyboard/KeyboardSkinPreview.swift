@@ -44,7 +44,10 @@ enum KeyboardPreviewToolbarItem: String, CaseIterable {
 struct KeyboardSkinPreview: View {
   let skin: KeyboardTheme
   let nineKey: Bool
-  var fourteenKey = false
+  /// 14 键或 18 键的字母网格；nil 画 26 键字母或九键。
+  var letterGrid: LetterKeyGrid?
+  /// 字母网格第三排左端画「分词」还是「符」：五笔 14 键没有音节可分，键盘上这个键总是「符」。
+  var gridSplitsSyllables: Bool = true
   var layout: KeyboardGeometry = KeyboardLayoutPreference.geometry
   var heightAdjustment: Double = 0
   var widthPercent: Double = 100
@@ -80,7 +83,7 @@ struct KeyboardSkinPreview: View {
 
   private var drawsHomeIndicator: Bool { topStrip != .candidates }
 
-  private var layoutTitle: String { nineKey ? "9 键" : fourteenKey ? "14 键" : "26 键" }
+  private var layoutTitle: String { nineKey ? "9 键" : letterGrid?.title ?? "26 键" }
 
   // Match the native nine-key sidebar proportions within the 390-point canvas.
   private var nineKeySidebarWidth: CGFloat { (390 - 14) * layout.sidebarRatio }
@@ -117,7 +120,7 @@ struct KeyboardSkinPreview: View {
       Text("你号").font(.subheadline)
       Spacer(minLength: 0)
       if KeyboardLayoutPreference.voiceShortcutEnabled { Image(systemName: "waveform").font(.caption) }
-      Text(nineKey ? "九键" : fourteenKey ? "14 键" : "全拼").font(.caption)
+      Text(nineKey ? "九键" : letterGrid?.title ?? "全拼").font(.caption)
 
     }.padding(.horizontal, 6).frame(height: 32)
       .background(color(skin.keyBackground).opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
@@ -178,12 +181,27 @@ struct KeyboardSkinPreview: View {
           key("！", function: true)
         }.frame(width: nineKeySidebarWidth)
       }.frame(maxHeight: .infinity)
-    } else if fourteenKey {
+    } else if letterGrid == .eighteenKey {
+      // 七个等宽键一排：第二排两侧各空出半个键，第三排两端的分词和 ⌫ 与字母键同宽。
+      GeometryReader { proxy in
+        let unit = (proxy.size.width - 5 * 6) / 7
+        VStack(spacing: layout.rowSpacing) {
+          ForEach(Array(EighteenKeyLayout.rows.enumerated()), id: \.offset) { index, keys in
+            HStack(spacing: 5) {
+              if index == EighteenKeyLayout.rows.count - 1 { key("分词", function: true).frame(width: unit) }
+              ForEach(keys.map(\.face), id: \.self) { face in key(face).frame(width: unit) }
+              if index == EighteenKeyLayout.rows.count - 1 { key("⌫", function: true).frame(width: unit) }
+            }
+            .frame(maxWidth: .infinity)
+          }
+        }
+      }.frame(maxHeight: .infinity)
+    } else if letterGrid == .fourteenKey {
       VStack(spacing: layout.rowSpacing) {
         ForEach(Array(FourteenKeyLayout.rows.enumerated()), id: \.offset) { index, keys in
           if index == FourteenKeyLayout.rows.count - 1 {
             HStack(spacing: 5) {
-              key("分词", function: true).frame(width: 38)
+              key(gridSplitsSyllables ? "分词" : "符", function: true).frame(width: 38)
               row(keys.map(\.face))
               key("⌫", function: true).frame(width: 38)
             }

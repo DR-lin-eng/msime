@@ -61,6 +61,7 @@ public:
           (change.path == std::vector<std::string>{"navigation", "mouse_wheel"} ||
            change.path == std::vector<std::string>{"backspace_reverts_selection"} ||
            change.path == std::vector<std::string>{"chinese_english_spacing"} ||
+           change.path == std::vector<std::string>{"caret_edit_suffix"} ||
            change.path == std::vector<std::string>{"shuangpin_keymap_hint"} ||
            change.path == std::vector<std::string>{"mixed_input", "enabled"} ||
            change.path == std::vector<std::string>{"mixed_input", "symbols"} ||
@@ -83,7 +84,10 @@ public:
           (change.path == std::vector<std::string>{"app_input_mode_rules"} ||
            change.path == std::vector<std::string>{"plugins"} ||
            change.path == std::vector<std::string>{"cloud_clipboard_relay"} ||
+           change.path == std::vector<std::string>{"cloud_clipboard_webdav"} ||
+           change.path == std::vector<std::string>{"dictionary_sync_webdav"} ||
            change.path == std::vector<std::string>{"game_compatibility"} ||
+           change.path == std::vector<std::string>{"multilingual_input"} ||
            change.path == std::vector<std::string>{"wubi_candidate_selection"});
       // 插件默认组会被共享序列化省略；只允许页面已知字段补齐其路径。
       const bool optional_plugin = plugin_field(change);

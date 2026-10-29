@@ -1,4 +1,5 @@
 #include "SettingsWindow.h"
+#include "../InputMethodSetup.h"
 #include "SettingsChrome.h"
 #include "KeyboardSkinPage.h"
 #include "SettingsRoutes.h"
@@ -16,12 +17,15 @@
 #include "ClipboardForm.h"
 #include "CloudClipboardForm.h"
 #include "CloudClipboardWorker.h"
+#include "DictionarySyncWorker.h"
+#include "../../common/DictionarySyncDirectory.h"
 #include "DictionaryForm.h"
 #include "DictionaryPersonalExport.h"
 #include "DictionaryUpdatesForm.h"
 #include "VocabularyForm.h"
 #include "VocabularyData.h"
 #include "PluginEffectsForm.h"
+#include "PluginEditorForm.h"
 #include "PluginLibraryForm.h"
 #include "PluginScriptsForm.h"
 #include "PluginMentionsForm.h"
@@ -142,7 +146,7 @@ struct CandidateCheck {
   const wchar_t* description;
   bool fallback;
 };
-constexpr std::array<CandidateCheck, 10> candidate_checks{{
+constexpr std::array<CandidateCheck, 11> candidate_checks{{
     {cloud_candidates, "", "cloud_candidates", L"云候选", L"仅将当前正在组的拼写发送给所选云候选服务，不发送已上屏内容、词库或历史。", false},
     {mixed_enabled, "mixed_input", "enabled", L"候选混输", L"关闭后保留各项设置，再开启时恢复。", true},
     {mixed_english, "mixed_input", "english", L"中英混输", L"中文输入时在候选项中补充英文单词。", true},
@@ -152,6 +156,7 @@ constexpr std::array<CandidateCheck, 10> candidate_checks{{
     {mixed_japanese, "mixed_input", "japanese", L"日文混输（实验）", L"全拼、双拼里完整输入日文罗马字时补充日文候选；词典不在时不生效。", false},
     {learn_candidates, "", "learning", L"学习选词习惯", L"根据选词调整候选顺序。", true},
     {single_character_only, "", "single_character_only", L"只出单字", L"候选只列单个汉字，不出词组和整句；选一个字后接着拼下一个字。", false},
+    {caret_edit_suffix, "", "caret_edit_suffix", L"移动光标后编辑光标后的部分", L"组字光标移到拼音中间时，光标前的部分固定为当前转换，候选改为编辑光标后的部分；首选是整句。", false},
     {word_lattice, "sentence_association", "word_lattice", L"本地整句联想", L"把词库组合出的整句加入候选；关闭后仍保留单词候选。", true},
 }};
 
@@ -429,7 +434,12 @@ private:
     const auto root = voice_model_root(); if (!root.is_absolute()) return dictionary_data::failure("local_model_storage");
     request.erase("operation"); request.erase("removed_path"); request["root"] = root.u8string();
     Json response;
-    if (operation == "models") return theme_data::call(msime_client_voice_local_models, request);
+    if (operation == "models") {
+      auto models = theme_data::call(msime_client_voice_local_models, request);
+      // 目录读取在设置窗口的后台 Worker 中完成，顺便把语音服务目录带回 UI，避免首次进入语音页同步阻塞创建控件。
+      models["voice_provider_catalog"] = theme_data::response(msime_client_voice_provider_catalog());
+      return models;
+    }
     if (operation == "remove") response = theme_data::call(msime_client_voice_local_model_remove, request);
     if (operation == "install") {
       if (snapshot_) request["mirror"] = snapshot_->preferences().at("voice_input").value("asr_model_mirror", std::string{});
@@ -532,10 +542,17 @@ private:
       } else {
         result = store_->load(); snapshot_ = result.snapshot;
       }
-      if (operation == "load_mentions" || operation == "save_mentions") return result;
+      // 读名单和编辑器读出一个包都不改插件目录，不用重读目录和授权。
+      if (operation == "load_mentions" || operation == "save_mentions" || operation == "authoring_load") return result;
       (*plugins_response_)["grants"] = plugin_data::call(directory_, options, {{"operation", "script_grants"}});
       if (operation == "catalog") (*plugins_response_)["mentions"] = plugin_data::call(directory_, options, PluginMentionsForm::load_request());
       (*plugins_response_)["catalog"] = operation == "catalog" ? response : plugin_data::call(directory_, options, PluginLibraryForm::catalog_request());
+      // 每个脚本插件的设置值和存储大小（详情里的设置项、已存数据和「清除数据」）。
+      Json states = Json::object();
+      if (const auto listed = plugin_data::packages((*plugins_response_)["catalog"]))
+        for (const auto& pack : *listed)
+          if (pack.kind == L"script") states[control_text::utf8(pack.id).value()] = plugin_data::call(directory_, options, {{"operation", "script_plugin_state"}, {"id", control_text::utf8(pack.id).value()}});
+      (*plugins_response_)["script_states"] = std::move(states);
       const auto statistics = theme_data::call(msime_client_typing_statistics,
           {{"directory", directory_.u8string()}, {"status", true}, {"action", {{"operation", "load"}}}});
       const auto status = statistics_data::parse(statistics);
@@ -557,11 +574,26 @@ private:
       else if (operation == "export_file") response = dictionary_data::export_file(dictionary_requests_, options, action, job.file, dictionary_transport_);
       else response = dictionary_requests_.call(options, action, dictionary_transport_);
       dictionary_response_ = Json{{"response", response}};
+      // 改了「我的词条」（编辑、导入、清除学习数据）：配着网盘时让词库同步马上记一次本机改动，与 WinUI 设置和共享页相同；没配时不调。
+      if (theme_data::value(response) && (operation == "edit" || operation == "import_file" || operation == "reset") &&
+          snapshot_ && dictionary_sync_configured(snapshot_->preferences()))
+        note_dictionary_sync_change(options, msime::windows::dictionary_sync_directory().u8string());
       if (theme_data::value(response) && job.dictionary_list && operation != "export_file" && operation != "export_all_file") {
         (*dictionary_response_)["list_request"] = *job.dictionary_list;
         (*dictionary_response_)["listing"] = dictionary_requests_.call(options, *job.dictionary_list, dictionary_transport_);
       }
       return {Outcome::loaded, snapshot_};
+    }
+    if (job.action == Job::Action::cloud_clipboard && job.credential && job.credential->contains("webdav_probe")) {
+      // WebDAV「测试连接」：先测试，通过了才写窗口给的配置（网盘配置和清空的中继配置），不通过就只读回当前设置。
+      const auto probe = probe_cloud_clipboard_webdav(job.credential->at("webdav_probe"), account_directory().u8string(), cloud_clipboard_services_);
+      const bool passed = theme_data::value(probe).has_value(), write = passed && !job.changes.empty();
+      result = !write ? store_->load() : snapshot_ ? store_->save(*snapshot_, job.changes) : Result{};
+      if (!result.snapshot) result.snapshot = store_->load().snapshot;
+      snapshot_ = result.snapshot;
+      // 配置和已存的相同时没有要写的，测试通过就算保存过了。
+      cloud_clipboard_response_ = Json{{"probe", probe}, {"saved", passed && (!write || result.outcome == Outcome::saved)}};
+      return result;
     }
     if (job.action == Job::Action::cloud_clipboard && job.credential) {
       const auto account = account_directory();
@@ -929,6 +961,9 @@ struct SettingsWindow::State {
   HWND selector_label = nullptr;
   HWND status = nullptr;
   HWND reload = nullptr;
+  HWND setup_notice = nullptr;
+  HWND setup_fix = nullptr;
+  input_method::InputMethodState input_method_state = input_method::InputMethodState::unknown;
   HWND navigation_tree = nullptr;
   HWND heading = nullptr;
   HWND page_summary = nullptr;
@@ -990,6 +1025,7 @@ struct SettingsWindow::State {
   bool busy = true;
   bool saving_cloud = false;
   bool saving_clipboard_relay = false;
+  bool saving_clipboard_webdav = false;
   bool saving_wubi_keys = false;
   bool failed = false;
   bool com_initialized = false;
@@ -1014,6 +1050,7 @@ struct SettingsWindow::State {
   VocabularyForm vocabulary_form;
   PluginEffectsForm plugin_effects_form;
   PluginLibraryForm plugin_library_form;
+  PluginEditorForm plugin_editor_form;
   PluginScriptsForm plugin_scripts_form;
   PluginMentionsForm plugin_mentions_form;
   bool plugin_mentions_initialized = false;
@@ -1064,6 +1101,9 @@ struct SettingsWindow::State {
     strong_font = CreateFontW(-dip(14), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
     selector_label = add(window, L"STATIC", L"设置页面", SS_LEFT, -1);
+    setup_notice = add(window, L"STATIC", L"", SS_LEFT, setup_state);
+    setup_fix = add(window, L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, setup_action);
+    refresh_setup();
     selector = add(window, WC_COMBOBOXW, L"设置页面", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, page_selector);
     for (const auto* title : {L"快捷键", L"悬浮工具栏", L"维护与诊断", L"输入", L"标点与翻译", L"候选窗口", L"AI 输入辅助", L"账号与同步", L"主题与皮肤", L"社区皮肤", L"打字统计", L"剪贴板", L"云剪贴板", L"词库", L"背单词", L"插件", L"关于与帮助", L"社区插件", L"社区词库与回复模板", L"语音输入", MSIME_EDITION_HANDWRITING != 0 ? L"屏幕键盘与手写" : L"屏幕键盘", L"连接 AI 助手", L"键盘皮肤制作"})
       SendMessageW(selector, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(title));
@@ -1078,6 +1118,10 @@ struct SettingsWindow::State {
     TreeView_SetItemHeight(navigation_tree, dip(32));
     TreeView_SetIndent(navigation_tree, dip(14));
     const auto group = [&](const wchar_t* title, std::initializer_list<int> children, bool expanded) {
+      const auto available = std::count_if(children.begin(), children.end(), [](const int page) {
+        return chrome::page_available(static_cast<size_t>(page));
+      });
+      if (!available) return;
       TVINSERTSTRUCTW entry{};
       entry.hParent = TVI_ROOT; entry.hInsertAfter = TVI_LAST;
       entry.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_STATE;
@@ -1085,6 +1129,7 @@ struct SettingsWindow::State {
       entry.item.stateMask = TVIS_BOLD; entry.item.state = TVIS_BOLD;
       const auto parent = TreeView_InsertItem(navigation_tree, &entry);
       for (const auto page : children) {
+        if (!chrome::page_available(static_cast<size_t>(page))) continue;
         entry.hParent = parent; entry.item.state = 0;
         entry.item.pszText = const_cast<wchar_t*>(chrome::pages[static_cast<size_t>(page)].title);
         if (page == 20 && !MSIME_EDITION_HANDWRITING) entry.item.pszText = const_cast<wchar_t*>(L"屏幕键盘");
@@ -1098,7 +1143,7 @@ struct SettingsWindow::State {
     group(L"词库与数据", {13, 14, 11, 12, 15}, false);
     group(L"个性外观", {8, 22}, true);
     group(L"社区", {9, 17, 18}, false);
-    group(L"账号与应用", {7, 10, 2, 16}, false);
+    group(L"统计与支持", {7, 10, 2, 16}, false);
     syncing_navigation = true;
     TreeView_SelectItem(navigation_tree, navigation_pages[0]);
     syncing_navigation = false;
@@ -1178,10 +1223,9 @@ struct SettingsWindow::State {
                                       int id, int top, int height) {
       return surface_row(Surface::ai, type, text, style, id, top, height);
     });
-    surface_row(Surface::account, L"BUTTON", L"打开社区词库、回复模板与我的作品", WS_TABSTOP | BS_PUSHBUTTON, CommunityResourceForm::open, 0, 32);
-    account_height = 48 + account_form.create([this](const wchar_t* type, const wchar_t* text, DWORD style,
+    account_height = account_form.create([this](const wchar_t* type, const wchar_t* text, DWORD style,
                                                 int id, int top, int height) {
-      return surface_row(Surface::account, type, text, style, id, top + 48, height);
+      return surface_row(Surface::account, type, text, style, id, top, height);
     });
     statistics_height = statistics_form.create([this](const wchar_t* type, const wchar_t* text, DWORD style,
         int id, int top, int height) {
@@ -1284,15 +1328,16 @@ struct SettingsWindow::State {
     const auto row = [this](const wchar_t* type, const wchar_t* text, DWORD style, int id, int top, int height) {
       return surface_row(Surface::plugins, type, text, style, id, top, height);
     };
-    row(L"BUTTON", L"打开社区插件与发布", WS_TABSTOP | BS_PUSHBUTTON | BS_NOTIFY, CommunityPluginForm::open, 0, 32);
-    plugins_height = 48 + plugin_effects_form.create([&](const wchar_t* type, const wchar_t* text, DWORD style, int id, int top, int height) { return row(type, text, style, id, top + 48, height); });
+    plugins_height = plugin_effects_form.create(row);
     plugins_height = plugin_library_form.create(row, plugins_height + 24);
+    plugins_height = plugin_editor_form.create(row, plugins_height + 24);
     plugins_height = plugin_scripts_form.create(row, plugins_height + 24);
     plugins_height = plugin_mentions_form.create(row, plugins_height + 24);
     plugins_created = true;
     refresh_plugins();
     plugin_effects_form.enable(snapshot.has_value() && !busy);
     plugin_library_form.enable(snapshot.has_value() && !busy);
+    plugin_editor_form.enable(snapshot.has_value() && !busy);
     plugin_scripts_form.enable(snapshot.has_value() && !busy);
     plugin_mentions_form.enable(snapshot.has_value() && !busy);
   }
@@ -1361,16 +1406,20 @@ struct SettingsWindow::State {
     item(L"BUTTON", L"打开日志目录", WS_TABSTOP | BS_PUSHBUTTON, open_logs_directory, 266, 32);
     item(L"BUTTON", L"TSF 端日志", WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY, diagnostic_tsf, 312, 28);
     item(L"STATIC", L"排查应用内预编辑和输入延迟时开启。日志在内存中限量缓冲，通过独立管道批量汇总，不记录按键、输入内容或候选文本。", SS_LEFT, -1, 348, 62);
-    item(L"STATIC", L"数据目录", SS_LEFT, -1, 430, 24);
-    item(L"STATIC", L"词库、学习记录、皮肤、剪贴板历史和设置共用此位置。要迁移，请重新运行完整安装包，在「选择数据位置」一步选择空文件夹。", SS_LEFT, -1, 466, 62);
-    item(L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL, data_directory_text, 540, 28);
-    item(L"BUTTON", L"打开数据目录", WS_TABSTOP | BS_PUSHBUTTON, open_data_directory, 580, 32);
-    item(L"STATIC", L"设置文件", SS_LEFT, -1, 638, 24);
-    item(L"STATIC", L"导出当前设置，换电脑或重装后可以导入。服务配置与密钥、诊断日志、使用统计和剪贴板历史开关只属于本机，不写进文件；词库和学习记录也不在其中。", SS_LEFT, -1, 674, 66);
-    item(L"BUTTON", L"导出设置…", WS_TABSTOP | BS_PUSHBUTTON, export_settings, 752, 32);
-    item(L"STATIC", L"导入文件里的设置并立即生效。本机的服务配置与密钥、诊断日志、使用统计和剪贴板历史开关保持不变。", SS_LEFT, -1, 796, 50);
-    item(L"BUTTON", L"导入设置…", WS_TABSTOP | BS_PUSHBUTTON, import_settings, 858, 32);
-    developer_height = 906;
+    // `msime-mcp candidates` 的开关（#9663），与现代窗口同名同文案。命令按用户自己的词库给出候选，缺省关闭；键在 `diagnostic_log` 下，只属于本机。Win7 安装包同样把 msime-mcp.exe 放在 server 文件夹里。
+    item(L"STATIC", L"命令行工具", SS_LEFT, -1, 430, 24);
+    item(L"BUTTON", L"命令行查询候选", WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY, diagnostic_command_line_candidates, 464, 28);
+    item(L"STATIC", L"允许安装目录下 server 文件夹里的 msime-mcp.exe candidates 命令按你现在的输入方案、设置和词库，输出一串拼音或按键会给出的候选，供编写测试和演示程序使用。词库里有你打过的词，任何能运行这个命令的程序都能借此读到它们，不用时请保持关闭；关闭时命令会提示并以错误码退出。", SS_LEFT, -1, 500, 108);
+    item(L"STATIC", L"数据目录", SS_LEFT, -1, 628, 24);
+    item(L"STATIC", L"词库、学习记录、皮肤、剪贴板历史和设置共用此位置。要迁移，请重新运行完整安装包，在「选择数据位置」一步选择空文件夹。", SS_LEFT, -1, 664, 62);
+    item(L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL, data_directory_text, 738, 28);
+    item(L"BUTTON", L"打开数据目录", WS_TABSTOP | BS_PUSHBUTTON, open_data_directory, 778, 32);
+    item(L"STATIC", L"设置文件", SS_LEFT, -1, 836, 24);
+    item(L"STATIC", L"导出当前设置，换电脑或重装后可以导入。服务配置与密钥、诊断日志、使用统计和剪贴板历史开关只属于本机，不写进文件；词库和学习记录也不在其中。", SS_LEFT, -1, 872, 66);
+    item(L"BUTTON", L"导出设置…", WS_TABSTOP | BS_PUSHBUTTON, export_settings, 950, 32);
+    item(L"STATIC", L"导入文件里的设置并立即生效。本机的服务配置与密钥、诊断日志、使用统计和剪贴板历史开关保持不变。", SS_LEFT, -1, 994, 50);
+    item(L"BUTTON", L"导入设置…", WS_TABSTOP | BS_PUSHBUTTON, import_settings, 1056, 32);
+    developer_height = 1104;
   }
 
   std::optional<std::filesystem::path> pick_dictionary_file(bool save, bool vocabulary = false, bool plugin = false, bool voice_model = false) const {
@@ -1572,12 +1621,42 @@ struct SettingsWindow::State {
         top += 120;
       }
     }
+    if (SchemeForm::offers("quanpin")) {
+      item(L"BUTTON", L"连续多语言输入（实验）", WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY,
+          multilingual_enabled, top, 28);
+      item(L"STATIC", L"开启候选混输后，在全拼 26 键中连续输入所选语言的编码；完整中文优先，混合结果作为备选。至少需要两种可用语言。", SS_LEFT, -1, top + 36, 70);
+      top += 116;
+      for (const auto& option : multilingual_options) {
+        if constexpr (!MSIME_EDITION_TEMPORARY_JAPANESE) {
+          if (option.first == multilingual_japanese) continue;
+        }
+        item(L"BUTTON", option.second, WS_TABSTOP | BS_AUTOCHECKBOX | BS_NOTIFY, option.first, top, 28);
+        top += 42;
+      }
+      if constexpr (MSIME_EDITION_TEMPORARY_JAPANESE) {
+        item(L"STATIC", L"日文使用已有词典，未安装或准备中时暂不参与。", SS_LEFT, -1, top, 48);
+        top += 58;
+      }
+    }
     item(L"STATIC", L"云候选服务", SS_LEFT, -1, top + 12, 28);
     candidates_height = cloud_form.create(item, top + 60);
   }
 
   static const Json& candidate_group(const Json& preferences, const CandidateCheck& field) {
     return *field.group ? preferences.at(field.group) : preferences;
+  }
+
+  inline static const std::array<std::pair<int, const wchar_t*>, 3> multilingual_options{{
+      {multilingual_chinese, L"连续输入：中文"}, {multilingual_english, L"连续输入：英文"},
+      {multilingual_japanese, L"连续输入：日文"}}};
+  inline static const std::array<const char*, 3> multilingual_languages{{"chinese", "english", "japanese"}};
+
+  static Json multilingual_document(const Json& preferences) {
+    auto document = preferences.value("multilingual_input", Json::object());
+    // 只补缺省字段；显式空列表、未展示语言和未来字段均保留。
+    if (!document.contains("enabled")) document["enabled"] = false;
+    if (!document.contains("languages")) document["languages"] = multilingual_languages;
+    return document;
   }
 
   void refresh_candidates() {
@@ -1589,6 +1668,13 @@ struct SettingsWindow::State {
             candidate_group(preferences, field).value(field.field, field.fallback) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(body, mixed_first_page_count), CB_SETCURSEL,
         preferences.at("mixed_input").value("first_page_count", 1) - 1, 0);
+    const auto multilingual = multilingual_document(preferences);
+    SendMessageW(GetDlgItem(body, multilingual_enabled), BM_SETCHECK,
+        multilingual.at("enabled").get<bool>() ? BST_CHECKED : BST_UNCHECKED, 0);
+    const auto& languages = multilingual.at("languages");
+    for (size_t index = 0; index < multilingual_options.size(); ++index)
+      SendMessageW(GetDlgItem(body, multilingual_options[index].first), BM_SETCHECK,
+          std::find(languages.begin(), languages.end(), multilingual_languages[index]) != languages.end() ? BST_CHECKED : BST_UNCHECKED, 0);
     cloud_form.refresh(preferences.at("cloud_candidate_provider"));
   }
 
@@ -1599,7 +1685,7 @@ struct SettingsWindow::State {
       if (HWND control = GetDlgItem(body, field.id)) EnableWindow(control, enabled);
     EnableWindow(GetDlgItem(body, toolbar_size), enabled);
     EnableWindow(GetDlgItem(body, toolbar_theme), enabled);
-    for (int id : {diagnostic_server, diagnostic_tsf, export_settings, import_settings})
+    for (int id : {diagnostic_server, diagnostic_tsf, diagnostic_command_line_candidates, export_settings, import_settings})
       EnableWindow(GetDlgItem(body, id), enabled);
     for (int id : {word_character_keys, backspace_reverts}) EnableWindow(GetDlgItem(body, id), enabled);
     for (const auto& field : navigation_checks) EnableWindow(GetDlgItem(body, field.id), enabled);
@@ -1615,6 +1701,10 @@ struct SettingsWindow::State {
         EnableWindow(control, enabled && (field.id == mixed_enabled || std::string_view(field.group) != "mixed_input" || mixed));
     EnableWindow(GetDlgItem(body, mixed_first_page_count), enabled && mixed && snapshot &&
         snapshot->preferences().at("mixed_input").at("english").get<bool>());
+    EnableWindow(GetDlgItem(body, multilingual_enabled), enabled);
+    const bool multilingual = snapshot && multilingual_document(snapshot->preferences()).at("enabled").get<bool>();
+    for (const auto& option : multilingual_options)
+      EnableWindow(GetDlgItem(body, option.first), enabled && mixed && multilingual);
     cloud_form.enable(enabled);
     mode_form.enable(enabled);
     advanced_form.enable(enabled);
@@ -1633,7 +1723,7 @@ struct SettingsWindow::State {
     if (community_resources_created) community_resources_form.enable(enabled);
     if (keyboard_created) keyboard_form.enable(enabled);
     if (voice_created) { voice_form.enable(enabled); voice_models_form.enable(enabled); }
-    if (plugins_created) { plugin_effects_form.enable(enabled); plugin_library_form.enable(enabled); plugin_scripts_form.enable(enabled); plugin_mentions_form.enable(enabled); }
+    if (plugins_created) { plugin_effects_form.enable(enabled); plugin_library_form.enable(enabled); plugin_editor_form.enable(enabled); plugin_scripts_form.enable(enabled); plugin_mentions_form.enable(enabled); }
     dictionary_updates_form.enable(enabled && !updates_busy);
     theme_form.enable(enabled);
     community_form.enable(enabled);
@@ -1641,6 +1731,16 @@ struct SettingsWindow::State {
     for (int id : {restart_service, open_data_directory, open_logs_directory})
       EnableWindow(GetDlgItem(body, id), !busy);
     EnableWindow(reload, !busy);
+  }
+
+  bool refresh_setup() {
+    const auto state = input_method::input_method_state();
+    const bool changed = state != input_method_state;
+    input_method_state = state;
+    const bool missing = state == input_method::InputMethodState::missing;
+    SetWindowTextW(setup_notice, missing ? L"水杉输入法尚未添加到系统键盘列表" : L"水杉输入法还不是默认输入法");
+    SetWindowTextW(setup_fix, missing ? L"添加输入法" : L"设为默认");
+    return changed;
   }
 
   void layout() {
@@ -1652,17 +1752,24 @@ struct SettingsWindow::State {
     const int left = dip(224);
     const int available = std::max(width - left - dip(32), 1);
     MoveWindow(navigation_tree, dip(12), dip(86), dip(180), std::max(height - dip(118), 1), TRUE);
-    MoveWindow(heading, left, dip(27), available, dip(38), TRUE);
-    MoveWindow(page_summary, left, dip(74), available, dip(38), TRUE);
+    const bool needs_setup = input_method_state == input_method::InputMethodState::missing ||
+        input_method_state == input_method::InputMethodState::not_default;
+    const int setup_height = needs_setup ? 54 : 0;
+    ShowWindow(setup_notice, needs_setup ? SW_SHOW : SW_HIDE);
+    ShowWindow(setup_fix, needs_setup ? SW_SHOW : SW_HIDE);
+    MoveWindow(setup_notice, left, dip(18), std::max(available - dip(140), 1), dip(36), TRUE);
+    MoveWindow(setup_fix, width - dip(162), dip(16), dip(130), dip(34), TRUE);
+    MoveWindow(heading, left, dip(27 + setup_height), available, dip(38), TRUE);
+    MoveWindow(page_summary, left, dip(74 + setup_height), available, dip(38), TRUE);
     const bool has_tabs = surface == Surface::shortcuts || surface == Surface::reference ||
         std::any_of(input_pages.begin(), input_pages.end(), [this](const auto& page) { return page.first == surface; }) ||
         std::any_of(expression_pages.begin(), expression_pages.end(), [this](const auto& page) { return page.first == surface; });
     ShowWindow(tabs, has_tabs ? SW_SHOW : SW_HIDE);
-    MoveWindow(tabs, left, dip(124), available, dip(38), TRUE);
+    MoveWindow(tabs, left, dip(124 + setup_height), available, dip(38), TRUE);
     // 低分辨率下六个输入子页等宽排开，标题仍完整可读。
     const int tab_count = std::max(TabCtrl_GetItemCount(tabs), 1);
     TabCtrl_SetItemSize(tabs, std::min(dip(112), available / tab_count - dip(3)), dip(34));
-    const int body_top = has_tabs ? 184 : 130;
+    const int body_top = (has_tabs ? 184 : 130) + setup_height;
     MoveWindow(body, left, dip(body_top), available, std::max(height - dip(body_top + 66), 1), TRUE);
     MoveWindow(status, left, height - dip(45), std::max(available - dip(130), 1), dip(32), TRUE);
     MoveWindow(reload, width - dip(142), height - dip(48), dip(110), dip(30), TRUE);
@@ -1753,7 +1860,9 @@ struct SettingsWindow::State {
     if (busy) return;
     account_form.google_waiting(job.action == Job::Action::account && job.credential &&
         job.credential->value("operation", std::string{}) == "google_login");
-    saving_clipboard_relay = job.changes.size() == 1 && job.changes.front().path == std::vector<std::string>{"cloud_clipboard_relay"};
+    saving_clipboard_relay = !job.changes.empty() && job.changes.front().path == std::vector<std::string>{"cloud_clipboard_relay"};
+    const bool probing_webdav = job.action == Job::Action::cloud_clipboard && job.credential && job.credential->contains("webdav_probe");
+    saving_clipboard_webdav = probing_webdav && !job.changes.empty();
     saving_cloud = job.changes.size() == 1 &&
         job.changes.front().path == std::vector<std::string>{"cloud_candidate_provider"};
     saving_wubi_keys = job.changes.size() == 1 &&
@@ -1775,7 +1884,7 @@ struct SettingsWindow::State {
     case Job::Action::plugins: message = L"正在处理插件操作…"; break;
     case Job::Action::vocabulary: message = L"正在处理词书与复习进度…"; break;
     case Job::Action::dictionary: message = L"正在处理词库操作…"; break;
-    case Job::Action::cloud_clipboard: message = L"正在更新云剪贴板…"; break;
+    case Job::Action::cloud_clipboard: message = probing_webdav ? L"正在测试 WebDAV 连接…" : L"正在更新云剪贴板…"; break;
     case Job::Action::clipboard: message = L"正在更新剪贴板历史…"; break;
     case Job::Action::wubi_lookup: message = L"正在查询编码…"; break;
     case Job::Action::helpcode_sources: message = L"正在读取辅助码方案…"; break;
@@ -1813,7 +1922,7 @@ struct SettingsWindow::State {
     }
     const auto diagnostics = preferences.find("diagnostic_log");
     if (diagnostics == preferences.end() || !diagnostics->is_object()) return false;
-    for (const auto* field : {"server", "tsf"}) {
+    for (const auto* field : {"server", "tsf", "command_line_candidates"}) {
       const auto value = diagnostics->find(field);
       if (value == diagnostics->end() || !value->is_boolean()) return false;
     }
@@ -1852,7 +1961,9 @@ struct SettingsWindow::State {
       if (!preferences.contains(group) || !preferences.at(group).is_object()) return false;
     for (const auto& field : candidate_checks) {
       const auto& group = candidate_group(preferences, field);
-      const bool optional = field.id == mixed_enabled || field.id == mixed_symbols || field.id == mixed_japanese;
+      // `caret_edit_suffix` 关着时共享序列化不写它，缺键读作关。
+      const bool optional = field.id == mixed_enabled || field.id == mixed_symbols || field.id == mixed_japanese ||
+          field.id == caret_edit_suffix;
       if (!group.contains(field.field)) {
         if (optional) continue;
         return false;
@@ -2045,6 +2156,8 @@ struct SettingsWindow::State {
           diagnostics.at("server").get<bool>() ? BST_CHECKED : BST_UNCHECKED, 0);
       SendMessageW(GetDlgItem(body, diagnostic_tsf), BM_SETCHECK,
           diagnostics.at("tsf").get<bool>() ? BST_CHECKED : BST_UNCHECKED, 0);
+      SendMessageW(GetDlgItem(body, diagnostic_command_line_candidates), BM_SETCHECK,
+          diagnostics.at("command_line_candidates").get<bool>() ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     SetWindowTextW(GetDlgItem(body, data_directory_text), completed->directory.empty() ?
         L"未找到数据目录" : completed->directory.c_str());
@@ -2056,7 +2169,11 @@ struct SettingsWindow::State {
       else if (completed->credential_request->value("service", std::string{}) == "voice.settings") {
         const auto& config = completed->credential_request->at("config");
         if (config.value("operation", std::string{}) == "capture_devices") voice_form.capture_devices(*completed->credential_response);
-        else voice_followup = voice_models_form.completed(config, *completed->credential_response);
+        else {
+          if (config.value("operation", std::string{}) == "models" && completed->credential_response->contains("voice_provider_catalog"))
+            voice_form.catalog(completed->credential_response->at("voice_provider_catalog"));
+          voice_followup = voice_models_form.completed(config, *completed->credential_response);
+        }
       } else if (completed->credential_request->value("service", std::string{}).substr(0,6) == "voice.")
         voice_form.tested(*completed->credential_request, *completed->credential_response);
       else translation_form.tested(*completed->credential_request, *completed->credential_response);
@@ -2082,8 +2199,11 @@ struct SettingsWindow::State {
       if (completed->credential_request->value("operation", std::string{}) == "candidate_skin_preview")
         community_form.preview(std::move(completed->community_preview));
       const auto operation = completed->credential_request->value("operation", std::string{});
-      if (operation.substr(0, 7) == "plugin_" || (operation == "report" && completed->credential_request->value("kind", std::string{}) == "plugins"))
+      if (operation.substr(0, 7) == "plugin_" || (operation == "report" && completed->credential_request->value("kind", std::string{}) == "plugins")) {
         community_plugins_form.completed(*completed->credential_request, *completed->community_response);
+        // 社区装好的脚本插件不会运行，要授权：切到插件页，在脚本插件授权区选中它。
+        if (auto script = community_plugins_form.installed_script(); !script.empty()) { plugin_scripts_form.select(std::move(script)); pending_page = 15; }
+      }
       else if (operation.substr(0, 9) == "resource_" || (operation == "report" &&
           (completed->credential_request->value("kind", std::string{}) == "dictionaries" || completed->credential_request->value("kind", std::string{}) == "replies")))
         community_resources_form.completed(*completed->credential_request, *completed->community_response);
@@ -2093,18 +2213,35 @@ struct SettingsWindow::State {
     if (completed->clipboard_response) clipboard_form.completed(*completed->clipboard_response);
     if (completed->cloud_clipboard_response && completed->credential_request)
       cloud_clipboard_form.completed(*completed->credential_request, *completed->cloud_clipboard_response);
+    HWND revealed_script = nullptr;
     if (completed->plugins_response && plugins_created && completed->credential_request) {
       const auto& value = *completed->plugins_response;
       const auto operation = completed->credential_request->value("operation", std::string{});
       if (operation == "load_mentions" || operation == "save_mentions") plugin_mentions_form.completed(value.at("response"), operation);
+      if (operation == "authoring_load" || operation == "authoring_save") {
+        PluginEditorForm::Usage usage{plugin_effects_form.preferences(), true, false};
+        if (snapshot) {
+          const auto document = snapshot->preferences();
+          if (document.contains("local_modes") && document.at("local_modes").is_object()) {
+            const auto& modes = document.at("local_modes");
+            if (modes.contains("quick_phrase") && modes.at("quick_phrase").is_boolean()) usage.quick_phrase = modes.at("quick_phrase").get<bool>();
+            if (modes.contains("command") && modes.at("command").is_boolean()) usage.command = modes.at("command").get<bool>();
+          }
+        }
+        plugin_editor_form.completed(value.at("response"), operation, usage);
+      }
       if (value.contains("mentions") && !plugin_mentions_initialized) {
         plugin_mentions_initialized = true; plugin_mentions_form.completed(value.at("mentions"), "load_mentions");
       }
       if (value.contains("catalog")) {
+        // 编辑器保存失败时由编辑器自己说明，插件库和脚本插件只看重读的目录。
+        const bool editor = operation == "authoring_save";
         plugin_library_form.completed(value.at("catalog"));
-        if (!theme_data::value(value.at("response"))) plugin_library_form.failure();
+        if (!editor && !theme_data::value(value.at("response"))) plugin_library_form.failure();
         plugin_effects_form.catalog(plugin_library_form.packages(), plugin_library_form.loaded());
-        plugin_scripts_form.completed(value.at("catalog"), value.at("grants"), value.at("response"));
+        plugin_editor_form.catalog(plugin_library_form.packages());
+        plugin_scripts_form.completed(value.at("catalog"), value.at("grants"), editor ? value.at("catalog") : value.at("response"), value.value("script_states", Json::object()), operation);
+        revealed_script = plugin_scripts_form.revealed();
       }
       if (value.contains("statistics_enabled")) {
         const auto& enabled = value.at("statistics_enabled");
@@ -2124,6 +2261,7 @@ struct SettingsWindow::State {
     appearance_form.game_profile(completed->game_profile_enabled);
     enable(snapshot.has_value());
     layout_body();
+    if (revealed_script && surface == Surface::plugins) { reveal(revealed_script); SetFocus(revealed_script); }
     const wchar_t* message = L"读取设置失败，请重新读取后重试。";
     switch (result->outcome) {
     case Outcome::loaded: message = L"设置已就绪。"; break;
@@ -2135,6 +2273,8 @@ struct SettingsWindow::State {
     }
     if (saving_clipboard_relay && result->outcome == Outcome::storage)
       message = L"中继配置未保存，请检查地址与令牌；未保存的输入已保留。";
+    if (saving_clipboard_webdav && result->outcome == Outcome::storage)
+      message = L"WebDAV 配置未保存，请检查地址、账号与应用密码；未保存的输入已保留。";
     if (saving_cloud && result->outcome == Outcome::storage)
       message = L"保存云候选服务失败，请检查地址、请求头 JSON、请求体模板、响应路径和超时；未保存的内容已保留。";
     if (saving_wubi_keys && result->outcome == Outcome::storage)
@@ -2215,6 +2355,14 @@ struct SettingsWindow::State {
 
   void command(WPARAM command) {
     const int id = LOWORD(command);
+    if (id == setup_action && HIWORD(command) == BN_CLICKED) {
+      const bool changed = input_method_state == input_method::InputMethodState::missing
+          ? input_method::add_input_method() : input_method::make_input_method_default();
+      if (!changed) ShellExecuteW(window, L"open", L"control.exe", L"/name Microsoft.RegionAndLanguage", nullptr, SW_SHOWNORMAL);
+      refresh_setup();
+      layout();
+      return;
+    }
     if (id == VoiceModelsForm::cancel && HIWORD(command) == BN_CLICKED && voice_created) {
       if (voice_models_form.command(command).cancel_install && worker) worker->cancel_voice();
       return;
@@ -2531,6 +2679,17 @@ struct SettingsWindow::State {
       }
       return;
     }
+    auto editor_change = plugin_editor_form.command(command);
+    if (editor_change.handled) {
+      if (!editor_change.confirmation.empty()) {
+        const bool allowed = confirmation ? confirmation(window, L"插件", editor_change.confirmation.c_str()) :
+            MessageBoxW(window, editor_change.confirmation.c_str(), L"插件", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+        if (!allowed) return;
+      }
+      if (editor_change.after) editor_change.after();
+      if (editor_change.request) { Job job; job.reload = false; job.action = Job::Action::plugins; job.credential = std::move(editor_change.request); submit(std::move(job)); }
+      return;
+    }
     auto plugin_change = plugin_library_form.command(command);
     if (plugin_change.handled) {
       if (!plugin_change.confirmation.empty()) {
@@ -2577,6 +2736,11 @@ struct SettingsWindow::State {
     }
     auto dictionary_change = dictionary_form.command(command);
     if (dictionary_change.handled) {
+      if (dictionary_change.route) {
+        const bool opened = surface_launcher ? surface_launcher(*dictionary_change.route) : launch_surface(*dictionary_change.route);
+        SetWindowTextW(status, opened ? L"已打开词库同步。" : L"无法打开词库同步，请检查安装文件。");
+        return;
+      }
       if (!dictionary_change.confirmation.empty()) {
         const bool allowed = confirmation ? confirmation(window, L"词库", dictionary_change.confirmation.c_str()) :
             MessageBoxW(window, dictionary_change.confirmation.c_str(), L"词库", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
@@ -2769,6 +2933,19 @@ struct SettingsWindow::State {
       const auto selected = SendMessageW(GetDlgItem(body, id), CB_GETCURSEL, 0, 0);
       if (selected < 0 || selected > 2) return;
       job.changes.push_back({{"mixed_input", "first_page_count"}, selected + 1});
+    } else if (id >= multilingual_enabled && id <= multilingual_japanese && HIWORD(command) == BN_CLICKED) {
+      const auto control = GetDlgItem(body, id);
+      if (!snapshot || !control || !IsWindowEnabled(control)) return;
+      auto document = multilingual_document(snapshot->preferences());
+      const bool checked = SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+      if (id == multilingual_enabled) document["enabled"] = checked;
+      else {
+        const auto language = multilingual_languages[static_cast<size_t>(id - multilingual_chinese)];
+        auto& languages = document["languages"];
+        languages.erase(std::remove(languages.begin(), languages.end(), language), languages.end());
+        if (checked) languages.push_back(language);
+      }
+      job.changes.push_back({{"multilingual_input"}, std::move(document)});
     } else if (id == punctuation_mode && HIWORD(command) == CBN_SELCHANGE) {
       const auto selected = SendMessageW(GetDlgItem(body, id), CB_GETCURSEL, 0, 0);
       if (selected < 0 || static_cast<size_t>(selected) >= ps::mode_choices.size()) return;
@@ -2828,8 +3005,9 @@ struct SettingsWindow::State {
         if (checked && word.at("enabled").get<bool>() && word.at("keys") == field.field)
           job.changes.push_back({{"word_character", "enabled"}, false});
       }
-      if (id == diagnostic_server || id == diagnostic_tsf)
-        job.changes.push_back({{"diagnostic_log", id == diagnostic_server ? "server" : "tsf"},
+      if (id == diagnostic_server || id == diagnostic_tsf || id == diagnostic_command_line_candidates)
+        job.changes.push_back({{"diagnostic_log", id == diagnostic_server ? "server" :
+            id == diagnostic_tsf ? "tsf" : "command_line_candidates"},
             SendMessageW(GetDlgItem(body, id), BM_GETCHECK, 0, 0) == BST_CHECKED});
       for (const auto& field : check_fields)
         if (id == field.first)
@@ -2990,6 +3168,9 @@ struct SettingsWindow::State {
       SelectObject(dc, previous); EndPaint(hwnd, &paint); return 0;
     }
     case WM_TIMER:
+      if (wparam == 73) {
+        if (self->refresh_setup()) self->layout();
+      }
       if (wparam == 72) self->poll_statistics();
       else if (wparam == 73) self->account_form.tick();
       else if (wparam == 74) {
@@ -3003,7 +3184,7 @@ struct SettingsWindow::State {
       return 0;
     // 激活可发生在按钮的按下与通知之间；延后刷新，不能在第一次点击中途禁用控件。
     case WM_ACTIVATE: if (LOWORD(wparam) != WA_INACTIVE) PostMessageW(hwnd, activated_message, 0, 0); break;
-    case activated_message: self->poll_statistics(); self->poll_clipboard(); self->poll_dictionary_updates(true); return 0;
+    case activated_message: if (self->refresh_setup()) self->layout(); self->poll_statistics(); self->poll_clipboard(); self->poll_dictionary_updates(true); return 0;
     case WM_SIZE: self->layout(); return 0;
     case WM_GETMINMAXINFO: {
       auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);

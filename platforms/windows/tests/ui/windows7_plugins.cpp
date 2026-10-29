@@ -1,4 +1,5 @@
 #include "../../settings/win7/SettingsWindow.h"
+#include "../../settings/win7/PluginEditorForm.h"
 #include "../../settings/win7/PluginEffectsForm.h"
 #include "../../settings/win7/PluginLibraryForm.h"
 #include "../../settings/win7/PluginMentionsForm.h"
@@ -6,6 +7,7 @@
 #include <cassert>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 
 namespace {
 using namespace msime::settings::win7;
@@ -82,12 +84,15 @@ int main() {
   assert(revision() == initial.snapshot->revision());
   assert(!IsWindowEnabled(control(PluginEffectsForm::music_enabled)));
   assert(!IsWindowEnabled(control(PluginEffectsForm::achievements_enabled)));
+  assert(control_text::read(control(PluginEffectsForm::selected_packs))->find("背景音乐暂不可用") != std::string::npos);
   // 默认省略的插件对象只补用户修改的字段，不把整个默认对象写回。
   click(PluginEffectsForm::key_enabled);
   assert(prefs().at("plugins").at("key_sound").at("enabled") == true);
   select(PluginEffectsForm::key_volume, 73);
   assert(prefs().at("plugins").at("key_sound").at("volume") == 73);
   assert(store.save(*store.load().snapshot, {{{"plugins", "unknown", "enabled"}, true}}).outcome == Outcome::invalid_change);
+  // 类型筛选是「全部类型」加插件库的 9 类，最后一类是脚本插件。
+  assert(SendMessageW(control(PluginLibraryForm::filter), CB_GETCOUNT, 0, 0) == 10);
   const auto before_import = revision(); cancel = true; click(PluginLibraryForm::import_folder); assert(picks == 1);
   cancel = false;
   manifest("synthetic-effect", "effect", "[effect]\nstyle = 'flash'\n");
@@ -96,9 +101,8 @@ int main() {
   // 列表包含中文类型前缀，按已知唯一条目选中。
   select(PluginLibraryForm::packages_list, 0, LBN_SELCHANGE);
   click(PluginLibraryForm::use_pack); assert(prefs().at("plugins").at("effect_pack") == "synthetic-effect");
-  assert(!IsWindowEnabled(control(PluginEffectsForm::intensity)));
+  assert(control_text::read(control(PluginEffectsForm::selected_packs))->find("特效包已接管") != std::string::npos);
   click(PluginLibraryForm::stop_pack); assert(prefs().at("plugins").value("effect_pack", std::string{}).empty());
-  select(PluginEffectsForm::intensity, 64); assert(prefs().at("plugins").at("effect_intensity") == 64);
   click(PluginLibraryForm::use_pack);
   const auto selected_revision = revision(); click(PluginLibraryForm::remove_pack);
   assert(confirms == 1 && revision() == selected_revision && std::filesystem::exists(temporary.path / L"plugins/effect/synthetic-effect"));
@@ -147,6 +151,50 @@ int main() {
   set(PluginMentionsForm::text, L"草稿"); click(PluginMentionsForm::apply_entry);
   allow = false; click(PluginMentionsForm::reload); assert(IsWindowEnabled(control(PluginMentionsForm::save)));
   allow = true; click(PluginMentionsForm::reload); assert(!IsWindowEnabled(control(PluginMentionsForm::save)));
+  // 插件编辑器：新建的短语表先按共享规则报第一处问题，改好后经 authoring_save 装进插件目录并生成 my- 开头的 id；再保存替换同一个包，从下拉框读回时内容一致；有没保存的修改时新建要先确认。
+  const auto notice_text = [&] { return control_text::read(control(PluginEditorForm::notice)).value(); };
+  const auto field_text = [&](int id) { return control_text::read(control(id), 4 * 1024 * 1024).value(); };
+  const auto authored = [&] {
+    std::vector<std::filesystem::path> found;
+    for (const auto& entry : std::filesystem::directory_iterator(temporary.path / L"plugins/phrase_table"))
+      if (entry.path().filename().wstring().rfind(L"my-", 0) == 0) found.push_back(entry.path());
+    return found;
+  };
+  const auto manifest_text = [&](const std::filesystem::path& folder) {
+    std::ifstream input(folder / L"plugin.toml", std::ios::binary); assert(input.good());
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+  };
+  assert(field_text(PluginEditorForm::license) == "CC0-1.0" && field_text(PluginEditorForm::version) == "1.0.0");
+  set(PluginEditorForm::name, L"合成短语"); set(PluginEditorForm::content, L"DH 合成电话");
+  const auto before_editor = revision(); click(PluginEditorForm::save_pack);
+  assert(notice_text() == "第 1 条短语的编码只能是 1 到 32 个小写字母。" && authored().empty());
+  set(PluginEditorForm::content, L"nospace"); click(PluginEditorForm::save_pack);
+  assert(notice_text() == "第 1 行要写成「编码 文字」，中间用空格隔开。");
+  set(PluginEditorForm::content, L"dh 合成电话\r\ndz 合成地址"); click(PluginEditorForm::save_pack);
+  auto folders = authored();
+  assert(folders.size() == 1 && folders[0].filename().wstring().size() == 11 && revision() == before_editor);
+  assert(manifest_text(folders[0]).find("合成地址") != std::string::npos && notice_text().find("已保存短语表「合成短语」。") == 0);
+  assert(notice_text().find("选用 / 启用所选插件") != std::string::npos);
+  set(PluginEditorForm::content, L"dh 合成电话改"); click(PluginEditorForm::save_pack);
+  assert(authored() == folders && manifest_text(folders[0]).find("合成电话改") != std::string::npos && manifest_text(folders[0]).find("合成地址") == std::string::npos);
+  click(PluginEditorForm::new_pack);
+  assert(field_text(PluginEditorForm::name).empty() && field_text(PluginEditorForm::content).empty());
+  const auto editable = SendMessageW(control(PluginEditorForm::packs), CB_FINDSTRING, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(L"短语表 · 合成短语"));
+  assert(editable >= 0); select(PluginEditorForm::packs, static_cast<int>(editable)); click(PluginEditorForm::open_pack);
+  assert(field_text(PluginEditorForm::name) == "合成短语" && field_text(PluginEditorForm::content) == "dh 合成电话改");
+  assert(!IsWindowEnabled(control(PluginEditorForm::kind)));
+  set(PluginEditorForm::name, L"合成短语改"); allow = false; const auto asked = confirms; click(PluginEditorForm::new_pack);
+  assert(confirms == asked + 1 && field_text(PluginEditorForm::name) == "合成短语改");
+  allow = true; click(PluginEditorForm::new_pack);
+  assert(field_text(PluginEditorForm::name).empty() && IsWindowEnabled(control(PluginEditorForm::kind)));
+  // 符号集按「[符号] 标题」分组写，保存后宿主装进 symbol_set。
+  select(PluginEditorForm::kind, 2); click(PluginEditorForm::new_pack);
+  set(PluginEditorForm::name, L"合成符号"); set(PluginEditorForm::content, L"[符号] 箭头\tjiantou\r\n→\r\n←");
+  click(PluginEditorForm::save_pack);
+  bool symbols_saved = false;
+  for (const auto& entry : std::filesystem::directory_iterator(temporary.path / L"plugins/symbol_set"))
+    symbols_saved = symbols_saved || entry.path().filename().wstring().rfind(L"my-", 0) == 0;
+  assert(symbols_saved && notice_text().find("已保存符号集「合成符号」。") == 0);
   // ABI 模块只导入明确声明的读取和改写能力；导入不执行、不自动授权。
   const uint8_t module[] = {0, 97, 115, 109, 1, 0, 0, 0, 1, 21, 4, 96, 1, 127, 1, 126, 96, 2, 127, 127, 1, 127, 96, 0, 1, 127, 96, 1, 127, 1, 127, 2, 46, 2, 5, 109, 115, 105, 109, 101, 13, 99, 111, 109, 109, 105, 116, 95, 115, 99, 97, 108, 97, 114, 0, 0, 5, 109, 115, 105, 109, 101, 14, 114, 101, 119, 114, 105, 116, 101, 95, 99, 111, 109, 109, 105, 116, 0, 1, 3, 3, 2, 2, 3, 5, 3, 1, 0, 1, 7, 39, 3, 6, 109, 101, 109, 111, 114, 121, 2, 0, 9, 109, 115, 105, 109, 101, 95, 97, 98, 105, 0, 2, 14, 109, 115, 105, 109, 101, 95, 111, 110, 95, 101, 118, 101, 110, 116, 0, 3, 10, 11, 2, 4, 0, 65, 1, 11, 4, 0, 65, 0, 11};
   { std::ofstream output(source / L"main.wasm", std::ios::binary); output.write(reinterpret_cast<const char*>(module), sizeof(module)); assert(output.good()); }
@@ -184,5 +232,5 @@ int main() {
   assert(!control_text::read(control(PluginScriptsForm::notice)).value().empty());
   assert(revision() == before_grant);
   DestroyWindow(host);
-  std::puts("Windows 7 plugins: real imports, selection, sparse preferences, priority, CAS conflict, removal, mentions, script grants and damaged-file preservation passed");
+  std::puts("Windows 7 plugins: real imports, selection, sparse preferences, priority, CAS conflict, removal, mentions, the plugin editor, script grants and damaged-file preservation passed");
 }

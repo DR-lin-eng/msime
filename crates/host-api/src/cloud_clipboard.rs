@@ -1,4 +1,4 @@
-//! 云剪贴板请求：每个宿主都接受的形状（[`validate_request`]）、经水杉账号的答复（[`account_request`]），以及经自建中继的答复（[`relay_request`]，见 `docs/cloud-clipboard-relay.md`）。
+//! 云剪贴板请求：每个宿主都接受的形状（[`validate_request`]）、经水杉账号的答复（[`account_request`]），以及经自建中继的答复（[`relay_request`]，见 `docs/cloud-clipboard-relay.md`）。「中继」有两种后端：HTTP 中继和 WebDAV 网盘（`docs/cloud-clipboard-webdav.md`，客户端在本机扮演中继），对宿主来说都是 `source: "relay"`，[`RelayConfig`] 里装着哪一种，这里的入口就按哪一种答，宿主不用分辨。
 
 use msime_client_core::preferences::PreferencesStore;
 use msime_client_core::{
@@ -100,7 +100,7 @@ pub fn validate_account_request(request: &Value) -> Result<(), &'static str> {
     validate_relay_request(request)
 }
 
-/// 偏好目录里配置的中继；没有配置时为 `None`。偏好读不了时是 `storage`，配置不合规时是 `relay_not_configured`。不联网。
+/// 偏好目录里配置的中继（HTTP 中继或 WebDAV 网盘）；没有配置时为 `None`。偏好读不了时是 `storage`，配置不合规时是 `relay_not_configured`。不联网。
 pub fn configured_relay(preferences_directory: &Path) -> Result<Option<RelayConfig>, &'static str> {
     configured_relay_at_revision(preferences_directory, None).map(|(config, _)| config)
 }
@@ -117,12 +117,11 @@ pub fn configured_relay_at_revision(
     if expected_revision.is_some_and(|expected| expected != snapshot.revision) {
         return Err("clipboard_source_changed");
     }
-    let config = RelayConfig::from_preferences(&snapshot.preferences.cloud_clipboard_relay)
-        .map_err(|error| error.code())?;
+    let config = RelayConfig::selected(&snapshot.preferences).map_err(|error| error.code())?;
     Ok((config, snapshot.revision))
 }
 
-/// 宿主据此决定云剪贴板走哪条路：配置了中继时是 `relay`，否则是 `account`。不联网。
+/// 宿主据此决定云剪贴板走哪条路：配置了中继或 WebDAV 网盘时是 `relay`，否则是 `account`。不联网。
 pub fn source(preferences_directory: &Path) -> Result<&'static str, &'static str> {
     Ok(if configured_relay(preferences_directory)?.is_some() {
         "relay"
@@ -142,6 +141,26 @@ pub fn relay_request(
     validate_relay_request(action).map_err(|_| INVALID)?;
     let relay = RelayClipboard::new(config, keystore_directory, device_name)
         .map_err(|error| error.code())?;
+    relay_action(&relay, action)
+}
+
+/// 与 [`relay_request`] 相同，但只用 `keystore_directory` 里已有的设备身份（`RelayClipboard::existing_identity_only`）：本机没有给这个中继和空间保存过可用的密钥串时，经驱动的动作（`list`、`add` 和设备管理）答 `clipboard_identity_missing`，不生成新身份、不登记设备、不联网。鸿蒙的键盘扩展用它沿用设置应用的身份，同一台设备只登记一次。
+pub fn relay_request_existing_identity(
+    config: RelayConfig,
+    keystore_directory: &Path,
+    device_name: &str,
+    action: &Value,
+) -> Result<Value, &'static str> {
+    const INVALID: &str = "invalid_cloud_clipboard";
+    validate_relay_request(action).map_err(|_| INVALID)?;
+    let relay = RelayClipboard::new(config, keystore_directory, device_name)
+        .map_err(|error| error.code())?
+        .existing_identity_only();
+    relay_action(&relay, action)
+}
+
+fn relay_action(relay: &RelayClipboard, action: &Value) -> Result<Value, &'static str> {
+    const INVALID: &str = "invalid_cloud_clipboard";
     let field = |name: &str| action.get(name).and_then(Value::as_str).ok_or(INVALID);
     let flag = |name: &str| action.get(name).and_then(Value::as_bool).ok_or(INVALID);
     let done = |result: Result<(), RelayError>, value: Value| {
@@ -185,9 +204,10 @@ pub fn relay_request(
     }
 }
 
-/// 向中继发端到端加密驱动给出的一个请求，答 `{status, body}`，宿主把它交回驱动（`msime_client_cloud_clipboard_e2e` 的 `resume`）。给自己跑驱动、自己保存密钥串的宿主用：这里不读也不写密钥串。路径不在云剪贴板接口之下、方法不认识或正文过大时是 `invalid_cloud_clipboard`，不发出去；中继拒绝令牌时是 `relay_unauthorized`，连不上或响应过大是 `relay_unavailable`；其余状态码原样交回。会联网，不要在界面线程上调用。
+/// 向中继发端到端加密驱动给出的一个请求，答 `{status, body}`，宿主把它交回驱动（`msime_client_cloud_clipboard_e2e` 的 `resume`）。给自己跑驱动、自己保存密钥串的宿主用：这里不读也不写密钥串。WebDAV 后端要 `directory`（绝对路径）放日志的本机缓存和锁文件，里面只有密文和公开数据；HTTP 中继不用它。路径不在云剪贴板接口之下、方法不认识或正文过大时是 `invalid_cloud_clipboard`，不发出去；中继拒绝令牌或网盘拒绝账号密码时是 `relay_unauthorized`，连不上或响应过大是 `relay_unavailable`，网盘限流、日志被回退各有错误码（见 `RelayError::code`）；其余状态码原样交回。会联网，不要在界面线程上调用。
 pub fn relay_exchange(
     config: RelayConfig,
+    directory: Option<&Path>,
     method: &str,
     path: &str,
     body: Option<&str>,
@@ -196,16 +216,53 @@ pub fn relay_exchange(
         RelayError::Invalid => "invalid_cloud_clipboard",
         error => error.code(),
     };
-    let response = RelayTransport::new(config)
+    let transport = match directory {
+        Some(directory) => RelayTransport::with_directory(config, directory),
+        None => RelayTransport::new(config),
+    };
+    let response = transport
         .map_err(code)?
         .send(method, path, body)
         .map_err(code)?;
     Ok(json!({ "status": response.status, "body": response.body }))
 }
 
+/// WebDAV 设置的「测试连接」：在 `url` 这个文件夹里试一遍日志要用的网盘行为（`clipboard_webdav::probe`），通过答 `{}`。给了 `directory`（本机中继密钥串所在的目录）时，通过后删掉那里的日志缓存：用户重新确认了这个网盘，防回退从网盘现在的样子开始。地址、账号或密码不合规是 `relay_not_configured`，网盘不合格是 `webdav_unsupported`，账号或密码不对是 `relay_unauthorized`。会联网，大约二十个请求。
+pub fn webdav_probe(
+    url: &str,
+    username: &str,
+    password: &str,
+    directory: Option<&Path>,
+) -> Result<Value, &'static str> {
+    let config = RelayConfig::webdav(url, username, password).map_err(|error| error.code())?;
+    msime_client_services::clipboard_webdav::probe_and_trust(&config, directory)
+        .map_err(|error| error.code())?;
+    Ok(json!({}))
+}
+
 fn relay_value<T: serde::Serialize>(result: Result<T, RelayError>) -> Result<Value, &'static str> {
     let value = result.map_err(|error| error.code())?;
     serde_json::to_value(value).map_err(|_| RelayError::Unavailable.code())
+}
+
+/// 与 [`account_request`] 相同，但只用本机已有的设备身份：经端到端加密驱动的动作（`list`、`add` 和设备管理）在本机没有可用的密钥串时答 `clipboard_identity_missing`，不生成新身份、不登记设备、不联网；开关、删除这些直接请求的动作照常。鸿蒙的键盘扩展用它沿用设置应用经共享沙箱镜像过来的那份身份。检查在驱动读取密钥串之前、不在同一把锁里：密钥串只会随会话一起被清掉（退出登录、会话采用清空），那时驱动在取凭据时就停下了。
+pub fn account_request_existing_identity<A: AccountApi, S: AccountSessionStorage>(
+    session: &BackendAccountSession<A, S>,
+    action: &Value,
+    device_name: Option<&str>,
+) -> Result<Value, &'static str> {
+    let driven = matches!(
+        action.get("operation").and_then(Value::as_str),
+        Some("list" | "add" | "devices" | "approve" | "reject" | "remove" | "reset")
+    );
+    if driven
+        && !session
+            .has_clipboard_identity()
+            .map_err(|error| error.code())?
+    {
+        return Err(msime_client_services::clipboard_relay::IDENTITY_MISSING);
+    }
+    account_request(session, action, device_name)
 }
 
 /// 经账号会话答一个云剪贴板动作：云剪贴板面板发的 `list`、`set_enabled`、`add` 和 `delete`，端到端加密的设备管理（`devices`、`approve`、`reject`、`remove`、`reset`，见 `docs/cloud-clipboard-e2e.md`），以及原生 Android、iOS 和 macOS 页面用的 `pin {id, pinned}`、`set_retention {days}` 和 `clear`。`pin` 和 `clear` 答 `{}`，`set_retention` 答 `{retention_days}`，形状与 [`relay_request`] 相同；`clear` 删掉所有条目，不动开关。`device_name` 是本设备在端到端加密里登记的名字，显示在其他设备的批准提示里；为 `None` 时用 `cloud_clipboard_device_name`，即计算机名或平台名。会联网，调用方不要在界面线程上调用。Tauri 外壳传它们 `AccountState` 持有的会话；原生 Windows 设置窗口（`msime_client_account_cloud_clipboard`）传一个基于外壳写下的已登录会话文件的会话。不属于这些的动作、或缺字段的动作是 `invalid_cloud_clipboard`，不会发到后端；调用失败时是账号错误的错误码，没人登录时是 `account_unauthorized`，或者是驱动的错误码（例如 `clipboard_device_pending`）。

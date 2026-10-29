@@ -73,7 +73,7 @@ export interface VoiceInputConfiguration {
 
 export const DEFAULT_VOICE_INPUT_CONFIGURATION: VoiceInputConfiguration = {
   enabled: true,
-  asr_provider: "doubao",
+  asr_provider: "local",
   language: "zh-cn",
   capture_backend: "",
   capture_device: "",
@@ -126,6 +126,10 @@ export class VoiceInputConfigurationPolicy {
     if (config.asr_provider === "local" && (config.asr_model_path ?? "").trim().length > 0) {
       return "使用本机模型识别；原始音频不会离开设备。";
     }
+    if (config.asr_provider === "local") {
+      // 出厂识别服务就是本地模型，新装还没有模型时录音会被 `HarmonyVoiceRecognizer.start` 以同一句话拒绝；这里先告诉用户去哪下载，不落到下面的「不可用，请检查设置」。
+      return "使用本机模型识别，请先在设置中下载并选择本地语音模型；原始音频不会离开设备。";
+    }
     if (DoubaoCredentialPolicy.attempted(config)) {
       return "使用豆包实时语音识别；原始音频会发送到豆包。";
     }
@@ -152,7 +156,7 @@ export class VoiceInputConfigurationPolicy {
 }
 
 /**
- * 豆包要不要用、缺什么。出厂的 `asr_provider` 就是 `doubao` 且不带任何凭据，从没配置过的用户拿到的一直是系统识别，所以「一个凭据都没填」读作没有配置，照旧交给系统识别，不报错；只要填过其中一项（密钥或 App ID），就按豆包走，缺的那一项明确报出来，不再悄悄换成系统识别。
+ * 豆包要不要用、缺什么。旧版出厂的 `asr_provider` 是 `doubao` 且不带任何凭据（现在出厂是 `local`，已保存的旧值不改），按旧默认装好、从没配置过的用户拿到的一直是系统识别，所以「一个凭据都没填」读作没有配置，照旧交给系统识别，不报错；只要填过其中一项（密钥或 App ID），就按豆包走，缺的那一项明确报出来，不再悄悄换成系统识别。
  */
 export class DoubaoCredentialPolicy {
   /** 豆包密钥：当前框优先，空时取 `asr_tokens.doubao`，与共享解析 `resolve_voice_fields` 一致。 */

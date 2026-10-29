@@ -5,9 +5,17 @@ import { pluginPreferences } from "../plugin-preferences";
 import { defaultLocalModes } from "../local-mode-preferences";
 import { createSettingsDraftActions } from "../settings-draft-actions";
 import { SettingsPageFieldset } from "../settings-page-fieldset";
+import type { PluginOpenRequest } from "../use-settings-shell-state";
 
 /** The 插件 page of the settings form (route id `plugins`): the installed packs, each opening its own detail, with 声音与效果 and the @ name list as entries above them. `hidden` is set while the page shows the community gallery in its place. */
-export function PluginsSettingsPage({ hidden = false }: { hidden?: boolean }) {
+export function PluginsSettingsPage({
+  hidden = false,
+  openRequest = null,
+}: {
+  hidden?: boolean;
+  /** 社区装好脚本插件后要打开的包，见 `PluginOpenRequest`。 */
+  openRequest?: PluginOpenRequest | null;
+}) {
   const {
     client,
     draft,
@@ -27,10 +35,22 @@ export function PluginsSettingsPage({ hidden = false }: { hidden?: boolean }) {
     showHelpcode,
     showWordbookPacks,
     showSymbolSetPacks,
+    showTouchPluginPacks,
     showScriptPlugins,
+    mobileKeyboardFeedback,
+    saveMobileKeyboardFeedback,
     host,
     selectPage,
   } = useSettingsForm();
+  // 触屏的插件页：「按键音」开关是宿主本机的按键反馈设置，详情里的「打开按键音」改的就是「键盘 → 按键反馈」那一行。
+  const touch = showTouchPluginPacks
+    ? {
+        keySoundEnabled: mobileKeyboardFeedback?.soundEnabled,
+        onEnableKeySound: mobileKeyboardFeedback
+          ? () => void saveMobileKeyboardFeedback({ ...mobileKeyboardFeedback, soundEnabled: true })
+          : undefined,
+      }
+    : undefined;
   const vocabulary = client.vocabularyReview;
   // 「去背单词」：先在背单词里选中这本书，再打开背单词页。
   const openWordbook = vocabulary
@@ -85,6 +105,8 @@ export function PluginsSettingsPage({ hidden = false }: { hidden?: boolean }) {
         wordbookPacks={showWordbookPacks}
         symbolSetPacks={showSymbolSetPacks}
         scriptPlugins={showScriptPlugins}
+        touch={touch}
+        openRequest={openRequest}
         platform={host?.platform}
         onOpenWordbook={openWordbook}
         onOpenPage={selectPage}

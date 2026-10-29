@@ -14,7 +14,12 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
+import androidx.biometric.BiometricManager;
+import androidx.biometric.BiometricPrompt;
+import androidx.core.content.ContextCompat;
 import app.msime.android.AccountFailureText;
+import app.msime.android.SettingsResetAuthenticationPolicy;
+import app.msime.android.SystemAuthenticators;
 import app.msime.android.AccountStore;
 import app.msime.android.AndroidLocalSettings;
 import app.msime.android.AppVersionPolicy;
@@ -74,6 +79,7 @@ public final class DeveloperPage extends ReloadingDetailPage {
     private boolean cloudLoaded;
     private boolean confirming;
     private boolean busy;
+    @Nullable private BiometricPrompt resetAuthentication;
     private boolean exportAfterPicking;
     private String exportDirectoryName = "未选择";
     private long generation;
@@ -103,6 +109,8 @@ public final class DeveloperPage extends ReloadingDetailPage {
     }
 
     @Override protected void onContentDestroyed() {
+        if (resetAuthentication != null) resetAuthentication.cancelAuthentication();
+        resetAuthentication = null;
         generation++;
         cloudAccountId = "";
         cloudSessionId = "";
@@ -228,14 +236,20 @@ public final class DeveloperPage extends ReloadingDetailPage {
         }
 
         GroupCard debug = GroupCard.add(sectionColumn(target, "调试"), "调试");
-        debug.toggle("显示调试信息", "在候选栏显示引擎耗时与词频",
+        boolean loggingEnabled = settings.bool(AndroidLocalSettings.DEVELOPER_LOGGING_ENABLED);
+        debug.toggle("日志总开关", "关闭后不显示调试信息，也不记录输入日志", loggingEnabled,
+            on -> edit(AndroidLocalSettings.DEVELOPER_LOGGING_ENABLED, on));
+        GroupCard.Row overlay = debug.toggle("显示调试信息", "在候选栏显示引擎耗时与词频",
             settings.bool(AndroidLocalSettings.DEVELOPER_DEBUG_OVERLAY),
             on -> edit(AndroidLocalSettings.DEVELOPER_DEBUG_OVERLAY, on));
-        debug.toggle("记录输入日志", "仅保存在本机，不会上传", settings.bool(AndroidLocalSettings.DEVELOPER_INPUT_LOG),
+        overlay.setEnabled(loggingEnabled);
+        GroupCard.Row inputLog = debug.toggle("记录输入日志", "仅保存在本机，不会上传", settings.bool(AndroidLocalSettings.DEVELOPER_INPUT_LOG),
             on -> edit(AndroidLocalSettings.DEVELOPER_INPUT_LOG, on));
+        inputLog.setEnabled(loggingEnabled);
         String level = settings.choice(AndroidLocalSettings.DEVELOPER_LOG_LEVEL);
-        debug.nav("日志级别", "只影响系统日志（logcat），导出的诊断包不受它影响", levelLabel(level),
+        GroupCard.Row levelRow = debug.nav("日志级别", "只影响系统日志（logcat），导出的诊断包不受它影响", levelLabel(level),
             snapshot == null ? null : () -> showLevelSheet(level));
+        levelRow.setEnabled(loggingEnabled && snapshot != null);
 
         GroupCard data = GroupCard.add(sectionColumn(target, "数据"), "数据");
         data.nav("默认导出文件夹", exportDirectoryName, null, () -> pickExportDirectory(false))
@@ -576,6 +590,43 @@ public final class DeveloperPage extends ReloadingDetailPage {
     private void confirmReset() {
         MessageDialog.confirm(requireContext(), "重置所有设置",
             "所有设置恢复为出厂设置，词库、统计和服务凭据不受影响。", "重置", () -> {
+                if (SettingsResetAuthenticationPolicy.requiresAuthentication()) {
+                    requestResetAuthentication();
+                    return;
+                }
+                resetSettings();
+            });
+    }
+
+    private void requestResetAuthentication() {
+        int authenticators = SystemAuthenticators.allowed();
+        Context context = requireContext();
+        if (BiometricManager.from(context).canAuthenticate(authenticators)
+                != BiometricManager.BIOMETRIC_SUCCESS) {
+            MsToast.show(context, "这台设备没有可用的系统认证");
+            return;
+        }
+        resetAuthentication = new BiometricPrompt(this, ContextCompat.getMainExecutor(context),
+            new BiometricPrompt.AuthenticationCallback() {
+                @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+                    resetAuthentication = null;
+                    if (getView() != null) resetSettings();
+                }
+
+                @Override public void onAuthenticationError(int errorCode, CharSequence errorString) {
+                    resetAuthentication = null;
+                    if (getContext() != null) MsToast.show(requireContext(), "未通过系统认证，没有重置设置");
+                }
+            });
+        BiometricPrompt.PromptInfo prompt = new BiometricPrompt.PromptInfo.Builder()
+            .setTitle("验证身份")
+            .setSubtitle("重置所有设置会恢复为出厂值")
+            .setAllowedAuthenticators(authenticators)
+            .build();
+        resetAuthentication.authenticate(prompt);
+    }
+
+    private void resetSettings() {
                 busy = true;
                 render();
                 HostTask.run(this, context -> {
@@ -607,7 +658,6 @@ public final class DeveloperPage extends ReloadingDetailPage {
                     reload();
                     MsToast.show(requireContext(), "已恢复出厂设置");
                 });
-            });
     }
 
     // ---- 本地设置 ----

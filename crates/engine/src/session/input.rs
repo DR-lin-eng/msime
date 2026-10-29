@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::candidates::clone_candidate_rows;
+use super::caret_edit::CaretEdit;
 use super::chain::CommitChain;
 use super::clock::Clock;
 use super::conversion::ConversionEdit;
@@ -30,6 +31,7 @@ use crate::shuangpin::ShuangpinProfile;
 use crate::stroke;
 use crate::tibetan::{SHAD, TSHEG};
 use crate::time::Instant;
+use crate::touch::KeyTouch;
 use crate::types::{
     CandidateSource, Command, CommandTableEntry, EnglishInputOptions, FirstPageRows,
     FrequencyAdjustmentOptions, KeyResult, LocalInputMode, LocalModeOptions, MentionEntry,
@@ -92,6 +94,10 @@ pub(super) struct InputSession {
     pub expressive_options: MixedExpressiveOptions,
     /// 日文混输开着（`SessionOptions::japanese_mixing`）。
     pub japanese_mixing: bool,
+    /// 所选语言的独立词库查询状态，不修改活动方案的提供者。
+    pub multilingual: Option<crate::multilingual::DictionaryComposer>,
+    /// 当前唯一的完整混合备选；快照据此保留语言边界。
+    pub multilingual_conversion: Option<crate::multilingual::Conversion>,
     pub dedicated_english: bool,
     pub dedicated_english_preedit: String,
     pub dedicated_english_candidates: Vec<WordItem>,
@@ -123,6 +129,10 @@ pub(super) struct InputSession {
     pub prefix_active: bool,
     pub prefix_query_input: String,
     pub prefix_candidates: Vec<WordItem>,
+    /// 移动光标后编辑光标后的部分（`SessionOptions::caret_edit_suffix`）。
+    pub caret_edit_suffix: bool,
+    /// 光标后编辑的状态，见 `caret_edit.rs`。
+    pub caret_edit: CaretEdit,
     pub shuangpin_preedit_uses_raw: bool,
     pub single_character_only: bool,
     /// Writes phrases under complete quanpin keys whatever the active scheme is, so a shuangpin session never feeds a canonical key back through its profile; opened on first use.
@@ -131,6 +141,8 @@ pub(super) struct InputSession {
     pub conversion: Option<ConversionEdit>,
     /// 「📅日期」页：选中混输里的入口后，候选窗换成这一组的全部格式（`EnterDateTimeCandidatePage`）。组字和 `mixed_candidates` 原样留着，任何非选词键把 `candidates()` 视图还回去。
     pub date_time_menu_page: Option<Vec<WordItem>>,
+    /// 触屏宿主为下一次 `character` 送来的按下点（`Session::set_key_touch`），只在 `dispatch_character` 把这一键交给方案之前用掉；其余路径一律丢掉。
+    pub pending_touch: Option<KeyTouch>,
 }
 
 impl InputSession {
@@ -159,9 +171,12 @@ impl InputSession {
             options.stroke_dictionary.clone(),
             options.japanese_dictionary.clone(),
         )?;
+        engine.set_force_cantonese_shuangpin(options.force_cantonese_shuangpin);
         engine.set_autocorrect_types(0);
         engine.set_quanpin_helpcode_enabled(true);
+        engine.set_strict_quanpin_helpcode(options.strict_quanpin_helpcode);
         engine.set_shuangpin_helpcode_enabled(true);
+        engine.set_korean_layout(options.korean_layout);
         engine.set_vietnamese_options(
             options.vietnamese_input_method,
             options.vietnamese_tone_style,
@@ -196,6 +211,19 @@ impl InputSession {
             english_options: EnglishInputOptions::default(),
             expressive_options: MixedExpressiveOptions::default(),
             japanese_mixing: false,
+            multilingual: (options.multilingual_languages.len() >= 2).then(|| {
+                let model = if options.japanese_dictionary.as_os_str().is_empty() {
+                    paths.resource(assets::JAPANESE_MODEL)
+                } else {
+                    options.japanese_dictionary.clone()
+                };
+                crate::multilingual::DictionaryComposer::with_japanese_model(
+                    &paths,
+                    &options.multilingual_languages,
+                    &model,
+                )
+            }),
+            multilingual_conversion: None,
             dedicated_english: false,
             dedicated_english_preedit: String::new(),
             dedicated_english_candidates: Vec::new(),
@@ -226,10 +254,13 @@ impl InputSession {
             prefix_active: false,
             prefix_query_input: String::new(),
             prefix_candidates: Vec::new(),
+            caret_edit_suffix: options.caret_edit_suffix,
+            caret_edit: CaretEdit::default(),
             shuangpin_preedit_uses_raw: true,
             single_character_only: options.single_character_only,
             canonical_phrase_engine: None,
             conversion: None,
+            pending_touch: None,
             journal_path: journal,
             paths,
         };
@@ -275,6 +306,11 @@ impl InputSession {
         if options.japanese_mixing {
             session.engine.warm_up_japanese();
         }
+        if options.mixed_candidates {
+            if let Some(composer) = &session.multilingual {
+                composer.warm_up_in_background();
+            }
+        }
         session.set_wubi_input_options(options.wubi);
         session.set_personal_context_enabled(options.personal_context);
 
@@ -304,10 +340,18 @@ impl InputSession {
 
     /// input_session.cpp:88-245: caret insertion, dedicated English, local modes and their Shift entries, the acceptance gate, then the scheme. Handled iff the preedit changed.
     pub fn handle_character(&mut self, value: u8, shift_only: bool) -> KeyResult {
+        // 任何实际字符输入都会使“退格撤销最近引号”失效；否则引号后输入一段拼音再退格，可能误撤销更早的引号。
+        self.punctuation.clear_quote_undo();
         self.exit_date_time_menu();
-        let result = self
-            .helpcode_character(value)
-            .unwrap_or_else(|| self.dispatch_character(value, shift_only));
+        // 辅助码前导键接走的按键不是音节里的键，触点作废。
+        let touch = self.pending_touch.take();
+        let result = match self.helpcode_character(value) {
+            Some(result) => result,
+            None => {
+                self.pending_touch = touch;
+                self.dispatch_character(value, shift_only)
+            }
+        };
         // #7616：交还给宿主的大写字母让这一串开了头，直到下一枚不是大写字母的键为止。
         self.uppercase_passthrough = value.is_ascii_uppercase() && !result.handled;
         result
@@ -319,6 +363,8 @@ impl InputSession {
     }
 
     pub(super) fn dispatch_character(&mut self, value: u8, shift_only: bool) -> KeyResult {
+        // 触点只交给下面写进 26 键组字的那一次 `handle_key`；在那之前返回的路径（改字、光标处插入、本地模式、网址）都用不到它。
+        let touch = self.pending_touch.take();
         // 改字时能写进组字的键先退出改字再照常键入；数字和空格等留给候选选择，宿主或 runtime 再按选择处理。
         if self.conversion.is_some() {
             if !(value.is_ascii_alphabetic() || value == b'\'' || value == b';') {
@@ -390,6 +436,9 @@ impl InputSession {
             && scheme == SchemeType::Shuangpin
             && self.profile.uses_semicolon_key()
             && helpcode_marker.is_none();
+        let cantonese_final = value == b';'
+            && scheme == SchemeType::Cantonese
+            && self.engine.cantonese_shuangpin_accepts_semicolon();
         let japanese_long_vowel = value == b'-' && scheme == SchemeType::JapaneseRomaji;
         // 已启用的快捷入口在上面处理；被关闭或资源不可用的入口按普通大写字母继续。
         let starts_pinyin_with_shift =
@@ -401,6 +450,7 @@ impl InputSession {
             && !composing_pinyin_uppercase
             && value != b'\''
             && !microsoft_final
+            && !cantonese_final
             && !japanese_long_vowel
             && helpcode_marker.is_none()
         {
@@ -427,7 +477,7 @@ impl InputSession {
         } else if let Some(marker) = helpcode_marker {
             // 触发键在输入串里一律记成标记字符（反引号或 '|'），与用户敲的键无关。
             SchemeKey::Symbol(marker)
-        } else if microsoft_final {
+        } else if microsoft_final || cantonese_final {
             SchemeKey::Semicolon
         } else if japanese_long_vowel {
             SchemeKey::Minus
@@ -437,6 +487,12 @@ impl InputSession {
             // Only a key the scheme claims gets past the filter above; none of the current schemes claims one here.
             SchemeKey::Symbol(value)
         };
+        // 必须在 `handle_key` 之前交出：它会同步刷新候选。只有双拼方案收，大写字母（辅助码）和标记不带触点。
+        if matches!(key, SchemeKey::Letter(letter) if letter.is_ascii_lowercase())
+            || key == SchemeKey::Semicolon
+        {
+            self.engine.set_pending_touch(touch);
+        }
         let changed = self.engine.handle_key(key);
         self.update_mixed_candidates();
         // A key the scheme ignores (a fifth wubi letter, a second apostrophe) leaves the preedit alone and goes back to the host.
@@ -445,6 +501,40 @@ impl InputSession {
         }
         self.invalidate_online_requests();
         KeyResult::handled()
+    }
+
+    /// 五笔 14 键的一键：`representative` 是这一组的代表字母（[`crate::wubi::grid::representative`]）。不是五笔、在本地模式或专用英文里、整句改字中、光标不在末尾，或者正在打 26 键的五笔码时不处理，组字不变。
+    pub fn handle_wubi_grid_key(&mut self, representative: u8) -> KeyResult {
+        if !self.is_wubi()
+            || self.dedicated_english
+            || self.local_mode != LocalInputMode::None
+            || self.conversion.is_some()
+            || self
+                .caret
+                .is_some_and(|caret| caret < self.editing_text_len())
+        {
+            return KeyResult::unhandled();
+        }
+        if !self.has_composition()
+            && self.chain.previous.is_some()
+            && self.chain.paused(self.steady_now())
+        {
+            self.chain.reset();
+        }
+        if !self.engine.handle_wubi_grid_key(representative) {
+            return KeyResult::unhandled();
+        }
+        self.caret = None;
+        self.update_mixed_candidates();
+        self.invalidate_online_requests();
+        KeyResult::handled()
+    }
+
+    /// 当前组字是五笔 14 键打的组码。
+    pub fn wubi_grid_composing(&self) -> bool {
+        self.local_mode == LocalInputMode::None
+            && !self.dedicated_english
+            && self.engine.wubi_grid_composing()
     }
 
     /// input_session.cpp:958-1036.
@@ -507,7 +597,8 @@ impl InputSession {
                 self.local_preedit.len() < GENERATED_MODE_INPUT_LIMIT
                     && (value.is_ascii_lowercase()
                         || (value == b'\''
-                            && self.command_takes_word_separator(self.local_preedit.len())))
+                            && self.command_takes_word_separator(self.local_preedit.len()))
+                        || self.command_takes_argument_symbol(value, self.local_preedit.len()))
             }
             LocalInputMode::Url => {
                 // 网址不收的符号（`"` `<` `|` 等）和空格结束网址：交还 runtime，由它先上屏网址再处理这个键。
@@ -884,6 +975,10 @@ impl InputSession {
         }
         self.end_uppercase_run();
         if !self.has_composition() {
+            match command {
+                Command::Backspace => self.punctuation.undo_last_quote(),
+                _ => self.punctuation.clear_quote_undo(),
+            }
             // With nothing composed every command is left to the host, which edits the text, moves the caret or inserts a newline, so the chain no longer ends where the host's text does.
             self.chain.reset();
             return KeyResult::unhandled();
@@ -1152,6 +1247,12 @@ impl InputSession {
         {
             return self.handle_character(value, false);
         }
+        if self.cantonese_rules_apply()
+            && value == b';'
+            && self.engine.cantonese_shuangpin_accepts_semicolon()
+        {
+            return self.handle_character(value, false);
+        }
         // A scheme without Chinese punctuation (Korean) writes half-width ASCII punctuation whatever the Chinese punctuation switches say. With a syllable open the mark follows it in one commit; with nothing open the host inserts the key itself.
         // 专用英文模式同样写半角英文标点：英文模式不往宿主漏中文标点，字符键那条路早就如此（`handle_character` 吞掉非字母键）。只有「固定标点」锁成「始终使用中文标点」（lock 1）时才照中文标点开关走；默认的「跟随中英文状态」（lock 0）在英文模式下就是英文标点。以前这里把专用英文排除在外，于是英文模式下按 `.` 上屏的是「。」。
         let ascii_marks = if self.dedicated_english {
@@ -1252,6 +1353,22 @@ impl InputSession {
                 .is_some_and(crate::local::command::takes_word_separator)
     }
 
+    /// `/` 模式里光标 `caret` 之前已经完整打出了一条 `extended` 插件指令的触发词，`value` 是数字或运算符号：它是参数的一部分。只看光标之前，光标挪回触发词里时数字照旧不收。
+    pub(super) fn command_takes_argument_symbol(&self, value: u8, caret: usize) -> bool {
+        self.local_mode == LocalInputMode::Command
+            && crate::local::command::extended_argument_symbol(value)
+            && self.command_argument_symbols_at(caret)
+    }
+
+    /// 光标 `caret` 之前完整打出了一条 `extended` 插件指令的触发词。
+    fn command_argument_symbols_at(&self, caret: usize) -> bool {
+        self.local_mode == LocalInputMode::Command
+            && self
+                .local_preedit
+                .get(1..caret)
+                .is_some_and(|code| self.queries.extended_plugin_trigger_typed(code))
+    }
+
     /// A mark typed on a bare `/` or `@` ends the mode instead of choosing a row: both keys commit as the punctuation they are with the mode off, so `/` `,` still types /， rather than the first command followed by ，.
     fn commit_bare_prefix(&mut self, value: u8) -> KeyResult {
         let prefix = self.local_preedit.as_bytes()[0];
@@ -1304,6 +1421,12 @@ impl InputSession {
                 .map(char::from)
                 .collect();
         }
+        // `extended` 的插件指令打完触发词之后，数字和运算符号是参数：列出来，宿主才把数字当输入、不当选词键（和计算模式一样）。
+        if self.command_argument_symbols_at(self.caret_position()) {
+            let mut symbols = String::from("0123456789");
+            symbols.push_str(crate::local::command::EXTENDED_ARGUMENT_SYMBOLS);
+            return symbols;
+        }
         if self.local_mode != LocalInputMode::None {
             return self.local_mode.spelling_symbols().to_owned();
         }
@@ -1319,7 +1442,13 @@ impl InputSession {
         // `'` is a Jyutping syllable boundary only inside a composition; idle it is punctuation.
         if self.cantonese_rules_apply() {
             return if self.has_composition() {
-                cantonese::SPELLING_SYMBOLS_COMPOSING.to_owned()
+                if self.engine.cantonese_shuangpin_active()
+                    || self.engine.cantonese_shuangpin_accepts_semicolon()
+                {
+                    "';".to_owned()
+                } else {
+                    cantonese::SPELLING_SYMBOLS_COMPOSING.to_owned()
+                }
             } else {
                 String::new()
             };
@@ -1577,6 +1706,7 @@ impl InputSession {
         self.prefix_candidates.clear();
         self.prefix_query_input.clear();
         self.prefix_active = false;
+        self.caret_edit = CaretEdit::default();
         self.phrase_progress = CreatingWordProgress::default();
         self.pending_sequence = None;
         self.pending_sequence_with_cases = None;
@@ -1589,6 +1719,7 @@ impl InputSession {
         self.dedicated_english_preedit.clear();
         self.dedicated_english_candidates.clear();
         self.mixed_candidates.clear();
+        self.multilingual_conversion = None;
         self.personal_reranked = false;
         self.ranking_candidates = None;
         self.engine.reset();
@@ -1614,11 +1745,16 @@ impl InputSession {
 
     pub fn reset_cache(&mut self) {
         self.engine.reset_cache();
+        if let Some(composer) = &mut self.multilingual {
+            composer.clear();
+        }
         if let Some(engine) = self.canonical_phrase_engine.as_mut() {
             engine.reset_cache();
         }
         // The visible prefix list stays until the next refresh, but its query must run again against the invalidated provider caches.
         self.prefix_query_input.clear();
+        // 光标后编辑固定的那段同样要按新的词库重新转换。
+        self.caret_edit.prefix_input.clear();
     }
 
     pub fn clear_online_candidates(&mut self, source: CandidateSource) {
@@ -1640,7 +1776,16 @@ impl InputSession {
             return false;
         }
         self.refresh_prefix_candidates();
-        let grew = if self.prefix_active {
+        let grew = if self.prefix_active && self.caret_edit.active {
+            // 光标后编辑：屏幕上是光标后那段的候选，展开的也是它。
+            let start = self.caret_edit_suffix_start();
+            let end = self.raw_with_cases().len();
+            self.engine.expand_current_raw_range_initial_candidates(
+                &self.prefix_query_input,
+                start..end,
+                &mut self.prefix_candidates,
+            )
+        } else if self.prefix_active {
             self.engine.expand_current_raw_prefix_initial_candidates(
                 &self.prefix_query_input,
                 self.prefix_end(),
@@ -1856,6 +2001,7 @@ impl InputSession {
     pub(super) fn discard_abandoned_phrase_progress(&mut self) {
         if !self.has_composition() {
             self.phrase_progress = CreatingWordProgress::default();
+            self.caret_edit.held.clear();
             self.chain.same_composition = false;
         }
     }
@@ -1962,8 +2108,16 @@ impl InputSession {
             b'S' => (LocalInputMode::Symbol, options.symbol),
             _ => return None,
         };
-        // 拆字和快捷短语一样在五笔下也能进入：它查的是编进引擎的部件拼音表，不经过当前方案的拼写，五笔用户同样会遇到不会读的字。
-        let scheme_opens = if matches!(mode, LocalInputMode::QuickPhrase | LocalInputMode::Chaizi) {
+        // 五笔编码只用小写字母，没有组字时的 Shift+字母不会和编码冲突，所以不经过当前方案拼写的模式在五笔下也能进入（`opens_table_modes`）：快捷短语、Unicode 码位、日期时间关键词、临时英文和符号分组码各有自己的输入，拆字查的是编进引擎的部件拼音表，五笔用户同样会遇到不会读的字（#9696）。Emoji、颜文字和超级简拼按当前方案的拼音拼写查，计算模式的数字和运算符要宿主按方案路由（Windows 的 LocalModeTriggersChanged），它们仍只在全拼、双拼下进入（`opens_local_modes`）。
+        let scheme_opens = if matches!(
+            mode,
+            LocalInputMode::QuickPhrase
+                | LocalInputMode::Chaizi
+                | LocalInputMode::Unicode
+                | LocalInputMode::DateTime
+                | LocalInputMode::TemporaryEnglish
+                | LocalInputMode::Symbol
+        ) {
             self.scheme().opens_table_modes()
         } else {
             self.scheme().opens_local_modes()

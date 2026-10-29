@@ -36,6 +36,24 @@ final class InputBridgeResponseTests: XCTestCase {
     XCTAssertThrowsError(try bridge.snapshot(from: ["view": ["nine_key_single_character": 1]]))
   }
 
+  /// 来源 18 的提交已在运行时逐段转换，解码与标点替换不能恢复整行转换。
+  func testMultilingualCommitKeepsItsConversionBoundary() throws {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: state) }
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    let snapshot = try bridge.snapshot(from: [
+      "commit": "hello網絡学校", "commit_context": ["script_conversion": false],
+      "view": ["candidates": [["text": "hello網絡学校", "source": 18]]],
+    ])
+    XCTAssertFalse(snapshot.scriptConversion)
+    XCTAssertFalse(snapshot.replacingCommit("hello網絡学校。").scriptConversion)
+    XCTAssertEqual(snapshot.candidateSources, [18])
+    XCTAssertTrue(try bridge.snapshot(from: ["view": [:]]).scriptConversion)
+    XCTAssertThrowsError(try bridge.snapshot(from: [
+      "commit_context": ["script_conversion": 0], "view": [:],
+    ]))
+  }
+
   func testCandidateHighlightIsStrictAndAlignedWithRows() throws {
     let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: state) }
@@ -47,6 +65,37 @@ final class InputBridgeResponseTests: XCTestCase {
     let visible = CandidateMarker.visibleIndices(sources: [0, 15, 0])
     XCTAssertEqual(visible.map { snapshot.candidateHighlighted[$0] }, [false, false])
     XCTAssertThrowsError(try bridge.snapshot(from: ["view": ["candidates": [["text": "合成", "highlighted": 1]]]]))
+  }
+
+  /// 双拼触点纠错坐了首选时，View 的那一行候选带 `confident_correction: true`（#10018），其余行和默认文档里这个字段不出现。解码与行对齐，缺省为假，字符串冒充时整份回应作废（与 `highlighted` 走同一个 strictBool），换上屏文字时留着。
+  func testConfidentCorrectionIsOptionalStrictAndAlignedWithRows() throws {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: state) }
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    let snapshot = try bridge.snapshot(from: try Self.viewFixture(confident: "true"))
+    XCTAssertEqual(snapshot.candidates, ["我们今天去公园", "我们今天去公", "我们"])
+    XCTAssertEqual(snapshot.candidateConfidentCorrections, [true, false, false])
+    XCTAssertEqual(snapshot.candidateAnnotations.first, "(womfjbtnqugsyr)", "纠错前的拼写照旧作为注释")
+    XCTAssertEqual(snapshot.replacingCommit("，").candidateConfidentCorrections, [true, false, false])
+    let visible = CandidateMarker.visibleIndices(sources: snapshot.candidateSources)
+    XCTAssertEqual(visible.map { snapshot.candidateConfidentCorrections[$0] }, [true, false, false])
+
+    let plain = try bridge.snapshot(from: try Self.viewFixture(confident: nil))
+    XCTAssertEqual(plain.candidateConfidentCorrections, [false, false, false], "默认文档里没有这个字段")
+    XCTAssertThrowsError(try bridge.snapshot(from: try Self.viewFixture(confident: "\"true\"")))
+  }
+
+  /// host-api 的 View JSON：首行是改过一键、坐了首选的纠错整句，第二行是没坐首选的纠错，`confident` 为 nil 时不写 `confident_correction`。
+  static func viewFixture(confident: String?) throws -> [String: Any] {
+    let flag = confident.map { #", "confident_correction": \#($0)"# } ?? ""
+    let json = """
+    {"handled": true, "view": {"preedit": "womfjbtnqugsyr", "generation": 3, "page_count": 1, "candidates": [
+      {"id": {"session": 1, "generation": 3, "index": 0}, "text": "我们今天去公园", "code": "womfjbtmqugsyr", "annotation": "(womfjbtnqugsyr)", "source": 0, "corrected": true, "fixed_position": 0, "highlighted": true\(flag)},
+      {"id": {"session": 1, "generation": 3, "index": 1}, "text": "我们今天去公", "code": "womfjbtmqugs", "annotation": "(womfjbtnqugs)", "source": 0, "corrected": true, "fixed_position": 0, "highlighted": false},
+      {"id": {"session": 1, "generation": 3, "index": 2}, "text": "我们", "code": "womf", "annotation": "", "source": 0, "corrected": false, "fixed_position": 0, "highlighted": false}
+    ]}}
+    """
+    return try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
   }
 
   func testAllSessionCallsUseOneOwningThread() {
@@ -129,6 +178,34 @@ final class InputBridgeResponseTests: XCTestCase {
       XCTAssertNil(rejected.commitText)
       XCTAssertEqual(rejected.preedit, "64", "被拒的旧画面操作不能清掉仍在运行时里的组字")
     }
+    _ = bridge.cancel()
+  }
+
+  /// 空闲渲染每次都把同样的学习设置再推一遍，会话已经应用的同一份偏好不再发。组字时被推迟的那次不算应用：组字结束后同样的请求要再发一次，如实报告已经生效；会话重建后也照常发送。
+  @MainActor
+  func testRepeatedPreferencesSkipOnlyWhatTheSessionAlreadyApplied() throws {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: state) }
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    XCTAssertFalse(bridge.initializationFailed)
+    XCTAssertTrue(bridge.setLearningEnabled(false))
+    XCTAssertTrue(bridge.setLearningEnabled(false))
+    XCTAssertTrue(bridge.setPrivateSession(true))
+    XCTAssertTrue(bridge.setPrivateSession(true))
+
+    XCTAssertFalse(bridge.handleCharacter("n").preedit.isEmpty)
+    XCTAssertFalse(bridge.setLearningEnabled(true), "组字中的偏好改动推迟到空闲时应用")
+    XCTAssertFalse(bridge.setLearningEnabled(true), "推迟的那次不能当作已经应用")
+    XCTAssertEqual(bridge.cancel().preedit, "")
+    XCTAssertTrue(bridge.setLearningEnabled(true))
+    XCTAssertTrue(bridge.setLearningEnabled(true))
+
+    XCTAssertTrue(bridge.suspendDictionarySession())
+    try bridge.resumeDictionarySession()
+    XCTAssertTrue(bridge.setLearningEnabled(false))
+    XCTAssertTrue(bridge.setPrivateSession(true))
+    XCTAssertTrue(bridge.setPrivateSession(false))
+    XCTAssertNil(bridge.handleCharacter("n").diagnosticText)
     _ = bridge.cancel()
   }
 

@@ -1,3 +1,4 @@
+#include "InputMethodSetup.h"
 // windows.h comes first so shellapi.h sees its types; the two macros it defines that collide with WinRT member names are dropped before any WinRT header is read.
 #include <windows.h>
 
@@ -7,6 +8,10 @@
 #include <dwrite.h>
 #include <wincodec.h>
 #include "../common/StateDirectory.h"
+#include "../common/UpdateRecordDirectory.h"
+#include "../common/DictionarySyncDirectory.h"
+#include "../common/SurfaceRouteArgument.h"
+#include "SettingsInstance.h"
 #undef GetCurrentTime
 #undef GetObject
 
@@ -49,6 +54,8 @@
 #include "ClientAgent.h"
 #include "CloudClipboardRoute.h"
 #include "CommunityPageModel.h"
+#include "DictionarySyncModel.h"
+#include "../common/DictionarySyncRetry.h"
 #include "FeedbackReport.h"
 #include "FloatingToolbarSizeModel.h"
 #include "GameProcessList.h"
@@ -56,8 +63,11 @@
 #include "InputSettingsModel.h"
 #include "LexiconImportModel.h"
 #include "McpConnect.h"
+#include "ModelErrorMessages.h"
+#include "PluginEditorModel.h"
 #include "PluginPageModel.h"
 #include "PreferencePath.h"
+#include "PreferencesSaveFailure.h"
 #include "PunctuationSettings.h"
 #include "SettingsDocumentFile.h"
 #include "SettingsMascotIntro.h"
@@ -77,6 +87,7 @@
 #include "msimeui/AnimatedImage.h"
 
 #include <winrt/base.h>
+#include <microsoft.ui.xaml.window.h>
 
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Input.h>
@@ -127,11 +138,13 @@ using A11y = Microsoft::UI::Xaml::Automation::AutomationProperties;
 namespace nav = msime::settings;
 namespace pg = msime::settings::plugins;
 namespace vs = msime::settings::voice;
+namespace model_errors = msime::settings::models;
 namespace ps = msime::settings::punctuation;
 namespace ism = msime::settings::input;
 namespace ais = msime::settings::ai;
 namespace am = msime::settings::account;
 namespace mc = msime::settings::mcp;
+namespace ds = msime::settings::dictionary_sync;
 
 struct Response {
   std::string text;
@@ -264,18 +277,11 @@ std::string path_utf8(const std::filesystem::path &path) {
   return result;
 }
 
-// ---- Default input method ----
-
-// Whether this input method is in the user's keyboard list, and whether it is the default one. Unknown when input.dll cannot answer, in which case no banner is shown rather than a wrong one.
-enum class InputMethodState { unknown, missing, not_default, ready };
-
-// 本版本的文本服务和语言 profile，与 TSF 的 Globals.cpp 和看门狗读同一份 shared/contracts/msime_edition.h。
-constexpr GUID input_method_clsid = MSIME_EDITION_CLSID;
-constexpr GUID input_method_profile = MSIME_EDITION_PROFILE_GUID;
-// The same profile in the <LangID>:<CLSID><profile> form InstallLayoutOrTip and SetDefaultLayoutOrTip take.
-constexpr const wchar_t *input_method_id =
-    MSIME_EDITION_LANGID_STRING L":" MSIME_EDITION_CLSID_STRING
-    MSIME_EDITION_PROFILE_GUID_STRING;
+// WinUI 与 Win7 使用同一套系统状态查询和修复操作。
+using msime::settings::input_method::InputMethodState;
+using msime::settings::input_method::input_method_state;
+using msime::settings::input_method::add_input_method;
+using msime::settings::input_method::make_input_method_default;
 
 // 本版本是否提供这个方案（版本表 input_schemes）。不提供的方案不出现在输入方案的选项里。
 bool edition_offers_scheme(std::wstring_view scheme) {
@@ -289,100 +295,10 @@ bool edition_offers_scheme(std::wstring_view scheme) {
   return false;
 }
 
-// input.dll's "Install Layout or Tip" functions are documented but ship without a header or an import library, so the structure and flags are declared here as the documentation gives them (LAYOUTORTIPPROFILE, LOT_DEFAULT, LOT_DISABLED).
-struct LayoutOrTipProfile {
-  DWORD profile_type;
-  LANGID language;
-  GUID clsid;
-  GUID profile;
-  GUID category;
-  DWORD substitute_layout;
-  DWORD flags;
-  WCHAR id[MAX_PATH];
-};
-constexpr DWORD layout_or_tip_default = 0x0001;
-constexpr DWORD layout_or_tip_disabled = 0x0002;
-
-template <typename Function> Function input_dll_function(const char *name) {
-  // A system DLL, loaded from System32 only and kept until the process exits.
-  static const HMODULE module =
-      LoadLibraryExW(L"input.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!module)
-    return nullptr;
-  // Through void*: GetProcAddress returns a generic FARPROC, and casting that straight to the real signature is what -Wcast-function-type rejects.
-  return reinterpret_cast<Function>(
-      reinterpret_cast<void *>(GetProcAddress(module, name)));
-}
-
-bool same_guid(GUID const &a, GUID const &b) {
-  return std::memcmp(&a, &b, sizeof(GUID)) == 0;
-}
-
-InputMethodState input_method_state() {
-  using Enumerate = UINT(WINAPI *)(LPCWSTR, LPCWSTR, LPCWSTR,
-                                   LayoutOrTipProfile *, UINT);
-  const auto enumerate = input_dll_function<Enumerate>("EnumEnabledLayoutOrTip");
-  if (!enumerate)
-    return InputMethodState::unknown;
-  // With a null buffer the function returns how many items the user has enabled; the buffer length is in items.
-  const UINT count = enumerate(nullptr, nullptr, nullptr, nullptr, 0);
-  if (count == 0)
-    return InputMethodState::unknown;
-  std::vector<LayoutOrTipProfile> profiles(count);
-  const UINT copied =
-      std::min(enumerate(nullptr, nullptr, nullptr, profiles.data(), count), count);
-  if (copied == 0)
-    return InputMethodState::unknown;
-  for (UINT i = 0; i < copied; ++i) {
-    const auto &item = profiles[i];
-    if (!same_guid(item.clsid, input_method_clsid) ||
-        !same_guid(item.profile, input_method_profile))
-      continue;
-    if (item.flags & layout_or_tip_disabled)
-      return InputMethodState::missing;
-    return (item.flags & layout_or_tip_default) != 0
-               ? InputMethodState::ready
-               : InputMethodState::not_default;
-  }
-  return InputMethodState::missing;
-}
-
-// Adds the input method to the current user's keyboard list.
-bool add_input_method() {
-  using Install = BOOL(WINAPI *)(LPCWSTR, DWORD);
-  const auto install = input_dll_function<Install>("InstallLayoutOrTip");
-  return install && install(input_method_id, 0) != FALSE;
-}
-
-// Makes the input method the current user's default, for this session too.
-bool make_input_method_default() {
-  using SetDefault = BOOL(WINAPI *)(LPCWSTR, DWORD);
-  const auto set_default = input_dll_function<SetDefault>("SetDefaultLayoutOrTip");
-  return set_default && set_default(input_method_id, 0) != FALSE;
-}
-
 // 保留启动请求的类别，窗口解析承载页时也恢复旧路由对应的顶部标签。
 std::string route_page() {
-  int argc = 0;
-  auto *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-  std::optional<std::string> page;
-  if (argv) {
-    for (int i = 1; i < argc; ++i) {
-      constexpr std::wstring_view prefix = L"--route=settings";
-      const std::wstring_view argument(argv[i]);
-      if (argument == prefix) {
-        page = std::string();
-        break;
-      }
-      if (argument.starts_with(prefix) && argument.size() > prefix.size() &&
-          argument[prefix.size()] == L':') {
-        page = utf8(hstring(argument.substr(prefix.size() + 1)));
-        break;
-      }
-    }
-    LocalFree(argv);
-  }
-  return page.value_or(std::string());
+  const auto route = msime::windows::requested_surface_route("settings");
+  return route && route->starts_with("settings:") ? route->substr(9) : std::string();
 }
 
 // The runtime options file the Server hands this window, or the one the Server reads at startup when started from the Start menu. None before the input method is set up.
@@ -436,11 +352,18 @@ std::optional<std::string> runtime_options_document() {
   return content;
 }
 
+bool dictionary_write(std::string const &action);
+fire_and_forget note_dictionary_sync_change(std::string options);
+
 // One request of the 词库 page through msime_client_settings_dictionary, the same code the Tauri settings page runs: a write first has the Server let go of its sessions, and a refusal comes back as the page's code. Blocks, so only off the UI thread.
 Response settings_dictionary_call(std::string const &options, std::string const &action) {
   const auto body = "{\"options\":" + options + ",\"action\":" + action + "}";
-  return take_response(msime_client_settings_dictionary(
+  auto response = take_response(msime_client_settings_dictionary(
       reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+  // 改了「我的词条」（编辑、导入、清除学习数据）：让词库同步马上记一次本机改动，与共享页的 withDictionaryChangeNotices 相同。
+  if (response.ok && dictionary_write(action))
+    note_dictionary_sync_change(options);
+  return response;
 }
 
 // 提示里说的词库名字（共享页的 `dictionaryKindLabel`）；种类和下拉框里的名字在 LexiconImportModel.h。
@@ -580,6 +503,30 @@ std::wstring local_date_time(uint64_t milliseconds) {
   return std::wstring(date) + L" " + time;
 }
 
+// 词库同步概况里「额度用完，将于某时继续自动同步」那一句：把 Unix 毫秒换成本机时区的年月日时分交给 ds::budget_wait_text；没在等、已经过了或时间读不出来时为空。
+std::wstring dictionary_sync_budget_wait(uint64_t until_ms) {
+  constexpr uint64_t unix_epoch = 116444736000000000ULL;
+  const auto local_minute = [](uint64_t milliseconds) -> std::optional<ds::LocalMinute> {
+    if (milliseconds > 900000000000000ULL)
+      return std::nullopt;
+    ULARGE_INTEGER ticks{};
+    ticks.QuadPart = milliseconds * 10000ULL + unix_epoch;
+    const FILETIME utc{ticks.LowPart, ticks.HighPart};
+    SYSTEMTIME universal{}, local{};
+    if (!FileTimeToSystemTime(&utc, &universal) || !SystemTimeToTzSpecificLocalTime(nullptr, &universal, &local))
+      return std::nullopt;
+    return ds::LocalMinute{local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute};
+  };
+  if (!until_ms)
+    return {};
+  const auto now = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  const auto until = local_minute(until_ms);
+  const auto today = local_minute(now);
+  return until && today ? ds::budget_wait_text(until_ms, now, *until, *today) : std::wstring();
+}
+
 // An entry's text on one line, as the shared row shows it (`white-space: nowrap`): every run of white space, line breaks included, becomes one space.
 std::wstring single_line(std::wstring const &value) {
   std::wstring line;
@@ -613,6 +560,52 @@ std::wstring response_error(Response const &response) {
   } catch (...) {
     return {};
   }
+}
+
+// ---- 词库同步 ----
+
+// 回答是不是密钥串身份冲突（#10032 的约定，common/DictionarySyncRetry.h）：调用本身失败，或者 run 的同步结果里报 clipboard_keystore_conflict。
+bool dictionary_sync_conflicted(Response const &response) {
+  const auto &code = msime::windows::dictionary_sync::keystore_conflict;
+  const std::wstring conflict(code.begin(), code.end());
+  if (!response.ok)
+    return response_error(response) == conflict;
+  try {
+    const auto value = JsonObject::Parse(text(response.text)).GetNamedValue(L"value");
+    return value.ValueType() == JsonValueType::Object && named_string(value.GetObject(), L"error") == conflict;
+  } catch (...) {
+    return false;
+  }
+}
+
+// msime_client_dictionary_sync 的一次请求，`action` 是动作的 JSON 文本。`options` 是输入法跑的 HostOptions 文档（偏好目录和 Engine 词库路径都从它来），设置向导还没准备好时为空，只有「测试连接」不读它。目录是本用户的 dictionary-sync（common/DictionarySyncDirectory.h），与 Server 的自动同步同一个，所以设置窗口和 Server 是同一台设备；身份冲突时重试（DictionarySyncRetry.h）。除 status 外都阻塞联网，只在工作线程上调用。
+Response dictionary_sync_call(std::optional<std::string> const &options, std::string const &action) {
+  const auto directory = msime::windows::dictionary_sync_directory();
+  if (directory.empty())
+    return {"{\"ok\":false,\"error\":\"dictionary_sync_storage\"}", false};
+  const auto body = "{\"options\":" + (options ? *options : std::string("null")) + ",\"directory\":" +
+                    utf8(JsonValue::CreateStringValue(hstring(directory.wstring())).Stringify()) +
+                    ",\"action\":" + action + "}";
+  return msime::windows::dictionary_sync::with_keystore_retry(
+      [&] {
+        return take_response(msime_client_dictionary_sync(reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+      },
+      dictionary_sync_conflicted);
+}
+
+// 改「我的词条」的三种词库写操作，与 settings_dictionary::action_requires_quiesce 相同。
+bool dictionary_write(std::string const &action) {
+  JsonObject parsed{nullptr};
+  if (!JsonObject::TryParse(text(action), parsed))
+    return false;
+  const auto operation = named_string(parsed, L"operation");
+  return operation == L"edit" || operation == L"import" || operation == L"reset";
+}
+
+// 以 local_change 记一次本机改动：只记录、不联网，Rust 按防抖稍后发送；没配网盘时 Rust 只答 dictionary_sync_not_configured。另放到线程池上跑，词库页不等它：Server 的自动同步正在联网时它要等那把文件锁。
+fire_and_forget note_dictionary_sync_change(std::string options) {
+  co_await resume_background();
+  (void)dictionary_sync_call(options, R"({"operation":"run","trigger":"local_change"})");
 }
 
 // 本版本在 AI 助手配置里登记的服务器名，与 client-core 的 `Edition::mcp_server_name` 相同：full 是 msime，其他版本是 msime-<id>。
@@ -750,7 +743,8 @@ public:
     }
   }
 
-  bool Save(std::wstring &error) {
+  // 成功时返回空。失败时文档保持调用前的样子（包括没存下的修改），返回失败属于哪一类（见 PreferencesSaveFailure.h），由调用方决定重读还是保留修改稍后重试。
+  std::optional<msime::settings::PreferencesSaveFailure> Save() {
     const auto directory = state_directory();
     const auto path = path_utf8(directory);
     document_.SetNamedValue(L"preferences", preferences_);
@@ -759,18 +753,22 @@ public:
         reinterpret_cast<const uint8_t *>(path.data()), path.size(), revision_,
         reinterpret_cast<const uint8_t *>(snapshot.data()), snapshot.size()));
     if (!response.ok) {
-      error = L"保存失败：设置可能已在其他窗口中更新，请重新读取后再保存。";
-      return false;
+      std::string error;
+      try {
+        error = utf8(JsonObject::Parse(text(response.text)).GetNamedString(L"error", L""));
+      } catch (...) {
+      }
+      return msime::settings::classify_preferences_save_failure(error);
     }
     try {
       document_ =
           JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
       preferences_ = document_.GetNamedObject(L"preferences");
       revision_ = strict_revision(document_, L"revision", revision_);
-      return true;
+      return std::nullopt;
     } catch (...) {
-      error = L"设置已写入，但返回内容无法读取。";
-      return false;
+      // 设置已写入，但返回内容读不了：调用方重读已存的设置。
+      return msime::settings::PreferencesSaveFailure::rejected;
     }
   }
 
@@ -1107,23 +1105,28 @@ std::wstring app_version_label() {
 
 // 检查更新的结果，措辞与共享设置页一致。
 struct UpdateOutcome {
-  // 「当前版本」下面的那一行：「已是最新版本」「暂无可用发行版」「检查失败，请稍后重试」或「发现新版本 vX」。
+  // 「当前版本」下面的那一行：「已是最新版本」「暂无可用发行版」「检查失败，请稍后重试」或「发现新版本 vX」（测试版和每日构建写明通道，见 AboutPageModel.h 的 update_build_title）。
   std::wstring status;
   // 当前运行的已是最新版本（回答的 status 是 current），这时状态下面画 updated 插画。
   bool current = false;
-  // 发现新版本时结果块里的内容（共享页的 `updateResult`）：版本号、安装包的可信度说明和国内镜像地址（拼不出时为空）。没有可用更新时 version 为空。
+  // 发现新版本时结果块里的内容（共享页的 `updateResult`）：版本号、构建的称呼、安装包的可信度说明和国内镜像地址（拼不出时为空）。没有可用更新时 version 为空。
   std::wstring version;
+  std::wstring title;
   msime::settings::InstallerTrust trust;
   std::wstring mirror_url;
+  // 下载按钮打开的地址和文字：正式版是官网下载页「前往下载」，测试版和每日构建是这个构建的发布页「前往发布页」（官网只列正式版）。
+  std::wstring download_url;
+  std::wstring download_label;
 };
 
-// `msime_client_update_check` 的请求：本版本的 Windows 发布。不带架构：同一个安装程序同时支持 x64 和 Arm64。
-JsonObject update_check_request() {
+// `msime_client_update_check` 的请求：本版本的 Windows 发布，`channel` 是偏好里的更新通道（已归一成 stable、beta、nightly）。不带架构：同一个安装程序同时支持 x64 和 Arm64。加上 `directory` 就是 `msime_client_update_pending` 的请求。
+JsonObject update_check_request(std::wstring_view channel) {
   JsonObject request;
   request.SetNamedValue(L"platform", JsonValue::CreateStringValue(L"windows"));
   request.SetNamedValue(L"current_version",
                         JsonValue::CreateStringValue(hstring(app_version)));
   request.SetNamedValue(L"edition", JsonValue::CreateStringValue(text(MSIME_EDITION_ID)));
+  request.SetNamedValue(L"channel", JsonValue::CreateStringValue(hstring(channel)));
   return request;
 }
 
@@ -1150,51 +1153,92 @@ std::wstring installer_placeholder() {
   return L"MetasequoiaIME-" + id + L"_Setup_v<版本>.exe";
 }
 
-// 读取 `msime_client_update_check` 的答复。发布页不在本仓库的 tag 下时视为检查失败。安装包名和摘要照共享页的 `fromHostUpdate` 先查形状，不合的当作没有；可信度说明和镜像地址的拼法在 AboutPageModel.h。
+// 读取检查结果 `value`（{status, update}）。发布页不在本仓库的 tag 下时视为检查失败。安装包名和摘要照共享页的 `fromHostUpdate` 先查形状，不合的当作没有；构建的称呼、可信度说明和镜像地址的拼法在 AboutPageModel.h。回答里的 `channel` 和 `build_run` 是这个构建所属的通道和运行 ID，以前的共享层没有这两项，按正式版、没有运行 ID；`channel` 不是三种之一时当作失败。缺少必需的字段时抛出，由调用方当作失败。
+UpdateOutcome describe_update_value(JsonObject const &value) {
+  const UpdateOutcome failed{L"检查失败，请稍后重试"};
+  const std::wstring status(value.GetNamedString(L"status", L"").c_str());
+  if (status == L"none")
+    return {L"暂无可用发行版"};
+  const auto update = value.GetNamedObject(L"update");
+  const std::wstring version(
+      update.GetNamedObject(L"version").GetNamedString(L"display", L"").c_str());
+  const std::wstring url(update.GetNamedString(L"release_url", L"").c_str());
+  if (version.empty() || !url.starts_with(std::wstring(releases_url) + L"/tag/"))
+    return failed;
+  if (status == L"current") {
+    UpdateOutcome latest{L"已是最新版本"};
+    latest.current = true;
+    return latest;
+  }
+  if (status != L"available")
+    return failed;
+  const auto string_field = [&update](wchar_t const *key) {
+    const auto field = update.GetNamedValue(key, JsonValue::CreateNullValue());
+    return field.ValueType() == JsonValueType::String ? std::wstring(field.GetString().c_str())
+                                                      : std::wstring();
+  };
+  const auto channel_field = update.GetNamedValue(L"channel", JsonValue::CreateStringValue(L"stable"));
+  if (channel_field.ValueType() != JsonValueType::String)
+    return failed;
+  const std::wstring found(channel_field.GetString().c_str());
+  if (msime::windows::update_channel::title(found).empty())
+    return failed;
+  std::optional<uint64_t> build_run;
+  const auto run_field = update.GetNamedValue(L"build_run", JsonValue::CreateNullValue());
+  // WinRT 把 JSON 数读成 double；运行 ID 远小于 2^53，只收精确的非负整数。
+  if (run_field.ValueType() == JsonValueType::Number) {
+    const double raw = run_field.GetNumber();
+    if (std::isfinite(raw) && raw >= 0 && std::trunc(raw) == raw && raw <= 9007199254740991.0)
+      build_run = static_cast<uint64_t>(raw);
+  }
+  const auto title = msime::settings::update_build_title(found, version, build_run);
+  UpdateOutcome outcome{msime::settings::update_found_status(title)};
+  outcome.version = version;
+  outcome.title = title;
+  outcome.download_url =
+      msime::settings::update_download_from_release_page(found) ? url : std::wstring(download_url);
+  outcome.download_label = std::wstring(msime::settings::update_download_label(found));
+  auto name = string_field(L"installer_name");
+  if (!msime::settings::installer_name_valid(name))
+    name.clear();
+  auto sha256 = string_field(L"installer_sha256");
+  if (!msime::settings::installer_sha256_valid(sha256))
+    sha256.clear();
+  std::optional<bool> is_signed;
+  const auto signed_value = update.GetNamedValue(L"signed", JsonValue::CreateNullValue());
+  if (signed_value.ValueType() == JsonValueType::Boolean)
+    is_signed = signed_value.GetBoolean();
+  outcome.trust = msime::settings::installer_trust(is_signed, name, sha256, installer_placeholder());
+  outcome.mirror_url = msime::settings::update_mirror_url(url, name);
+  return outcome;
+}
+
+// 读取 `msime_client_update_check` 的答复。
 UpdateOutcome describe_update_check(Response const &response) {
   const UpdateOutcome failed{L"检查失败，请稍后重试"};
   if (!response.ok)
     return failed;
   try {
-    const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
-    const std::wstring status(value.GetNamedString(L"status", L"").c_str());
-    if (status == L"none")
-      return {L"暂无可用发行版"};
-    const auto update = value.GetNamedObject(L"update");
-    const std::wstring version(
-        update.GetNamedObject(L"version").GetNamedString(L"display", L"").c_str());
-    const std::wstring url(update.GetNamedString(L"release_url", L"").c_str());
-    if (version.empty() || !url.starts_with(std::wstring(releases_url) + L"/tag/"))
-      return failed;
-    if (status == L"current") {
-      UpdateOutcome latest{L"已是最新版本"};
-      latest.current = true;
-      return latest;
-    }
-    if (status != L"available")
-      return failed;
-    UpdateOutcome outcome{L"发现新版本 v" + version};
-    outcome.version = version;
-    const auto string_field = [&update](wchar_t const *key) {
-      const auto field = update.GetNamedValue(key, JsonValue::CreateNullValue());
-      return field.ValueType() == JsonValueType::String ? std::wstring(field.GetString().c_str())
-                                                        : std::wstring();
-    };
-    auto name = string_field(L"installer_name");
-    if (!msime::settings::installer_name_valid(name))
-      name.clear();
-    auto sha256 = string_field(L"installer_sha256");
-    if (!msime::settings::installer_sha256_valid(sha256))
-      sha256.clear();
-    std::optional<bool> is_signed;
-    const auto signed_value = update.GetNamedValue(L"signed", JsonValue::CreateNullValue());
-    if (signed_value.ValueType() == JsonValueType::Boolean)
-      is_signed = signed_value.GetBoolean();
-    outcome.trust = msime::settings::installer_trust(is_signed, name, sha256, installer_placeholder());
-    outcome.mirror_url = msime::settings::update_mirror_url(url, name);
-    return outcome;
+    return describe_update_value(JsonObject::Parse(text(response.text)).GetNamedObject(L"value"));
   } catch (...) {
     return failed;
+  }
+}
+
+// 读取 `msime_client_update_pending` 的答复：Server 的后台检查已经找到、仍比本版本新的构建。没有（value 为 null）、读不出来或不是可用更新时为空，关于页什么都不显示，等用户自己检查。
+std::optional<UpdateOutcome> describe_pending_update(Response const &response) {
+  if (!response.ok)
+    return std::nullopt;
+  try {
+    const auto value = JsonObject::Parse(text(response.text)).GetNamedValue(L"value");
+    if (value.ValueType() != JsonValueType::Object)
+      return std::nullopt;
+    auto outcome = describe_update_value(value.GetObject());
+    if (outcome.version.empty())
+      return std::nullopt;
+    return outcome;
+  } catch (...) {
+    return std::nullopt;
   }
 }
 
@@ -1510,6 +1554,9 @@ JsonObject plugin_action(wchar_t const *operation) {
 // 数据目录下 plugins 里已安装的插件，与 Tauri 的 plugin_catalog 是同一份 msime_client_plugins catalog。辅助码表插件都是装上的包，所以不传内置声音包的目录。读目录，只在 UI 线程之外调用。
 Response plugin_catalog_call() { return plugins_call(plugin_action(L"catalog"), false); }
 
+// 带 script_page 的同一份目录：脚本插件只在这份目录里列出，官方插件包（官方 uuid 脚本插件等，builtin 为真）也在。社区发布对话框列本机可发布的包、社区安装脚本插件前查同 id 的已装包时用它。读目录，只在 UI 线程之外调用。
+Response plugin_script_catalog_call() { return plugins_call(plugin_action(L"catalog"), false, true); }
+
 // 失败的插件请求在页面上的那句话：error 是 client-services 的失败码，detail 是它报告的规则（共享页的 pluginErrorMessage）。
 std::wstring plugin_failure(Response const &response, std::wstring const &fallback) {
   std::wstring code, detail;
@@ -1587,6 +1634,32 @@ msime::settings::plugins::Package plugin_package(JsonObject const &object) {
   pack.hooks = named_strings(object, L"hooks");
   pack.permissions = named_strings(object, L"permissions");
   pack.content_hash = named_string(object, L"content_hash");
+  // 脚本插件第二批的字段：收数字和运算符号的指令、清单里的设置项、随包数据。没有时都不出现。
+  for (auto const &item : named_objects(object, L"commands"))
+    if (named_string(item, L"arguments") == L"extended")
+      pack.extended_commands.push_back(named_string(item, L"trigger"));
+  for (auto const &item : named_objects(object, L"settings")) {
+    msime::settings::plugins::ScriptSetting setting;
+    setting.key = named_string(item, L"key");
+    setting.title = named_string(item, L"title");
+    setting.description = named_string(item, L"description");
+    setting.type = named_string(item, L"type");
+    const auto fallback = item.GetNamedValue(L"default", JsonValue::CreateNullValue());
+    if (fallback.ValueType() == JsonValueType::Boolean)
+      setting.bool_default = fallback.GetBoolean();
+    else if (fallback.ValueType() == JsonValueType::Number)
+      setting.number_default = static_cast<std::int64_t>(std::llround(fallback.GetNumber()));
+    else if (fallback.ValueType() == JsonValueType::String)
+      setting.text_default = std::wstring(fallback.GetString().c_str());
+    setting.min = static_cast<std::int64_t>(std::llround(named_number(item, L"min").value_or(0)));
+    setting.max = static_cast<std::int64_t>(std::llround(named_number(item, L"max").value_or(0)));
+    setting.max_length = static_cast<std::size_t>(named_number(item, L"max_length").value_or(0));
+    for (auto const &option : named_objects(item, L"options"))
+      setting.options.push_back({named_string(option, L"value"), named_string(option, L"title")});
+    pack.settings.push_back(std::move(setting));
+  }
+  pack.data = named_strings(object, L"data");
+  pack.data_bytes = named_number(object, L"data_bytes").value_or(0);
   return pack;
 }
 
@@ -1632,6 +1705,41 @@ std::optional<msime::settings::plugins::ScriptGrants> plugin_script_grants(Respo
   }
 }
 
+// script_plugin_state、set_script_settings 和 clear_script_data 的回答（client-services 的 ScriptPluginStateView）；读不懂时为空。值按 JSON 类型换成布尔、整数或文字。
+std::optional<msime::settings::plugins::ScriptPluginState> plugin_script_state(Response const &response) {
+  if (!response.ok)
+    return std::nullopt;
+  try {
+    const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+    msime::settings::plugins::ScriptPluginState state;
+    state.storage_bytes = named_number(value, L"storage_bytes").value_or(0);
+    const auto values = value.GetNamedValue(L"values", JsonValue::CreateNullValue());
+    if (values.ValueType() == JsonValueType::Object)
+      for (auto const &entry : values.GetObject()) {
+        const std::wstring key(entry.Key().c_str());
+        const auto item = entry.Value();
+        if (item.ValueType() == JsonValueType::Boolean)
+          state.values[key] = item.GetBoolean();
+        else if (item.ValueType() == JsonValueType::Number)
+          state.values[key] = static_cast<std::int64_t>(std::llround(item.GetNumber()));
+        else if (item.ValueType() == JsonValueType::String)
+          state.values[key] = std::wstring(item.GetString().c_str());
+      }
+    return state;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+// 失败回答里的 detail（client-services 报告的规则）；没有时为空。
+std::wstring response_detail(Response const &response) {
+  try {
+    return named_string(JsonObject::Parse(text(response.text)), L"detail");
+  } catch (...) {
+    return {};
+  }
+}
+
 // load_mentions 的回答；读不懂时为空。
 std::optional<std::vector<msime::settings::plugins::Mention>> plugin_mentions(Response const &response) {
   if (!response.ok)
@@ -1642,12 +1750,115 @@ std::optional<std::vector<msime::settings::plugins::Mention>> plugin_mentions(Re
       if (item.ValueType() != JsonValueType::Object)
         return std::nullopt;
       const auto entry = item.GetObject();
-      mentions.push_back({named_string(entry, L"text"), named_string(entry, L"key")});
+      mentions.push_back({named_string(entry, L"text"), named_string(entry, L"key"),
+                          named_string(entry, L"phone")});
     }
     return mentions;
   } catch (...) {
     return std::nullopt;
   }
+}
+
+// ---- 插件编辑器的 AuthoredPack ----
+
+// authoring_load 的回答（client-services 的 AuthoredPack）；读不懂时为空。可选的字段是 null 时留空，四个内容字段只读与 kind 对应的那一个。
+std::optional<msime::settings::plugins::AuthoredPack> authored_pack(Response const &response) {
+  if (!response.ok)
+    return std::nullopt;
+  try {
+    const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+    auto nullable = [](JsonObject const &object, wchar_t const *key) -> std::optional<std::wstring> {
+      const auto field = object.GetNamedValue(key, JsonValue::CreateNullValue());
+      if (field.ValueType() == JsonValueType::String)
+        return std::wstring(field.GetString().c_str());
+      return std::nullopt;
+    };
+    msime::settings::plugins::AuthoredPack pack;
+    pack.kind = named_string(value, L"kind");
+    if (!msime::settings::plugins::is_authored_kind(pack.kind))
+      return std::nullopt;
+    pack.id = nullable(value, L"id");
+    pack.name = named_string(value, L"name");
+    pack.version = named_string(value, L"version");
+    pack.license = named_string(value, L"license");
+    pack.author = nullable(value, L"author");
+    pack.description = nullable(value, L"description");
+    if (pack.kind == L"phrase_table")
+      for (auto const &item : named_objects(value, L"phrases"))
+        pack.phrases.push_back({named_string(item, L"key"), named_string(item, L"text")});
+    if (pack.kind == L"command_table")
+      for (auto const &item : named_objects(value, L"commands"))
+        pack.commands.push_back({named_string(item, L"trigger"), named_string(item, L"title"),
+                                 named_string(item, L"template")});
+    if (pack.kind == L"symbol_set")
+      for (auto const &item : named_objects(value, L"groups"))
+        pack.groups.push_back({named_string(item, L"tab"), named_string(item, L"title"), nullable(item, L"keywords"),
+                               named_strings(item, L"items")});
+    if (pack.kind == L"wordbook")
+      for (auto const &item : named_objects(value, L"words"))
+        pack.words.push_back({named_string(item, L"word"), nullable(item, L"phonetic"), named_string(item, L"gloss")});
+    return pack;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+// authoring_save 的 pack：可选的字段为空时写 null，只带与 kind 对应的那一个内容字段。
+JsonObject authored_pack_json(msime::settings::plugins::AuthoredPack const &pack) {
+  auto json_text = [](std::wstring const &value) { return JsonValue::CreateStringValue(hstring(value)); };
+  auto nullable = [&json_text](std::optional<std::wstring> const &value) {
+    return value ? json_text(*value) : JsonValue::CreateNullValue();
+  };
+  JsonObject object;
+  object.SetNamedValue(L"kind", json_text(pack.kind));
+  object.SetNamedValue(L"id", nullable(pack.id));
+  object.SetNamedValue(L"name", json_text(pack.name));
+  object.SetNamedValue(L"version", json_text(pack.version));
+  object.SetNamedValue(L"license", json_text(pack.license));
+  object.SetNamedValue(L"author", nullable(pack.author));
+  object.SetNamedValue(L"description", nullable(pack.description));
+  JsonArray rows;
+  if (pack.kind == L"phrase_table") {
+    for (auto const &row : pack.phrases) {
+      JsonObject item;
+      item.SetNamedValue(L"key", json_text(row.key));
+      item.SetNamedValue(L"text", json_text(row.text));
+      rows.Append(item);
+    }
+    object.SetNamedValue(L"phrases", rows);
+  } else if (pack.kind == L"command_table") {
+    for (auto const &row : pack.commands) {
+      JsonObject item;
+      item.SetNamedValue(L"trigger", json_text(row.trigger));
+      item.SetNamedValue(L"title", json_text(row.title));
+      item.SetNamedValue(L"template", json_text(row.template_text));
+      rows.Append(item);
+    }
+    object.SetNamedValue(L"commands", rows);
+  } else if (pack.kind == L"symbol_set") {
+    for (auto const &group : pack.groups) {
+      JsonObject item;
+      item.SetNamedValue(L"tab", json_text(group.tab));
+      item.SetNamedValue(L"title", json_text(group.title));
+      item.SetNamedValue(L"keywords", nullable(group.keywords));
+      JsonArray items;
+      for (auto const &symbol : group.items)
+        items.Append(json_text(symbol));
+      item.SetNamedValue(L"items", items);
+      rows.Append(item);
+    }
+    object.SetNamedValue(L"groups", rows);
+  } else if (pack.kind == L"wordbook") {
+    for (auto const &row : pack.words) {
+      JsonObject item;
+      item.SetNamedValue(L"word", json_text(row.word));
+      item.SetNamedValue(L"phonetic", nullable(row.phonetic));
+      item.SetNamedValue(L"gloss", json_text(row.gloss));
+      rows.Append(item);
+    }
+    object.SetNamedValue(L"words", rows);
+  }
+  return object;
 }
 
 // 公开预设没有文件或网络访问，首次绘制时读取一次；持有字段的副本后即可释放 C 接口的 JSON。
@@ -2124,46 +2335,20 @@ std::vector<std::wstring> json_texts(JsonObject const &object, wchar_t const *ke
   return values;
 }
 
-// The content type and bytes of a msime_client_skin_resource answer, {"ok":true,"value":{"contentType":...,"bytes":[...]}}. The byte array is read by hand: an image of a few hundred kilobytes is that many JSON numbers, which Windows.Data.Json would turn into as many objects.
+// The content type and bytes of a msime_client_skin_resource answer asked for with encoding:"base64", {"ok":true,"value":{"contentType":...,"bytesBase64":...}}. The default `bytes` array would cost the shared layer a JSON value per byte (about 512 MiB at the 8 MiB resource limit) and `take_response`'s Windows.Data.Json parse an object per byte.
 std::optional<std::pair<std::string, std::vector<uint8_t>>>
 skin_resource_bytes(std::string const &answer) {
-  const std::string type_key = "\"contentType\":\"";
-  const std::string bytes_key = "\"bytes\":[";
-  const auto type_at = answer.find(type_key);
-  const auto bytes_at = answer.find(bytes_key);
-  if (type_at == std::string::npos || bytes_at == std::string::npos)
+  try {
+    const auto value = JsonObject::Parse(text(answer)).GetNamedObject(L"value");
+    const auto buffer = Windows::Security::Cryptography::CryptographicBuffer::DecodeFromBase64String(
+        value.GetNamedString(L"bytesBase64"));
+    com_array<uint8_t> bytes;
+    Windows::Security::Cryptography::CryptographicBuffer::CopyToByteArray(buffer, bytes);
+    return std::pair{utf8(value.GetNamedString(L"contentType")),
+                     std::vector<uint8_t>(bytes.begin(), bytes.end())};
+  } catch (hresult_error const &) {
     return std::nullopt;
-  const auto type_start = type_at + type_key.size();
-  const auto type_end = answer.find('"', type_start);
-  if (type_end == std::string::npos)
-    return std::nullopt;
-  std::vector<uint8_t> bytes;
-  size_t at = bytes_at + bytes_key.size();
-  unsigned value = 0;
-  bool digits = false;
-  bool closed = false;
-  for (; at < answer.size() && !closed; ++at) {
-    const char c = answer[at];
-    if (c >= '0' && c <= '9') {
-      value = value * 10 + static_cast<unsigned>(c - '0');
-      if (value > 255)
-        return std::nullopt;
-      digits = true;
-    } else if (c == ',' || c == ']') {
-      if (digits)
-        bytes.push_back(static_cast<uint8_t>(value));
-      else if (c == ',' || !bytes.empty())
-        return std::nullopt;
-      value = 0;
-      digits = false;
-      closed = c == ']';
-    } else if (c != ' ') {
-      return std::nullopt;
-    }
   }
-  if (!closed)
-    return std::nullopt;
-  return std::pair{answer.substr(type_start, type_end - type_start), std::move(bytes)};
 }
 
 // 只由这款包组成的自定义主题配色；排列取包支持的一种，面板确认可画后才使用 panel_drawn 配色。
@@ -2197,6 +2382,7 @@ std::vector<uint8_t> skin_image(std::string const &root, std::wstring const &id,
   request.SetNamedValue(L"id", JsonValue::CreateStringValue(hstring(id)));
   request.SetNamedValue(L"relative", JsonValue::CreateStringValue(hstring(relative)));
   request.SetNamedValue(L"kind", JsonValue::CreateStringValue(L"image"));
+  request.SetNamedValue(L"encoding", JsonValue::CreateStringValue(L"base64"));
   const auto body = utf8(request.Stringify());
   const auto response = take_response(
       msime_client_skin_resource(reinterpret_cast<const uint8_t *>(body.data()), body.size()));
@@ -2530,6 +2716,8 @@ struct CommunityPluginItem {
   bool owned = false;
   int64_t my_rating = 0;
   std::wstring moderation;
+  // 脚本插件清单申请的能力名，按清单顺序，可能有本客户端还不认识的名字；数据类插件和旧服务端没有。
+  std::vector<std::wstring> permissions;
 };
 
 void parse_community_item(JsonObject const &object, CommunitySkinItem &skin) {
@@ -2577,6 +2765,7 @@ void parse_community_item(JsonObject const &object, CommunityPluginItem &plugin)
   plugin.owned = owned.ValueType() == JsonValueType::Boolean && owned.GetBoolean();
   plugin.my_rating = named_count(object, L"my_rating");
   plugin.moderation = named_string(object, L"moderation");
+  plugin.permissions = named_strings(object, L"permissions");
 }
 
 // 社区里的一个词库或回复模板（client-services 的 CommunityResource，共享页的 CommunityResource）。词库带词条，回复模板带提示词。
@@ -3315,11 +3504,34 @@ struct MainWindow : WindowT<MainWindow> {
       closed_ = true;
       if (dictionary_update_timer_) dictionary_update_timer_.Stop();
       flush_pending();
+      // 写盘失败后保留着的修改在关闭前最后再存一次；仍失败就只能留在磁盘上的旧值。
+      retry_unsaved_edit();
+      if (save_retry_timer_) save_retry_timer_.Stop();
       // 本地模型的下载随窗口一起停下，下次安装时清掉没装完的临时文件。
       take_response(msime_client_voice_local_model_cancel(nullptr, 0));
       // 等待中的 Google 登录也随窗口结束，回环端口不再等一个没人看的浏览器。
       cancel_account_google();
     });
+  }
+
+  // 第二次启动只恢复已有窗口；带页面的请求沿用首启的类别和页内标签。
+  bool open_route(std::string_view route) {
+    if (closed_) return false;
+    if (route == "settings") return true;
+    if (!route.starts_with("settings:")) return false;
+    const std::string page(route.substr(9));
+    navigate(std::string(nav::offered_page_for_route(page, MSIME_EDITION_HANDWRITING != 0)));
+    if (page == "mcp") page_tabs_["ai"] = L"connection";
+    if (page == "handwriting" && MSIME_EDITION_HANDWRITING != 0)
+      page_tabs_["osk"] = L"handwriting";
+    if (page == "vocabulary") {
+      page_tabs_["lexicon"] = L"manage";
+      vocabulary_view_ = true;
+    }
+    if (page == "feedback" || page == "help") page_tabs_["about"] = L"feedback";
+    about_help_open_ = page == "help";
+    render_page(false);
+    return true;
   }
 
 private:
@@ -3330,11 +3542,13 @@ private:
     std::wstring error;
     if (fresh.Load(error)) {
       document_ = std::move(fresh);
+      discard_unsaved_edit();
       synchronize_cloud_clipboard_configuration();
       loaded_ = true;
       load_error_.clear();
     } else if (!loaded_) {
       document_ = std::move(fresh);
+      discard_unsaved_edit();
       load_error_ = error;
     }
   }
@@ -3500,18 +3714,27 @@ private:
   void on_activated(Inspectable const &, WindowActivatedEventArgs const &args) {
     if (args.WindowActivationState() == WindowActivationState::Deactivated) {
       flush_pending();
+      retry_unsaved_edit();
       return;
     }
     // 与共享页一样，窗口获得焦点时重读打字统计并按日节流检查词库。
     poll_statistics();
     dictionary_update_request(L"automatic");
     sogou_request(sogou_action(L"status"));
+    reread_dictionary_sync_status();
     // Another window (the tray, the shared app, another device through sync) may have changed the settings or Windows may have switched between light and dark while this window was in the background.
     bool changed = false;
     PreferencesDocument fresh;
     std::wstring error;
     if (fresh.Load(error) &&
         (!loaded_ || fresh.revision() != document_.revision())) {
+      // 写盘失败后保留着的修改还没存下，别处却已经存了新的修订号：与保存时遇到的冲突一样，以别处的设置为准并说明。
+      if (pending_save_failures_ > 0) {
+        discard_unsaved_edit();
+        notice_ = msime::settings::preferences_reload_failure_message(
+            msime::settings::PreferencesSaveFailure::conflict);
+        notice_severity_ = InfoBarSeverity::Error;
+      }
       document_ = std::move(fresh);
       synchronize_cloud_clipboard_configuration();
       loaded_ = true;
@@ -3591,15 +3814,20 @@ private:
 
   // ---- Saving ----
 
-  // Every control writes through at once. A refused write (a newer revision elsewhere, or a combination the store rejects) reloads the stored settings and says so.
+  // 每个控件改动后立即保存，返回是否已经存下。被拒绝的保存（别处先存了新修订号，或这组设置不被接受）重读已存的设置并在页首说明。写盘失败（设置文件被别的程序占用等）不重读：修改留在文档里、页面照它显示，按 PreferencesSaveFailure.h 的间隔自动重试，见 keep_unsaved_edit。
   bool commit() {
-    std::wstring error;
-    if (document_.Save(error)) {
+    const auto failure = document_.Save();
+    if (!failure) {
       synchronize_cloud_clipboard_configuration();
+      settle_unsaved_edit();
       return true;
     }
-    notice_ = L"无法保存这项设置：设置可能已在其他窗口中更新，或与其他设置冲突。"
-              L"已重新读取当前设置。";
+    if (*failure == msime::settings::PreferencesSaveFailure::storage) {
+      keep_unsaved_edit();
+      return false;
+    }
+    discard_unsaved_edit();
+    notice_ = msime::settings::preferences_reload_failure_message(*failure);
     notice_severity_ = InfoBarSeverity::Error;
     // The refused edit is still in memory; the stored settings replace it, and if they cannot be read the controls are disabled rather than showing a value that was never saved.
     PreferencesDocument fresh;
@@ -3613,11 +3841,57 @@ private:
     return false;
   }
 
+  // 写盘失败后保留修改：文档不动，说明还会自动重试，并排好下一次。自动重试用完后不再排，pending_save_failures_ 仍大于零，切到别的窗口、关闭窗口或下一次修改时再存。
+  void keep_unsaved_edit() {
+    ++pending_save_failures_;
+    if (closed_)
+      return;
+    const auto delay = msime::settings::preferences_save_retry_delay(pending_save_failures_);
+    auto message = msime::settings::preferences_storage_failure_message(delay.has_value());
+    // 同一句说明已经显示着时不重画整页，免得每次重试都打断正在操作的控件。
+    if (message != notice_)
+      show_notice(std::move(message), delay ? InfoBarSeverity::Warning : InfoBarSeverity::Error);
+    if (!delay)
+      return;
+    if (!save_retry_timer_) {
+      save_retry_timer_ = DispatcherQueue().CreateTimer();
+      save_retry_timer_.IsRepeating(false);
+      save_retry_timer_.Tick([this](Microsoft::UI::Dispatching::DispatcherQueueTimer const &,
+                                    Inspectable const &) { retry_unsaved_edit(); });
+    }
+    save_retry_timer_.Stop();
+    save_retry_timer_.Interval(*delay);
+    save_retry_timer_.Start();
+  }
+
+  // 有写盘失败后保留着的修改时再存一次。
+  void retry_unsaved_edit() {
+    if (pending_save_failures_ > 0)
+      commit();
+  }
+
+  // 保存成功：之前保留着的修改也一并存下了，换掉写盘失败的说明。
+  void settle_unsaved_edit() {
+    if (pending_save_failures_ == 0)
+      return;
+    discard_unsaved_edit();
+    show_notice(std::wstring(msime::settings::preferences_saved_after_retry_message),
+                InfoBarSeverity::Success);
+  }
+
+  // 文档被已存的设置换掉（重读、别处改过）时，保留着的修改随之作废，不再重试。
+  void discard_unsaved_edit() {
+    pending_save_failures_ = 0;
+    if (save_retry_timer_)
+      save_retry_timer_.Stop();
+  }
+
   void change(std::function<void(PreferencesDocument &)> const &edit,
               bool redraw) {
     flush_pending();
     edit(document_);
-    if (commit()) {
+    // 写盘失败时修改仍留在文档里，预览照样跟着它走。
+    if (commit() || pending_save_failures_ > 0) {
       forget_stale_card_previews();
       update_preview();
       update_toolbar_preview();
@@ -4054,15 +4328,19 @@ private:
       helpcode_packs_stale_ = true;
     // 与共享页一样，每次进入「剪贴板」页都重读历史，并重新查一次能否发到云剪贴板。
     if (id == "clip" && id != current_page_) {
-      cloud_relay_draft_.reset();
+      reset_cloud_clipboard_draft();
       clip_stale_ = true;
       reset_cloud_clipboard();
     }
     if (id == "stats" && id != current_page_)
       reset_statistics_page();
     // 「词库」页每次进入都重新列出词条；背单词子页随离开本页收起。
-    if (id == "lexicon" && id != current_page_)
+    if (id == "lexicon" && id != current_page_) {
       lexicon_listed_ = false;
+      // 与共享页挂上「词库同步」时一样，每次进入都以 opened 同步一次；离开时没保存的网盘草稿丢掉。
+      reset_dictionary_sync_draft();
+      reset_dictionary_sync_state();
+    }
     if (current_page_ == "lexicon" && id != current_page_) {
       vocabulary_view_ = false;
       vocabulary_pending_focus_ = false;
@@ -5478,7 +5756,7 @@ private:
     if (!available)
       return;
     auto const &outcome = *update_outcome_;
-    auto headline = make_text(msime::settings::update_release_headline(outcome.version), 12,
+    auto headline = make_text(msime::settings::update_release_headline(outcome.title), 12,
                               palette_.sub);
     headline.IsTextSelectionEnabled(true);
     update_result_.Children().Append(headline);
@@ -5497,7 +5775,8 @@ private:
     if (!outcome.mirror_url.empty())
       actions.Children().Append(button_control(
           L"国内镜像下载", [this, url = outcome.mirror_url] { open_url(url.c_str()); }));
-    actions.Children().Append(button_control(L"前往下载", [this] { open_url(download_url); }));
+    actions.Children().Append(button_control(
+        outcome.download_label, [this, url = outcome.download_url] { open_url(url.c_str()); }));
     update_result_.Children().Append(actions);
   }
 
@@ -5519,20 +5798,69 @@ private:
     check_for_update();
   }
 
-  // GitHub 可能要十秒才回应，所以请求在 UI 线程之外执行，只把结果传回来。
+  // 偏好里的更新通道（`update_channel`），归一成 stable、beta、nightly；偏好没读到时是稳定版。
+  std::wstring current_update_channel() const {
+    return std::wstring(msime::windows::update_channel::normalize(
+        std::wstring_view(document_.String(L"update_channel", msime::windows::update_channel::stable))));
+  }
+
+  // 换了更新通道：上一次的结果是按旧通道检查的，不再显示；还在路上的检查回来时也丢掉（update_generation_）。然后读新通道下 Server 后台检查找到的版本。
+  void on_update_channel_changed() {
+    ++update_generation_;
+    update_checking_ = false;
+    update_outcome_.reset();
+    grammar_updates_checking_ = false;
+    grammar_updates_available_.clear();
+    grammar_updates_notice_.clear();
+    show_update_outcome();
+    load_pending_update();
+  }
+
+  // GitHub 可能要十秒才回应，所以请求在 UI 线程之外执行，只把结果传回来。按点下按钮时偏好里的通道检查。
   fire_and_forget check_for_update() {
     update_checking_ = true;
     update_outcome_.reset();
     show_update_outcome();
+    const auto generation = ++update_generation_;
     auto weak = get_weak();
     auto queue = DispatcherQueue();
-    const auto body = utf8(update_check_request().Stringify());
+    const auto channel = current_update_channel();
+    const auto body = utf8(update_check_request(channel).Stringify());
     co_await resume_background();
     auto outcome = describe_update_check(take_response(msime_client_update_check(
         reinterpret_cast<const uint8_t *>(body.data()), body.size())));
-    queue.TryEnqueue([weak, outcome = std::move(outcome)] {
+    queue.TryEnqueue([weak, generation, outcome = std::move(outcome)] {
       if (auto self = weak.get()) {
+        if (self->update_generation_ != generation)
+          return;
         self->update_checking_ = false;
+        self->update_outcome_ = outcome;
+        self->show_update_outcome();
+      }
+    });
+  }
+
+  // 「版本更新」标签画出来、还没有结果时，先显示 Server 后台检查（UpdateNotifier）已经找到、仍比本版本新的构建（`msime_client_update_pending`，只读本用户更新记录目录里的 update-check.json，与 Server 写的是同一个目录（common/UpdateRecordDirectory.h），不联网），点通知打开这一页时用户直接看到是哪个版本。读文件也放在 UI 线程之外；回来时用户已经点了检查、换了通道或者已有结果就不覆盖。
+  fire_and_forget load_pending_update() {
+    const auto directory = msime::windows::update_record_directory();
+    if (directory.empty() || !directory.is_absolute())
+      co_return;
+    const auto generation = update_generation_;
+    auto weak = get_weak();
+    auto queue = DispatcherQueue();
+    const auto channel = current_update_channel();
+    auto request = update_check_request(channel);
+    request.SetNamedValue(L"directory", JsonValue::CreateStringValue(hstring(directory.wstring())));
+    const auto body = utf8(request.Stringify());
+    co_await resume_background();
+    auto outcome = describe_pending_update(take_response(msime_client_update_pending(
+        reinterpret_cast<const uint8_t *>(body.data()), body.size())));
+    if (!outcome)
+      co_return;
+    queue.TryEnqueue([weak, generation, outcome = std::move(*outcome)] {
+      if (auto self = weak.get()) {
+        if (self->update_generation_ != generation || self->update_checking_ || self->update_outcome_)
+          return;
         self->update_outcome_ = outcome;
         self->show_update_outcome();
       }
@@ -9524,13 +9852,13 @@ private:
           // ResourceDetail 的 unpublish 只关上详情：列表不重读，也不说明。
           if constexpr (resource_item<Item>) {
             gallery_end<Item>();
-            return;
+          } else {
+            gallery.installed = false;
+            gallery.confirm_replace = false;
+            gallery.notice = message;
+            gallery_list<Item>(gallery.active_search, false, gallery.active_mine,
+                               [this](bool) { gallery_end<Item>(); });
           }
-          gallery.installed = false;
-          gallery.confirm_replace = false;
-          gallery.notice = message;
-          gallery_list<Item>(gallery.active_search, false, gallery.active_mine,
-                             [this](bool) { gallery_end<Item>(); });
         });
   }
 
@@ -9755,15 +10083,19 @@ private:
     struct Outcome {
       bool exists = false;
       Response response;
+      // 装好脚本插件之后重读的目录（与「我的插件」读的同一份），第一次绘制授权详情时就找得到它。
+      std::optional<pg::Catalog> catalog;
     };
     const auto owner = gallery.owner;
     run_worker<Outcome>(
         [target, replace] {
           Outcome outcome;
+          // 脚本插件只在带 script_page 的目录里列出；那份目录还列出官方插件包，官方包不会被社区安装替换，不算同 id。
+          const bool script = target.kind == L"script";
           if (!replace) {
-            if (const auto catalog = plugin_catalog(plugin_catalog_call()))
+            if (const auto catalog = plugin_catalog(script ? plugin_script_catalog_call() : plugin_catalog_call()))
               for (auto const &pack : catalog->packages)
-                if (pack.kind == target.kind && pack.id == target.plugin_id) {
+                if (!pack.builtin && pack.kind == target.kind && pack.id == target.plugin_id) {
                   outcome.exists = true;
                   return outcome;
                 }
@@ -9773,9 +10105,11 @@ private:
           action.SetNamedValue(L"kind", JsonValue::CreateStringValue(hstring(target.kind)));
           action.SetNamedValue(L"plugin_id", JsonValue::CreateStringValue(hstring(target.plugin_id)));
           outcome.response = community_call(action);
+          if (script && outcome.response.ok)
+            outcome.catalog = plugin_catalog(plugins_call(plugin_action(L"catalog"), true, true));
           return outcome;
         },
-        [this, owner](Outcome &outcome) {
+        [this, owner, target](Outcome &outcome) {
           if (outcome.response.ok)
             plugins_stale_ = true;
           if (owner != plugin_gallery_.owner)
@@ -9792,7 +10126,20 @@ private:
           plugin_gallery_.confirm_replace = false;
           plugin_gallery_.installed = true;
           gallery_end<CommunityPluginItem>();
+          if (target.kind == L"script")
+            reveal_installed_script(target.plugin_id, std::move(outcome.catalog));
         });
+  }
+
+  // 社区装好的脚本插件和本机导入的一样不会运行，也没有任何授权：切到「我的插件」，打开它的详情（共享页的 onOpenScript），焦点落在「启用」开关上，授权从那里开始。目录已在工作线程上重读，先换上，第一次绘制就找得到它；没读到时照常重读，找不到就停在列表上。
+  void reveal_installed_script(std::wstring const &id, std::optional<pg::Catalog> catalog) {
+    if (catalog) {
+      plugin_catalog_ = std::move(*catalog);
+      plugin_catalog_state_ = PluginCatalogState::loaded;
+    }
+    set_plugin_view(false);
+    open_plugin_view(PluginView::pack, L"script", id, L"pack/script/" + id);
+    plugin_pending_focus_ = L"script-switch";
   }
 
   // ---- 预览图 ----
@@ -10479,7 +10826,7 @@ private:
     community_search<CommunityPluginItem>(page, L"搜索插件");
     community_heading<CommunityPluginItem>(
         page, L"社区插件",
-        L"音效、音乐、指令表、特效、短语表、辅助码表、单词本与符号集，安装后在「我的插件」中选用",
+        L"音效、音乐、指令表、特效、短语表、辅助码表、单词本、符号集与脚本插件，安装后在「我的插件」中选用；脚本插件经管理员审核后才会出现，安装后要授权才会运行",
         L"插件范围", L"全部插件", L"发布我的插件", [this] { open_plugin_publish(); });
     std::vector<std::pair<std::optional<std::wstring>, std::wstring>> kinds{{std::nullopt, L"全部"}};
     for (auto const kind : cm::plugin_kinds)
@@ -10504,12 +10851,20 @@ private:
       auto title = card_line(plugin.name, 14, palette_.text);
       title.FontWeight(Windows::UI::Text::FontWeight{600});
       body.Children().Append(title);
-      body.Children().Append(card_line(cm::card_author(pg::kind_label(plugin.kind), plugin.author,
-                                                       plugin.owned, false,
-                                                       plugin.moderation == L"removed"),
-                                       12, palette_.sub));
+      body.Children().Append(card_line(
+          cm::plugin_card_author(plugin.kind, plugin.author, plugin.owned, plugin.moderation), 12,
+          palette_.sub));
+      // 脚本插件多一行申请的能力：说明让出一行，卡片高度不变；有要注意的能力时整行用危险色。
+      const bool script = plugin.kind == L"script";
       if (!plugin.description.empty())
-        body.Children().Append(card_line(plugin.description, 12, palette_.sub, 2));
+        body.Children().Append(card_line(plugin.description, 12, palette_.sub, script ? 1 : 2));
+      if (script) {
+        const auto lines = cm::capability_lines(plugin.permissions);
+        const bool caution = std::any_of(lines.begin(), lines.end(),
+                                         [](cm::CapabilityLine const &line) { return line.caution; });
+        body.Children().Append(
+            card_line(cm::capability_summary(lines), 12, caution ? danger_color() : palette_.sub));
+      }
       body.Children().Append(card_metrics(plugin.downloads, plugin.rating_count, plugin.rating_average));
       grid.Children().Append(community_card(L"查看插件 " + plugin.name, body, width, height,
                                             [this, plugin] { gallery_open(plugin); }));
@@ -10522,17 +10877,26 @@ private:
     auto &gallery = plugin_gallery_;
     auto const selected = *gallery.selected;
     auto body = community_detail_frame<CommunityPluginItem>(page);
+    const bool script = selected.kind == L"script";
+    const bool reviewing = cm::plugin_pending_review(selected.kind, selected.owned, selected.moderation);
     community_detail_header(body, selected.name,
                             cm::join_dot({pg::kind_label(selected.kind), selected.author,
                                           selected.version.empty() ? L"" : L"v" + selected.version}),
-                            selected.owned, selected.moderation, L"我的作品", selected.description);
+                            selected.owned, selected.moderation,
+                            reviewing ? L"我的作品 · " + std::wstring(cm::pending_review_label) : L"我的作品",
+                            selected.description);
     body.Children().Append(make_text(
         cm::join_dot({selected.plugin_id, selected.license.empty() ? L"" : L"授权 " + selected.license,
                       cm::megabytes(selected.size)}),
         13, palette_.sub));
     community_detail_status<CommunityPluginItem>(body, L"正在读取插件详情…");
+    if (reviewing)
+      community_notice(body, std::wstring(cm::script_review_notice));
+    if (script)
+      community_script_capabilities(body, selected.permissions);
     if (gallery.installed)
-      community_notice(body, L"已安装到插件目录，可在「我的插件」中选用。");
+      community_notice(body, script ? std::wstring(cm::script_installed_notice)
+                                    : std::wstring(L"已安装到插件目录，可在「我的插件」中选用。"));
     else
       body.Children().Append(community_install_button<CommunityPluginItem>(
           [this] { install_community_plugin(false); }));
@@ -10553,6 +10917,29 @@ private:
         L"已下架这个插件；其他用户将无法再下载。已安装的插件会保留。");
     if (!selected.owned)
       community_report<CommunityPluginItem>(body);
+  }
+
+  // 社区脚本插件申请的能力（共享页的 CommunityPluginCapabilities）：先说安装后不会运行，再按清单顺序逐项用授权页的白话列出；改写输入的文字和长期保存数据两项标「注意」并用危险色，本客户端还不认识的能力另说安装会失败。
+  void community_script_capabilities(StackPanel const &body, std::vector<std::wstring> const &permissions) {
+    StackPanel panel;
+    panel.Spacing(6);
+    panel.Children().Append(make_text(
+        std::wstring(cm::script_install_note) + L"。" + std::wstring(cm::script_grant_note), 13, palette_.text));
+    const auto lines = cm::capability_lines(permissions);
+    if (lines.empty())
+      panel.Children().Append(make_text(cm::script_no_capabilities, 13, palette_.sub));
+    for (auto const &line : lines) {
+      auto title = make_text(line.caution ? L"注意：" + line.title : line.title, 13,
+                             line.caution ? danger_color() : palette_.text);
+      title.FontWeight(Windows::UI::Text::FontWeight{600});
+      panel.Children().Append(title);
+      if (!line.description.empty())
+        panel.Children().Append(make_text(line.description, 12, palette_.sub));
+    }
+    if (cm::capabilities_unsupported(lines))
+      panel.Children().Append(make_text(cm::script_unknown_capabilities, 13, danger_color()));
+    A11y::SetName(panel, L"脚本插件申请的能力");
+    body.Children().Append(panel);
   }
 
   // ---- 发布 ----
@@ -11327,7 +11714,8 @@ private:
       });
     };
     build_plugin_publish(form, dialog);
-    run_host(plugin_catalog_call, [this, generation](Response const &response) {
+    // 内置包和官方插件包（builtin 为真）不能发布。
+    run_host(plugin_script_catalog_call, [this, generation](Response const &response) {
       auto &state = plugin_publish_;
       if (generation != state.generation)
         return;
@@ -11335,7 +11723,8 @@ private:
       if (auto catalog = plugin_catalog(response)) {
         state.options.clear();
         for (auto const &pack : catalog->packages) {
-          if (pack.builtin)
+          if (pack.builtin || std::find(cm::plugin_kinds.begin(), cm::plugin_kinds.end(), pack.kind) ==
+                                  cm::plugin_kinds.end())
             continue;
           state.options.push_back({pack.kind + L"/" + pack.id, pack.kind, pg::pack_kind_label(pack),
                                    pack.id, pack.name});
@@ -11412,7 +11801,11 @@ private:
   void update_plugin_publish_button(ContentDialog const &dialog) {
     auto const &state = plugin_publish_;
     if (state.pack_error.empty()) {
-      dialog.PrimaryButtonText(state.busy ? L"正在发布…" : L"公开发布");
+      // 脚本插件先审后发，主按钮写「提交审核」，同共享页。
+      const auto *chosen = chosen_plugin();
+      dialog.PrimaryButtonText(state.busy ? L"正在发布…"
+                               : chosen && chosen->kind == L"script" ? L"提交审核"
+                                                                     : L"公开发布");
       dialog.IsPrimaryButtonEnabled(!state.busy && plugin_publish_ready());
     } else {
       dialog.PrimaryButtonText(L"");
@@ -11471,7 +11864,7 @@ private:
       form.Children().Append(make_text(L"正在读取本地插件…", 13, palette_.sub));
     if (!state.options_loading && state.options.empty())
       form.Children().Append(make_text(
-          L"还没有可发布的插件。内置插件不能发布，请先在「我的插件」中导入自己的音效包、音乐包、指令表、特效包、短语表、辅助码表、单词本或符号集。",
+          L"还没有可发布的插件。内置插件不能发布，请先在「我的插件」中导入自己的音效包、音乐包、指令表、特效包、短语表、辅助码表、单词本、符号集或脚本插件。",
           13, palette_.sub));
     if (!state.options.empty()) {
       std::vector<Option> options;
@@ -11492,6 +11885,10 @@ private:
       combo.MinWidth(320);
       form.Children().Append(combo);
     }
+    const auto *chosen = chosen_plugin();
+    const bool script = chosen && chosen->kind == L"script";
+    if (script)
+      form.Children().Append(make_text(cm::script_review_notice, 13, palette_.text));
     if (state.pack_loading)
       form.Children().Append(make_text(L"正在检查插件…", 13, palette_.sub));
     if (!state.pack_error.empty())
@@ -11505,7 +11902,9 @@ private:
       publication_fields(
           form, state.name, state.description, state.agreed, state.publication_id, state.busy,
           L"名称", L"发布插件名称", L"说明", L"发布插件说明",
-          L"我拥有插件中音频与文字的发布权利，并同意其他用户按包内授权免费下载使用", L"确认拥有发布内容权利",
+          script ? L"我拥有插件中代码与文字的发布权利，并同意其他用户按包内授权免费下载使用"
+                 : L"我拥有插件中音频与文字的发布权利，并同意其他用户按包内授权免费下载使用",
+          L"确认拥有发布内容权利",
           [this] {
             if (plugin_publish_.update_button)
               plugin_publish_.update_button();
@@ -13270,13 +13669,14 @@ private:
                L"五笔输入达到四码且只有一个候选时，自动提交该候选。关闭后这个词留在候选列表里，用空格或数字键选它。",
                L"wubi_auto_commit_unique", true);
     }
-    // 日语、韩语、粤拼、注音和笔画各只有一个方案，没有可选的东西，只在对应方案下用一行说明怎么打，标题和说明与共享页 InputSchemeDetailsSection 的 schemeNote 相同。
+    // 单一布局只展示输入说明；韩语另外提供实体键盘布局选择。
     if (scheme == L"japanese")
       add_row(group, 0xE8AB, L"日语方案",
               L"罗马音：直接输入罗马音，提供平假名、片假名及日语词库候选", nullptr);
     if (scheme == L"korean")
-      add_row(group, 0xE8AB, L"韩语方案",
-              L"两套式：按两套式（두벌식）键位输入韩文字母，自动拼成音节，标点为半角", nullptr);
+      segment_row(group, 0xE8AB, L"韩语布局",
+                  L"默认两套式，可切换为罗马字。罗马字用 x 输入声母 ㅇ（xa → 아，hangug → 한국），Shift+G/D/B/J/S 输入紧音；退格删除当前拼写的最后一个拉丁字母，标点为半角",
+                  L"korean.layout", {{L"dubeolsik", L"两套式"}, {L"romaja", L"罗马字"}}, L"dubeolsik");
     if (scheme == L"cantonese")
       add_row(group, 0xE8AB, L"粤拼方案",
               L"粤拼：按不带声调的粤拼输入，用 ' 分隔音节，数字键选词，候选为繁体字词", nullptr);
@@ -13652,19 +14052,35 @@ private:
       if (commit()) {
         cloud_provider_draft_.reset();
         queue_refresh();
-      } else
+      } else if (pending_save_failures_ == 0)
+        // 写盘失败时配置本身没问题，页首已经说明会自动重试，不改成检查配置的提示。
         show_notice(L"保存失败，请检查地址、请求头 JSON、请求体模板、响应路径和超时。");
     }, loaded_);
     A11y::SetAutomationId(save, L"cloud-candidate-save");
     append_row_frame(group, save).Padding(Thickness{row_inset, 10, row_inset, 10});
   }
 
-  // Windows 原生设置页也提供共享设置页中的神经联想和 octagram 语法模型管理。
-  void build_sentence_model_settings(StackPanel const &group) {
+  void request_sentence_packs() {
     if (!indexing_ && sentence_pack_statuses_.empty() && !sentence_packs_requested_) {
       sentence_packs_requested_ = true;
       refresh_sentence_packs();
     }
+  }
+
+  // 安装包不带落定重排模型（Prepare-PackageFiles.ps1），与共享页一样在「桌面神经联想」打开时给出它的下载行，否则开关打开了也没有模型可用。
+  void build_neural_desktop_settings(StackPanel const &group) {
+    bool_row(group, 0xE8C1, L"桌面神经联想",
+             L"使用神经模型重排整句候选；没有模型时保持现有候选",
+             L"sentence_association.neural_desktop", false, true);
+    if (!document_.Boolean(L"sentence_association.neural_desktop", false))
+      return;
+    request_sentence_packs();
+    sentence_pack_row(group, L"settled-model", L"神经联想模型");
+  }
+
+  // Windows 原生设置页也提供共享设置页中的 octagram 语法模型管理。
+  void build_sentence_model_settings(StackPanel const &group) {
+    request_sentence_packs();
     const std::wstring model = document_.String(L"sentence_association.grammar_model", L"none");
     std::vector<Option> choices = {
         {L"none", L"不使用"},
@@ -13682,8 +14098,25 @@ private:
             L"octagram 语法模型给整句候选加分；模型按需下载，不随安装包。选择后切换一次输入框生效。",
             selector);
     const auto pack = grammar_pack_for_model(model);
-    if (pack.empty())
-      return;
+    if (!pack.empty())
+      sentence_pack_row(group, pack, L"模型文件");
+    StackPanel actions;
+    actions.Orientation(Orientation::Horizontal);
+    actions.Spacing(8);
+    auto check = button_control(grammar_updates_checking_ ? L"检查中…" : L"检查更新",
+                                [this] { check_grammar_model_updates(); },
+                                !grammar_updates_checking_);
+    A11y::SetAutomationId(check, L"sentence-grammar-model-check-updates");
+    actions.Children().Append(check);
+    add_row(group, 0xE8C1, L"模型更新",
+            grammar_updates_notice_.empty()
+                ? L"只在点击后读取官方模型目录，不会自动替换当前可用模型。"
+                : grammar_updates_notice_,
+            actions);
+  }
+
+  void sentence_pack_row(StackPanel const &group, std::wstring const &pack,
+                         std::wstring const &title) {
     const auto status = sentence_pack_status(pack);
     const bool installing = sentence_pack_installing_.count(pack) > 0;
     const bool removing = sentence_pack_removing_.count(pack) > 0;
@@ -13707,12 +14140,16 @@ private:
       A11y::SetAutomationId(download, L"sentence-model-download-" + pack);
       actions.Children().Append(download);
     }
+    if (status == L"installed" && grammar_updates_available_.count(pack) > 0 &&
+        !installing && !removing)
+      actions.Children().Append(
+          button_control(L"下载更新", [this, pack] { install_sentence_pack(pack); }, loaded_));
     if (status == L"installed" && !installing && !removing)
       actions.Children().Append(button_control(L"删除", [this, pack] { remove_sentence_pack(pack); },
                                                 loaded_));
     if (installing)
       actions.Children().Append(button_control(L"取消", [this, pack] { cancel_sentence_pack(pack); }, true));
-    add_row(group, 0xE8C1, L"模型文件", subtitle, actions);
+    add_row(group, 0xE8C1, title, subtitle, actions);
   }
 
   static std::wstring grammar_pack_for_model(std::wstring const &model) {
@@ -13751,13 +14188,60 @@ private:
                 continue;
               const auto object = item.GetObject();
               const auto id = named_string(object, L"id");
-              if (id == L"grammar-model-wanxiang" || id == L"grammar-model-baguwen" ||
-                  id == L"grammar-model-baguwen-compact")
+              if (id == L"settled-model" || id == L"grammar-model-wanxiang" ||
+                  id == L"grammar-model-baguwen" || id == L"grammar-model-baguwen-compact")
                 sentence_pack_statuses_.push_back({id, named_string(object, L"state")});
             }
             redraw_input();
           } catch (...) {
           }
+        });
+  }
+
+  void check_grammar_model_updates() {
+    const auto root = state_directory();
+    if (root.empty() || !root.is_absolute() || grammar_updates_checking_)
+      return;
+    grammar_updates_checking_ = true;
+    grammar_updates_notice_.clear();
+    redraw_input();
+    const auto channel = current_update_channel();
+    JsonObject request;
+    request.SetNamedValue(L"state_root", JsonValue::CreateStringValue(hstring(root.wstring())));
+    request.SetNamedValue(
+        L"channel",
+        JsonValue::CreateStringValue(hstring(channel)));
+    run_host(
+        [body = utf8(request.Stringify())] {
+          return take_response(msime_client_resource_pack_check_grammar_updates(
+              reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+        },
+        [this, channel](Response const &response) {
+          if (channel != current_update_channel())
+            return;
+          grammar_updates_checking_ = false;
+          grammar_updates_available_.clear();
+          if (!response.ok) {
+            grammar_updates_notice_ = L"无法读取官方模型目录，请稍后重试。";
+          } else {
+            try {
+              const auto updates =
+                  JsonObject::Parse(text(response.text)).GetNamedArray(L"value");
+              for (auto const &item : updates) {
+                if (item.ValueType() == JsonValueType::Object)
+                  grammar_updates_available_.insert(named_string(item.GetObject(), L"pack"));
+              }
+              const auto selected = grammar_pack_for_model(
+                  document_.String(L"sentence_association.grammar_model", L"none"));
+              grammar_updates_notice_ =
+                  grammar_updates_available_.count(selected) == 0
+                      ? L"当前已是最新模型。"
+                      : L"发现可选模型更新；下载前仍会校验完整性。";
+            } catch (...) {
+              grammar_updates_notice_ = L"模型目录返回内容无法读取，请稍后重试。";
+            }
+          }
+          redraw_input();
         });
   }
 
@@ -13777,6 +14261,10 @@ private:
     JsonObject request;
     request.SetNamedValue(L"state_root", JsonValue::CreateStringValue(hstring(root.wstring())));
     request.SetNamedValue(L"pack", JsonValue::CreateStringValue(hstring(id)));
+    request.SetNamedValue(
+        L"channel",
+        JsonValue::CreateStringValue(
+            hstring(current_update_channel())));
     const auto mirror = document_.String(L"voice_input.asr_model_mirror", L"");
     if (!mirror.empty()) {
       JsonArray sources;
@@ -13791,8 +14279,13 @@ private:
         },
         [this, id](Response const &response) {
           sentence_pack_installing_.erase(id);
-          if (!response.ok)
-            show_notice(L"模型下载失败，请检查网络或稍后重试。", InfoBarSeverity::Error);
+          if (!response.ok) {
+            if (const auto message = model_errors::error_message(
+                    model_errors::error_code(response_error(response))))
+              show_notice(*message, InfoBarSeverity::Error);
+          } else {
+            grammar_updates_available_.erase(id);
+          }
           refresh_sentence_packs();
           redraw_input();
         });
@@ -13804,7 +14297,11 @@ private:
   }
 
   fire_and_forget remove_sentence_pack(std::wstring const &id) {
-    if (!co_await confirm(L"删除语法模型", L"删除后切换输入框即可退回无语法模型的候选行为。确定删除？", L"删除"))
+    const bool settled = id == L"settled-model";
+    if (!co_await confirm(settled ? L"删除桌面神经联想模型" : L"删除语法模型",
+                          settled ? L"删除后切换输入框即可退回不经神经模型重排的整句候选。确定删除？"
+                                  : L"删除后切换输入框即可退回无语法模型的候选行为。确定删除？",
+                          L"删除"))
       co_return;
     const auto root = state_directory();
     if (root.empty() || !root.is_absolute()) co_return;
@@ -13825,6 +14322,45 @@ private:
           refresh_sentence_packs();
           redraw_input();
         });
+  }
+
+  // 语言列表缺省才使用共享默认值；显式空列表保留为全不选。
+  void build_multilingual_input(StackPanel const &group, bool mixed_enabled) {
+    if (!edition_offers_scheme(L"quanpin"))
+      return;
+    const bool enabled = document_.Boolean(L"multilingual_input.enabled", false);
+    bool_row(group, 0xE774, L"连续多语言输入（实验）",
+             L"开启候选混输后，在全拼 26 键中连续输入所选语言的编码；完整中文优先，混合结果作为备选。至少需要两种可用语言",
+             L"multilingual_input.enabled", false, true);
+    const auto stored = document_.Value(L"multilingual_input.languages");
+    const auto languages = stored && stored.ValueType() == JsonValueType::Array
+                               ? document_.Strings(L"multilingual_input.languages")
+                               : std::vector<std::wstring>{L"chinese", L"english", L"japanese"};
+    for (auto const &option : std::vector<Option>{{L"chinese", L"中文"},
+                                                 {L"english", L"英文"},
+                                                 {L"japanese", L"日文"}}) {
+      if constexpr (!MSIME_EDITION_TEMPORARY_JAPANESE) {
+        if (option.value == L"japanese")
+          continue;
+      }
+      const auto language = option.value;
+      const auto title = L"连续输入：" + option.label;
+      add_row(group, 0xE774, title,
+              language == L"japanese" ? L"使用已有日文词典，未安装或准备中时暂不参与" : L"",
+              toggle_control(title, std::find(languages.begin(), languages.end(), language) != languages.end(),
+                             [this, language](bool selected) {
+                               change([&](PreferencesDocument &doc) {
+                                 const auto value = doc.Value(L"multilingual_input.languages");
+                                 auto next = value && value.ValueType() == JsonValueType::Array
+                                                 ? doc.Strings(L"multilingual_input.languages")
+                                                 : std::vector<std::wstring>{L"chinese", L"english", L"japanese"};
+                                 next.erase(std::remove(next.begin(), next.end(), language), next.end());
+                                 if (selected)
+                                   next.push_back(language);
+                                 doc.SetOrderedStrings(L"multilingual_input.languages", next);
+                               }, false);
+                             }, enabled && mixed_enabled));
+    }
   }
 
   // 「候选与联想」「输出设置」「高级选项」三个标签的内容，与共享页 InputSharedSettingsSection 的 candidates、output、advanced 三块相同。
@@ -13854,6 +14390,7 @@ private:
           candidates, candidates_more_open_,
           focus_row_ == L"符号混输" || focus_row_ == L"颜文字混输" ||
               focus_row_ == L"日文混输（实验）" || focus_row_ == L"只出单字" ||
+              focus_row_ == L"移动光标后编辑光标后的部分" ||
               focus_row_ == L"本地整句联想");
       // 符号混输是后加的可选键，默认开，文档里平时没有它，回退值必须是 true。
       bool_row(candidates_more, 0xE8EF, L"符号混输",
@@ -13868,15 +14405,18 @@ private:
                  L"全拼、双拼里打出完整的日文罗马字时补充一个日文候选（如 ohayou → おはよう）；词典不在时不生效",
                  L"mixed_input.japanese", false, false, mixed_enabled);
       }
+      build_multilingual_input(candidates_more, mixed_enabled);
       bool_row(candidates_more, 0xE8C1, L"只出单字",
                L"候选只列单个汉字，不出词组和整句；选一个字后接着拼下一个字",
                L"single_character_only", false);
+      // 后加的可选键，关着时共享序列化不写它，回退值必须是 false（client-core 的 `caret_edit_suffix`）。共享页把它排在「快捷短语混输」旁边，Windows 没有那一行，排在「只出单字」后面。
+      bool_row(candidates_more, 0xE8C1, L"移动光标后编辑光标后的部分",
+               L"组字光标移到拼音中间时，光标前的部分固定为当前转换，候选改为编辑光标后的部分；首选是整句",
+               L"caret_edit_suffix", false);
       bool_row(candidates_more, 0xE8C1, L"本地整句联想",
                L"把词库组合出的整句加入候选；关闭后仍保留单词候选",
                L"sentence_association.word_lattice", true);
-      bool_row(candidates, 0xE8C1, L"桌面神经联想",
-               L"使用神经模型重排整句候选；没有模型时保持现有候选",
-               L"sentence_association.neural_desktop", false, true);
+      build_neural_desktop_settings(candidates);
       bool_row(candidates, 0xE8C1, L"去重后补充次选",
                L"某个模型的首选与已有候选重复时，显示该模型排名最高的下一条不同结果",
                L"sentence_association.show_next_on_duplicate", false);
@@ -14178,6 +14718,18 @@ private:
     const bool glosses = translations || document_.Boolean(L"candidate_english_gloss", false);
     bool_row(candidates, 0xE8C1, L"候选词翻译", L"为当前候选请求翻译结果并显示在候选行",
              L"candidate_translations", false, true);
+    // 翻译范围：共享页 CandidateTranslationOptionsSection 的 scopeRow，紧跟在「候选词翻译」开关下面。只管候选词翻译（翻译服务和为它查的离线词典），「显示英文释义」的离线释义照旧每个候选都有。候选词翻译关着时置灰（开关会重画这一页），已存的值不动。读到的值来自共享 Rust 规范化过的文档，缺键和不认识的值都已按「仅当前高亮」读好；这里的回退值只是与它一致。
+    add_row(candidates, 0xE8B3, L"翻译范围",
+            L"仅当前高亮：只翻译高亮的候选，高亮移动时译文跟着走；离线英文释义不受影响",
+            select_control(L"候选词翻译范围",
+                           {{L"highlighted", L"仅当前高亮"}, {L"all", L"全部"}},
+                           document_.String(L"candidate_translation_scope", L"highlighted"),
+                           [this](std::wstring const &value) {
+                             change([&](PreferencesDocument &doc) {
+                               doc.SetString(L"candidate_translation_scope", value);
+                             }, false);
+                           },
+                           translations));
     select_row(candidates, 0xE774, L"目标语言", L"候选词翻译目标语言",
                L"translation_target_language",
                {{L"en", L"英语"}, {L"fr", L"法语"}, {L"ja", L"日语"}, {L"es", L"西班牙语"},
@@ -14971,6 +15523,7 @@ private:
   void set_lexicon_feedback(std::wstring message, InfoBarSeverity severity) {
     lexicon_feedback_ = std::move(message);
     lexicon_feedback_severity_ = severity;
+    lexicon_feedback_reveal_ = true;
     if (!closed_ && current_page_ == "lexicon")
       queue_refresh();
   }
@@ -15146,13 +15699,18 @@ private:
                          JsonValue::CreateStringValue(request_id(previous ? L"ui-edit-" : L"ui-add-")));
     const uint32_t reload = previous ? lexicon_offset_ : 0;
     lexicon_feedback_.clear();
-    lexicon_request(action, [this, kind, reload](Response const &response) {
+    const bool added = !previous;
+    lexicon_request(action, [this, kind, reload, added, key = replacement.key](Response const &response) {
       if (!response.ok) {
         set_lexicon_feedback(dictionary_error_text(response_error(response), kind,
                                                    lexicon_kind_label(kind) + L"保存失败，请稍后重试。"),
                              InfoBarSeverity::Error);
         return;
       }
+      // 列表按个人词条、权重排，新词条不一定落在第一页上；只换列表的话，看不见它的人只能当作没加上（#9434）。
+      set_lexicon_feedback(added ? L"已添加到" + lexicon_kind_label(kind) + L"，编码 " + key + L"。"
+                                 : L"已保存。",
+                           InfoBarSeverity::Success);
       lexicon_list(reload);
     });
   }
@@ -16007,6 +16565,7 @@ private:
       auto cloud = add_group(page, L"云词库");
       shell_row(cloud, 0xE753, L"云词库", L"管理同步到账号的词条和备份", L"打开云词库",
                 nav::shell_links::cloud_dictionary);
+      build_dictionary_sync(page);
     }
   }
 
@@ -16068,6 +16627,23 @@ private:
     A11y::SetAutomationId(bar, L"lexicon-feedback");
     bar.Margin(Thickness{0, 12, 0, 0});
     bar.Closed([this](InfoBar const &, InfoBarClosedEventArgs const &) { lexicon_feedback_.clear(); });
+    // 结果条画在页内标签下面，「新增词条」「导入」却在页面下方：窗口不够高、页面往下滚过时，新的结果正好落在视野外面，看上去点了什么也没发生（#9434）。新的结果画出来后滚进视野一次；先等这一轮其余的 Loaded（render_page_at 恢复滚动位置）跑完，换下来的旧结果条不滚。
+    if (lexicon_feedback_reveal_)
+      bar.Loaded([weak = get_weak()](Inspectable const &sender, RoutedEventArgs const &) {
+        auto self = weak.get();
+        if (!self)
+          return;
+        self->DispatcherQueue().TryEnqueue(
+            Microsoft::UI::Dispatching::DispatcherQueuePriority::Low,
+            [weak, shown = sender.as<InfoBar>()] {
+              auto self = weak.get();
+              if (!self || self->closed_ || !self->lexicon_feedback_reveal_ ||
+                  self->lexicon_feedback_bar_ != shown)
+                return;
+              self->lexicon_feedback_reveal_ = false;
+              shown.StartBringIntoView();
+            });
+      });
     return bar;
   }
 
@@ -16656,6 +17232,727 @@ private:
     redraw_lexicon();
   }
 
+  // ---- 词库同步 ----
+
+  // 共享页的「词库同步」（packages/ui/src/settings/dictionary-sync.ts 和 use-dictionary-sync.ts）在 Windows 上画在词库页「云端词库」标签里、云词库那一组下面：「我的词条」经用户自己的 WebDAV 网盘同步（docs/dictionary-webdav-sync.md）。网盘配置照「剪贴板」页云剪贴板的 WebDAV 那一套：地址、账号和应用密码先进草稿，应用密码遮罩、不回填已存的那个（留空沿用），「测试连接」只测不存，「保存」先测、通过才写偏好 dictionary_sync_webdav，不通过时草稿留着；规则由共享 Rust 偏好库和测试连接判断。存着网盘时，每次进入词库页以 opened 同步一次并取设备，之后按「立即同步」（manual）、设备的允许、拒绝、移除和重置再调；自动的 periodic 和候选窗口删词后的 local_change 由 Server 做（src/system/DictionarySyncWorker.h），本窗口改了词以后的 local_change 在 settings_dictionary_call 里；窗口重新获得焦点时重读一次不联网的 status，跟上 Server 在后台做的同步。所有调用都在工作线程上（dictionary_sync_call），同一时间只有一件（焦点回来时那次 status 不占这一件，Rust 读同步状态不必等锁）；配置换过之后回来的结果丢掉。展示规则和文字在 DictionarySyncModel.h。
+
+  struct DictionarySyncConfiguration {
+    std::wstring url;
+    std::wstring username;
+    std::wstring password;
+    bool operator==(DictionarySyncConfiguration const &other) const {
+      return url == other.url && username == other.username && password == other.password;
+    }
+  };
+
+  // 网盘配置的草稿，点「保存」之前不写盘。应用密码框不回填已存的密码：留空表示沿用已存的那个，「显示」也就看不到它。
+  struct DictionarySyncDraft {
+    std::wstring url;
+    std::wstring username;
+    std::wstring password;
+    bool reveal_password = false;
+  };
+
+  // 一次用户操作在工作线程上的回答：动作本身，以及之后需要时再取的设备和概况。
+  struct DictionarySyncOutcome {
+    Response action;
+    std::optional<Response> devices;
+    std::optional<Response> status;
+  };
+
+  bool dictionary_sync_saved() const { return !dsync_configuration_.url.empty(); }
+
+  // 存着的网盘配置变了（本窗口保存或清掉、别的窗口改了偏好）：草稿、测试结果和读到的状态都不再属于眼前的配置。
+  void synchronize_dictionary_sync_configuration() {
+    const DictionarySyncConfiguration configuration{document_.String(L"dictionary_sync_webdav.url", L""),
+                                                    document_.String(L"dictionary_sync_webdav.username", L""),
+                                                    document_.String(L"dictionary_sync_webdav.password", L"")};
+    if (configuration == dsync_configuration_)
+      return;
+    dsync_configuration_ = configuration;
+    reset_dictionary_sync_draft();
+    reset_dictionary_sync_state();
+  }
+
+  // 丢掉草稿和「测试连接」的结果；还在跑的测试回来时按 dsync_probe_generation_ 作废，不会把旧草稿写进偏好。
+  void reset_dictionary_sync_draft() {
+    dsync_draft_.reset();
+    ++dsync_probe_generation_;
+    dsync_probe_busy_ = false;
+    dsync_probe_message_.clear();
+  }
+
+  // 丢掉读到的概况、设备和上一次操作的结果，下一次画页面时重新以 opened 同步；在途的回答按 dsync_generation_ 作废。
+  void reset_dictionary_sync_state() {
+    ++dsync_generation_;
+    dsync_checked_ = false;
+    dsync_busy_ = false;
+    dsync_status_.reset();
+    dsync_devices_.reset();
+    dsync_error_.clear();
+    dsync_notice_.clear();
+  }
+
+  // 只在「云端词库」标签画着的时候重画：别的标签（例如正在打字的查找框）不因为词库同步的回答被整页重建。
+  void redraw_dictionary_sync() {
+    if (!closed_ && current_page_ == "lexicon" && !vocabulary_view_ && page_tab("lexicon") == L"cloud")
+      queue_refresh();
+  }
+
+  static bool named_flag(JsonObject const &object, wchar_t const *key) {
+    const auto value = object.GetNamedValue(key, JsonValue::CreateNullValue());
+    return value.ValueType() == JsonValueType::Boolean && value.GetBoolean();
+  }
+
+  // 非负的整数；超过 2^53 的不是真实的数，按 0 算。
+  static uint64_t named_size(JsonObject const &object, wchar_t const *key) {
+    const auto value = object.GetNamedValue(key, JsonValue::CreateNullValue());
+    if (value.ValueType() != JsonValueType::Number)
+      return 0;
+    const auto number = value.GetNumber();
+    return number > 0 && number < 9007199254740992.0 ? static_cast<uint64_t>(number) : 0;
+  }
+
+  static JsonObject dictionary_sync_action(wchar_t const *operation) {
+    JsonObject action;
+    action.SetNamedValue(L"operation", JsonValue::CreateStringValue(operation));
+    return action;
+  }
+
+  static JsonObject dictionary_sync_run_action(wchar_t const *trigger) {
+    auto action = dictionary_sync_action(L"run");
+    action.SetNamedValue(L"trigger", JsonValue::CreateStringValue(trigger));
+    return action;
+  }
+
+  // 成功回答里的 value；失败或形状不对时为空。
+  static std::optional<JsonObject> dictionary_sync_value(Response const &response) {
+    if (!response.ok)
+      return std::nullopt;
+    try {
+      const auto value = JsonObject::Parse(text(response.text)).GetNamedValue(L"value");
+      if (value.ValueType() == JsonValueType::Object)
+        return value.GetObject();
+    } catch (...) {
+    }
+    return std::nullopt;
+  }
+
+  // `status` 的结果（也是 run 结果里的 status），与共享页的 dictionarySyncStatus 一样：approved 和 joined 不是布尔值时整个不认。
+  static std::optional<ds::Status> dictionary_sync_status(IJsonValue const &value) {
+    if (value.ValueType() != JsonValueType::Object)
+      return std::nullopt;
+    const auto object = value.GetObject();
+    const auto approved = object.GetNamedValue(L"approved", JsonValue::CreateNullValue());
+    const auto joined = object.GetNamedValue(L"joined", JsonValue::CreateNullValue());
+    if (approved.ValueType() != JsonValueType::Boolean || joined.ValueType() != JsonValueType::Boolean)
+      return std::nullopt;
+    ds::Status status;
+    status.device_id = named_string(object, L"device_id");
+    status.code = named_string(object, L"code");
+    status.approved = approved.GetBoolean();
+    status.joined = joined.GetBoolean();
+    status.words = named_size(object, L"words");
+    status.pending_upload = named_size(object, L"pending_upload");
+    status.pending_apply = named_size(object, L"pending_apply");
+    status.held_deletions = named_size(object, L"held_deletions");
+    status.clock_skew = named_flag(object, L"clock_skew");
+    status.last_success_ms = named_size(object, L"last_success_ms");
+    status.last_error = named_string(object, L"last_error");
+    status.budget_wait_until = named_size(object, L"budget_wait_until");
+    return status;
+  }
+
+  // 设备管理的结果，形状与云剪贴板的 devices 相同；同一台设备的几条登记合成一条（ds::group_devices）。
+  static std::optional<ds::DeviceGroups> dictionary_sync_devices(IJsonValue const &value) {
+    if (value.ValueType() != JsonValueType::Object)
+      return std::nullopt;
+    const auto list = value.GetObject().GetNamedValue(L"devices", JsonValue::CreateNullValue());
+    if (list.ValueType() != JsonValueType::Array)
+      return std::nullopt;
+    std::vector<ds::Device> devices;
+    for (auto const &item : list.GetArray()) {
+      if (item.ValueType() != JsonValueType::Object)
+        continue;
+      const auto object = item.GetObject();
+      ds::Device device;
+      device.id = named_string(object, L"device_id");
+      device.name = named_string(object, L"name");
+      device.created_at = named_string(object, L"created_at");
+      device.code = named_string(object, L"code");
+      device.approved = named_flag(object, L"approved");
+      device.current = named_flag(object, L"current");
+      if (!device.id.empty())
+        devices.push_back(std::move(device));
+    }
+    return ds::group_devices(devices);
+  }
+
+  // 一次 run 的结果（也是 remove、reset 回答里的 run）：换上概况；同步失败时记下错误码，成功时清掉，`manual` 时写一句结果。读不出来时当作连不上网盘。
+  void apply_dictionary_sync_run(IJsonValue const &value, bool manual) {
+    std::optional<ds::Status> status;
+    if (value.ValueType() == JsonValueType::Object)
+      status = dictionary_sync_status(value.GetObject().GetNamedValue(L"status", JsonValue::CreateNullValue()));
+    if (!status) {
+      dsync_error_ = L"dictionary_sync_unavailable";
+      return;
+    }
+    dsync_status_ = std::move(*status);
+    const auto run = value.GetObject();
+    const auto report = run.GetNamedValue(L"report", JsonValue::CreateNullValue());
+    if (report.ValueType() == JsonValueType::Object) {
+      dsync_error_.clear();
+      if (manual)
+        dsync_notice_ = ds::run_notice(dsync_status_->approved, named_flag(report.GetObject(), L"deferred"));
+      return;
+    }
+    dsync_error_ = named_string(run, L"error");
+    if (dsync_error_.empty())
+      dsync_error_ = L"dictionary_sync_unavailable";
+  }
+
+  // 调用本身失败时记下错误码（没有码时当作连不上网盘）。
+  void record_dictionary_sync_failure(Response const &response) {
+    dsync_error_ = response_error(response);
+    if (dsync_error_.empty())
+      dsync_error_ = L"dictionary_sync_unavailable";
+  }
+
+  void apply_dictionary_sync_devices(Response const &response) {
+    if (auto value = dictionary_sync_value(response)) {
+      if (auto groups = dictionary_sync_devices(*value))
+        dsync_devices_ = std::move(*groups);
+      return;
+    }
+    record_dictionary_sync_failure(response);
+  }
+
+  void apply_dictionary_sync_status(Response const &response) {
+    if (auto value = dictionary_sync_value(response))
+      if (auto status = dictionary_sync_status(*value))
+        dsync_status_ = std::move(*status);
+  }
+
+  // 在工作线程上依次跑 `action`，`devices` 为真时再取设备，`status` 为真时再读不联网的概况（第一次取设备会登记本机，核对码在那之后才有）；回到 UI 线程交给 `done`。设置向导还没准备好 HostOptions 时说明原因、什么都不调。
+  void dictionary_sync_job(JsonObject const &action, bool devices, bool status,
+                           std::function<void(DictionarySyncOutcome &)> done) {
+    if (dsync_busy_)
+      return;
+    const auto options = runtime_options_document();
+    if (!options) {
+      dsync_error_.clear();
+      dsync_notice_ = L"输入法尚未完成初始化，完成设置向导后即可同步词库。";
+      redraw_dictionary_sync();
+      return;
+    }
+    dsync_status_reads_.invalidate();
+    dsync_busy_ = true;
+    dsync_notice_.clear();
+    const auto generation = dsync_generation_;
+    run_worker<DictionarySyncOutcome>(
+        [options, body = utf8(action.Stringify()), devices, status] {
+          DictionarySyncOutcome outcome;
+          outcome.action = dictionary_sync_call(options, body);
+          if (devices)
+            outcome.devices = dictionary_sync_call(options, R"({"operation":"devices"})");
+          if (status)
+            outcome.status = dictionary_sync_call(options, R"({"operation":"status"})");
+          return outcome;
+        },
+        [this, generation, done = std::move(done)](DictionarySyncOutcome &outcome) {
+          if (generation != dsync_generation_)
+            return;
+          dsync_busy_ = false;
+          done(outcome);
+          redraw_dictionary_sync();
+        });
+    redraw_dictionary_sync();
+  }
+
+  // 进入词库页（或者刚保存了新的网盘配置）时以 opened 同步一次，再取设备和概况。
+  void open_dictionary_sync() {
+    dsync_checked_ = true;
+    dictionary_sync_job(dictionary_sync_run_action(L"opened"), true, true, [this](DictionarySyncOutcome &outcome) {
+      apply_dictionary_sync_run_response(outcome.action, false);
+      if (outcome.devices)
+        apply_dictionary_sync_devices(*outcome.devices);
+      if (outcome.status)
+        apply_dictionary_sync_status(*outcome.status);
+    });
+  }
+
+  // 窗口重新获得焦点、「云端词库」标签开着时重读一次不联网的概况，与共享页相同：periodic 和候选窗口删词后的 local_change 由 Server 在后台做，结果不经本窗口，不重读的话「待发送」「上次同步」要离开词库页再进来才变。有操作在跑时不读，它的回答会带回概况；读到的与画着的相同时不重画，画也等按下的指针松开，免得激活窗口的那一下点击落在重建的控件上。错误和结果说明不动，它们记的是本窗口最近一次操作。
+  void reread_dictionary_sync_status() {
+    if (closed_ || dsync_busy_ || !dsync_checked_ || !dictionary_sync_saved() || current_page_ != "lexicon" ||
+        vocabulary_view_ || page_tab("lexicon") != L"cloud")
+      return;
+    const auto options = runtime_options_document();
+    if (!options)
+      return;
+    const auto generation = dsync_generation_;
+    const auto sequence = dsync_status_reads_.begin_read();
+    run_worker<Response>([options] { return dictionary_sync_call(options, R"({"operation":"status"})"); },
+                         [this, generation, sequence](Response &response) {
+                           if (generation != dsync_generation_ || dsync_busy_ || !dsync_status_reads_.accepts(sequence))
+                             return;
+                           const auto value = dictionary_sync_value(response);
+                           if (!value)
+                             return;
+                           auto status = dictionary_sync_status(*value);
+                           if (!status || (dsync_status_ && *status == *dsync_status_))
+                             return;
+                           dsync_status_ = std::move(*status);
+                           if (pointer_down_)
+                             defer_refresh_until_pointer_up();
+                           else
+                             redraw_dictionary_sync();
+                         });
+  }
+
+  // 一次 run 的回答（不是 remove、reset 那种带 devices 的）。
+  void apply_dictionary_sync_run_response(Response const &response, bool manual) {
+    if (auto value = dictionary_sync_value(response)) {
+      apply_dictionary_sync_run(*value, manual);
+      return;
+    }
+    record_dictionary_sync_failure(response);
+  }
+
+  // 「立即同步」，以及对被挡下的大批删除的两个选择（同步删除、从网盘恢复）：manual 不受防抖和间隔限制，桌面端会请输入法让出词库。做完再取一次设备，新登记、新允许的设备随之出现。
+  void sync_dictionary_now(wchar_t const *choice = nullptr) {
+    auto action = dictionary_sync_run_action(L"manual");
+    if (choice)
+      action.SetNamedValue(choice, JsonValue::CreateBooleanValue(true));
+    dictionary_sync_job(action, true, false, [this](DictionarySyncOutcome &outcome) {
+      apply_dictionary_sync_run_response(outcome.action, true);
+      if (outcome.devices && outcome.action.ok)
+        apply_dictionary_sync_devices(*outcome.devices);
+    });
+  }
+
+  fire_and_forget confirm_dictionary_deletions() {
+    auto strong = get_strong();
+    if (dsync_busy_)
+      co_return;
+    if (!co_await confirm(L"同步删除", std::wstring(ds::confirm_deletions_question), L"同步删除"))
+      co_return;
+    sync_dictionary_now(L"confirm_deletions");
+  }
+
+  // 允许、拒绝一台等待中的设备：先确认（允许时对照核对码），回答是新的设备列表。
+  fire_and_forget decide_dictionary_device(ds::Device device, bool approve) {
+    auto strong = get_strong();
+    if (dsync_busy_)
+      co_return;
+    bool accepted = false;
+    if (approve)
+      accepted = co_await confirm(L"允许设备", ds::approve_question(device), L"允许");
+    else
+      accepted = co_await confirm(L"拒绝设备", ds::reject_question(device), L"拒绝");
+    if (!accepted || dsync_busy_)
+      co_return;
+    auto action = dictionary_sync_action(approve ? L"approve" : L"reject");
+    action.SetNamedValue(L"device_id", JsonValue::CreateStringValue(hstring(device.id)));
+    dictionary_sync_job(action, false, true, [this](DictionarySyncOutcome &outcome) {
+      apply_dictionary_sync_devices(outcome.action);
+      if (outcome.action.ok)
+        dsync_error_.clear();
+      if (outcome.status)
+        apply_dictionary_sync_status(*outcome.status);
+    });
+  }
+
+  // 移除设备和重置密钥：都换钥，回答是 {devices, run}。
+  fire_and_forget rekey_dictionary_sync(std::optional<ds::Device> device) {
+    auto strong = get_strong();
+    if (dsync_busy_)
+      co_return;
+    bool accepted = false;
+    if (device)
+      accepted = co_await confirm(L"移除设备", ds::remove_question(*device), L"移除");
+    else
+      accepted = co_await confirm(L"重置密钥", std::wstring(ds::reset_question), L"重置");
+    if (!accepted || dsync_busy_)
+      co_return;
+    auto action = dictionary_sync_action(device ? L"remove" : L"reset");
+    if (device)
+      action.SetNamedValue(L"device_id", JsonValue::CreateStringValue(hstring(device->id)));
+    dictionary_sync_job(action, false, false, [this](DictionarySyncOutcome &outcome) {
+      const auto value = dictionary_sync_value(outcome.action);
+      if (!value) {
+        record_dictionary_sync_failure(outcome.action);
+        return;
+      }
+      if (auto groups = dictionary_sync_devices(value->GetNamedValue(L"devices", JsonValue::CreateNullValue())))
+        dsync_devices_ = std::move(*groups);
+      apply_dictionary_sync_run(value->GetNamedValue(L"run", JsonValue::CreateNullValue()), false);
+    });
+  }
+
+  // 恢复只使用打开确认框时的已保存配置，期间换代则取消。
+  fire_and_forget trust_dictionary_sync_remote() {
+    auto strong = get_strong();
+    if (dsync_busy_ || !dictionary_sync_saved()) co_return;
+    const auto generation = dsync_generation_;
+    const auto saved = dsync_configuration_;
+    if (!co_await confirm(L"确认网盘现状并恢复同步", std::wstring(ds::trust_remote_question), L"恢复同步")) co_return;
+    if (generation != dsync_generation_ || dsync_busy_) co_return;
+    auto action = dictionary_sync_action(L"probe");
+    action.SetNamedValue(L"url", JsonValue::CreateStringValue(hstring(saved.url)));
+    action.SetNamedValue(L"username", JsonValue::CreateStringValue(hstring(saved.username)));
+    action.SetNamedValue(L"password", JsonValue::CreateStringValue(hstring(saved.password)));
+    action.SetNamedValue(L"trust_remote", JsonValue::CreateBooleanValue(true));
+    dictionary_sync_job(action, false, true, [this](DictionarySyncOutcome &outcome) {
+      if (!outcome.action.ok) { record_dictionary_sync_failure(outcome.action); return; }
+      if (outcome.status) apply_dictionary_sync_status(*outcome.status);
+      dsync_error_.clear();
+      dsync_notice_ = L"已确认网盘现状，请点「立即同步」恢复。";
+    });
+  }
+
+  // 以本机为准重新开始：回答是概况。
+  fire_and_forget restart_dictionary_sync() {
+    auto strong = get_strong();
+    if (dsync_busy_)
+      co_return;
+    if (!co_await confirm(L"以本机为准重新开始", std::wstring(ds::restart_question), L"重新开始"))
+      co_return;
+    dictionary_sync_job(dictionary_sync_action(L"restart"), false, false, [this](DictionarySyncOutcome &outcome) {
+      const auto value = dictionary_sync_value(outcome.action);
+      if (!value) {
+        record_dictionary_sync_failure(outcome.action);
+        return;
+      }
+      if (auto status = dictionary_sync_status(*value))
+        dsync_status_ = std::move(*status);
+      dsync_error_.clear();
+      dsync_notice_ = ds::restarted;
+    });
+  }
+
+  // 「停止同步」：确认后从偏好里删掉 dictionary_sync_webdav（与 Rust 没配置时不写这个键的形状一致）。网盘上的内容和本机的同步状态都不删。
+  fire_and_forget clear_dictionary_sync() {
+    auto strong = get_strong();
+    if (dsync_probe_busy_)
+      co_return;
+    if (!co_await confirm(L"停止词库同步", std::wstring(ds::clear_question), L"停止同步"))
+      co_return;
+    flush_pending();
+    document_.Remove(L"dictionary_sync_webdav");
+    if (commit()) {
+      synchronize_dictionary_sync_configuration();
+      show_notice(L"已停止词库同步", InfoBarSeverity::Success);
+    }
+    redraw_dictionary_sync();
+  }
+
+  bool dictionary_sync_draft_complete() const {
+    if (!dsync_draft_)
+      return false;
+    return !dsync_draft_->url.empty() && !dsync_draft_->username.empty() &&
+           (!dsync_draft_->password.empty() || !dsync_configuration_.password.empty());
+  }
+
+  // 「测试连接」：在工作线程上用草稿跑 probe（只测、不读偏好），不改同步位置、待发改动或防回退记录。`save` 为真时通过后才把三项成对写进偏好（仍由共享 Rust 偏好库校验），不通过就只说明原因、草稿留着。
+  void probe_dictionary_sync(bool save) {
+    if (!dsync_draft_ || dsync_probe_busy_)
+      return;
+    auto draft = *dsync_draft_;
+    // 应用密码框留空表示沿用已存的那一个。
+    if (draft.password.empty())
+      draft.password = dsync_configuration_.password;
+    auto action = dictionary_sync_action(L"probe");
+    action.SetNamedValue(L"url", JsonValue::CreateStringValue(hstring(draft.url)));
+    action.SetNamedValue(L"username", JsonValue::CreateStringValue(hstring(draft.username)));
+    action.SetNamedValue(L"password", JsonValue::CreateStringValue(hstring(draft.password)));
+    const auto generation = ++dsync_probe_generation_;
+    dsync_probe_busy_ = true;
+    dsync_probe_message_ = save ? L"正在测试连接，通过后保存…" : L"正在测试连接…";
+    run_host(
+        [options = runtime_options_document(), body = utf8(action.Stringify())] {
+          return dictionary_sync_call(options, body);
+        },
+        [this, generation, save, draft](Response const &response) {
+          // 草稿在测试期间作废了（离开页面、偏好被别处改了）：结果不再属于眼前的设置。
+          if (generation != dsync_probe_generation_)
+            return;
+          dsync_probe_busy_ = false;
+          if (!response.ok) {
+            dsync_probe_message_ = ds::error_message(response_error(response), true);
+            redraw_dictionary_sync();
+            return;
+          }
+          if (!save) {
+            dsync_probe_message_ = ds::probe_passed;
+            // 已经在同步时重新读取状态，普通探测不解除防回退。
+            if (dictionary_sync_saved()) {
+              ++dsync_generation_;
+              dsync_checked_ = false;
+              dsync_busy_ = false;
+            }
+            redraw_dictionary_sync();
+            return;
+          }
+          flush_pending();
+          document_.SetString(L"dictionary_sync_webdav.url", draft.url);
+          document_.SetString(L"dictionary_sync_webdav.username", draft.username);
+          document_.SetString(L"dictionary_sync_webdav.password", draft.password);
+          if (commit()) {
+            // 和已存的完全一样时配置没变，也要丢掉草稿、从网盘现在的样子重新读一次。
+            synchronize_dictionary_sync_configuration();
+            reset_dictionary_sync_draft();
+            reset_dictionary_sync_state();
+            show_notice(L"已保存词库同步的网盘配置", InfoBarSeverity::Success);
+          } else {
+            // commit 已经重读设置并在页面顶部说明；草稿还在时留着输入，测试结果不再代表要保存的内容。
+            dsync_probe_message_.clear();
+          }
+          redraw_dictionary_sync();
+        });
+    redraw_dictionary_sync();
+  }
+
+  // 「词库同步」的全部组：网盘配置，存着网盘时再加同步状态、设备和密钥。
+  void build_dictionary_sync(StackPanel const &page) {
+    synchronize_dictionary_sync_configuration();
+    if (!indexing_ && dictionary_sync_saved() && !dsync_checked_ && !dsync_busy_)
+      open_dictionary_sync();
+    build_dictionary_sync_settings(page);
+    if (dictionary_sync_saved()) {
+      build_dictionary_sync_status(page);
+      build_dictionary_sync_devices(page);
+    }
+  }
+
+  // 网盘配置：说明、三项输入、「测试连接」和它的结果、「保存」，存着网盘时再加一句现状和「停止同步」。输入改动只进草稿，并让上一次的测试结果失效；测试期间输入框和按钮都不可用，保存的正是测试过的那一份。
+  void build_dictionary_sync_settings(StackPanel const &page) {
+    auto group = add_group(page, L"词库同步");
+    if (!dsync_draft_) {
+      DictionarySyncDraft draft;
+      draft.url = dsync_configuration_.url;
+      draft.username = dsync_configuration_.username;
+      dsync_draft_ = std::move(draft);
+    }
+    const bool busy = dsync_probe_busy_;
+    group.Children().Append(group_note(ds::explanation));
+
+    Button save;
+    save.Content(box_value(L"保存"));
+    save.IsEnabled(loaded_ && !busy && dictionary_sync_draft_complete());
+    A11y::SetName(save, L"保存词库同步的网盘配置");
+    A11y::SetAutomationId(save, L"dictionary-sync-save");
+    save.Click([this](Inspectable const &, RoutedEventArgs const &) { probe_dictionary_sync(true); });
+    Button test;
+    test.Content(box_value(L"测试连接"));
+    test.IsEnabled(loaded_ && !busy && dictionary_sync_draft_complete());
+    A11y::SetName(test, L"测试词库同步的网盘连接");
+    A11y::SetAutomationId(test, L"dictionary-sync-test");
+    test.Click([this](Inspectable const &, RoutedEventArgs const &) { probe_dictionary_sync(false); });
+    // 上一次测试的结果，排在「测试连接」那一行下面；没有结果时收起。
+    auto result = group_note(dsync_probe_message_);
+    A11y::SetAutomationId(result, L"dictionary-sync-result");
+    A11y::SetLiveSetting(result, Automation::Peers::AutomationLiveSetting::Polite);
+    result.Visibility(dsync_probe_message_.empty() ? Visibility::Collapsed : Visibility::Visible);
+    // 改了任何一项：按钮跟着必填项是否齐全变，旧的测试结果不再说明眼前这份草稿，收起它。
+    const auto edited = [this, weak_save = make_weak(save), weak_test = make_weak(test),
+                         weak_result = make_weak(result)] {
+      const bool complete = loaded_ && dictionary_sync_draft_complete();
+      if (auto button = weak_save.get())
+        button.IsEnabled(complete);
+      if (auto button = weak_test.get())
+        button.IsEnabled(complete);
+      dsync_probe_message_.clear();
+      if (auto note = weak_result.get())
+        note.Visibility(Visibility::Collapsed);
+    };
+
+    TextBox url;
+    url.Width(240);
+    url.Text(hstring(dsync_draft_->url));
+    url.PlaceholderText(hstring(nav::webdav_url_placeholder));
+    url.IsSpellCheckEnabled(false);
+    url.IsTextPredictionEnabled(false);
+    url.IsEnabled(loaded_ && !busy);
+    A11y::SetName(url, L"词库同步服务器地址");
+    A11y::SetAutomationId(url, L"dictionary-sync-url");
+    url.TextChanged([this, edited](Inspectable const &sender, TextChangedEventArgs const &) {
+      if (!dsync_draft_)
+        return;
+      dsync_draft_->url = sender.as<TextBox>().Text().c_str();
+      edited();
+    });
+    add_row(group, 0xE774, L"词库同步服务器地址", std::wstring(ds::url_note), url);
+
+    TextBox username;
+    username.Width(240);
+    username.Text(hstring(dsync_draft_->username));
+    username.IsSpellCheckEnabled(false);
+    username.IsTextPredictionEnabled(false);
+    username.IsEnabled(loaded_ && !busy);
+    A11y::SetName(username, L"词库同步网盘账号");
+    A11y::SetAutomationId(username, L"dictionary-sync-username");
+    username.TextChanged([this, edited](Inspectable const &sender, TextChangedEventArgs const &) {
+      if (!dsync_draft_)
+        return;
+      dsync_draft_->username = sender.as<TextBox>().Text().c_str();
+      edited();
+    });
+    add_row(group, 0xE77B, L"词库同步网盘账号", L"网盘的登录账号，坚果云是登录邮箱。可以和云剪贴板用同一个网盘账号。", username);
+
+    StackPanel secret;
+    secret.Orientation(Orientation::Horizontal);
+    secret.Spacing(8);
+    PasswordBox password;
+    password.Width(180);
+    password.Password(hstring(dsync_draft_->password));
+    if (!dsync_configuration_.password.empty())
+      password.PlaceholderText(L"留空以保留已保存的应用密码");
+    password.PasswordRevealMode(dsync_draft_->reveal_password ? PasswordRevealMode::Visible : PasswordRevealMode::Hidden);
+    password.IsEnabled(loaded_ && !busy);
+    A11y::SetName(password, L"词库同步应用密码");
+    A11y::SetAutomationId(password, L"dictionary-sync-password");
+    password.PasswordChanged([this, edited](Inspectable const &sender, RoutedEventArgs const &) {
+      if (!dsync_draft_)
+        return;
+      dsync_draft_->password = sender.as<PasswordBox>().Password().c_str();
+      edited();
+    });
+    secret.Children().Append(password);
+    // 「显示」只切换框里这份草稿的明暗，已存的应用密码从不回填，所以看不到它。
+    const std::wstring reveal_action = dsync_draft_->reveal_password ? L"隐藏" : L"显示";
+    Button reveal;
+    reveal.Content(box_value(hstring(reveal_action)));
+    reveal.Height(32);
+    reveal.IsEnabled(loaded_ && !busy);
+    A11y::SetName(reveal, hstring(reveal_action + L"词库同步应用密码"));
+    A11y::SetAutomationId(reveal, L"dictionary-sync-reveal");
+    ToolTipService::SetToolTip(reveal, box_value(hstring(reveal_action)));
+    reveal.Click([this, weak_password = make_weak(password)](Inspectable const &sender, RoutedEventArgs const &) {
+      if (!dsync_draft_)
+        return;
+      const bool revealed = !dsync_draft_->reveal_password;
+      dsync_draft_->reveal_password = revealed;
+      if (auto field = weak_password.get())
+        field.PasswordRevealMode(revealed ? PasswordRevealMode::Visible : PasswordRevealMode::Hidden);
+      const std::wstring action = revealed ? L"隐藏" : L"显示";
+      auto button = sender.as<Button>();
+      button.Content(box_value(hstring(action)));
+      A11y::SetName(button, hstring(action + L"词库同步应用密码"));
+      ToolTipService::SetToolTip(button, box_value(hstring(action)));
+    });
+    secret.Children().Append(reveal);
+    add_row(group, 0xE72E, L"词库同步应用密码", L"在网盘的安全设置里为第三方应用生成的密码，不是登录密码。", secret);
+
+    add_row(group, 0xE703, L"测试词库同步连接", L"只测试，不保存。", test);
+    group.Children().Append(result);
+    add_row(group, 0xE74E, L"保存词库同步配置",
+            L"保存时先测试一次，不通过不保存。地址、账号和应用密码只保存在本机，不随设置导出或账号同步。", save);
+    if (dictionary_sync_saved()) {
+      auto status = group_note(ds::saved_note(dsync_configuration_.url));
+      A11y::SetAutomationId(status, L"dictionary-sync-saved");
+      group.Children().Append(status);
+      auto clear = button_control(L"停止同步", [this] { clear_dictionary_sync(); }, loaded_ && !busy);
+      A11y::SetAutomationId(clear, L"dictionary-sync-clear");
+      add_row(group, 0xE711, L"停止词库同步", L"本机不再连接这个网盘；网盘上的内容和设备登记不会被删除。", clear);
+    }
+  }
+
+  // 同步状态：本设备是否获准、核对码、词条和待处理的数量、上次同步的时间、自动同步在等额度时什么时候继续和错误，「立即同步」和它的结果，被挡下的大批删除，以及很少用到的重置密钥和重新开始。
+  void build_dictionary_sync_status(StackPanel const &page) {
+    auto group = add_group(page, L"词库同步状态");
+    const bool busy = dsync_busy_;
+    std::wstring summary;
+    if (dsync_status_) {
+      summary = ds::approval_text(*dsync_status_) + L"\n" + ds::counts_text(*dsync_status_);
+      if (dsync_status_->last_success_ms)
+        if (const auto when = local_date_time(dsync_status_->last_success_ms); !when.empty())
+          summary += L"\n上次同步：" + when;
+      if (const auto wait = dictionary_sync_budget_wait(dsync_status_->budget_wait_until); !wait.empty())
+        summary += L"\n" + wait;
+      if (!dsync_status_->last_error.empty() && dsync_error_.empty())
+        summary += L"\n上次出错：" + ds::error_message(dsync_status_->last_error);
+      if (dsync_status_->clock_skew)
+        summary += L"\n" + std::wstring(ds::clock_skew_note);
+    } else {
+      summary = busy ? L"正在读取同步状态…" : L"还没有读到同步状态，点「立即同步」重试。";
+    }
+    auto overview = group_note(summary);
+    A11y::SetAutomationId(overview, L"dictionary-sync-status");
+    A11y::SetLiveSetting(overview, Automation::Peers::AutomationLiveSetting::Polite);
+    group.Children().Append(overview);
+    if (dsync_status_ && !dsync_status_->code.empty()) {
+      plugin_summary_row(group, 0xE8D7, L"本设备核对码",
+                         L"在其他设备上允许本设备时，核对那里显示的核对码与这里完全一致。", dsync_status_->code);
+    }
+
+    auto now = button_control(busy ? L"同步中…" : L"立即同步", [this] { sync_dictionary_now(); }, loaded_ && !busy);
+    A11y::SetAutomationId(now, L"dictionary-sync-now");
+    add_row(group, 0xE895, L"立即同步词库", L"马上拉取并发送，不等自动同步的间隔；网盘的请求额度用完时会提示稍后再试。", now);
+    const auto message = !dsync_error_.empty() ? ds::error_message(dsync_error_) : dsync_notice_;
+    auto notice = group_note(message);
+    A11y::SetAutomationId(notice, L"dictionary-sync-notice");
+    A11y::SetLiveSetting(notice, Automation::Peers::AutomationLiveSetting::Polite);
+    notice.Visibility(message.empty() ? Visibility::Collapsed : Visibility::Visible);
+    group.Children().Append(notice);
+
+    if (dsync_status_ && dsync_status_->held_deletions) {
+      StackPanel choices;
+      choices.Orientation(Orientation::Horizontal);
+      choices.Spacing(8);
+      auto restore = button_control(L"从网盘恢复", [this] { sync_dictionary_now(L"restore_deletions"); }, loaded_ && !busy);
+      A11y::SetAutomationId(restore, L"dictionary-sync-restore-deletions");
+      auto remove = button_control(L"同步删除", [this] { confirm_dictionary_deletions(); }, loaded_ && !busy);
+      A11y::SetAutomationId(remove, L"dictionary-sync-confirm-deletions");
+      choices.Children().Append(restore);
+      choices.Children().Append(remove);
+      add_row(group, 0xE7BA, L"被挡下的删除", ds::held_deletions_text(dsync_status_->held_deletions), choices);
+    }
+
+    auto recover = button_control(L"恢复同步…", [this] { trust_dictionary_sync_remote(); }, loaded_ && !busy);
+    A11y::SetAutomationId(recover, L"dictionary-sync-trust-remote");
+    add_row(group, 0xE777, L"确认网盘现状并恢复同步", L"仅在自己清理过网盘文件夹、同步报历史被删改时使用。", recover);
+    auto reset = button_control(L"重置…", [this] { rekey_dictionary_sync(std::nullopt); }, loaded_ && !busy);
+    A11y::SetAutomationId(reset, L"dictionary-sync-reset");
+    add_row(group, 0xE72C, L"重置词库同步密钥", L"换一把只给本设备的新密钥，其他设备都要重新允许。找不到能允许本设备的设备时使用。", reset);
+    auto restart = button_control(L"重新开始…", [this] { restart_dictionary_sync(); }, loaded_ && !busy);
+    A11y::SetAutomationId(restart, L"dictionary-sync-restart");
+    add_row(group, 0xE777, L"以本机为准重新开始", L"持有旧密钥的设备都不在了时使用：共享词库换成本机的词条，其他设备获准后把它们的词合并进来，不删词。", restart);
+  }
+
+  // 设备：等待本设备允许的其他设备（允许、拒绝），以及已获准的设备（本设备之外的可以移除）。同一台设备只有一条（ds::group_devices）。还没取到设备时不画。
+  void build_dictionary_sync_devices(StackPanel const &page) {
+    if (!dsync_devices_)
+      return;
+    auto group = add_group(page, L"词库同步设备");
+    const bool enabled = loaded_ && !dsync_busy_;
+    if (!dsync_devices_->waiting.empty()) {
+      group.Children().Append(group_note(ds::waiting_note));
+      for (auto const &device : dsync_devices_->waiting) {
+        StackPanel actions;
+        actions.Orientation(Orientation::Horizontal);
+        actions.Spacing(8);
+        auto approve = button_control(L"允许", [this, device] { decide_dictionary_device(device, true); }, enabled);
+        A11y::SetName(approve, hstring(L"允许" + ds::device_label(device)));
+        A11y::SetAutomationId(approve, hstring(L"dictionary-sync-approve-" + device.id));
+        auto reject = button_control(L"拒绝", [this, device] { decide_dictionary_device(device, false); }, enabled);
+        A11y::SetName(reject, hstring(L"拒绝" + ds::device_label(device)));
+        A11y::SetAutomationId(reject, hstring(L"dictionary-sync-reject-" + device.id));
+        actions.Children().Append(approve);
+        actions.Children().Append(reject);
+        add_row(group, 0xE7F8, ds::device_label(device) + L" · 等待允许", ds::device_detail(device), actions);
+      }
+    }
+    for (auto const &device : dsync_devices_->approved) {
+      FrameworkElement control{nullptr};
+      if (!device.current) {
+        control = button_control(L"移除…", [this, device] { rekey_dictionary_sync(device); }, enabled);
+        A11y::SetName(control, hstring(L"移除" + ds::device_label(device)));
+        A11y::SetAutomationId(control, hstring(L"dictionary-sync-remove-" + device.id));
+      }
+      add_row(group, 0xE7F8, ds::device_label(device), ds::device_detail(device), control);
+    }
+  }
+
   // ---- 剪贴板 ----
 
   // 共享的「剪贴板」页（packages/ui/src/settings/pages/tools-page.tsx 和 clipboard-history-section.tsx）在 Windows 上画三组：「剪贴板」（历史开关、有历史时的清空历史）、开着历史时的「历史记录」（每条可重新复制、发到云剪贴板、固定和删除），以及打开云剪贴板面板的「云剪贴板」。历史文件与共享应用的相同（偏好目录下的 clipboard_history.json），经 msime_client_desktop_clipboard_history 读写；发到云剪贴板先读取共享偏好的来源，再经账号或中继 C ABI 请求。云剪贴板面板是输入工具，仍由共享应用打开。
@@ -16669,22 +17966,54 @@ private:
   // 账号和中继共用设备批准状态，但中继令牌失效不应提示登录水杉账号。
   using CloudClipboardState = nav::CloudClipboardState;
 
+  // 偏好里存着的中继和 WebDAV 网盘配置，两者最多配置一个（由共享 Rust 偏好库保证）。
+  struct CloudClipboardConfiguration {
+    std::wstring relay_url;
+    std::wstring relay_token;
+    std::wstring webdav_url;
+    std::wstring webdav_username;
+    std::wstring webdav_password;
+    bool operator==(CloudClipboardConfiguration const &other) const {
+      return relay_url == other.relay_url && relay_token == other.relay_token &&
+             webdav_url == other.webdav_url && webdav_username == other.webdav_username &&
+             webdav_password == other.webdav_password;
+    }
+  };
+
+  // 「云剪贴板同步方式」的草稿：选中的方式（account、relay 或 webdav）和各自的输入，点保存之前都不写盘。应用密码框不回填已存的密码：留空表示沿用已存的那个，「显示」也就看不到它。
   struct CloudClipboardRelayDraft {
-    bool relay = false;
+    std::wstring source = L"account";
     std::wstring url;
     std::wstring token;
+    std::wstring webdav_url;
+    std::wstring webdav_username;
+    std::wstring webdav_password;
+    bool reveal_password = false;
   };
 
   void synchronize_cloud_clipboard_configuration() {
-    const std::pair<std::wstring, std::wstring> configuration{
+    const CloudClipboardConfiguration configuration{
         document_.String(L"cloud_clipboard_relay.url", L""),
-        document_.String(L"cloud_clipboard_relay.token", L"")};
+        document_.String(L"cloud_clipboard_relay.token", L""),
+        document_.String(L"cloud_clipboard_webdav.url", L""),
+        document_.String(L"cloud_clipboard_webdav.username", L""),
+        document_.String(L"cloud_clipboard_webdav.password", L"")};
     if (configuration == cloud_configuration_)
       return;
     cloud_configuration_ = configuration;
-    cloud_relay_draft_.reset();
+    reset_cloud_clipboard_draft();
     reset_cloud_clipboard();
   }
+
+  // 丢掉草稿和「测试连接」的结果；还在跑的测试回来时按 cloud_probe_generation_ 作废，不会把旧草稿写进已经换过来源的偏好。
+  void reset_cloud_clipboard_draft() {
+    cloud_relay_draft_.reset();
+    ++cloud_probe_generation_;
+    cloud_probe_busy_ = false;
+    cloud_probe_message_.clear();
+  }
+
+  bool cloud_clipboard_webdav_saved() const { return !cloud_configuration_.webdav_url.empty(); }
 
   void redraw_clip() {
     if (!closed_ && current_page_ == "clip")
@@ -16945,8 +18274,11 @@ private:
       if (response.ok) {
         cloud_notice_ = L"已发到云剪贴板";
       } else if (const auto failure = nav::cloud_clipboard_failure(response_error(response));
-                 failure != CloudClipboardState::unavailable) {
-        // 未登录、本机待批准和云剪贴板已关闭都要先由用户处理，在那之前不再允许发送。
+                 failure == CloudClipboardState::webdav_rate_limited) {
+        // 网盘限流过一会儿自己会好，与服务暂不可用一样只说明这一次，不停用发送。
+        cloud_notice_ = nav::webdav_error_message(L"webdav_rate_limited");
+      } else if (failure != CloudClipboardState::unavailable) {
+        // 未登录、本机待批准、云剪贴板已关闭和网盘记录被回退都要先由用户处理，在那之前不再允许发送。
         cloud_state_ = failure;
         cloud_notice_.clear();
       } else {
@@ -16965,7 +18297,12 @@ private:
     case CloudClipboardState::signed_out:
       return L"登录水杉账号后可在设备间同步剪贴板";
     case CloudClipboardState::relay_unauthorized:
-      return L"中继拒绝了令牌，请检查中继地址和令牌";
+      return cloud_clipboard_webdav_saved() ? std::wstring(nav::webdav_error_message(L"relay_unauthorized"))
+                                            : L"中继拒绝了令牌，请检查中继地址和令牌";
+    case CloudClipboardState::webdav_rollback:
+      return std::wstring(nav::webdav_error_message(L"webdav_rollback"));
+    case CloudClipboardState::webdav_rate_limited:
+      return std::wstring(nav::webdav_error_message(L"webdav_rate_limited"));
     case CloudClipboardState::pending:
       return L"本设备还没有获准使用云剪贴板：请打开云剪贴板查看本设备的核对码，再到一台已在使用云剪贴板的设备上点「允许」";
     case CloudClipboardState::disabled:
@@ -17273,47 +18610,137 @@ private:
     return row;
   }
 
+  // 草稿里选中的方式能不能保存：只看必填项是否为空，地址和凭据的规则交给共享 Rust 偏好库和「测试连接」，这里不重复。
+  bool cloud_draft_complete() const {
+    if (!cloud_relay_draft_)
+      return false;
+    const auto &draft = *cloud_relay_draft_;
+    if (draft.source == L"relay")
+      return !draft.url.empty() && !draft.token.empty();
+    if (draft.source == L"webdav")
+      return !draft.webdav_url.empty() && !draft.webdav_username.empty() &&
+             (!draft.webdav_password.empty() || !cloud_configuration_.webdav_password.empty());
+    return true;
+  }
+
+  // WebDAV 的「测试连接」：在工作线程上用草稿跑 msime_client_cloud_clipboard_webdav_probe，带上中继密钥串所在的账号目录，通过时 Rust 顺带清掉那里的日志缓存。`save` 为真时通过后才写偏好（地址、账号、应用密码成对写入并删掉中继配置，仍由共享 Rust 偏好库校验），不通过就只说明原因、不保存。
+  void probe_cloud_clipboard_webdav(bool save) {
+    if (!cloud_relay_draft_ || cloud_probe_busy_ || cloud_relay_draft_->source != L"webdav")
+      return;
+    auto draft = *cloud_relay_draft_;
+    // 应用密码框留空表示沿用已存的那一个。
+    if (draft.webdav_password.empty())
+      draft.webdav_password = cloud_configuration_.webdav_password;
+    JsonObject request;
+    request.SetNamedValue(L"url", JsonValue::CreateStringValue(hstring(draft.webdav_url)));
+    request.SetNamedValue(L"username", JsonValue::CreateStringValue(hstring(draft.webdav_username)));
+    request.SetNamedValue(L"password", JsonValue::CreateStringValue(hstring(draft.webdav_password)));
+    if (const auto directory = account_directory(); !directory.empty())
+      request.SetNamedValue(L"directory", JsonValue::CreateStringValue(hstring(directory.wstring())));
+    const auto generation = ++cloud_probe_generation_;
+    cloud_probe_busy_ = true;
+    cloud_probe_message_ = save ? L"正在测试连接，通过后保存…" : L"正在测试连接…";
+    run_host(
+        [body = utf8(request.Stringify())] {
+          return take_response(msime_client_cloud_clipboard_webdav_probe(
+              reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+        },
+        [this, generation, save, draft](Response const &response) {
+          // 草稿在测试期间作废了（离开页面、偏好被别处改了来源）：结果不再属于眼前的设置。
+          if (generation != cloud_probe_generation_)
+            return;
+          cloud_probe_busy_ = false;
+          if (!response.ok) {
+            cloud_probe_message_ = nav::webdav_error_message(response_error(response));
+            redraw_clip();
+            return;
+          }
+          cloud_probe_message_ = nav::webdav_probe_passed;
+          if (!save) {
+            // 测试通过时 Rust 已清掉本机的日志缓存；已经在用网盘时重新查一次，网盘记录被回退后不用离开页面就能再发送。
+            if (cloud_clipboard_webdav_saved())
+              reset_cloud_clipboard();
+            redraw_clip();
+            return;
+          }
+          flush_pending();
+          document_.SetString(L"cloud_clipboard_webdav.url", draft.webdav_url);
+          document_.SetString(L"cloud_clipboard_webdav.username", draft.webdav_username);
+          document_.SetString(L"cloud_clipboard_webdav.password", draft.webdav_password);
+          document_.Remove(L"cloud_clipboard_relay");
+          if (commit()) {
+            reset_cloud_clipboard_draft();
+            reset_cloud_clipboard();
+            show_notice(L"已保存云剪贴板同步方式", InfoBarSeverity::Success);
+          } else {
+            // commit 已经重读设置并在页面顶部说明；草稿还在时留着输入，测试结果不再代表要保存的内容。
+            cloud_probe_message_.clear();
+          }
+          redraw_clip();
+        });
+    redraw_clip();
+  }
+
+  // 「云剪贴板」组里的同步方式：水杉账号、自建中继或 WebDAV 网盘。草稿留在窗口里，点「保存同步方式」才写偏好；中继直接交给共享 Rust 偏好库校验，WebDAV 先「测试连接」，通过后才写。保存一种方式时删掉另一种的配置，改回水杉账号时两者都删。
   void build_cloud_clipboard_relay_settings(StackPanel const &group) {
     if (!cloud_relay_draft_) {
-      cloud_relay_draft_ = CloudClipboardRelayDraft{
-          !cloud_configuration_.first.empty(), cloud_configuration_.first, cloud_configuration_.second};
+      CloudClipboardRelayDraft draft;
+      draft.source = !cloud_configuration_.relay_url.empty() ? L"relay"
+                     : cloud_clipboard_webdav_saved()        ? L"webdav"
+                                                             : L"account";
+      draft.url = cloud_configuration_.relay_url;
+      draft.token = cloud_configuration_.relay_token;
+      draft.webdav_url = cloud_configuration_.webdav_url;
+      draft.webdav_username = cloud_configuration_.webdav_username;
+      cloud_relay_draft_ = std::move(draft);
     }
+    const bool busy = cloud_probe_busy_;
     auto source = select_control(
-        L"云剪贴板同步方式", {{L"account", L"水杉账号"}, {L"relay", L"自建中继"}},
-        cloud_relay_draft_->relay ? L"relay" : L"account",
+        L"云剪贴板同步方式",
+        {{L"account", L"水杉账号"}, {L"relay", L"自建中继"}, {L"webdav", L"WebDAV"}},
+        cloud_relay_draft_->source,
         [this](std::wstring const &value) {
-          cloud_relay_draft_->relay = value == L"relay";
+          if (!cloud_relay_draft_ || cloud_probe_busy_)
+            return;
+          cloud_relay_draft_->source = value;
+          cloud_probe_message_.clear();
           queue_refresh();
-        });
+        },
+        !busy);
     A11y::SetAutomationId(source, L"cloud-clipboard-source");
     add_row(group, 0xE753, L"云剪贴板同步方式",
-            L"选择自建中继后只连接该中继，不会在失败时切回水杉账号。", source);
+            L"选择自建中继或 WebDAV 后只连接它，不会在失败时切回水杉账号。", source);
 
     Button save;
     save.Content(box_value(L"保存同步方式"));
-    save.IsEnabled(loaded_ && (!cloud_relay_draft_->relay ||
-                              (!cloud_relay_draft_->url.empty() && !cloud_relay_draft_->token.empty())));
+    save.IsEnabled(loaded_ && !busy && cloud_draft_complete());
     A11y::SetName(save, L"保存云剪贴板同步方式");
     A11y::SetAutomationId(save, L"cloud-clipboard-save-source");
     save.Click([this](Inspectable const &, RoutedEventArgs const &) {
-      if (!cloud_relay_draft_)
+      if (!cloud_relay_draft_ || cloud_probe_busy_)
         return;
       const auto draft = *cloud_relay_draft_;
+      if (draft.source == L"webdav") {
+        probe_cloud_clipboard_webdav(true);
+        return;
+      }
       flush_pending();
-      if (draft.relay) {
+      if (draft.source == L"relay") {
         document_.SetString(L"cloud_clipboard_relay.url", draft.url);
         document_.SetString(L"cloud_clipboard_relay.token", draft.token);
       } else {
         document_.Remove(L"cloud_clipboard_relay");
       }
+      // 中继和网盘只能二选一，改回水杉账号时两者都不留。
+      document_.Remove(L"cloud_clipboard_webdav");
       // 地址和令牌成对交给共享 Rust 偏好库校验；编辑中的值不写盘。
       if (commit()) {
-        cloud_relay_draft_.reset();
+        reset_cloud_clipboard_draft();
         reset_cloud_clipboard();
         show_notice(L"已保存云剪贴板同步方式", InfoBarSeverity::Success);
       }
     });
-    if (cloud_relay_draft_->relay) {
+    if (cloud_relay_draft_->source == L"relay") {
       TextBox url;
       url.Width(240);
       url.Text(hstring(cloud_relay_draft_->url));
@@ -17327,7 +18754,7 @@ private:
         if (cloud_relay_draft_) {
           cloud_relay_draft_->url = sender.as<TextBox>().Text().c_str();
           if (auto button = weak_save.get())
-            button.IsEnabled(loaded_ && !cloud_relay_draft_->url.empty() && !cloud_relay_draft_->token.empty());
+            button.IsEnabled(loaded_ && cloud_draft_complete());
         }
       });
       add_row(group, 0xE774, L"中继地址", L"使用 HTTPS 地址；仅本机回环地址允许 HTTP。", url);
@@ -17342,12 +18769,132 @@ private:
         if (cloud_relay_draft_) {
           cloud_relay_draft_->token = sender.as<PasswordBox>().Password().c_str();
           if (auto button = weak_save.get())
-            button.IsEnabled(loaded_ && !cloud_relay_draft_->url.empty() && !cloud_relay_draft_->token.empty());
+            button.IsEnabled(loaded_ && cloud_draft_complete());
         }
       });
       add_row(group, 0xE72E, L"中继令牌", L"16–256 个可打印 ASCII 字符，不含空格。", token);
     }
-    add_row(group, 0xE74E, L"保存同步方式", L"地址和令牌只保存在本机，不随设置导出或账号同步。", save);
+    if (cloud_relay_draft_->source == L"webdav")
+      build_cloud_clipboard_webdav_fields(group, save, busy);
+    add_row(group, 0xE74E, L"保存同步方式",
+            L"地址、令牌、账号和应用密码只保存在本机，不随设置导出或账号同步。", save);
+    if (cloud_clipboard_webdav_saved()) {
+      auto status = group_note(L"云剪贴板现在经 WebDAV 网盘 " + cloud_configuration_.webdav_url +
+                               L" 同步。换了地址或账号后，本机要重新登记，并在其他设备上重新允许；换应用密码不用。");
+      A11y::SetAutomationId(status, L"cloud-clipboard-webdav-status");
+      group.Children().Append(status);
+    }
+  }
+
+  // WebDAV 的三项输入、说明、「测试连接」和上一次测试的结果。输入改动只进草稿，并让上一次的测试结果失效；测试期间输入框和按钮都不可用，保存的正是测试过的那一份。
+  void build_cloud_clipboard_webdav_fields(StackPanel const &group, Button const &save, bool busy) {
+    Button test;
+    test.Content(box_value(L"测试连接"));
+    test.IsEnabled(loaded_ && !busy && cloud_draft_complete());
+    A11y::SetName(test, L"测试 WebDAV 连接");
+    A11y::SetAutomationId(test, L"cloud-clipboard-webdav-test");
+    test.Click([this](Inspectable const &, RoutedEventArgs const &) { probe_cloud_clipboard_webdav(false); });
+    // 上一次测试的结果，排在组里「测试连接」那一行下面；没有结果时收起。
+    auto result = group_note(cloud_probe_message_);
+    A11y::SetAutomationId(result, L"cloud-clipboard-webdav-result");
+    A11y::SetLiveSetting(result, Automation::Peers::AutomationLiveSetting::Polite);
+    result.Visibility(cloud_probe_message_.empty() ? Visibility::Collapsed : Visibility::Visible);
+    // 改了任何一项：按钮跟着必填项是否齐全变，旧的测试结果不再说明眼前这份草稿，收起它。
+    const auto edited = [this, weak_save = make_weak(save), weak_test = make_weak(test),
+                         weak_result = make_weak(result)] {
+      const bool complete = loaded_ && cloud_draft_complete();
+      if (auto button = weak_save.get())
+        button.IsEnabled(complete);
+      if (auto button = weak_test.get())
+        button.IsEnabled(complete);
+      cloud_probe_message_.clear();
+      if (auto note = weak_result.get())
+        note.Visibility(Visibility::Collapsed);
+    };
+
+    TextBox url;
+    url.Width(240);
+    url.Text(hstring(cloud_relay_draft_->webdav_url));
+    url.PlaceholderText(hstring(nav::webdav_url_placeholder));
+    url.IsSpellCheckEnabled(false);
+    url.IsTextPredictionEnabled(false);
+    url.IsEnabled(loaded_ && !busy);
+    A11y::SetName(url, L"服务器地址");
+    A11y::SetAutomationId(url, L"cloud-clipboard-webdav-url");
+    url.TextChanged([this, edited](Inspectable const &sender, TextChangedEventArgs const &) {
+      if (!cloud_relay_draft_)
+        return;
+      cloud_relay_draft_->webdav_url = sender.as<TextBox>().Text().c_str();
+      edited();
+    });
+    add_row(group, 0xE774, L"服务器地址",
+            L"坚果云填 https://dav.jianguoyun.com/dav/ 即可，水杉会在里面自动建 msime-clipboard 文件夹，不用自己先建；其他网盘填它给的 WebDAV 地址。使用 HTTPS 地址，证书要由公网信任的机构签发；仅本机回环地址允许 HTTP。", url);
+
+    TextBox username;
+    username.Width(240);
+    username.Text(hstring(cloud_relay_draft_->webdav_username));
+    username.IsSpellCheckEnabled(false);
+    username.IsTextPredictionEnabled(false);
+    username.IsEnabled(loaded_ && !busy);
+    A11y::SetName(username, L"账号");
+    A11y::SetAutomationId(username, L"cloud-clipboard-webdav-username");
+    username.TextChanged([this, edited](Inspectable const &sender, TextChangedEventArgs const &) {
+      if (!cloud_relay_draft_)
+        return;
+      cloud_relay_draft_->webdav_username = sender.as<TextBox>().Text().c_str();
+      edited();
+    });
+    add_row(group, 0xE77B, L"账号", L"网盘的登录账号，坚果云是登录邮箱。", username);
+
+    StackPanel secret;
+    secret.Orientation(Orientation::Horizontal);
+    secret.Spacing(8);
+    PasswordBox password;
+    password.Width(180);
+    password.Password(hstring(cloud_relay_draft_->webdav_password));
+    if (!cloud_configuration_.webdav_password.empty())
+      password.PlaceholderText(L"留空以保留已保存的应用密码");
+    password.PasswordRevealMode(cloud_relay_draft_->reveal_password ? PasswordRevealMode::Visible
+                                                                     : PasswordRevealMode::Hidden);
+    password.IsEnabled(loaded_ && !busy);
+    A11y::SetName(password, L"应用密码");
+    A11y::SetAutomationId(password, L"cloud-clipboard-webdav-password");
+    password.PasswordChanged([this, edited](Inspectable const &sender, RoutedEventArgs const &) {
+      if (!cloud_relay_draft_)
+        return;
+      cloud_relay_draft_->webdav_password = sender.as<PasswordBox>().Password().c_str();
+      edited();
+    });
+    secret.Children().Append(password);
+    // 「显示」只切换框里这份草稿的明暗，已存的应用密码从不回填，所以看不到它。
+    const std::wstring reveal_action = cloud_relay_draft_->reveal_password ? L"隐藏" : L"显示";
+    Button reveal;
+    reveal.Content(box_value(hstring(reveal_action)));
+    reveal.Height(32);
+    reveal.IsEnabled(loaded_ && !busy);
+    A11y::SetName(reveal, hstring(reveal_action + L"应用密码"));
+    A11y::SetAutomationId(reveal, L"cloud-clipboard-webdav-reveal");
+    ToolTipService::SetToolTip(reveal, box_value(hstring(reveal_action)));
+    reveal.Click([this, weak_password = make_weak(password)](Inspectable const &sender, RoutedEventArgs const &) {
+      if (!cloud_relay_draft_)
+        return;
+      const bool revealed = !cloud_relay_draft_->reveal_password;
+      cloud_relay_draft_->reveal_password = revealed;
+      if (auto field = weak_password.get())
+        field.PasswordRevealMode(revealed ? PasswordRevealMode::Visible : PasswordRevealMode::Hidden);
+      const std::wstring action = revealed ? L"隐藏" : L"显示";
+      auto button = sender.as<Button>();
+      button.Content(box_value(hstring(action)));
+      A11y::SetName(button, hstring(action + L"应用密码"));
+      ToolTipService::SetToolTip(button, box_value(hstring(action)));
+    });
+    secret.Children().Append(reveal);
+    add_row(group, 0xE72E, L"应用密码",
+            L"在网盘的安全设置里为第三方应用生成的密码，不是登录密码。", secret);
+
+    group.Children().Append(group_note(nav::webdav_explanation));
+    add_row(group, 0xE703, L"测试连接", L"保存时也会先测试一次，不通过不保存。", test);
+    group.Children().Append(result);
   }
 
   // ---- 打字统计 ----
@@ -18793,9 +20340,9 @@ private:
 
   // ---- 插件 ----
 
-  // 共享的「插件」页（packages/ui/src/settings/pages/plugins-page.tsx 和 plugins-section.tsx）在 Windows 上的「我的插件」：列表照 macOS 的插件库（plugin-library-view.tsx），先是「声音与效果」和「@ 名单」两张快捷卡片，再是「已安装 N 个插件」和导入按钮、搜索框、带计数的类型筛选、按类型分节的卡片（已安装插件、缺失的选择和「脚本插件（实验）」）、「无法载入的插件」和折叠的「插件导入说明」；点一张卡片在原处打开它的视图（plugin-sound-effects-view.tsx、plugin-mentions-view.tsx、plugin-detail-view.tsx、plugin-script-view.tsx），视图头上的「我的插件」回到列表。Windows 宿主的能力全为真（播放音效和音乐、路由 / 与 @、画特效样式和特效包、背单词列单词本、符号面板列符号集），辅助码表随版本（与「输入」页的辅助码组同一个条件）。插件目录、导入、删除和名单都经 msime_client_plugins，与 Tauri 的 desktop_plugins.rs 同一份 client-services 规则；内置声音包取 Server 状态目录下的 sound-packs。规则和文案在 PluginPageModel.h。所有读写都在工作线程上。页首的「社区插件」标签见「社区皮肤与社区插件」一节。
+  // 共享的「插件」页（packages/ui/src/settings/pages/plugins-page.tsx 和 plugins-section.tsx）在 Windows 上的「我的插件」：列表照 macOS 的插件库（plugin-library-view.tsx），先是「声音与效果」和「@ 名单」两张快捷卡片，再是「已安装 N 个插件」和「新建插件」、导入按钮、搜索框、带计数的类型筛选、按类型分节的卡片（已安装插件、缺失的选择和「脚本插件（实验）」）、「无法载入的插件」和折叠的「插件导入说明」；点一张卡片在原处打开它的视图（plugin-sound-effects-view.tsx、plugin-mentions-view.tsx、plugin-detail-view.tsx、plugin-script-view.tsx），视图头上的「我的插件」回到列表；「新建插件」和用户短语表、指令表、符号集、单词本详情里的「编辑」打开插件编辑器（plugin-editor-view.tsx，见「插件编辑器」一节）。Windows 宿主的能力全为真（播放音效和音乐、路由 / 与 @、画特效样式和特效包、背单词列单词本、符号面板列符号集），辅助码表随版本（与「输入」页的辅助码组同一个条件）。插件目录、导入、删除、编辑器的读写和名单都经 msime_client_plugins，与 Tauri 的 desktop_plugins.rs 同一份 client-services 规则；内置声音包取 Server 状态目录下的 sound-packs。规则和文案在 PluginPageModel.h 和 PluginEditorModel.h。所有读写都在工作线程上。页首的「社区插件」标签见「社区皮肤与社区插件」一节。
 
-  enum class PluginView { list, pack, missing, sound_effects, mentions };
+  enum class PluginView { list, pack, missing, sound_effects, mentions, editor };
   enum class PluginCatalogState { loading, loaded, failed };
 
   // 授权对话框（共享页的 ScriptGrantDialog）的状态。generation 在打开和关上时递增，作废在途的回答；id 是对话框授权的那个包，每次绘制时到目录里找，包被换过、页面重读之后对话框跟着换成新版本；granted 是勾着的能力；opener 是关上后焦点要回到的控件（启用开关或「调整授权」）；boxes 是现在画着的复选框，勾选时就地更新，不重建对话框，焦点留在刚点的那一项上。
@@ -18814,6 +20361,9 @@ private:
     std::vector<Box> boxes;
     std::function<void()> refresh;
     weak_ref<ContentDialog> dialog;
+    // 这次授权会删掉插件存下的数据时，第一次按「授权并启用」只把删除说清楚（`deletion` 那行红字），再按一次才写；改了勾选要重新确认。
+    bool deletion_shown = false;
+    weak_ref<TextBlock> deletion;
   };
 
   void redraw_plugins() {
@@ -18821,7 +20371,7 @@ private:
       queue_refresh();
   }
 
-  // 每次进入页面都与共享页重新激活一样：回到列表，作废上一次留下的请求，下一次绘制时重读目录和名单。没存的名单改动留着。进入时读一次打字统计开没开（共享页的 statisticsEnabled），用来决定「成就音效」能不能打开；读不了时按打开处理。
+  // 每次进入页面都与共享页重新激活一样：回到列表，作废上一次留下的请求，下一次绘制时重读目录和名单。没存的名单改动留着；编辑器的草稿与共享页一样随视图一起丢掉。进入时读一次打字统计开没开（共享页的 statisticsEnabled），用来决定「成就音效」能不能打开；读不了时按打开处理。
   void enter_plugins_page() {
     ++plugins_generation_;
     plugins_busy_ = false;
@@ -18829,6 +20379,10 @@ private:
     plugin_view_ = PluginView::list;
     plugin_pending_focus_.clear();
     plugin_statistics_enabled_.reset();
+    ++plugin_editor_generation_;
+    plugin_draft_.reset();
+    plugin_draft_baseline_.reset();
+    plugin_just_saved_.reset();
     const auto generation = plugins_generation_;
     statistics_host(statistics_action(L"load"),
                     [this, generation](std::optional<StatisticsStatus> const &status) {
@@ -19002,6 +20556,8 @@ private:
                  plugin_scripts_ = std::move(*grants);
                else
                  show_notice(plugin_failure(response, L"无法读取脚本插件的授权，请重试。"));
+               // 授权重读过（进页面、导入、删除之后）：详情的设置和已存数据也跟着重读，输入法在这期间可能写过存储。
+               plugin_script_state_stale_ = true;
                if (then)
                  then();
                else
@@ -19141,6 +20697,7 @@ private:
             JsonObject item;
             item.SetNamedValue(L"text", JsonValue::CreateStringValue(hstring(entry.text)));
             item.SetNamedValue(L"key", JsonValue::CreateStringValue(hstring(entry.key)));
+            item.SetNamedValue(L"phone", JsonValue::CreateStringValue(hstring(entry.phone)));
             entries.Append(item);
           }
           auto action = plugin_action(L"save_mentions");
@@ -19212,6 +20769,7 @@ private:
 
   void back_to_plugin_list() {
     plugin_view_ = PluginView::list;
+    plugin_just_saved_.reset();
     plugin_pending_focus_ = plugin_opened_from_;
     queue_refresh();
   }
@@ -19292,8 +20850,8 @@ private:
     return row;
   }
 
-  // 视图的头（共享页的 PluginViewHeader）：回到列表的「我的插件」，然后是视图的标题。视图刚打开时焦点落在返回上。
-  void plugin_view_header(StackPanel const &page, std::wstring const &title) {
+  // 视图的头（共享页的 PluginViewHeader）：回到列表的「我的插件」，然后是视图的标题。视图刚打开时焦点落在返回上。`back_action` 是编辑器自己的返回（有没保存的修改时先确认），没有时直接回到列表。
+  void plugin_view_header(StackPanel const &page, std::wstring const &title, std::function<void()> back_action = {}) {
     StackPanel label;
     label.Orientation(Orientation::Horizontal);
     label.Spacing(6);
@@ -19306,7 +20864,12 @@ private:
     back.Height(32);
     back.Padding(Thickness{12, 0, 12, 0});
     A11y::SetName(back, L"返回我的插件");
-    back.Click([this](Inspectable const &, RoutedEventArgs const &) { back_to_plugin_list(); });
+    back.Click([this, back_action = std::move(back_action)](Inspectable const &, RoutedEventArgs const &) {
+      if (back_action)
+        back_action();
+      else
+        back_to_plugin_list();
+    });
     page.Children().Append(back);
     auto heading = make_text(title, 20, palette_.text);
     heading.FontWeight(Windows::UI::Text::FontWeight{600});
@@ -19657,7 +21220,9 @@ private:
     A11y::SetName(summary, L"插件导入说明");
     A11y::SetItemStatus(summary, open ? L"已展开" : L"已收起");
 
-    auto text = make_text(pg::import_description, 12, palette_.sub);
+    // 先是「新建插件」的一句（macOS 插件库 `footer` 的第一段），再是导入的说明，各占一段。
+    auto text = make_text(std::wstring(pg::create_description) + L"。\n" + std::wstring(pg::import_description), 12,
+                          palette_.sub);
     text.Visibility(open ? Visibility::Visible : Visibility::Collapsed);
     // 说明和「▸」的旋转按值捕获，与 add_fold 相同：折叠区标题对兄弟元素取的弱引用在 CI 上点按时解析为空。两者都不引用 summary，不成环。
     summary.Click([this, text, turn](Inspectable const &sender, RoutedEventArgs const &) {
@@ -19695,6 +21260,10 @@ private:
     }
     plugin_mentions_warning_ = nullptr;
     plugin_mentions_save_ = nullptr;
+    plugin_editor_warning_ = nullptr;
+    plugin_editor_save_ = nullptr;
+    plugin_editor_bulk_add_ = nullptr;
+    plugin_editor_bulk_warning_ = nullptr;
     // 搜索选中「社区插件」时打开图库，选中「我的插件」里的设置时回到列表。
     if (!focus_row_.empty()) {
       const bool community = focus_row_ == L"社区插件";
@@ -19722,6 +21291,10 @@ private:
       // 搜索结果可能是被筛选或搜索藏起来的那张卡片：清掉插件库的筛选和搜索，它才一定画得出来。
       plugin_library_kind_ = pg::library_all;
       plugin_library_query_.clear();
+    }
+    if (plugin_view_ == PluginView::editor) {
+      build_plugin_editor(page);
+      return;
     }
     if (plugin_view_ == PluginView::pack) {
       for (auto const &pack : plugin_catalog_.packages)
@@ -19821,6 +21394,22 @@ private:
     imports.Orientation(Orientation::Horizontal);
     imports.Spacing(8);
     imports.VerticalAlignment(VerticalAlignment::Center);
+    // 「新建插件」是主按钮，排在两个导入按钮前面（macOS 插件库的 `onCreate`）；关上编辑器后焦点回到它。
+    {
+      const std::wstring label = L"新建插件";
+      record(label, std::wstring(pg::create_description));
+      Button create;
+      create.Content(box_value(hstring(label)));
+      create.Height(32);
+      create.Padding(Thickness{16, 0, 16, 0});
+      create.IsEnabled(!plugins_busy_);
+      make_primary(create);
+      A11y::SetAutomationId(create, L"plugin-create");
+      create.Click([this](Inspectable const &, RoutedEventArgs const &) { open_plugin_editor(L"", L""); });
+      mark_search_target(label, create);
+      imports.Children().Append(create);
+      rows.emplace_back(L"create", create);
+    }
     for (bool folder : {true, false}) {
       const std::wstring label = folder ? L"导入文件夹" : L"导入 .zip";
       record(label, L"");
@@ -20235,9 +21824,25 @@ private:
       plugin_mentions_save_.IsEnabled(!plugins_busy_ && dirty && !issue);
   }
 
-  // 一个已安装的包：里面有什么，怎样把它设为这一类的当前选择，不是内置的还可以删除。
+  // 一个已安装的包：里面有什么，怎样把它设为这一类的当前选择，四种文本类的用户包可以在编辑器里修改，不是内置的还可以删除。刚在编辑器里保存过时，顶上说明还差哪一步才能用上。
   void build_plugin_detail(StackPanel const &page, pg::Package const &pack) {
     plugin_view_header(page, pack.name);
+    if (plugin_just_saved_ && plugin_just_saved_->first == pack.kind && plugin_just_saved_->second == pack.id) {
+      const auto preferences = plugin_preferences();
+      const auto modes = plugin_table_modes();
+      const bool phrase = pack.kind == L"phrase_table";
+      const auto &tables = phrase ? preferences.phrase_tables : preferences.command_tables;
+      auto saved = make_text(pg::authored_save_note(pack.kind, pg::contains(tables, pack.id),
+                                                    phrase ? modes.quick_phrase : modes.command),
+                             13, palette_.sub);
+      A11y::SetLiveSetting(saved, Microsoft::UI::Xaml::Automation::Peers::AutomationLiveSetting::Polite);
+      StackPanel body;
+      body.Padding(Thickness{25, 14, 25, 14});
+      body.Children().Append(saved);
+      auto card = make_inner_card();
+      card.Child(body);
+      add_group(page, L"").Children().Append(card);
+    }
     auto info = add_group(page, L"信息");
     plugin_summary_row(info, 0xE8EC, L"类型", L"", pg::pack_kind_label(pack));
     plugin_summary_row(info, 0xE946, L"版本", L"", pack.version);
@@ -20250,6 +21855,14 @@ private:
       info.Children().Append(group_note(pack.description));
     build_plugin_content(page, pack);
     build_plugin_actions(add_group(page, L"使用"), pack);
+    if (pg::pack_editable(pack)) {
+      auto edit = button_control(L"编辑", [this, kind = pack.kind, id = pack.id] { open_plugin_editor(kind, id); },
+                                 !plugins_busy_);
+      A11y::SetName(edit, hstring(L"编辑" + pack.name));
+      A11y::SetAutomationId(edit, L"plugin-edit");
+      plugin_action_block(add_group(page, L""), L"不用写代码，在设置页里修改名字、介绍和内容；保存后替换本机的这一份。",
+                          {edit});
+    }
     if (!pack.builtin) {
       auto remove = button_control(L"删除", [this, pack] { remove_plugin_pack(pack); }, !plugins_busy_);
       A11y::SetName(remove, hstring(L"删除" + pack.name));
@@ -20494,6 +22107,510 @@ private:
                                         loaded_)});
   }
 
+  // ---- 插件编辑器 ----
+
+  // 共享页 plugin-editor-view.tsx 在 Windows 上的样子：新建时先选类型，再填基本信息和内容；编辑时经 msime_client_plugins 的 authoring_load 读出已安装的包。保存经 authoring_save，宿主按导入同样的规则校验并安装，成功后打开这个包的详情，顶上说明还差哪一步才能用上。草稿只在这个视图里，离开前有没保存的修改时先确认。输入时只改草稿并就地更新提示和保存按钮，加减行和批量添加才重画。规则和文案在 PluginEditorModel.h。
+
+  // 草稿里的一个文字字段；行已经被删掉时为空。
+  using DraftSlot = std::function<std::wstring *(pg::AuthoringDraft &)>;
+
+  bool plugin_editor_dirty() const { return plugin_draft_.has_value() && plugin_draft_ != plugin_draft_baseline_; }
+
+  // 打开编辑器：kind 和 id 为空时新建，先选类型；否则读出这个包。
+  void open_plugin_editor(std::wstring const &kind, std::wstring const &id) {
+    const auto generation = ++plugin_editor_generation_;
+    plugin_just_saved_.reset();
+    plugin_draft_.reset();
+    plugin_draft_baseline_.reset();
+    plugin_editor_error_.clear();
+    plugin_editor_save_error_.clear();
+    plugin_editor_bulk_.clear();
+    plugin_editor_bulk_issue_.clear();
+    plugin_editor_shown_ = pg::editor_row_page;
+    // 新建从列表的「新建插件」打开，关上后焦点回到它；编辑从详情打开，之后从详情回到列表时焦点仍落在这个包的卡片上。
+    open_plugin_view(PluginView::editor, kind, id, id.empty() ? std::wstring(L"create") : plugin_opened_from_);
+    if (id.empty())
+      return;
+    run_host(
+        [kind, id] {
+          auto action = plugin_action(L"authoring_load");
+          action.SetNamedValue(L"kind", JsonValue::CreateStringValue(hstring(kind)));
+          action.SetNamedValue(L"id", JsonValue::CreateStringValue(hstring(id)));
+          return plugins_call(action, false);
+        },
+        [this, generation](Response const &response) {
+          if (generation != plugin_editor_generation_)
+            return;
+          if (const auto pack = authored_pack(response)) {
+            plugin_draft_ = pg::draft_from_pack(*pack);
+            plugin_draft_baseline_ = plugin_draft_;
+          } else {
+            plugin_editor_error_ = plugin_failure(response, L"无法读取这个插件，请重试。");
+          }
+          redraw_plugins();
+        });
+  }
+
+  // 编辑器头上的返回：有没保存的修改时先确认；编辑回到这个包的详情，新建回到列表。
+  fire_and_forget leave_plugin_editor() {
+    auto strong = get_strong();
+    const auto generation = plugin_editor_generation_;
+    if (plugin_editor_dirty() && !co_await confirm(L"放弃修改", L"还没有保存的修改会丢掉。", L"放弃"))
+      co_return;
+    if (generation != plugin_editor_generation_ || plugin_view_ != PluginView::editor)
+      co_return;
+    ++plugin_editor_generation_;
+    plugin_draft_.reset();
+    plugin_draft_baseline_.reset();
+    if (plugin_view_id_.empty()) {
+      back_to_plugin_list();
+      co_return;
+    }
+    plugin_view_ = PluginView::pack;
+    plugin_pending_focus_ = L"back";
+    queue_refresh();
+  }
+
+  // 「想做哪一种插件？」里选了一种：换成这种类型的空草稿，焦点落到名字上。
+  void pick_plugin_kind(std::wstring const &kind) {
+    plugin_draft_ = pg::empty_draft(kind);
+    plugin_draft_baseline_ = plugin_draft_;
+    plugin_pending_focus_ = L"editor-name";
+    queue_refresh();
+  }
+
+  // 输入框里的一次改动：只改这一个字段，清掉宿主上次的拒绝，再就地更新提示和按钮。值没变（重画后输入框补发的 TextChanged）时什么也不做。
+  void edit_plugin_draft(DraftSlot const &slot, std::wstring value) {
+    if (!plugin_draft_)
+      return;
+    auto *field = slot(*plugin_draft_);
+    if (!field || *field == value)
+      return;
+    *field = std::move(value);
+    plugin_editor_save_error_.clear();
+    update_plugin_editor_state();
+  }
+
+  // 加减行这类改变表单结构的改动：改完重画。
+  void change_plugin_draft(std::function<void(pg::AuthoringDraft &)> const &change) {
+    if (!plugin_draft_)
+      return;
+    change(*plugin_draft_);
+    plugin_editor_save_error_.clear();
+    queue_refresh();
+  }
+
+  // 保存按钮上方只报第一处问题（有改动时），宿主拒绝时换成它的说明；保存按钮只在有改动、能保存、没有别的操作在进行时可按。「添加到列表」在批量框里有字时可按。
+  void update_plugin_editor_state() {
+    if (!plugin_draft_)
+      return;
+    const auto issue = pg::draft_issue(*plugin_draft_);
+    const bool dirty = plugin_editor_dirty();
+    if (plugin_editor_warning_) {
+      const auto message = issue && dirty ? *issue : plugin_editor_save_error_;
+      plugin_editor_warning_.Text(hstring(message));
+      plugin_editor_warning_.Visibility(message.empty() ? Visibility::Collapsed : Visibility::Visible);
+    }
+    if (plugin_editor_save_)
+      plugin_editor_save_.IsEnabled(!plugins_busy_ && dirty && !issue);
+    if (plugin_editor_bulk_add_)
+      plugin_editor_bulk_add_.IsEnabled(!pg::blank_text(plugin_editor_bulk_));
+    if (plugin_editor_bulk_warning_) {
+      plugin_editor_bulk_warning_.Text(hstring(plugin_editor_bulk_issue_));
+      plugin_editor_bulk_warning_.Visibility(plugin_editor_bulk_issue_.empty() ? Visibility::Collapsed
+                                                                              : Visibility::Visible);
+    }
+  }
+
+  // 编辑器里的一个输入框：标题在上，读屏读到 `name`。`multiline` 的可以换行（介绍、符号），读出的换行按 textarea 写成 LF；`plain` 的是编码、版本这类，不做拼写检查和输入预测。
+  TextBox plugin_editor_field(std::wstring const &header, std::wstring const &name, DraftSlot slot,
+                              std::wstring const &placeholder = L"", bool multiline = false, bool plain = false) {
+    TextBox box;
+    box.Header(box_value(hstring(header)));
+    // AcceptsReturn 必须早于 Text，否则多行内容在单行状态下被截到第一个换行符。
+    if (multiline) {
+      box.AcceptsReturn(true);
+      box.TextWrapping(TextWrapping::Wrap);
+      box.MinHeight(96);
+    }
+    if (!placeholder.empty())
+      box.PlaceholderText(hstring(placeholder));
+    if (plain) {
+      box.IsSpellCheckEnabled(false);
+      box.IsTextPredictionEnabled(false);
+    }
+    if (auto *current = plugin_draft_ ? slot(*plugin_draft_) : nullptr)
+      box.Text(hstring(*current));
+    A11y::SetName(box, hstring(name));
+    box.TextChanged([this, slot = std::move(slot), multiline](Inspectable const &sender, TextChangedEventArgs const &) {
+      std::wstring value = sender.as<TextBox>().Text().c_str();
+      edit_plugin_draft(slot, multiline ? cm::line_feeds(value) : std::move(value));
+    });
+    return box;
+  }
+
+  // 编辑器分组里的表单块（共享页的 SettingsManagerBlock）：组内一张子卡片，块里各项相隔 10。
+  StackPanel plugin_editor_block(StackPanel const &group) {
+    StackPanel body;
+    body.Spacing(10);
+    body.Padding(Thickness{25, 14, 25, 14});
+    auto card = make_inner_card();
+    card.Child(body);
+    group.Children().Append(card);
+    return body;
+  }
+
+  // 一行表单（共享页的 SettingsPhraseForm）：几个输入框按权重分宽，最后是「删除」。
+  void plugin_editor_row(StackPanel const &body, std::vector<std::pair<TextBox, double>> const &fields,
+                         std::wstring const &remove_name, std::function<void()> remove) {
+    Grid row;
+    row.ColumnSpacing(8);
+    int32_t column = 0;
+    for (auto const &[field, weight] : fields) {
+      ColumnDefinition definition;
+      definition.Width(GridLength{weight, GridUnitType::Star});
+      row.ColumnDefinitions().Append(definition);
+      Grid::SetColumn(field, column++);
+      row.Children().Append(field);
+    }
+    ColumnDefinition last;
+    last.Width(GridLength{1, GridUnitType::Auto});
+    row.ColumnDefinitions().Append(last);
+    auto button = button_control(L"删除", std::move(remove));
+    button.VerticalAlignment(VerticalAlignment::Bottom);
+    A11y::SetName(button, hstring(remove_name));
+    Grid::SetColumn(button, column);
+    row.Children().Append(button);
+    body.Children().Append(row);
+  }
+
+  // 一排按钮（共享页的 SettingsManagerActions）。
+  void plugin_editor_actions(StackPanel const &body, std::vector<FrameworkElement> const &buttons) {
+    StackPanel actions;
+    actions.Orientation(Orientation::Horizontal);
+    actions.Spacing(8);
+    for (auto const &button : buttons)
+      actions.Children().Append(button);
+    body.Children().Append(actions);
+  }
+
+  // 长列表画出的行数不够时，接着画下一批（共享页的 MoreRows）。
+  void plugin_editor_more_rows(StackPanel const &body, std::size_t total) {
+    if (total <= plugin_editor_shown_)
+      return;
+    const auto next = std::min(pg::editor_row_page, total - plugin_editor_shown_);
+    plugin_editor_actions(body, {button_control(L"再显示 " + std::to_wstring(next) + L" 条（共 " +
+                                                    std::to_wstring(total) + L" 条）",
+                                                [this] {
+                                                  plugin_editor_shown_ += pg::editor_row_page;
+                                                  queue_refresh();
+                                                })});
+  }
+
+  // 「添加一条」：接在最后，并且一定画得出来。
+  template <typename Rows> void add_plugin_draft_row(Rows pg::AuthoringDraft::*rows) {
+    change_plugin_draft([this, rows](pg::AuthoringDraft &draft) {
+      (draft.*rows).emplace_back();
+      plugin_editor_shown_ = std::max(plugin_editor_shown_, (draft.*rows).size());
+    });
+  }
+
+  template <typename Rows> void remove_plugin_draft_row(Rows pg::AuthoringDraft::*rows, std::size_t index) {
+    change_plugin_draft([rows, index](pg::AuthoringDraft &draft) {
+      if (index < (draft.*rows).size())
+        (draft.*rows).erase((draft.*rows).begin() + static_cast<std::ptrdiff_t>(index));
+    });
+  }
+
+  // 「批量添加」：读出的行接在已有的行后面；读不出时说明是哪一行，框里的文字留着。
+  void add_plugin_bulk() {
+    if (!plugin_draft_)
+      return;
+    auto &draft = *plugin_draft_;
+    std::optional<std::wstring> issue;
+    if (draft.kind == L"phrase_table") {
+      auto parsed = pg::parse_phrase_lines(plugin_editor_bulk_);
+      issue = parsed.issue;
+      if (!issue)
+        draft.phrases = pg::append_rows(draft.phrases, parsed.rows, pg::blank_phrase);
+    } else if (draft.kind == L"wordbook") {
+      auto parsed = pg::parse_word_lines(plugin_editor_bulk_);
+      issue = parsed.issue;
+      if (!issue)
+        draft.words = pg::append_rows(draft.words, parsed.rows, pg::blank_word);
+    }
+    plugin_editor_bulk_issue_ = issue.value_or(L"");
+    if (!issue) {
+      plugin_editor_bulk_.clear();
+      plugin_editor_save_error_.clear();
+    }
+    queue_refresh();
+  }
+
+  void save_plugin_draft() {
+    if (!plugin_draft_ || pg::draft_issue(*plugin_draft_) || !plugin_editor_dirty() || !begin_plugin_action())
+      return;
+    const auto generation = plugins_generation_;
+    const auto editor = plugin_editor_generation_;
+    plugin_editor_save_error_.clear();
+    run_host(
+        [pack = pg::pack_from_draft(*plugin_draft_)] {
+          auto action = plugin_action(L"authoring_save");
+          action.SetNamedValue(L"pack", authored_pack_json(pack));
+          action.SetNamedValue(L"replace", JsonValue::CreateBooleanValue(pack.id.has_value()));
+          return plugins_call(action, false, true);
+        },
+        [this, generation, editor](Response const &response) {
+          if (generation != plugins_generation_)
+            return;
+          if (!response.ok) {
+            if (editor == plugin_editor_generation_)
+              plugin_editor_save_error_ = plugin_failure(response, L"保存失败，请重试。");
+            end_plugin_action(generation);
+            return;
+          }
+          pg::Package saved;
+          try {
+            const auto value = JsonObject::Parse(text(response.text)).GetNamedValue(L"value");
+            if (value.ValueType() == JsonValueType::Object)
+              saved = plugin_package(value.GetObject());
+          } catch (...) {
+          }
+          if (!saved.id.empty())
+            plugins_notice_ = pg::saved_notice(saved);
+          refresh_plugin_catalog(generation, [this, generation, editor, saved] {
+            if (generation != plugins_generation_)
+              return;
+            // 保存途中离开了编辑器时，留在用户去的地方。
+            if (editor == plugin_editor_generation_ && plugin_view_ == PluginView::editor && !saved.id.empty()) {
+              ++plugin_editor_generation_;
+              plugin_draft_.reset();
+              plugin_draft_baseline_.reset();
+              plugin_just_saved_ = std::make_pair(saved.kind, saved.id);
+              plugin_view_ = PluginView::pack;
+              plugin_view_kind_ = saved.kind;
+              plugin_view_id_ = saved.id;
+              if (plugin_opened_from_ == L"create")
+                plugin_opened_from_ = L"pack/" + saved.kind + L"/" + saved.id;
+              plugin_pending_focus_ = L"back";
+            }
+            end_plugin_action(generation);
+          });
+        });
+    redraw_plugins();
+  }
+
+  void build_plugin_editor(StackPanel const &page) {
+    const bool editing = !plugin_view_id_.empty();
+    const auto kind_label = plugin_draft_ ? pg::kind_label(plugin_draft_->kind) : std::wstring(L"插件");
+    const auto title = editing ? L"编辑「" + (plugin_draft_baseline_ ? plugin_draft_baseline_->name : plugin_view_id_) + L"」"
+                       : plugin_draft_ ? L"新建" + kind_label
+                                       : std::wstring(L"新建插件");
+    plugin_view_header(page, title, [this] { leave_plugin_editor(); });
+    if (!plugin_draft_) {
+      if (editing) {
+        if (plugin_editor_error_.empty()) {
+          page.Children().Append(plugin_empty_message(L"正在读取插件…"));
+        } else {
+          auto error = make_text(plugin_editor_error_, 13, palette_.text);
+          A11y::SetLiveSetting(error, Microsoft::UI::Xaml::Automation::Peers::AutomationLiveSetting::Assertive);
+          plugin_editor_block(add_group(page, L"")).Children().Append(error);
+        }
+        return;
+      }
+      auto kinds = add_group(page, L"想做哪一种插件？");
+      for (auto const &entry : pg::authored_kinds) {
+        auto row = plugin_nav_row(kinds, plugin_kind_glyph(entry.kind), std::wstring(entry.title),
+                                  std::wstring(entry.description), L"",
+                                  [this, kind = std::wstring(entry.kind)] { pick_plugin_kind(kind); });
+        A11y::SetAutomationId(row, hstring(L"plugin-create-" + std::wstring(entry.kind)));
+      }
+      return;
+    }
+
+    auto const &draft = *plugin_draft_;
+    auto basics = plugin_editor_block(add_group(page, L"基本信息"));
+    auto fields = responsive_grid(220, 12, 2);
+    auto name = plugin_editor_field(L"名字", L"插件名字", [](pg::AuthoringDraft &d) { return &d.name; },
+                                    L"我的" + kind_label);
+    A11y::SetAutomationId(name, L"plugin-editor-name");
+    fields.Children().Append(name);
+    fields.Children().Append(
+        plugin_editor_field(L"作者（可不填）", L"作者", [](pg::AuthoringDraft &d) { return &d.author; }));
+    fields.Children().Append(plugin_editor_field(L"版本", L"版本", [](pg::AuthoringDraft &d) { return &d.version; },
+                                                 L"", false, true));
+    fields.Children().Append(plugin_editor_field(L"许可证", L"许可证", [](pg::AuthoringDraft &d) { return &d.license; },
+                                                 L"", false, true));
+    basics.Children().Append(fields);
+    basics.Children().Append(make_text(pg::license_note, 12, palette_.sub));
+    auto description = plugin_editor_field(L"介绍（可不填）", L"介绍",
+                                           [](pg::AuthoringDraft &d) { return &d.description; }, L"", true);
+    description.MinHeight(64);
+    basics.Children().Append(description);
+    if (!indexing_ && plugin_pending_focus_ == L"editor-name") {
+      plugin_pending_focus_.clear();
+      focus_target_ = name;
+    }
+
+    if (draft.kind == L"phrase_table") {
+      auto body = plugin_editor_block(add_group(page, L"短语（" + std::to_wstring(draft.phrases.size()) + L"）"));
+      body.Children().Append(make_text(L"编码是 K 之后输入的小写字母，最多 32 个；同一个编码可以对应几段文字。文字最多 " +
+                                           std::to_wstring(pg::max_text_utf16) + L" 个字符，不能换行。",
+                                       12, palette_.sub));
+      for (std::size_t i = 0; i < std::min(draft.phrases.size(), plugin_editor_shown_); ++i) {
+        const auto at = L"第 " + std::to_wstring(i + 1) + L" 条短语";
+        auto key = plugin_editor_field(
+            L"编码", at + L"的编码",
+            [i](pg::AuthoringDraft &d) { return i < d.phrases.size() ? &d.phrases[i].key : nullptr; }, L"dz", false,
+            true);
+        auto text = plugin_editor_field(
+            L"文字", at + L"的文字",
+            [i](pg::AuthoringDraft &d) { return i < d.phrases.size() ? &d.phrases[i].text : nullptr; });
+        plugin_editor_row(body, {{key, 1}, {text, 2}}, L"删除" + at,
+                          [this, i] { remove_plugin_draft_row(&pg::AuthoringDraft::phrases, i); });
+      }
+      plugin_editor_more_rows(body, draft.phrases.size());
+      plugin_editor_actions(body, {button_control(L"添加一条", [this] { add_plugin_draft_row(&pg::AuthoringDraft::phrases); },
+                                                  draft.phrases.size() < pg::max_phrases)});
+    } else if (draft.kind == L"command_table") {
+      auto body = plugin_editor_block(add_group(page, L"指令（" + std::to_wstring(draft.commands.size()) + L"）"));
+      body.Children().Append(make_text(
+          L"指令是 / 之后输入的小写字母。要插入的文字里可以写 {date}（日期）、{time}（时间）和 {weekday}（星期几），例如「{date} 张三」；日期和时间也可以带格式，例如 {date:%m月%d日}。",
+          12, palette_.sub));
+      for (std::size_t i = 0; i < draft.commands.size(); ++i) {
+        const auto at = L"第 " + std::to_wstring(i + 1) + L" 条指令";
+        auto trigger = plugin_editor_field(
+            L"指令", at + L"的字母",
+            [i](pg::AuthoringDraft &d) { return i < d.commands.size() ? &d.commands[i].trigger : nullptr; }, L"sig",
+            false, true);
+        auto heading = plugin_editor_field(
+            L"标题", at + L"的标题",
+            [i](pg::AuthoringDraft &d) { return i < d.commands.size() ? &d.commands[i].title : nullptr; }, L"签名");
+        auto inserted = plugin_editor_field(
+            L"要插入的文字", at + L"要插入的文字",
+            [i](pg::AuthoringDraft &d) { return i < d.commands.size() ? &d.commands[i].template_text : nullptr; });
+        plugin_editor_row(body, {{trigger, 1}, {heading, 1}, {inserted, 2}}, L"删除" + at,
+                          [this, i] { remove_plugin_draft_row(&pg::AuthoringDraft::commands, i); });
+      }
+      plugin_editor_actions(body, {button_control(L"添加一条", [this] { add_plugin_draft_row(&pg::AuthoringDraft::commands); },
+                                                  draft.commands.size() < pg::max_commands)});
+    } else if (draft.kind == L"symbol_set") {
+      for (std::size_t i = 0; i < draft.groups.size(); ++i) {
+        const auto at = L"第 " + std::to_wstring(i + 1) + L" 组";
+        auto body = plugin_editor_block(add_group(page, at));
+        auto row = responsive_grid(160, 8, 3);
+        auto tab = select_control(at + L"放在哪一页", {{L"symbols", L"符号"}, {L"kaomoji", L"颜文字"}},
+                                  draft.groups[i].tab,
+                                  [this, i](std::wstring const &value) {
+                                    edit_plugin_draft(
+                                        [i](pg::AuthoringDraft &d) { return i < d.groups.size() ? &d.groups[i].tab : nullptr; },
+                                        value);
+                                  },
+                                  true, false)
+                       .as<ComboBox>();
+        tab.Header(box_value(L"放在"));
+        tab.HorizontalAlignment(HorizontalAlignment::Left);
+        row.Children().Append(tab);
+        row.Children().Append(plugin_editor_field(
+            L"标题", at + L"的标题",
+            [i](pg::AuthoringDraft &d) { return i < d.groups.size() ? &d.groups[i].title : nullptr; }, L"箭头"));
+        row.Children().Append(plugin_editor_field(
+            L"搜索关键词（可不填）", at + L"的搜索关键词",
+            [i](pg::AuthoringDraft &d) { return i < d.groups.size() ? &d.groups[i].keywords : nullptr; },
+            L"jiantou arrow"));
+        body.Children().Append(row);
+        body.Children().Append(plugin_editor_field(
+            L"符号", at + L"的符号",
+            [i](pg::AuthoringDraft &d) { return i < d.groups.size() ? &d.groups[i].items : nullptr; }, L"", true));
+        body.Children().Append(make_text(L"每行一个，可以直接粘贴。", 12, palette_.sub));
+        auto remove = button_control(L"删除这一组", [this, i] { remove_plugin_draft_row(&pg::AuthoringDraft::groups, i); });
+        A11y::SetName(remove, hstring(L"删除" + at));
+        plugin_editor_actions(body, {remove});
+      }
+      auto body = plugin_editor_block(add_group(page, L""));
+      body.Children().Append(
+          make_text(L"符号组以插件名为分类排在符号面板的内置符号之后，颜文字组排在颜文字的 All 之后。", 12, palette_.sub));
+      plugin_editor_actions(body, {button_control(L"添加一组", [this] { add_plugin_draft_row(&pg::AuthoringDraft::groups); },
+                                                  draft.groups.size() < pg::max_groups)});
+    } else if (draft.kind == L"wordbook") {
+      auto body = plugin_editor_block(add_group(page, L"单词（" + std::to_wstring(draft.words.size()) + L"）"));
+      body.Children().Append(make_text(L"每个单词要有释义，音标可以不填。单词本的名字最多 64 个字，最多 " +
+                                           std::to_wstring(pg::max_words) + L" 个单词。",
+                                       12, palette_.sub));
+      for (std::size_t i = 0; i < std::min(draft.words.size(), plugin_editor_shown_); ++i) {
+        const auto at = L"第 " + std::to_wstring(i + 1) + L" 个单词";
+        auto word = plugin_editor_field(
+            L"单词", at, [i](pg::AuthoringDraft &d) { return i < d.words.size() ? &d.words[i].word : nullptr; }, L"",
+            false, true);
+        auto phonetic = plugin_editor_field(
+            L"音标（可不填）", at + L"的音标",
+            [i](pg::AuthoringDraft &d) { return i < d.words.size() ? &d.words[i].phonetic : nullptr; }, L"", false,
+            true);
+        auto gloss = plugin_editor_field(
+            L"释义", at + L"的释义",
+            [i](pg::AuthoringDraft &d) { return i < d.words.size() ? &d.words[i].gloss : nullptr; });
+        plugin_editor_row(body, {{word, 1}, {phonetic, 1}, {gloss, 2}}, L"删除" + at,
+                          [this, i] { remove_plugin_draft_row(&pg::AuthoringDraft::words, i); });
+      }
+      plugin_editor_more_rows(body, draft.words.size());
+      plugin_editor_actions(body, {button_control(L"添加一个", [this] { add_plugin_draft_row(&pg::AuthoringDraft::words); },
+                                                  draft.words.size() < pg::max_words)});
+    }
+
+    if (draft.kind == L"phrase_table" || draft.kind == L"wordbook") {
+      const bool phrase = draft.kind == L"phrase_table";
+      auto body = plugin_editor_block(add_group(page, L"批量添加"));
+      TextBox bulk;
+      bulk.Header(box_value(hstring(phrase ? L"每行一条短语" : L"每行一个单词")));
+      bulk.AcceptsReturn(true);
+      bulk.TextWrapping(TextWrapping::Wrap);
+      bulk.MinHeight(96);
+      bulk.IsSpellCheckEnabled(false);
+      bulk.Text(hstring(plugin_editor_bulk_));
+      A11y::SetName(bulk, L"批量添加的内容");
+      bulk.TextChanged([this](Inspectable const &sender, TextChangedEventArgs const &) {
+        auto value = cm::line_feeds(sender.as<TextBox>().Text().c_str());
+        if (value == plugin_editor_bulk_)
+          return;
+        plugin_editor_bulk_ = std::move(value);
+        plugin_editor_bulk_issue_.clear();
+        update_plugin_editor_state();
+      });
+      body.Children().Append(bulk);
+      body.Children().Append(make_text(phrase ? L"编码在前，文字在后，中间用空格隔开，例如 dz 北京市海淀区。"
+                                              : L"从表格复制过来即可：单词、释义两列，或单词、音标、释义三列，列之间用 Tab 隔开。",
+                                       12, palette_.sub));
+      plugin_editor_bulk_warning_ = make_text(L"", 13, palette_.text);
+      A11y::SetLiveSetting(plugin_editor_bulk_warning_,
+                           Microsoft::UI::Xaml::Automation::Peers::AutomationLiveSetting::Assertive);
+      body.Children().Append(plugin_editor_bulk_warning_);
+      Button add;
+      add.Content(box_value(L"添加到列表"));
+      add.Height(32);
+      add.Padding(Thickness{16, 0, 16, 0});
+      add.Click([this](Inspectable const &, RoutedEventArgs const &) { add_plugin_bulk(); });
+      plugin_editor_bulk_add_ = add;
+      plugin_editor_actions(body, {add});
+    }
+
+    auto footer = plugin_editor_block(add_group(page, L""));
+    footer.Children().Append(make_text(pg::save_note(editing), 12, palette_.sub));
+    plugin_editor_warning_ = make_text(L"", 13, palette_.text);
+    A11y::SetLiveSetting(plugin_editor_warning_, Microsoft::UI::Xaml::Automation::Peers::AutomationLiveSetting::Assertive);
+    A11y::SetAutomationId(plugin_editor_warning_, L"plugin-editor-warning");
+    footer.Children().Append(plugin_editor_warning_);
+    Button save;
+    save.Content(box_value(hstring(editing ? L"保存修改" : L"保存并安装")));
+    save.Height(32);
+    save.Padding(Thickness{16, 0, 16, 0});
+    make_primary(save);
+    A11y::SetAutomationId(save, L"plugin-editor-save");
+    save.Click([this](Inspectable const &, RoutedEventArgs const &) { save_plugin_draft(); });
+    plugin_editor_save_ = save;
+    plugin_editor_actions(footer, {save});
+    update_plugin_editor_state();
+  }
+
   // ---- 脚本插件（实验） ----
 
   // 共享页 plugin-script-view.tsx 在 Windows 上的样子：插件库里的「脚本插件（实验）」节（`plugin-library-view.tsx` 的同名节，一节卡片）见 fill_plugin_sections，这里是详情和授权对话框。授权、撤销和排序都经 msime_client_plugins 的 set_script_grant 和 reorder_scripts，规则在 client-services 的 script_grants，与 Tauri 的同名命令相同；页面的勾选联动、标记和文案在 PluginPageModel.h。
@@ -20533,6 +22650,8 @@ private:
             return;
           if (auto grants = plugin_script_grants(response)) {
             plugin_scripts_ = std::move(*grants);
+            // 撤销 `persist_data` 会删掉存储：详情重画时重读设置和数据。
+            plugin_script_state_stale_ = true;
             done(response);
             return;
           }
@@ -20544,11 +22663,20 @@ private:
         });
   }
 
-  // 详情的启用开关关掉：停用并撤销全部授权（set(enabled = false, granted = [])），输入法在下一次聚焦时停止运行它。
-  void revoke_script(pg::Package const &pack) {
+  // 详情的启用开关关掉：停用并撤销全部授权（set(enabled = false, granted = [])），输入法在下一次聚焦时停止运行它。插件存着数据时这会把数据一起删掉，先确认（共享页详情的 `revoke`）；不确认时开关回到「开」。
+  fire_and_forget revoke_script(pg::Package pack) {
+    auto strong = get_strong();
+    const auto storage = script_storage_bytes(pack);
+    if (pg::script_persisting(pg::script_grant(plugin_grants(), pack.id), storage) &&
+        !co_await confirm(L"停用脚本插件", pg::script_revoke_confirmation(pack, storage),
+                          std::wstring(pg::script_revoke_confirm))) {
+      plugin_pending_focus_ = L"script-switch";
+      redraw_plugins();
+      co_return;
+    }
     if (!begin_plugin_action()) {
       redraw_plugins();
-      return;
+      co_return;
     }
     const auto generation = plugins_generation_;
     write_script_grant(pack, false, {}, [this, generation](Response const &response) {
@@ -20670,19 +22798,29 @@ private:
     }
     const auto requested = pg::sort_capabilities(pack->permissions);
     if (requested.empty()) {
-      form.Children().Append(make_text(pg::grant_dialog_no_permissions, 14, palette_.sub));
+      form.Children().Append(make_text(pg::grant_dialog_no_permissions(*pack), 14, palette_.sub));
     } else {
+      // 按读文字、改文字、记住数据分组（共享页的 `CAPABILITY_GROUPS`），每组一个标题；「长期保存数据」的说明是红字。
       StackPanel list;
-      list.Spacing(6);
+      list.Spacing(10);
       A11y::SetName(list, hstring(pg::grant_dialog_legend));
-      auto legend = make_text(pg::grant_dialog_legend, 14, palette_.text);
-      legend.FontWeight(Windows::UI::Text::FontWeight{600});
-      list.Children().Append(legend);
-      for (auto const &item : pg::grant_items(requested, state.granted, state.busy)) {
+      StackPanel group{nullptr};
+      std::wstring group_title;
+      for (auto const &item : pg::grant_items(requested, state.granted, state.busy, pg::has_extended_command(*pack))) {
+        if (!group || item.group != group_title) {
+          group_title = item.group;
+          group = StackPanel{};
+          group.Spacing(6);
+          A11y::SetName(group, hstring(group_title));
+          auto legend = make_text(group_title, 14, palette_.text);
+          legend.FontWeight(Windows::UI::Text::FontWeight{600});
+          group.Children().Append(legend);
+          list.Children().Append(group);
+        }
         StackPanel texts;
         texts.Spacing(1);
         texts.Children().Append(make_text(item.title, 14, palette_.text));
-        auto description = make_text(item.description, 12, palette_.sub);
+        auto description = make_text(item.description, 12, item.warning ? danger_color() : palette_.sub);
         texts.Children().Append(description);
         CheckBox box;
         box.Content(texts);
@@ -20695,18 +22833,40 @@ private:
           toggle_script_capability(capability, checked && checked.Value());
         });
         state.boxes.push_back({item.capability, make_weak(box), make_weak(description)});
-        list.Children().Append(box);
+        group.Children().Append(box);
       }
       form.Children().Append(list);
+      if (!pack->settings.empty())
+        form.Children().Append(make_text(pg::grant_dialog_settings_note, 14, palette_.sub));
     }
     form.Children().Append(account_message(std::wstring(pg::script_residual_risk), InfoBarSeverity::Warning));
+    // 第二次确认之前的红字：这次授权不包括「长期保存数据」，存下的数据会被删掉。
+    const bool confirming = state.deletion_shown && script_grant_deletes_data(*pack, state.granted);
+    auto deletion = make_text(pg::grant_dialog_deletion(script_storage_bytes(*pack)), 14, danger_color());
+    deletion.TextWrapping(TextWrapping::Wrap);
+    deletion.Visibility(confirming ? Visibility::Visible : Visibility::Collapsed);
+    A11y::SetLiveSetting(deletion, Automation::Peers::AutomationLiveSetting::Assertive);
+    state.deletion = make_weak(deletion);
+    form.Children().Append(deletion);
     if (!state.error.empty()) {
       auto error = account_message(state.error, InfoBarSeverity::Error);
       A11y::SetLiveSetting(error, Automation::Peers::AutomationLiveSetting::Assertive);
       form.Children().Append(error);
     }
-    dialog.PrimaryButtonText(hstring(pg::grant_dialog_confirm));
+    dialog.PrimaryButtonText(hstring(confirming ? pg::grant_dialog_confirm_deletion : pg::grant_dialog_confirm));
     dialog.IsPrimaryButtonEnabled(!state.busy);
+  }
+
+  // 一个脚本插件持久存储现在的字节数：详情页读到的是这个插件的状态时取它，否则按 0 算。
+  double script_storage_bytes(pg::Package const &pack) const {
+    return plugin_script_state_ && plugin_script_state_id_ == pack.id ? plugin_script_state_->storage_bytes : 0;
+  }
+
+  // 把对话框现在勾着的这份授权写下去，会不会删掉插件存下的数据（`grantDeletesStoredData`）。
+  bool script_grant_deletes_data(pg::Package const &pack, std::vector<std::wstring> const &granted) const {
+    return pg::grant_deletes_stored_data(pg::script_grant(plugin_grants(), pack.id),
+                                         pg::selected_capabilities(granted, pack.permissions),
+                                         script_storage_bytes(pack));
   }
 
   // 勾选或取消一项（共享页的 toggleCapability）：依赖的一起勾上、依赖它的一起取消、互斥的那一项禁用并写明原因。复选框就地更新，焦点留在刚点的那一项上。
@@ -20716,7 +22876,16 @@ private:
     if (!pack || state.busy)
       return;
     state.granted = pg::toggle_capability(state.granted, capability, checked, pack->permissions);
-    for (auto const &item : pg::grant_items(pg::sort_capabilities(pack->permissions), state.granted, state.busy))
+    // 改了勾选，删除数据要重新确认。
+    if (state.deletion_shown) {
+      state.deletion_shown = false;
+      if (auto deletion = state.deletion.get())
+        deletion.Visibility(Visibility::Collapsed);
+      if (auto shown = state.dialog.get())
+        shown.PrimaryButtonText(hstring(pg::grant_dialog_confirm));
+    }
+    for (auto const &item : pg::grant_items(pg::sort_capabilities(pack->permissions), state.granted, state.busy,
+                                            pg::has_extended_command(*pack)))
       for (auto const &entry : state.boxes) {
         if (entry.capability != item.capability)
           continue;
@@ -20736,6 +22905,13 @@ private:
     const auto *pack = plugin_script_pack(state.id);
     if (state.busy || !pack)
       return;
+    // 这次授权会删掉存下的数据：第一次只把删除说清楚，再按一次才写（共享页的 `useScriptGrantDialog`）。
+    if (script_grant_deletes_data(*pack, state.granted) && !state.deletion_shown) {
+      state.deletion_shown = true;
+      if (state.refresh)
+        state.refresh();
+      return;
+    }
     state.busy = true;
     state.error.clear();
     const auto generation = state.generation;
@@ -20758,8 +22934,259 @@ private:
       state.refresh();
   }
 
-  // 一个脚本插件（共享页的 ScriptPluginDetailView）：它在什么时候运行、申请了什么、授予了什么、输入法有没有停用它、排第几个执行，以及启用（经授权对话框）、调整授权和删除。
+  // 读一个脚本插件的设置值和存储大小（共享页的 `useScriptPluginState`）：换了插件或内容之后先丢掉旧的状态和草稿，授权写过之后（`plugin_script_state_stale_`）保留草稿重读一次；读到后重画详情。
+  void load_script_state(pg::Package const &pack) {
+    const auto key = pack.id + L"\n" + pack.content_hash;
+    if (key != plugin_script_state_key_) {
+      plugin_script_state_key_ = key;
+      plugin_script_state_id_ = pack.id;
+      plugin_script_state_.reset();
+      plugin_script_state_error_.clear();
+      plugin_script_draft_.clear();
+      plugin_script_failure_key_.clear();
+      plugin_script_failure_.clear();
+      plugin_script_saving_ = false;
+      plugin_script_saved_ = false;
+      plugin_script_state_stale_ = true;
+    }
+    if (!plugin_script_state_stale_ || indexing_)
+      return;
+    plugin_script_state_stale_ = false;
+    const auto generation = plugins_generation_;
+    run_host(
+        [id = pack.id] {
+          auto action = plugin_action(L"script_plugin_state");
+          action.SetNamedValue(L"id", JsonValue::CreateStringValue(hstring(id)));
+          return plugins_call(action, false, true);
+        },
+        [this, generation, key](Response const &response) {
+          if (key != plugin_script_state_key_)
+            return;
+          // 页面在读的时候重新载入过：这次的回答不算数，下一次画详情时再读。
+          if (generation != plugins_generation_) {
+            plugin_script_state_stale_ = true;
+            return;
+          }
+          if (auto state = plugin_script_state(response)) {
+            plugin_script_state_ = std::move(*state);
+            plugin_script_state_error_.clear();
+          } else {
+            plugin_script_state_error_ = plugin_failure(response, L"无法读取插件的设置和数据，请重试。");
+          }
+          redraw_plugins();
+        });
+  }
+
+  // 设置表单里改了一项（共享页 `ScriptSettingsForm` 的 `change`）：只改草稿，就地更新各项下面的问题和「保存设置」能不能按，不重画页面，焦点留在输入框里。
+  void change_script_setting(std::wstring const &key, pg::ScriptSettingValue value) {
+    plugin_script_draft_[key] = std::move(value);
+    plugin_script_failure_.clear();
+    plugin_script_failure_key_.clear();
+    plugin_script_saved_ = false;
+    update_script_settings_feedback();
+  }
+
+  // 草稿和读到的值不同、页面又查不出问题时「保存设置」才能按；每项下面写着页面查出的问题，或者宿主拒绝时说的那一项。
+  void update_script_settings_feedback() {
+    const auto *pack = plugin_script_pack(plugin_script_state_id_);
+    if (!pack || !plugin_script_state_)
+      return;
+    bool dirty = false, blocked = false;
+    for (auto const &setting : pack->settings) {
+      const auto found = plugin_script_draft_.find(setting.key);
+      const auto raw = found == plugin_script_draft_.end() ? pg::draft_setting_value(setting, plugin_script_state_->values)
+                                                           : found->second;
+      const auto value = pg::parsed_setting_value(setting, raw);
+      auto issue = pg::setting_issue(setting, value);
+      blocked = blocked || !issue.empty();
+      dirty = dirty || value != pg::setting_value(setting, plugin_script_state_->values);
+      if (issue.empty() && plugin_script_failure_key_ == setting.key)
+        issue = plugin_script_failure_;
+      const auto text = plugin_script_issue_texts_.find(setting.key);
+      if (text == plugin_script_issue_texts_.end())
+        continue;
+      if (auto block = text->second.get()) {
+        block.Text(hstring(issue));
+        block.Visibility(issue.empty() ? Visibility::Collapsed : Visibility::Visible);
+      }
+    }
+    if (plugin_script_save_)
+      plugin_script_save_.IsEnabled(!plugins_busy_ && !plugin_script_saving_ && dirty && !blocked);
+    if (auto status = plugin_script_status_.get()) {
+      const auto message = !plugin_script_failure_.empty() && plugin_script_failure_key_.empty()
+                               ? plugin_script_failure_
+                               : (plugin_script_saved_ && !dirty ? std::wstring(L"已保存。") : std::wstring());
+      status.Text(hstring(message));
+      status.Foreground(brush(plugin_script_failure_.empty() ? palette_.sub : danger_color()));
+      status.Visibility(message.empty() ? Visibility::Collapsed : Visibility::Visible);
+    }
+  }
+
+  // 「保存设置」：整份交给 set_script_settings。宿主拒绝某一项（`plugin_script_setting_invalid`，detail 说出是哪一项）时原因写在那一项下面，否则写在按钮旁边。
+  void save_script_settings() {
+    const auto *pack = plugin_script_pack(plugin_script_state_id_);
+    if (!pack || !plugin_script_state_ || plugin_script_saving_ || plugins_busy_)
+      return;
+    std::vector<std::pair<std::wstring, pg::ScriptSettingValue>> values;
+    for (auto const &setting : pack->settings) {
+      const auto found = plugin_script_draft_.find(setting.key);
+      const auto raw = found == plugin_script_draft_.end() ? pg::draft_setting_value(setting, plugin_script_state_->values)
+                                                           : found->second;
+      values.emplace_back(setting.key, pg::parsed_setting_value(setting, raw));
+    }
+    plugin_script_saving_ = true;
+    plugin_script_failure_key_.clear();
+    plugin_script_failure_.clear();
+    update_script_settings_feedback();
+    const auto key = plugin_script_state_key_;
+    run_host(
+        [id = pack->id, values = std::move(values)] {
+          JsonObject object;
+          for (auto const &[name, value] : values) {
+            if (auto const *flag = std::get_if<bool>(&value))
+              object.SetNamedValue(hstring(name), JsonValue::CreateBooleanValue(*flag));
+            else if (auto const *number = std::get_if<std::int64_t>(&value))
+              object.SetNamedValue(hstring(name), JsonValue::CreateNumberValue(static_cast<double>(*number)));
+            else
+              object.SetNamedValue(hstring(name), JsonValue::CreateStringValue(hstring(std::get<std::wstring>(value))));
+          }
+          auto action = plugin_action(L"set_script_settings");
+          action.SetNamedValue(L"id", JsonValue::CreateStringValue(hstring(id)));
+          action.SetNamedValue(L"values", object);
+          return plugins_call(action, false, true);
+        },
+        [this, key](Response const &response) {
+          if (key != plugin_script_state_key_)
+            return;
+          plugin_script_saving_ = false;
+          if (auto state = plugin_script_state(response)) {
+            plugin_script_state_ = std::move(*state);
+            plugin_script_draft_.clear();
+            plugin_script_saved_ = true;
+          } else {
+            plugin_script_failure_key_ = response_error(response) == L"plugin_script_setting_invalid"
+                                             ? pg::setting_error_key(response_detail(response))
+                                             : std::wstring();
+            plugin_script_failure_ = plugin_failure(response, L"设置没有保存，请重试。");
+          }
+          plugin_pending_focus_ = L"script-settings-save";
+          redraw_plugins();
+        });
+  }
+
+  // 「清除数据」：先确认，再经 clear_script_data 删掉这个插件的持久存储。
+  fire_and_forget clear_script_data(pg::Package pack) {
+    auto strong = get_strong();
+    if (plugins_busy_)
+      co_return;
+    if (!co_await confirm(L"清除数据", pg::script_clear_confirmation(pack, script_storage_bytes(pack)), L"清除"))
+      co_return;
+    if (!begin_plugin_action())
+      co_return;
+    const auto generation = plugins_generation_;
+    const auto key = plugin_script_state_key_;
+    run_host(
+        [id = pack.id] {
+          auto action = plugin_action(L"clear_script_data");
+          action.SetNamedValue(L"id", JsonValue::CreateStringValue(hstring(id)));
+          return plugins_call(action, false, true);
+        },
+        [this, generation, key](Response const &response) {
+          if (generation != plugins_generation_)
+            return;
+          if (auto state = plugin_script_state(response)) {
+            if (key == plugin_script_state_key_)
+              plugin_script_state_ = std::move(*state);
+          } else {
+            show_notice(plugin_failure(response, L"数据没有清除，请重试。"));
+          }
+          plugin_pending_focus_ = L"script-clear";
+          end_plugin_action(generation);
+        });
+    redraw_plugins();
+  }
+
+  // 详情里的「设置」一组（共享页的 `ScriptSettingsForm`）：清单 `[[script.settings]]` 每项一行，开关、下拉框、整数和文本框，改完按「保存设置」整份写入。
+  void build_script_settings(StackPanel const &page, pg::Package const &pack) {
+    plugin_script_issue_texts_.clear();
+    plugin_script_save_ = nullptr;
+    plugin_script_status_ = {};
+    if (!plugin_script_state_) {
+      if (!plugin_script_state_error_.empty()) {
+        auto group = add_group(page, L"设置");
+        auto error = group_note(plugin_script_state_error_);
+        error.Foreground(brush(danger_color()));
+        group.Children().Append(error);
+      }
+      return;
+    }
+    auto group = add_group(page, L"设置");
+    group.Children().Append(group_note(pg::script_settings_note));
+    const bool enabled = !plugins_busy_ && !plugin_script_saving_;
+    auto const &values = plugin_script_state_->values;
+    for (auto const &setting : pack.settings) {
+      if (!plugin_script_draft_.count(setting.key))
+        plugin_script_draft_[setting.key] = pg::draft_setting_value(setting, values);
+      const auto raw = plugin_script_draft_[setting.key];
+      auto issue = make_text(L"", 12, danger_color());
+      issue.TextWrapping(TextWrapping::Wrap);
+      issue.Visibility(Visibility::Collapsed);
+      A11y::SetLiveSetting(issue, Automation::Peers::AutomationLiveSetting::Assertive);
+      plugin_script_issue_texts_[setting.key] = make_weak(issue);
+      FrameworkElement control{nullptr};
+      if (setting.type == L"bool") {
+        auto const *flag = std::get_if<bool>(&raw);
+        control = toggle_control(setting.title, flag && *flag,
+                                 [this, key = setting.key](bool on) { change_script_setting(key, on); }, enabled, false);
+      } else if (setting.type == L"choice") {
+        std::vector<Option> options;
+        for (auto const &option : setting.options)
+          options.push_back({option.value, option.title});
+        auto const *current = std::get_if<std::wstring>(&raw);
+        control = select_control(
+            setting.title, std::move(options), current ? *current : std::wstring(),
+            [this, key = setting.key](std::wstring const &value) { change_script_setting(key, value); }, enabled, false);
+      } else {
+        TextBox input;
+        input.Width(setting.type == L"number" ? 120 : 240);
+        auto const *current = std::get_if<std::wstring>(&raw);
+        input.Text(hstring(current ? *current : std::wstring()));
+        if (setting.type == L"text")
+          input.MaxLength(static_cast<int32_t>(setting.max_length));
+        input.IsEnabled(enabled);
+        A11y::SetName(input, hstring(setting.title));
+        if (setting.type == L"number")
+          A11y::SetHelpText(input, hstring(L"整数，" + std::to_wstring(setting.min) + L" 到 " + std::to_wstring(setting.max)));
+        input.TextChanged([this, key = setting.key](Inspectable const &sender, TextChangedEventArgs const &) {
+          change_script_setting(key, std::wstring(sender.as<TextBox>().Text().c_str()));
+        });
+        control = input;
+      }
+      add_row(group, setting.type == L"bool" ? 0xE7E8 : 0xE713, setting.title, setting.description, control, issue);
+    }
+    auto status = make_text(L"", 13, palette_.sub);
+    status.TextWrapping(TextWrapping::Wrap);
+    status.Visibility(Visibility::Collapsed);
+    A11y::SetLiveSetting(status, Automation::Peers::AutomationLiveSetting::Polite);
+    plugin_script_status_ = make_weak(status);
+    auto save = button_control(L"保存设置", [this] { save_script_settings(); }, false);
+    plugin_script_save_ = save.as<Button>();
+    StackPanel actions;
+    actions.Spacing(10);
+    actions.Padding(Thickness{25, 14, 25, 14});
+    actions.Children().Append(status);
+    actions.Children().Append(save);
+    group.Children().Append(actions);
+    update_script_settings_feedback();
+    if (!indexing_ && plugin_pending_focus_ == L"script-settings-save") {
+      plugin_pending_focus_.clear();
+      focus_target_ = save;
+    }
+  }
+
+  // 一个脚本插件（共享页的 ScriptPluginDetailView）：它在什么时候运行、申请了什么、授予了什么、输入法有没有停用它、排第几个执行、清单声明的设置项、自带和存下的数据，以及启用（经授权对话框）、调整授权、清除数据和删除。
   void build_script_detail(StackPanel const &page, pg::Package const &pack) {
+    load_script_state(pack);
     plugin_view_header(page, pack.name);
     const auto *grants = plugin_grants();
     const auto *grant = pg::script_grant(grants, pack.id);
@@ -20797,7 +23224,8 @@ private:
           group_note(L"没有申请任何权限：只能知道发生了什么事件，读不到也改不了文字。"));
     for (auto const &capability : requested) {
       const auto label = pg::capability_label(capability);
-      plugin_summary_row(permissions, 0xE72E, label.title, label.description,
+      plugin_summary_row(permissions, 0xE72E, label.title,
+                         pg::capability_description(capability, pg::has_extended_command(pack)),
                          pg::contains(granted, capability) ? L"已授予" : L"未授予");
     }
 
@@ -20850,6 +23278,27 @@ private:
         plugin_pending_focus_ = can_up ? L"script-up" : L"script-switch";
     }
 
+    if (!pack.settings.empty())
+      build_script_settings(page, pack);
+
+    // 「数据」：随包的只读数据，以及授予过 `persist_data`（或存储里有数据）时已存的大小和「清除数据」。
+    FrameworkElement clear{nullptr};
+    const auto storage = script_storage_bytes(pack);
+    const bool persisting = pg::script_persisting(grant, storage);
+    if (pack.data_bytes > 0 || persisting) {
+      auto data = add_group(page, L"数据");
+      if (pack.data_bytes > 0)
+        plugin_summary_row(data, 0xE8B7, L"自带数据", std::wstring(pg::script_bundled_data_note),
+                           pg::format_kilobytes(pack.data_bytes));
+      if (persisting) {
+        plugin_summary_row(data, 0xE74E, L"已存数据", std::wstring(pg::script_stored_data_note),
+                           pg::format_kilobytes(storage));
+        clear = button_control(L"清除数据", [this, pack] { clear_script_data(pack); },
+                               !plugins_busy_ && storage > 0);
+        plugin_action_block(data, L"", {clear});
+      }
+    }
+
     auto safety = add_group(page, L"安全");
     safety.Children().Append(group_note(
         L"脚本插件在输入法里的沙箱中运行，只能做你授予的事，读不到文件和网络，也不会在密码框里运行。"));
@@ -20873,6 +23322,8 @@ private:
         chosen = up;
       else if (target == L"script-down")
         chosen = down;
+      else if (target == L"script-clear" && storage > 0)
+        chosen = clear;
       if (!chosen)
         chosen = control;
       focus_target_ = chosen;
@@ -21490,7 +23941,7 @@ private:
       voice_sync_.clear();
       local_model_views_.clear();
     }
-    const auto provider = document_.String(L"voice_input.asr_provider", L"doubao");
+    const auto provider = document_.String(L"voice_input.asr_provider", L"local");
     const bool system_voice = provider == L"system";
     const bool local_voice = provider == L"local";
     const bool service_voice = !system_voice && !local_voice;
@@ -21691,7 +24142,7 @@ private:
                             doubao ? L"测试豆包识别配置" : L"测试语音识别配置",
                             [this] { return asr_test_config(); },
                             [this] {
-                              const auto current = document_.String(L"voice_input.asr_provider", L"doubao");
+                              const auto current = document_.String(L"voice_input.asr_provider", L"local");
                               return vs::asr_test_disabled(
                                   current,
                                   vs::doubao_auth_mode(
@@ -22135,7 +24586,7 @@ private:
 
   // 「测试豆包识别配置」「测试语音识别配置」发给 msime_client_test_api_credential 的配置（asrServiceCredentialTestConfig）。
   JsonObject asr_test_config() const {
-    const auto provider = document_.String(L"voice_input.asr_provider", L"doubao");
+    const auto provider = document_.String(L"voice_input.asr_provider", L"local");
     auto string = [](std::wstring const &value) { return JsonValue::CreateStringValue(hstring(value)); };
     JsonObject config;
     config.SetNamedValue(L"provider", string(provider));
@@ -22208,7 +24659,7 @@ private:
 
   // 共享页的 onProviderChange（VoiceInputBasicsSection）：换上新服务的令牌、地址和模型，选系统识别时把「自动识别」换成 zh-CN。换到或换走本地模型时，模型列表像共享页的模型管理器重新挂载一样重读。
   void select_asr_provider(std::wstring const &provider) {
-    const auto previous = document_.String(L"voice_input.asr_provider", L"doubao");
+    const auto previous = document_.String(L"voice_input.asr_provider", L"local");
     if (provider == previous)
       return;
     const auto update = voice_provider_update(L"asr", provider, previous);
@@ -22700,7 +25151,7 @@ private:
     local_models_stale_ = false;
     const auto root = local_model_root();
     if (root.empty()) {
-      local_models_notice_ = *vs::local_model_error_message(L"local_model_invalid_root");
+      local_models_notice_ = *model_errors::error_message(L"local_model_invalid_root");
       return;
     }
     JsonObject request;
@@ -22716,14 +25167,14 @@ private:
             return;
           if (!response.ok) {
             local_models_notice_ =
-                vs::local_model_error_message(vs::local_model_error_code(response_error(response)))
+                model_errors::error_message(model_errors::error_code(response_error(response)))
                     .value_or(L"");
           } else {
             try {
               local_models_ = parse_local_models(
                   JsonObject::Parse(text(response.text)).GetNamedObject(L"value"));
             } catch (...) {
-              local_models_notice_ = *vs::local_model_error_message(L"");
+              local_models_notice_ = *model_errors::error_message(L"");
             }
           }
           redraw_voice();
@@ -22815,7 +25266,7 @@ private:
     }
     const auto root = local_model_root();
     if (root.empty()) {
-      local_models_notice_ = *vs::local_model_error_message(L"local_model_invalid_root");
+      local_models_notice_ = *model_errors::error_message(L"local_model_invalid_root");
       redraw_voice();
       return;
     }
@@ -22866,9 +25317,9 @@ private:
                 doc.SetString(L"voice_input.asr_model_path", path);
               }, false);
           } else {
-            const auto code = vs::local_model_error_code(response_error(response));
+            const auto code = model_errors::error_code(response_error(response));
             const auto message = import ? vs::local_model_import_error_message(code)
-                                        : vs::local_model_error_message(code);
+                                        : model_errors::error_message(code);
             local_models_notice_ =
                 message ? *message
                         : (import ? L"已取消导入「" : L"已取消下载「") + title + L"」。";
@@ -22895,7 +25346,7 @@ private:
       co_return;
     const auto root = local_model_root();
     if (root.empty()) {
-      local_models_notice_ = *vs::local_model_error_message(L"local_model_invalid_root");
+      local_models_notice_ = *model_errors::error_message(L"local_model_invalid_root");
       redraw_voice();
       co_return;
     }
@@ -22922,7 +25373,7 @@ private:
               }, false);
           } else {
             local_models_notice_ =
-                vs::local_model_error_message(vs::local_model_error_code(response_error(response)))
+                model_errors::error_message(model_errors::error_code(response_error(response)))
                     .value_or(L"");
           }
           local_model_removing_.erase(model.id);
@@ -23553,7 +26004,7 @@ private:
 
   // ---- 维护与诊断 ----
 
-  // 共享「维护与诊断」页（`pages/developer-page.tsx`）在 Windows 上的样子，顺序也相同：「输入法服务」（`input-method-service-section.tsx` 非 macOS、非 Linux 的一支）、「诊断日志」（`diagnostic-logs-section.tsx` 的 Windows 一支）、「数据目录」，最后是 Windows 独有的「设置文件」。macOS 的「卸载」一组不画，Windows 从系统的「应用」设置卸载。
+  // 共享「维护与诊断」页（`pages/developer-page.tsx`）在 Windows 上的样子，顺序也相同：「输入法服务」（`input-method-service-section.tsx` 非 macOS、非 Linux 的一支）、「诊断日志」（`diagnostic-logs-section.tsx` 的 Windows 一支）、「数据目录」，最后是 Windows 独有的「设置文件」；「命令行工具」一组排在「诊断日志」之后。macOS 的「卸载」一组不画，Windows 从系统的「应用」设置卸载。
   void build_dev_page(StackPanel const &page) {
     auto service = add_group(page, L"输入法服务");
     service.Children().Append(group_note(L"请求受监督的输入法服务重新启动。"));
@@ -23571,6 +26022,12 @@ private:
     bool_row(logs, 0xEBE8, L"TSF 端日志",
              L"排查应用内预编辑和输入延迟时开启。日志在内存中限量缓冲，并通过独立管道批量汇总，不记录按键、输入内容或候选文本。",
              L"diagnostic_log.tsf", false);
+
+    // `msime-mcp candidates` 的开关（#9663）：命令按用户自己的词库给出候选，等于把打过的词交给能运行它的任何程序，所以缺省关闭。键在 `diagnostic_log` 下，与两个日志开关一样只属于本机，不随云同步、不进设置文件；bool_row 只改这一个键，同组的 server、tsf 原样保留。安装器把 msime-mcp.exe 放在安装目录的 server 文件夹里（msime_setup.iss）。
+    auto command_line = add_group(page, L"命令行工具");
+    bool_row(command_line, 0xE756, L"命令行查询候选",
+             L"允许安装目录下 server 文件夹里的 msime-mcp.exe candidates 命令按你现在的输入方案、设置和词库，输出一串拼音或按键会给出的候选，供编写测试和演示程序使用。词库里有你打过的词，任何能运行这个命令的程序都能借此读到它们，不用时请保持关闭；关闭时命令会提示并以错误码退出。",
+             L"diagnostic_log.command_line_candidates", false);
 
     // 数据目录登记在安装器写的 HKLM DataDir 里（common/StateDirectory.h），32 位和 64 位 TSF DLL 与 Server 都按它解析状态根，改它要管理员权限，搬迁时还要先停掉 Server 和看门狗；这些安装器都已经做了（「选择数据位置」一步、MigrateUserDataDir 只复制、安装成功后 FinishDataDirMove 才删旧目录），所以这里没有共享页的「选择位置…」，只显示和打开，搬迁的办法写在组注里指向安装器。路径照共享页的 `<code>` 用 Consolas。
     auto data = add_group(page, L"数据目录");
@@ -24088,6 +26545,20 @@ private:
     update_result.Spacing(8);
     auto update_result_frame = append_row_frame(updates, update_result);
     update_result_frame.Padding(Thickness{row_inset, 10, row_inset, 10});
+    // 「更新通道」（偏好 `update_channel`）：检查更新和 Server 的后台提醒都按它选版本。选项在 AboutPageModel.h；换了通道，上面的结果作废（on_update_channel_changed）。
+    {
+      std::vector<Option> channels;
+      for (auto const &option : msime::settings::update_channel_options)
+        channels.push_back({std::wstring(option.value), std::wstring(option.label)});
+      add_row(updates, 0xE7C1, L"更新通道", std::wstring(msime::settings::update_channel_description),
+              select_control(L"更新通道", std::move(channels), current_update_channel(),
+                             [this](std::wstring const &value) {
+                               change([&](PreferencesDocument &doc) {
+                                 doc.SetString(L"update_channel", value);
+                               }, false);
+                               on_update_channel_changed();
+                             }));
+    }
     if (!indexing_) {
       update_button_ = update_button;
       update_lines_ = update_lines;
@@ -24096,6 +26567,8 @@ private:
       update_result_ = update_result;
       update_result_frame_ = update_result_frame;
       show_update_outcome();
+      if (!update_checking_ && !update_outcome_)
+        load_pending_update();
     }
     url_row(updates, L"其他平台下载", L"在水杉输入法官网的下载页获取其他平台的版本。",
             download_url);
@@ -24588,6 +27061,8 @@ private:
   bool refresh_queued_ = false;
   bool closed_ = false;
   bool pending_save_ = false;
+  // 写盘连续失败的次数；大于零时文档里有没存下的修改，见 keep_unsaved_edit。
+  std::size_t pending_save_failures_ = 0;
   bool preview_visible_ = true;
   std::wstring preview_sample_;
   std::optional<bool> preview_dark_;
@@ -24679,6 +27154,8 @@ private:
   Border lexicon_results_host_{nullptr};
   // 页上正画着的操作结果条，查询条件变化时就地收起它（clear_lexicon_feedback_for_query）；没画时为空。
   InfoBar lexicon_feedback_bar_{nullptr};
+  // 刚有新的操作结果，结果条画出来后要滚进视野一次（make_lexicon_feedback）。
+  bool lexicon_feedback_reveal_ = false;
   bool lexicon_results_queued_ = false;
   Microsoft::UI::Dispatching::DispatcherQueueTimer lexicon_search_timer_{nullptr};
   // 导入导出的文件格式，跨重画保留；换到不能用它的词库类型时退回标准格式。
@@ -24746,6 +27223,9 @@ private:
   std::vector<std::pair<std::wstring, std::wstring>> sentence_pack_statuses_;
   std::set<std::wstring> sentence_pack_installing_;
   std::set<std::wstring> sentence_pack_removing_;
+  std::set<std::wstring> grammar_updates_available_;
+  bool grammar_updates_checking_ = false;
+  std::wstring grammar_updates_notice_;
   // 「输入 › 候选与联想」云候选服务的草稿（共享页 CloudCandidatesSection 的组件状态）和它出自的那份文档配置（序列化后的文字）；文档里的配置变了草稿作废。
   std::optional<JsonObject> cloud_provider_draft_;
   std::wstring cloud_provider_base_;
@@ -24827,6 +27307,8 @@ private:
 
   // 检查更新：状态跨页面重建保留；控件是「关于」页当前的那一组。
   bool update_checking_ = false;
+  // 每次检查和每次换通道加一；回来的结果代次不对就丢掉，免得旧通道的结果盖住新通道的。
+  uint64_t update_generation_ = 0;
   std::optional<UpdateOutcome> update_outcome_;
   Button update_button_{nullptr};
   StackPanel update_lines_{nullptr};
@@ -24871,8 +27353,27 @@ private:
   bool cloud_sending_ = false;
   std::wstring cloud_notice_;
   uint64_t cloud_generation_ = 0;
-  std::pair<std::wstring, std::wstring> cloud_configuration_;
+  CloudClipboardConfiguration cloud_configuration_;
   std::optional<CloudClipboardRelayDraft> cloud_relay_draft_;
+  // WebDAV「测试连接」：是否正在跑和上一次的结果说明。cloud_probe_generation_ 在草稿作废时递增，作废还没回来的测试。
+  bool cloud_probe_busy_ = false;
+  std::wstring cloud_probe_message_;
+  uint64_t cloud_probe_generation_ = 0;
+
+  // 词库页的「词库同步」：存着的网盘配置和草稿，「测试连接」是否在跑、结果和代次（作废还没回来的测试）；读到的概况和设备、上一次操作的错误码和结果说明，以及是否在做一件操作、这次进入页面是否已经以 opened 同步过。dsync_generation_ 在配置变化或重新进入页面时递增，作废在途的回答。
+  DictionarySyncConfiguration dsync_configuration_;
+  std::optional<DictionarySyncDraft> dsync_draft_;
+  bool dsync_probe_busy_ = false;
+  std::wstring dsync_probe_message_;
+  uint64_t dsync_probe_generation_ = 0;
+  std::optional<ds::Status> dsync_status_;
+  std::optional<ds::DeviceGroups> dsync_devices_;
+  std::wstring dsync_error_;
+  std::wstring dsync_notice_;
+  bool dsync_busy_ = false;
+  bool dsync_checked_ = false;
+  uint64_t dsync_generation_ = 0;
+  ds::StatusReadOrder dsync_status_reads_;
 
   // 「打字统计」页：读到的状态、出错说明、选中的日子和标签，跨页面重建保留，每次进入页面时重置（共享页的组件状态）。stats_generation_ 在进入页面时递增，作废上一次留下的请求；stats_request_ 是在途请求的序号，0 表示没有；两个时间点是共享页轮询用的 requestStartedAt 和 lastRequestAt。
   std::optional<StatisticsStatus> stats_;
@@ -24918,10 +27419,38 @@ private:
   // 脚本插件的授权和输入法记下的停用（`script_grants` 的回答），还没读到时为空，跨页面重建保留。plugin_grant_ 是开着的授权对话框。
   std::optional<pg::ScriptGrants> plugin_scripts_;
   ScriptGrantDialog plugin_grant_;
+  // 脚本插件详情读到的设置值和存储大小（`script_plugin_state`）和它属于哪个包（id 加内容哈希）；授权写过之后 stale 为真，详情重画时重读。draft 是设置表单的草稿（数字项存原文），failure 是保存被拒的原因和它落到的那一项（为空时写在按钮旁边）。issue_texts、save、status 是这一次画出来的表单控件，改草稿时就地更新。
+  std::optional<pg::ScriptPluginState> plugin_script_state_;
+  std::wstring plugin_script_state_key_;
+  std::wstring plugin_script_state_id_;
+  std::wstring plugin_script_state_error_;
+  bool plugin_script_state_stale_ = true;
+  std::map<std::wstring, pg::ScriptSettingValue> plugin_script_draft_;
+  std::wstring plugin_script_failure_key_;
+  std::wstring plugin_script_failure_;
+  bool plugin_script_saving_ = false;
+  bool plugin_script_saved_ = false;
+  std::map<std::wstring, weak_ref<TextBlock>> plugin_script_issue_texts_;
+  Button plugin_script_save_{nullptr};
+  weak_ref<TextBlock> plugin_script_status_;
   // 插件库的类型筛选和搜索框里的文字（macOS 的 `libraryFilter`），打开详情再回来、离开页面再回来都保留；搜索结果落到插件页时清掉。底部「插件导入说明」是否展开，跨页面重建保留。
   std::wstring plugin_library_kind_{pg::library_all};
   std::wstring plugin_library_query_;
   bool plugin_import_help_open_ = false;
+  // 设置页插件编辑器（共享页的 `PluginEditorView`）：plugin_view_ 为 editor 时打开，plugin_view_kind_ 和 plugin_view_id_ 是要编辑的包，新建时为空。plugin_draft_ 是表单里的草稿，plugin_draft_baseline_ 是刚读出或刚选好类型时的样子，两者不同就是有没保存的修改；新建时还没选类型、编辑时还没读到包时两者都为空。plugin_editor_generation_ 在打开和离开编辑器时递增，作废在途的读取。plugin_editor_error_ 是读不出包的原因，plugin_editor_save_error_ 是宿主拒绝保存时的说明，plugin_editor_bulk_ 和 plugin_editor_bulk_issue_ 是「批量添加」框里的文字和读不出的那一行，plugin_editor_shown_ 是长列表画出的行数。提示、保存和「添加到列表」按钮是当前那一组，随输入就地更新。plugin_just_saved_ 是刚在编辑器里保存的包，它的详情顶上说明还差哪一步才能用上，回到列表或再打开编辑器时清掉。
+  std::optional<pg::AuthoringDraft> plugin_draft_;
+  std::optional<pg::AuthoringDraft> plugin_draft_baseline_;
+  uint64_t plugin_editor_generation_ = 0;
+  std::wstring plugin_editor_error_;
+  std::wstring plugin_editor_save_error_;
+  std::wstring plugin_editor_bulk_;
+  std::wstring plugin_editor_bulk_issue_;
+  std::size_t plugin_editor_shown_ = pg::editor_row_page;
+  TextBlock plugin_editor_warning_{nullptr};
+  Button plugin_editor_save_{nullptr};
+  Button plugin_editor_bulk_add_{nullptr};
+  TextBlock plugin_editor_bulk_warning_{nullptr};
+  std::optional<std::pair<std::wstring, std::wstring>> plugin_just_saved_;
 
   // 「主题」页和「候选窗口」页预览用的皮肤目录：上次扫描到的包、被忽略的目录和皮肤目录，跨页面重建保留。skins_pending_ 是在途的扫描，skins_busy_ 是显示「正在读取」的那种（第一次和「刷新皮肤」）；skins_signature_ 是上次落地的目录回答，自动重扫据此判断有没有变化。skins_revision_ 在每次落地时递增，作废还在解码的旧图片。skin_preview_overrides_ 是卡片上选的预览明暗，连同选它时的当前明暗。color_picker_open_ 是有取色器开着，这时不重画页面。
   std::vector<SkinPackage> skin_packages_;
@@ -25020,6 +27549,7 @@ private:
   TextBlock dictionary_update_note_{nullptr};
   Microsoft::UI::Dispatching::DispatcherQueueTimer dictionary_update_timer_{nullptr};
   Microsoft::UI::Dispatching::DispatcherQueueTimer save_timer_{nullptr};
+  Microsoft::UI::Dispatching::DispatcherQueueTimer save_retry_timer_{nullptr};
   // A redraw held back until the click that activated the window has been delivered.
   bool pointer_down_ = false;
   bool refresh_after_pointer_ = false;
@@ -25028,9 +27558,18 @@ private:
 
 // Without a XAML compiler the application supplies the metadata provider itself; the WinUI controls' own provider answers for every type this window uses.
 struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
+  explicit App(msime::settings::SettingsInstance &instance) : instance_(instance) {}
   void OnLaunched(LaunchActivatedEventArgs const &) {
     Resources().MergedDictionaries().Append(XamlControlsResources());
-    window_ = make<MainWindow>(route_page());
+    auto main = make_self<MainWindow>(route_page());
+    window_ = main.as<Window>();
+    HWND handle = nullptr;
+    check_hresult(window_.as<::IWindowNative>()->get_WindowHandle(&handle));
+    if (!instance_.listen(handle, [weak = main->get_weak()](std::string_view route) {
+          const auto window = weak.get();
+          return window && window->open_route(route);
+        }))
+      throw std::runtime_error("Settings activation unavailable");
     window_.Activate();
   }
 
@@ -25047,6 +27586,7 @@ struct App : ApplicationT<App, Markup::IXamlMetadataProvider> {
   }
 
 private:
+  msime::settings::SettingsInstance &instance_;
   XamlTypeInfo::XamlControlsXamlMetaDataProvider provider_;
   Window window_{nullptr};
 };
@@ -25056,7 +27596,13 @@ private:
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR command, int) {
   const int gameProfileResult = msime::windows::game_profile::run_if_requested(command);
   if (gameProfileResult >= 0) return gameProfileResult;
+  const auto route = msime::windows::requested_surface_route("settings");
+  if (!route) return 2;
+  msime::settings::SettingsInstance instance;
+  const auto activation = instance.start(*route);
+  if (activation != msime::settings::SettingsInstance::Start::primary)
+    return activation == msime::settings::SettingsInstance::Start::forwarded ? 0 : 1;
   init_apartment(apartment_type::single_threaded);
-  Application::Start([](auto &&) { make<App>(); });
+  Application::Start([&instance](auto &&) { make<App>(instance); });
   return 0;
 }

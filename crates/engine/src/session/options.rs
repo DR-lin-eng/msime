@@ -30,8 +30,12 @@ pub struct SessionOptions {
     pub vietnamese_input_method: VietnameseInputMethod,
     /// Where the Vietnamese scheme puts the tone on `oa`, `oe` and `uy`.
     pub vietnamese_tone_style: VietnameseToneStyle,
+    /// 韩语实体键盘布局，缺省两套式。
+    pub korean_layout: crate::KoreanLayout,
     /// Where `msime-cantonese.db` is; empty when the host has none. Read only when Cantonese is activated, which fails without it.
     pub cantonese_dictionary: PathBuf,
+    /// 独立粤语双拼入口强制按两键码解释，普通粤拼入口仍按现有规则自动识别。
+    pub force_cantonese_shuangpin: bool,
     /// Where `msime-zhuyin.db` is; empty when the host has none. Read only when Zhuyin is activated, which fails without it.
     pub zhuyin_dictionary: PathBuf,
     /// Where `msime-stroke.db` is; empty when the host has none. Read only when Stroke is activated, which fails without it.
@@ -48,6 +52,8 @@ pub struct SessionOptions {
     /// `autocorrect_type` bits; 0 keeps the user's spelling. Either of transposition and neighbor also enables missing and extra letters, and on inputs of three or more complete syllables offers a sentence that reads one syllable as a typo. Committing the raw letters while a correction is offered turns correction off for that exact input.
     pub autocorrect_types: u32,
     pub helpcode: bool,
+    /// 一码辅助码严格筛选，默认关闭以保持原有重排行为。
+    pub strict_quanpin_helpcode: bool,
     /// 双拼辅助码的触发方式（Windows `[helpcode]` 组的双拼专属键）；只在双拼方案下生效。
     pub shuangpin_helpcode_modes: ShuangpinHelpcodeModes,
     pub chinese_punctuation: bool,
@@ -65,6 +71,8 @@ pub struct SessionOptions {
     pub first_page_rows: usize,
     /// 只出单字：中文方案的候选去掉含汉字的词和整句、只留单个汉字（见 [`SchemeType::filters_to_single_characters`]），选一个字后剩下的拼写接着组字。
     pub single_character_only: bool,
+    /// 移动光标后编辑光标后的部分（默认关）：全拼、双拼的组字光标停在中间时，光标前的原文固定为它当前的最佳转换，候选是光标后那段原文的候选，首选前面接上固定的部分；选中一条只消耗它的音节，固定部分和已选部分一起留到组字结束。规则见 `session/caret_edit.rs`。
+    pub caret_edit_suffix: bool,
     pub fuzzy_pinyin: FuzzyPinyinOptions,
     pub frequency: FrequencyAdjustmentOptions,
     pub local_modes: LocalModeOptions,
@@ -74,6 +82,8 @@ pub struct SessionOptions {
     pub expressive: MixedExpressiveOptions,
     /// 日文混输（实验选项，默认关）：全拼、双拼组字时，整段输入像日文罗马字就混进一行日文转换（来源 `MixedJapanese`），见 `ImeSession::mixed_japanese_conversion`。需要会话带日文（`enabled_schemes` 含 `JapaneseRomaji`）和日文模型；开着时建会话就在后台预热模型。
     pub japanese_mixing: bool,
+    /// 连续多语言输入所选的语言；默认空集合关闭，少于两种不生成混合行。
+    pub multilingual_languages: Vec<crate::multilingual::Language>,
     pub wubi: WubiInputOptions,
     /// Learn word sequences and pick pairs; also needs `learning`.
     pub personal_context: bool,
@@ -92,7 +102,7 @@ pub struct SessionOptions {
     pub quick_phrase_table: Vec<QuickPhraseEntry>,
     /// 普通候选是否追加编码匹配的快捷短语。仅 macOS 桌面宿主打开；其他宿主保留独立 K 模式。
     pub quick_phrase_candidates: bool,
-    /// 快捷短语参与调频：追加进普通候选的整组短语有自己的槽位（`quick_phrase_slots` 日志表），越过它选普通候选让整组后退（最多退到首页末位），选中组内短语让整组前移。关掉时组固定追加在末尾，槽位记录保留但不读。
+    /// 快捷短语参与调频：追加进普通候选的整组短语有自己的槽位（`quick_phrase_slots` 日志表），越过它选普通候选让整组后退（最多退到首页末位），选中组内短语让整组前移。关掉时组固定在默认位置（首页最后几格，普通候选不满一页时接在它们之后，见 `default_quick_phrase_slot`），槽位记录保留但不读。
     pub quick_phrase_frequency: bool,
     /// 宿主会把候选转成繁体输出：拆字（`C`）行按转换后的字形去重，免得一屏出现两个相同的繁体字。
     pub chaizi_traditional_output: bool,
@@ -110,7 +120,9 @@ impl SessionOptions {
             shuangpin_preedit_uses_raw: true,
             vietnamese_input_method: VietnameseInputMethod::Telex,
             vietnamese_tone_style: VietnameseToneStyle::Modern,
+            korean_layout: crate::KoreanLayout::Dubeolsik,
             cantonese_dictionary: PathBuf::new(),
+            force_cantonese_shuangpin: false,
             zhuyin_dictionary: PathBuf::new(),
             stroke_dictionary: PathBuf::new(),
             japanese_dictionary: PathBuf::new(),
@@ -120,6 +132,7 @@ impl SessionOptions {
             helpcode_fallback_resources: None,
             autocorrect_types: 0,
             helpcode: true,
+            strict_quanpin_helpcode: false,
             shuangpin_helpcode_modes: ShuangpinHelpcodeModes::default(),
             chinese_punctuation: true,
             paired_punctuation: true,
@@ -130,6 +143,7 @@ impl SessionOptions {
             sentence_alternatives: false,
             first_page_rows: DEFAULT_FIRST_PAGE_ROWS,
             single_character_only: false,
+            caret_edit_suffix: false,
             fuzzy_pinyin: FuzzyPinyinOptions::default(),
             frequency: FrequencyAdjustmentOptions::default(),
             local_modes: LocalModeOptions::default(),
@@ -137,6 +151,7 @@ impl SessionOptions {
             english: EnglishInputOptions::default(),
             expressive: MixedExpressiveOptions::default(),
             japanese_mixing: false,
+            multilingual_languages: Vec::new(),
             wubi: WubiInputOptions::default(),
             personal_context: true,
             next_word_prediction: false,
@@ -182,6 +197,8 @@ pub struct SessionSnapshot {
     pub wubi_unique_four_code: bool,
     pub shuangpin_profile: String,
     pub candidate_sources: Vec<CandidateSource>,
+    /// 当前唯一的连续混合行所携带的语言边界；没有该行时为空，不随普通候选重排而错位。
+    pub multilingual_conversion: Option<crate::multilingual::Conversion>,
     /// Helpcodes or correction hints.
     pub candidate_annotations: Vec<String>,
     /// Whether each candidate answers the whole key rather than a prefix of it or a completion past it.
@@ -192,4 +209,8 @@ pub struct SessionSnapshot {
     pub conversion: String,
     /// 整句改字的光标和光标处那一段，按 `conversion` 的字（Unicode 标量）计：光标在第 `.0` 个字之前，`.0..1` 是候选所替换的那一段；光标在句末时两者都等于字数。不在改字时为 `(0, 0)`。
     pub conversion_focus: (usize, usize),
+    /// 光标后编辑（`SessionOptions::caret_edit_suffix`）正在生效：候选是光标后那段的，首选前面接着 `caret_edit_prefix`。宿主据此显示模式提示。
+    pub caret_edit_suffix: bool,
+    /// 光标后编辑里首选前面固定的那段文字（已经交出去的部分加上光标前那段的最佳转换）。`candidates` 仍是光标后那段的行，首选显示为这段文字接上 `candidates[0].word`，宿主可以把这几个字画淡；选中首选时上屏的是光标前那段的转换接上这一行。模式不生效时为空。
+    pub caret_edit_prefix: String,
 }

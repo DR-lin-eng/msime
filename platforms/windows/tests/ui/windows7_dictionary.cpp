@@ -36,7 +36,8 @@ struct TemporaryState {
   ~TemporaryState() { std::error_code error; std::filesystem::remove_all(path, error); }
 };
 void pump(const std::function<bool()>& condition, const char* stage) {
-  const auto deadline = GetTickCount64() + 15000;
+  // 词库页首次创建会等待隔离的共享存储和后台线程；冷启动的 Windows CI 可能超过普通控件的 10 秒预算。
+  const auto deadline = GetTickCount64() + 30000;
   for (;;) {
     MSG message{};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -153,6 +154,10 @@ int main(int argc, char** argv) {
   { std::ofstream output(import_path, std::ios::binary); output << "合成导入\timported\t3456\n"; assert(output.good()); }
   click(dictionary_import);
   assert(text(dictionary_notice).find("导入完成") != std::string::npos && SendMessageW(GetDlgItem(body, dictionary_entries), LB_GETCOUNT, 0, 0) == 2);
+  // 个人词库导入遇到维护锁时必须把可操作的原因显示出来，而不是退化成泛化的导入失败。
+  reject = true; click(dictionary_import);
+  assert(text(dictionary_notice).find("词库正被输入法占用") != std::string::npos);
+  reject = false;
   // UTF-16 文件经正式格式模型解码，emoji 代理对与换行不丢失。
   { std::ofstream output(import_path, std::ios::binary); const std::wstring record = L"合成🙂\tunicode\t4567\r\n"; output.put(static_cast<char>(0xff)); output.put(static_cast<char>(0xfe)); output.write(reinterpret_cast<const char*>(record.data()), static_cast<std::streamsize>(record.size() * sizeof(wchar_t))); assert(output.good()); }
   click(dictionary_import); assert(SendMessageW(GetDlgItem(body, dictionary_entries), LB_GETCOUNT, 0, 0) == 3);

@@ -77,6 +77,10 @@ public:
   void candidate_rendered(const FocusLease &lease, uint64_t generation) {
     candidates_.rendered(lease, generation);
   }
+  // 候选界面的绘制请求（#9519）：按键和点选的渲染屏障要等回执时调用它，叫醒候选窗立即读快照绘制，不等它下一次轮询。任何线程都可能调用；回调只能发信号（如 SetEvent），不得回调本控制器或候选信箱。候选窗销毁前传空函数撤掉，返回后旧回调不会再被调用。
+  void set_candidate_render_request(std::function<void()> request) {
+    candidates_.set_render_request(std::move(request));
+  }
   std::optional<ModePresentation> mode_view();
   // Definitive: is a focused client's mode on file at all. mode_view() returns
   // nothing for contention as well, so a UI needs this to tell busy from gone.
@@ -85,9 +89,9 @@ public:
   // Empty means stale, busy or unavailable; never a guessed mode.
   std::optional<bool> dedicated_english_state(const FocusLease &lease);
   // Exit the Engine's dedicated-English mode for this exact focus lease.
-  bool exit_dedicated_english(const FocusLease &lease);
+  bool exit_dedicated_english(const FocusLease &lease, bool *changed = nullptr);
   // 托盘「英文候选模式」：把这个焦点租约的 Engine 英文模式设成 `enabled`。和退出一样只在外部工作线程上调用，最多等 2 秒；成功才返回 true。
-  bool set_dedicated_english(const FocusLease &lease, bool enabled);
+  bool set_dedicated_english(const FocusLease &lease, bool enabled, bool *changed = nullptr);
   // Control-thread lease validation, not a best-effort UI snapshot. Waits for
   // an existing focus transaction instead of treating a busy gate as loss.
   bool focus_current(const FocusLease &lease);

@@ -182,6 +182,73 @@ fn linux_runtime_state_directory_treats_a_missing_locator_as_first_run() {
     );
 }
 
+/// 首次运行：设置进程启动时没有 runtime-options.json，状态目录落在本应用的数据目录；首次配置写出带 `preferences_directory` 的文件后，启动时定下的目录就不再是输入法读写的那个，设置必须交给新进程（Ubuntu 24.04 实机验收：更新通道写进了 `~/.local/share/app.msime.linux`，重开后回到稳定版）。
+#[test]
+fn linux_first_run_state_directory_moves_once_setup_publishes_the_options() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("msime-client");
+    let options = state.join("runtime-options.json");
+    let fallback = root.path().join("app.msime.linux");
+
+    let directory =
+        super::LinuxStateDirectory::resolve(None, Some(options.clone()), fallback.clone()).unwrap();
+    assert_eq!(directory.startup, fallback);
+    assert!(!directory.moved());
+
+    std::fs::create_dir(&state).unwrap();
+    std::fs::write(
+        &options,
+        serde_json::json!({ "preferences_directory": state }).to_string(),
+    )
+    .unwrap();
+    assert!(directory.moved());
+
+    // 新进程按准备好的文件定目录，之后不再换。
+    let restarted =
+        super::LinuxStateDirectory::resolve(None, Some(options.clone()), fallback.clone()).unwrap();
+    assert_eq!(restarted.startup, state);
+    assert!(!restarted.moved());
+}
+
+/// 不该交接的情况：文件没写 `preferences_directory`（仍用数据目录）、文件坏了（新进程同样起不来）、目录由 `MSIME_CLIENT_STATE_DIR` 指定、根本没有给出 runtime-options。
+#[test]
+fn linux_state_directory_stays_put_unless_prepared_options_name_another_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let options = root.path().join("runtime-options.json");
+    let fallback = root.path().join("app.msime.linux");
+
+    let directory =
+        super::LinuxStateDirectory::resolve(None, Some(options.clone()), fallback.clone()).unwrap();
+    std::fs::write(&options, r#"{"resources":"/synthetic"}"#).unwrap();
+    assert!(!directory.moved());
+    std::fs::write(&options, "{").unwrap();
+    assert!(!directory.moved());
+
+    let overridden = root.path().join("override");
+    std::fs::write(
+        &options,
+        serde_json::json!({ "preferences_directory": root.path().join("prepared") }).to_string(),
+    )
+    .unwrap();
+    let directory = super::LinuxStateDirectory::resolve(
+        Some(overridden.clone().into_os_string()),
+        Some(options.clone()),
+        fallback.clone(),
+    )
+    .unwrap();
+    assert_eq!(directory.startup, overridden);
+    assert!(!directory.moved());
+
+    let directory = super::LinuxStateDirectory::resolve(None, None, fallback.clone()).unwrap();
+    assert_eq!(directory.startup, fallback);
+    assert!(!directory.moved());
+
+    assert!(
+        super::LinuxStateDirectory::resolve(Some("relative".into()), None, fallback.clone())
+            .is_err()
+    );
+}
+
 #[test]
 fn cantonese_zhuyin_and_stroke_are_offered_only_with_their_installed_dictionary() {
     use msime_client_core::host_surface::{HostCapabilities, HostPlatform};
@@ -709,6 +776,8 @@ fn ios_keyboard_ai_preferences_resolve_origin_tokens_and_disable_incomplete_draf
 #[test]
 fn ios_voice_doubao_configuration_uses_shared_auth_and_current_preferences() {
     let mut preferences = msime_client_core::preferences::Preferences::default();
+    // 出厂服务是本地识别，这里要的是豆包。
+    preferences.voice_input.asr_provider = "doubao".into();
     preferences.voice_input.asr_token = "synthetic-key".into();
     preferences.voice_input.asr_app_key = "stale-app".into();
     preferences.voice_input.doubao_auth_mode = "api_key".into();
@@ -2569,7 +2638,17 @@ fn preferences_recovery_serializes_the_fields_the_settings_page_reads() {
     assert!(untouched["backupPath"].is_null());
 }
 
-/// A re-check from the settings page reads the input source list and the system-wide input method directory again and reports the rest of the start-time result unchanged, without running the install a second time.
+/// Caps Lock 快捷键关闭时不请求输入监控权限，开启时请求。
+#[cfg(target_os = "macos")]
+#[test]
+fn caps_lock_hid_permission_request_follows_the_shortcut_preference() {
+    let mut preferences = msime_client_core::preferences::Preferences::default();
+    assert!(!super::should_request_caps_lock_hid_access(&preferences));
+    preferences.keybindings.switch_language_caps_lock = true;
+    assert!(super::should_request_caps_lock_hid_access(&preferences));
+}
+
+/// 设置页重新检查时读取输入源列表和系统输入法目录，并保持启动时结果不变，不会再次执行安装。
 #[cfg(target_os = "macos")]
 #[test]
 fn input_source_status_rereads_only_what_the_user_can_change() {

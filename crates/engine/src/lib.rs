@@ -3,6 +3,8 @@
 //! This crate replaces the C++ MSIME-Engine that used to be fetched from `engine-lock.json` and patched by overlay scripts. It owns the input algorithms; `msime-input-runtime` keeps orchestrating hosts and does not duplicate any of it.
 //!
 //! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
+//!
+//! 引擎在运行时读写的每个文件（词库、模型、学习日志、代次目录）的格式、版本检查、产出方与数据许可证见仓库里的 `docs/data-formats.md`；代码注释里的 `data-formats.md §N` 指它的章节。
 
 pub mod adaptive;
 pub mod assets;
@@ -19,9 +21,11 @@ pub mod host;
 mod ime;
 mod japanese;
 mod korean;
+pub use korean::KoreanLayout;
 pub mod language_dictionary;
 mod lattice;
 mod local;
+pub mod multilingual;
 mod nine_key;
 mod nine_key_shuangpin;
 pub mod ordering;
@@ -36,6 +40,7 @@ pub mod stroke;
 mod text;
 mod tibetan;
 pub mod time;
+pub mod touch;
 mod types;
 mod user_dictionary;
 pub mod vietnamese;
@@ -45,7 +50,7 @@ mod wubi;
 pub mod zhuyin;
 
 pub use error::{EngineError, Result};
-#[cfg(not(any(target_os = "android", target_env = "ohos")))]
+#[cfg(not(target_os = "android"))]
 pub use handwriting::handwriting_recognize;
 pub use handwriting::order_handwriting_candidates;
 // 按需下载的 `.gram` 语法模型由宿主侧资源包管理，删除包时需要释放
@@ -86,6 +91,7 @@ pub use user_dictionary::state::{
 };
 pub use wubi::code::phrase_code as wubi_phrase_code;
 
+pub use local::command::{valid_plugin_argument, EXTENDED_ARGUMENT_SYMBOLS};
 pub use local::date_time::LocalDateTime;
 pub use local::url;
 
@@ -119,4 +125,9 @@ pub fn unload_japanese_dictionary(path: &std::path::Path) {
 /// handle to pass to `Session::reset_cache`.
 pub fn release_japanese_dictionary_cache() {
     japanese::decoder::JapaneseDictionary::release_shared();
+}
+
+/// 放掉进程里为下一个会话留着、没有会话在用的整句联想 n-gram store（连同它的模型和日志连接）。正在用的会话不受影响；之后第一个会话重新读日志。和 [`release_japanese_dictionary_cache`] 一样由宿主的清缓存、内存告警动作调用。
+pub fn release_idle_personal_models() {
+    user_dictionary::ngram_store::release_idle();
 }

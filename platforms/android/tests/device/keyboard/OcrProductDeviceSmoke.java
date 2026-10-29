@@ -19,6 +19,7 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Predicate;
 
 /** 只操作专用模拟器中的合成模块、相机图和编辑器，不导出任意用户内容。 */
 public final class OcrProductDeviceSmoke extends DeviceSmoke {
@@ -132,18 +133,44 @@ public final class OcrProductDeviceSmoke extends DeviceSmoke {
         stage = operation + " / open picker";
         openPicker();
         stage = operation + " / show document roots";
-        tap(node -> pickerNode(node) && node.getContentDescription() != null
+        clickPicker(node -> pickerNode(node) && node.getContentDescription() != null
             && (node.getContentDescription().toString().equalsIgnoreCase("Show roots")
                 || node.getContentDescription().toString().contains("根目录")
                 || node.getContentDescription().toString().contains("导航")));
         stage = operation + " / choose synthetic provider";
-        tap(node -> pickerNode(node) && equalsText("MSIME OCR 测试模块", node.getText())
+        clickPicker(node -> pickerNode(node) && equalsText("MSIME OCR 测试模块", node.getText())
             && "android:id/title".equals(node.getViewIdResourceName()));
         stage = operation + " / choose synthetic document";
-        awaitAny(node -> pickerNode(node) && equalsText("msime-synthetic-ocr-" + id + ".apk", node.getText()));
+        Predicate<AccessibilityNodeInfo> document = node -> pickerNode(node)
+            && equalsText("msime-synthetic-ocr-" + id + ".apk", node.getText()) && node.isEnabled();
+        AccessibilityNodeInfo target = awaitStableBounds(document);
+        android.graphics.Rect bounds = new android.graphics.Rect();
+        target.getBoundsInScreen(bounds);
+        check(bounds.width() > 0 && bounds.height() > 0, "synthetic document has visible touch bounds");
         screenshot("picker-documents");
-        tap(node -> pickerNode(node) && equalsText("msime-synthetic-ocr-" + id + ".apk", node.getText()));
+        // Android 9 的文档条目不提供可点击节点；只对这个已确认位置的合成文件实走触摸。
+        if (android.os.Build.VERSION.SDK_INT == 28) tap(document);
+        else clickPicker(document);
         stage = operation;
+    }
+
+    /** 点击系统文档控件或同包可点击父节点，避免抽屉动画使坐标落到别的根。 */
+    private void clickPicker(Predicate<AccessibilityNodeInfo> match) throws Exception {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            dropStaleNodes();
+            automation.waitForIdle(500, 5000);
+            AccessibilityNodeInfo target = awaitAny(match);
+            if (!target.isVisibleToUser()) {
+                check(target.performAction(
+                    AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.getId()),
+                    "show synthetic document picker control");
+                continue;
+            }
+            while (target != null && pickerNode(target) && !target.isClickable()) target = target.getParent();
+            check(target != null && pickerNode(target) && target.isClickable(), "clickable document picker control");
+            if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return;
+        }
+        throw new AssertionError("System document picker action failed");
     }
 
     private boolean pickerNode(AccessibilityNodeInfo node) {
@@ -185,6 +212,11 @@ public final class OcrProductDeviceSmoke extends DeviceSmoke {
             Context.class, String.class, List.class, List.class, progress);
         stage = "host handwriting client before OCR";
         handwritingClient();
+        // 本地语音识别的 sherpa-onnx 自带另一份 libonnxruntime.so，加载在宿主自己的链接器命名空间；OCR 模块的 ONNX Runtime 在模块类加载器的命名空间里。两份先后进同一个进程后，OCR 和语音运行库都必须照常可用。
+        stage = "host speech runtime before OCR";
+        Method speech = loader.loadClass("app.msime.android.NativeClient").getMethod("localSpeechAvailable");
+        boolean speechRuntime = (Boolean) speech.invoke(null);
+        android.util.Log.i("MSIME_OCR_PRODUCT", "speech_runtime_loaded_before_ocr=" + speechRuntime);
         source = new File(context.getCacheDir(), "synthetic-ocr-import.apk");
         try (InputStream input = getContext().getAssets().open("ocr-product-module.apk");
              FileOutputStream output = new FileOutputStream(source)) {
@@ -217,14 +249,23 @@ public final class OcrProductDeviceSmoke extends DeviceSmoke {
         importModule();
         recognizeFixture();
         source.delete();
+        stage = "host speech runtime after OCR";
+        if (speechRuntime) check((Boolean) speech.invoke(null), "host speech runtime stays loaded beside the OCR runtime");
         stage = "host handwriting client after OCR";
         handwritingClient();
+    }
+
+    /** ART 编译产物所在的指令集目录名：arm64-v8a 设备是 `arm64`，x86_64 设备是 `x86_64`。 */
+    private static String artInstructionSet() {
+        String abi = android.os.Build.SUPPORTED_64_BIT_ABIS.length == 0 ? "" : android.os.Build.SUPPORTED_64_BIT_ABIS[0];
+        return abi.equals("arm64-v8a") ? "arm64" : abi;
     }
 
     /** ART 还会生成性能采样和锁；只清理固定合成模块的已知条目，不跟随符号链接。 */
     private void clearSyntheticModule(File path, String relative) throws Exception {
         int mode = Os.lstat(path.getAbsolutePath()).st_mode;
-        if (relative.isEmpty() || relative.equals("oat") || relative.equals("oat/x86_64")) {
+        String isa = artInstructionSet();
+        if (relative.isEmpty() || relative.equals("oat") || relative.equals("oat/" + isa)) {
             check(OsConstants.S_ISDIR(mode), "synthetic module cache is a real directory");
             File[] entries = path.listFiles();
             check(entries != null, "synthetic module directory readable");
@@ -232,13 +273,13 @@ public final class OcrProductDeviceSmoke extends DeviceSmoke {
                 clearSyntheticModule(entry, relative.isEmpty() ? entry.getName() : relative + "/" + entry.getName());
         } else {
             check(relative.equals("msime-ocr-v1.apk") || relative.equals("msime-model.json")
-                || relative.equals("msime-ocr-v1.apk.x86_64.flock")
+                || relative.equals("msime-ocr-v1.apk." + isa + ".flock")
                 || relative.equals("oat/msime-ocr-v1.apk.cur.prof")
                 || relative.equals("oat/msime-ocr-v1.apk.prof")
-                || relative.equals("oat/x86_64/msime-ocr-v1.odex")
-                || relative.equals("oat/x86_64/msime-ocr-v1.vdex")
-                || relative.equals("oat/x86_64/msime-ocr-v1.art"), "only known synthetic module files can be removed: "
-                    + (relative.matches("(?:oat/|oat/x86_64/)?msime-ocr-v1[.a-z0-9_-]{0,80}")
+                || relative.equals("oat/" + isa + "/msime-ocr-v1.odex")
+                || relative.equals("oat/" + isa + "/msime-ocr-v1.vdex")
+                || relative.equals("oat/" + isa + "/msime-ocr-v1.art"), "only known synthetic module files can be removed: "
+                    + (relative.matches("(?:oat/|oat/(?:x86_64|arm64)/)?msime-ocr-v1[.a-z0-9_-]{0,80}")
                         ? relative : "unrecognized path"));
             check(OsConstants.S_ISREG(mode), "synthetic module cache is a regular file");
         }

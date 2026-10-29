@@ -160,6 +160,30 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
     }
 
     private void firstRecordActions(File history, File local) throws Exception {
+        // 清空剪贴板历史要先通过系统认证：专用 AVD 默认没有锁屏凭据，先确认此时清空被拒绝且记录保留，再设置合成 PIN 走认证成功的路径。
+        write(local, new JSONObject().put("version", 1).put("settings", new JSONObject()
+            .put("platform.android.toolbar_hidden", false)).toString());
+        write(history, new JSONArray().put(new JSONObject().put("text", "Synthetic prior record")
+            .put("timestampMs", 1700000000000L).put("pinned", true)).toString());
+        stage = "clear clipboard without device credential is refused";
+        if (DeviceCredentialFixture.secure(getTargetContext()))
+            throw new AssertionError("Dedicated AVD starts with a device credential");
+        openClipboardEditor();
+        tap(key("清空"));
+        tap(described("确认清空剪贴板历史"));
+        SystemClock.sleep(1500);
+        if (DeviceCredentialFixture.promptVisible(automation))
+            throw new AssertionError("System credential prompt opened without a device credential");
+        awaitHistoryCount(history, 1);
+        DeviceCredentialFixture.set(getTargetContext(), automation);
+        try {
+            firstRecordActionsAuthenticated(history, local);
+        } finally {
+            DeviceCredentialFixture.clear(getTargetContext(), automation);
+        }
+    }
+
+    private void firstRecordActionsAuthenticated(File history, File local) throws Exception {
         for (String columns : new String[] {"one", "two"}) {
             write(local, new JSONObject().put("version", 1).put("settings", new JSONObject()
                 .put("platform.android.toolbar_hidden", false)
@@ -173,7 +197,10 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
                 stage = "clear clipboard before first copy: " + columns + ", multiline=" + multiline;
                 tap(key("清空"));
                 tap(described("确认清空剪贴板历史"));
+                DeviceCredentialFixture.enter(automation);
                 awaitHistoryCount(history, 0);
+                // 认证界面的密码框也由水杉键盘输入，回到编辑器之前键盘仍按密码框不记剪贴板；先回到合成编辑器再复制，和用户认证完回来再复制一致。
+                openClipboardEditor();
                 copySynthetic(text);
                 awaitHistoryCount(history, 1);
                 // 与报告步骤一致：复制后重新进入面板，等设置重载与剪贴板补读完成再长按。
@@ -274,7 +301,7 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         previewClosed();
         tap(field("msime-test-plain"));
         await(key("n"));
-        tap(described("剪贴板"));
+        tap(clipboardEntry());
         AccessibilityNodeInfo card = await(node -> node.isLongClickable() && node.getText() != null
             && node.getText().toString().startsWith(replacement));
         if (!card.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK))
@@ -301,7 +328,7 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
             + (multiline ? " --ez msime_test_multiline true" : ""));
         tap(field("msime-test-plain"));
         await(key("n"));
-        tap(described("剪贴板"));
+        tap(clipboardEntry());
     }
 
     private void floatingPreview(File history, String text) throws Exception {
@@ -310,6 +337,7 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         byte[] before = Files.readAllBytes(history.toPath());
         Bitmap beforePreview = automation.takeScreenshot();
         Rect editorBounds = awaitFocusedField("msime-test-plain");
+        String focusedWindow = inputFocusIdentity();
         Rect card = openFloatingPreview();
         // 这一段有五处等待，失败时只报总阶段名看不出卡在哪一处，所以每处各标一句。
         stage = step + ": preview scroll area settles";
@@ -327,6 +355,9 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         stage = step + ": editor keeps focus";
         // API 28 遮挡期间连系统焦点查询也可能返回空；从合成编辑器主线程读取真实状态。
         Rect editorAfter = awaitFocusedField("msime-test-plain");
+        // 系统输入焦点在浮层展开前后必须一致；焦点身份从 dumpsys 读取，不记录窗口内容。
+        if (!focusedWindow.equals(inputFocusIdentity()))
+            throw new AssertionError("Floating preview changed editor focus: same_input_window=false");
         stage = step + ": clipboard card stays in the panel";
         Rect cardAfter = new Rect();
         await(node -> node.isLongClickable() && node.getText() != null
@@ -393,7 +424,7 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         tap(field("msime-test-plain"));
         await(key("n"));
         previewClosed();
-        tap(described("剪贴板"));
+        tap(clipboardEntry());
         stage = "changing input field removes floating preview";
         openFloatingPreview();
         if (!editorProbe("focus", "msime-test-password").getBoolean("accepted"))
@@ -421,6 +452,31 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         throw new AssertionError("Synthetic editor did not retain input focus (field="
             + snapshot.getBoolean("focused") + ", window=" + snapshot.getBoolean("window_focused")
             + ", focus loss=" + snapshot.getString("focus_loss") + ")");
+    }
+
+    /** 仅在合成编辑器中比较系统输入窗口的标识，不记录 dump 或正文。 */
+    private String inputFocusIdentity() throws Exception {
+        try (var input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                automation.executeShellCommand("dumpsys input_method"))) {
+            var output = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int length;
+            while ((length = input.read(buffer)) != -1) {
+                if (output.size() + length > 1024 * 1024)
+                    throw new AssertionError("Synthetic input-method dump exceeded its bound");
+                output.write(buffer, 0, length);
+            }
+            String dump = output.toString(StandardCharsets.UTF_8.name());
+            for (String line : dump.split("\n")) {
+                String value = line.trim();
+                // Android 15 把窗口标识移进 ImeBindingState，字段名带括号；旧系统继续使用原字段。
+                for (String prefix : new String[] {"mCurFocusedWindow=", "mFocusedWindow()="}) {
+                    if (value.startsWith(prefix) && !value.startsWith(prefix + "null"))
+                        return value.substring(prefix.length()).split(" softInputMode=", 2)[0];
+                }
+            }
+            throw new AssertionError("Synthetic editor input focus was unavailable");
+        }
     }
 
     private Rect openFloatingPreview() {

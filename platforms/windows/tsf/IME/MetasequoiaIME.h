@@ -1,6 +1,7 @@
 #pragma once
 #include "../HostFocusState.h"
 #include "../WubiCommitOwner.h"
+#include "../PreferenceBarrier.h"
 #include "../../common/GroupedPanelKeyLease.h"
 
 #include "KeyHandlerEditSession.h"
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -57,6 +59,7 @@ const DWORD WM_CandidateContinuationFailed = WM_USER + 32;
 const DWORD WM_ApplyCapsLockEdge = WM_USER + 33;
 const DWORD WM_ApplyUiLessCandidates = WM_USER + 34;
 const DWORD WM_HostOnlineCandidates = WM_USER + 35;
+const DWORD WM_ApplyPreferenceTransition = WM_USER + 36;
 constexpr ULONG_PTR SMART_PUNCTUATION_SENDINPUT_EXTRA_INFO = 0x4D535050u;
 // Marker for caret movement synthesized by paired punctuation. Key sinks and
 // the bare-Shift hook must pass these events through to the host.
@@ -92,6 +95,7 @@ constexpr UINT_PTR TIMER_DEFERRED_FOCUS_LOSS = 4;
 constexpr UINT_PTR TIMER_FOCUS_STATUS_RESEND = 5;
 constexpr UINT_PTR TIMER_REFRESH_HOST_PREFERENCES = 6;
 constexpr UINT_PTR TIMER_PAIRED_PUNCTUATION_CARET = 7;
+constexpr UINT_PTR TIMER_PREFERENCE_TRANSITION = 8;
 constexpr UINT PAIRED_PUNCTUATION_CARET_RETRY_MS = 15;
 constexpr ULONGLONG PAIRED_PUNCTUATION_CARET_TIMEOUT_MS = 2000;
 constexpr int PAIRED_PUNCTUATION_CARET_MAX_STEPS = 8;
@@ -102,7 +106,7 @@ constexpr UINT FOCUS_LOSS_DEFER_MS = 300;
 constexpr UINT FOCUS_STATUS_RESEND_DELAY_MS = 50;
 LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND wndHandle, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-namespace msime::tsf { struct EngineResult; }
+namespace msime::tsf { struct EngineResult; struct HostConfiguration; }
 
 class CMetasequoiaIME : public ITfTextInputProcessorEx,
                         public ITfThreadMgrEventSink,
@@ -341,11 +345,13 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     HRESULT _HandleCandidateFinalizeForVKReturn(TfEditCookie ec, _In_ ITfContext *pContext);
     // Server 回了 CommitExactText（预选的释义列、Ctrl+Enter 的释义页）：它已经取消了自己的组字，text 是要原样上屏的完整文本。宿主会话也丢掉组字，再把 text 写进组字并结束组字，不补成对标点。
     HRESULT _CommitServerExactText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text);
-    // 宿主会话拥有组字时，在宿主会话里选中候选窗高亮的那一项：选完了就上屏并结束组字，只选了一段（分段选词）就按宿主会话剩下的原文继续组字。数字键和空格都走这里，宿主会话因此和 Server 一样前进，之后的 Shift、回车不会再把已经上屏或选过的拼音交出来。候选窗与宿主会话的候选列表对不上（代次过期）或选择失败时返回 S_FALSE，什么也不写。
-    HRESULT _SelectHighlightedHostCandidate(TfEditCookie ec, _In_ ITfContext *pContext,
-                                            _In_opt_ const std::wstring *serverChoice = nullptr);
+    // 宿主会话拥有组字时，在宿主会话里选中 Server 对这个键选的那一项（`serverReply` 是它回复的 candidate_string，`serverMsgType` 是回复类型，见 HostServerSelection.h）；没有回复可读时传 nullptr，选候选窗高亮的那一项。选完了就上屏并结束组字，只选了一段（分段选词）就按宿主会话剩下的原文继续组字。数字键和空格都走这里，宿主会话因此和 Server 一样前进，之后的 Shift、回车不会再把已经上屏或选过的拼音交出来。候选窗与宿主会话的候选列表对不上（代次过期）、回复里什么都没选、宿主会话里找不到唯一的那个词或选择失败时返回 S_FALSE，什么也不写。
+    HRESULT _SelectHighlightedHostCandidate(TfEditCookie ec, _In_ ITfContext *pContext, UINT serverMsgType = 0,
+                                            _In_opt_ const std::wstring *serverReply = nullptr);
+    // typedKey：产生这个答复的字符键，宿主会话在没有组字时不收它时，按上屏这个字符处理（DeclinedIdleCharacterCommit）；不是字符键的答复传 '\0'。
     HRESULT _ApplyHostCompositionResult(TfEditCookie ec, ITfContext *pContext,
-                                         const msime::tsf::EngineResult &result, bool serverCommit = false);
+                                         const msime::tsf::EngineResult &result, bool serverCommit = false,
+                                         char typedKey = '\0');
     HRESULT _HandleCandidateConvert(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId,
                                     const std::wstring &prefetchedText);
     HRESULT _HandleCandidateArrowKey(TfEditCookie ec, _In_ ITfContext *pContext, _In_ KEYSTROKE_FUNCTION keyFunction,
@@ -422,8 +428,9 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
                                           TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId);
     HRESULT _CreateAndStartCandidate(_In_ CCompositionProcessorEngine *pCompositionProcessorEngine, TfEditCookie ec,
                                      _In_ ITfContext *pContext);
+    // localSlotSelected：数字键在 presenter 这一页上选中了按键位置的那一项。宿主会话这一页比 Server 那一页短时为假，这时仍要读 Server 的回复跟着选，只是读不到回复时不再退回本地高亮项。
     HRESULT _HandleCandidateWorker(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId,
-                                   const std::wstring &prefetchedText);
+                                   const std::wstring &prefetchedText, bool localSlotSelected = true);
 
     struct AsyncKeyRequest
     {
@@ -527,9 +534,13 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
                                const msime::panel_key::Owner *groupedOwner = nullptr);
     bool _QueueDeferredPreservedKey(_In_ ITfContext *pContext, REFGUID preservedKey);
     void _ClearDeferredKeyDowns();
+    void _PollPreferenceTransition();
+    bool _ApplyHostPreferences(const std::shared_ptr<const msime::tsf::HostConfiguration> &configuration);
     void _ScheduleDeferredKeyDownDrain(bool allowSyncFallback = true);
     bool _ResolveDeferredKeyClassification(uint64_t replayToken);
-    bool _IsDeferredKeyOwnerCurrent(ITfContext *context, uint64_t focusGeneration, HWND foregroundWindow) const;
+    // 仅尚未发送的分类允许在重置期间核验焦点；实际写入与注入保持默认屏障。
+    bool _IsDeferredKeyOwnerCurrent(ITfContext *context, uint64_t focusGeneration, HWND foregroundWindow,
+                                   bool allowPendingReset = false) const;
     void _DrainOneDeferredKeyDown();
     void _TryLeaveServerUnavailableFallback();
     void _WakeServerIfNeeded();
@@ -827,6 +838,10 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     std::wstring _pendingServerCandidateString;
     std::deque<CCandidateListUIPresenter *> _pendingCandidatePresenterCleanup;
     msime::tsf::WubiCommitOwner _wubiCommitOwner;
+    msime::tsf::PreferenceBarrier _preferenceBarrier;
+    std::atomic<bool> _preferenceNotificationPending{false};
+    std::deque<FanyImePreferencePipe::Transition> _preferenceTransitions;
+    ULONGLONG _preferenceTransitionStarted = 0;
     std::deque<DeferredKeyDown> _deferredKeyDowns;
     std::deque<DeferredKeyDown> _deferredAppliedPrefix;
     DeferredKeyDown _deferredKeyInFlight;

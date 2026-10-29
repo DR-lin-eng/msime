@@ -1,3 +1,4 @@
+import app.msime.android.SymbolCategoryOrderPolicy;
 import app.msime.android.SymbolPanelModel;
 
 import java.util.ArrayList;
@@ -6,11 +7,11 @@ import java.util.List;
 public final class SymbolPanelModelSmoke {
     public static void main(String[] args) {
         List<SymbolPanelModel.Category> empty = SymbolPanelModel.categories(List.of());
-        check(empty.size() == 6 + 13, "six fixed categories, kaomoji and twelve symbol parents: " + empty.size());
+        check(empty.size() == 7 + 13, "seven fixed categories, kaomoji and twelve symbol parents: " + empty.size());
         check(empty.get(0).title().equals("常用") && empty.get(0).symbols().isEmpty(),
             "没有使用记录时常用为空");
-        check(empty.get(4).symbols().get(20).equals("http://"), "network shortcuts");
-        check(empty.get(5).title().equals("拼音") && empty.get(5).symbols().equals(List.of(
+        check(empty.get(5).symbols().get(20).equals("http://"), "network shortcuts");
+        check(empty.get(6).title().equals("拼音") && empty.get(6).symbols().equals(List.of(
                 "ā", "á", "ǎ", "à", "ō", "ó", "ǒ", "ò", "ê", "ē", "é", "ě", "è",
                 "ī", "í", "ǐ", "ì", "ū", "ú", "ǔ", "ù", "ü", "ǖ", "ǘ", "ǚ", "ǜ", "ń", "ň")),
             "pinyin tone symbols");
@@ -21,9 +22,10 @@ public final class SymbolPanelModelSmoke {
             check(category.symbols().size() == new java.util.HashSet<>(category.symbols()).size(),
                 category.title() + " has no duplicates");
         check(empty.get(0).id().equals("recents") && empty.get(1).id().equals("chinese")
-            && empty.get(18).id().equals("more"), "categories expose stable IDs");
+            && empty.get(19).id().equals("more"), "categories expose stable IDs");
         catalogCategories(empty);
-        networkSuffixes(empty.get(4));
+        networkSuffixes(empty.get(5));
+        glyphCentering();
 
         check(SymbolPanelModel.initialCategory(List.of()) == 0, "没有记录时仍打开常用");
         check(SymbolPanelModel.initialCategory(List.of("＞")) == 0, "history opens on 常用");
@@ -59,6 +61,23 @@ public final class SymbolPanelModelSmoke {
         }
 
         System.out.println("SymbolPanelModelSmoke: PASS");
+    }
+
+    /** 只有全角/CJK 标点按墨迹居中；靠高低表达含义的字形全部按字体基线排。 */
+    private static void glyphCentering() {
+        for (String baseline : List.of("-", "_", ".", ",", "\"", "'", ";", ":", "|", "~", "`", "@", "0", "A",
+                "一", "５", "Ⅰ", "①", "ｦ", "㋿",
+                "‗", "₀", "₉", "₊", "ₐ", "⁰", "²", "⁹", "ⁿ", "ⁱ", "′", "″", "‴", "‵", "‚", "„", "‛", "‟",
+                "¨", "¯", "´", "¸", "º", "ª", "⁎", "‥", "⁏", "▁", "▄", "▀", "▔", "⌃", "⌄", "⌢", "⌣",
+                "⏜", "⏝", "⏞", "⏟", "⏠", "⏡", "⎴", "⎵", "‿", "⁀", "﹉", "﹍", "﹎", "﹏", "＿", "￣", "〝", "〞", "〟"))
+            check(!SymbolPanelModel.centersGlyphInk(baseline), "positional glyphs keep the font baseline: " + baseline);
+        for (String fullWidth : List.of("，", "。", "、", "：", "；", "！", "？", "“", "”", "（", "）", "《", "》",
+                "【", "】", "「", "」", "＠", "－", "～", "…", "—", "·", "︵", "﹁"))
+            check(SymbolPanelModel.centersGlyphInk(fullWidth), "full-width punctuation centres its ink: " + fullWidth);
+        for (String longEntry : new String[] {"@protonmail.com", "http://", "（笑）", "😀😀"})
+            check(!SymbolPanelModel.centersGlyphInk(longEntry), "multi-glyph entries stay on the baseline: " + longEntry);
+        check(!SymbolPanelModel.centersGlyphInk(null) && !SymbolPanelModel.centersGlyphInk(""),
+            "missing symbols are not drawn");
     }
 
     /** #6147：「网络」接上全部邮箱后缀，国内常用的在前；长条目缩小字号并单行省略。 */
@@ -98,25 +117,27 @@ public final class SymbolPanelModelSmoke {
             "single symbols keep their compact cells");
         check(SymbolPanelModel.cellColumnSpan(SymbolPanelModel.categories(List.of()).get(0), "@gmail.com", 80, 60, 12) == 2,
             "recents use the same wider suffix rule");
-        check(SymbolPanelModel.cellColumnSpan(SymbolPanelModel.categories(List.of()).get(6), "(long face)", 112, 60, 12) == 1,
-            "catalog pagination and kaomoji keep the existing layout");
+        check(SymbolPanelModel.cellColumnSpan(SymbolPanelModel.categories(List.of()).get(8), "(long symbol)", 80, 60, 12) == 2,
+            "catalog symbols use the measured width");
+        check(SymbolPanelModel.cellColumnSpan(SymbolPanelModel.categories(List.of()).get(7), "(long face)", 112, 60, 12) == 1,
+            "kaomoji keep their two-column layout");
 
     }
 
     /** #5667：颜文字和 Engine 符号目录接在写死的分类后面。 */
     private static void catalogCategories(List<SymbolPanelModel.Category> categories) {
-        for (int index = 0; index < 6; index++) {
+        for (int index = 0; index < 7; index++) {
             SymbolPanelModel.Category fixed = categories.get(index);
             check(!fixed.fromCatalog() && fixed.columns() == SymbolPanelModel.COLUMNS && fixed.remembers(),
                 fixed.title() + " is a fixed five-column category");
         }
-        SymbolPanelModel.Category kaomoji = categories.get(6);
+        SymbolPanelModel.Category kaomoji = categories.get(7);
         check(kaomoji.title().equals("颜文字") && kaomoji.kaomoji() && kaomoji.fromCatalog()
             && kaomoji.symbols().isEmpty(), "颜文字 comes from the Engine catalog");
         check(kaomoji.columns() == SymbolPanelModel.KAOMOJI_COLUMNS && !kaomoji.remembers(),
             "kaomoji are two per row and stay out of 常用");
         java.util.HashSet<String> parents = new java.util.HashSet<>();
-        for (SymbolPanelModel.Category category : categories.subList(7, categories.size())) {
+        for (SymbolPanelModel.Category category : categories.subList(8, categories.size())) {
             check(category.catalog().equals(SymbolPanelModel.SYMBOLS_CATALOG) && !category.parent().isEmpty()
                 && category.columns() == SymbolPanelModel.COLUMNS && category.remembers(),
                 category.title() + " reads one symbol parent");
@@ -170,6 +191,41 @@ public final class SymbolPanelModelSmoke {
             "undrawable single symbols leave 常用, multi-glyph entries stay: " + recentsShown);
         check(!judged.contains("http://") && !judged.contains("❤️‍🔥") && judged.contains("❤️"),
             "only single code points (with an optional variation selector) are judged: " + judged);
+        pluginCategories();
+    }
+
+    /** 符号集插件：符号组按插件合成一个分类排在最后，颜文字组逐组紧跟在「颜文字」之后，坏组跳过。 */
+    private static void pluginCategories() {
+        List<SymbolPanelModel.PluginGroup> groups = List.of(
+            new SymbolPanelModel.PluginGroup("arrows", "我的箭头", "symbols", "箭头", List.of("→", "←")),
+            new SymbolPanelModel.PluginGroup("faces", "表情", "kaomoji", "开心", List.of("(^_^)", "")),
+            new SymbolPanelModel.PluginGroup("arrows", "我的箭头", "symbols", "斜箭头", List.of("↗", "x".repeat(65))),
+            new SymbolPanelModel.PluginGroup("bad", "坏", "emoji", "未知的页", List.of("x")),
+            new SymbolPanelModel.PluginGroup("empty", "空", "symbols", "空组", List.of(" ")),
+            new SymbolPanelModel.PluginGroup("faces", "表情", "kaomoji", "难过", List.of("(T_T)")));
+        List<SymbolPanelModel.Category> plugins = SymbolPanelModel.pluginCategories(groups);
+        check(plugins.size() == 3, "one symbols category per pack, one kaomoji category per group: " + plugins.size());
+        SymbolPanelModel.Category arrows = plugins.get(0);
+        check(arrows.title().equals("我的箭头") && arrows.symbols().equals(List.of("→", "←", "↗"))
+            && !arrows.kaomoji() && arrows.plugin() && arrows.remembers() && !arrows.fromCatalog()
+            && arrows.columns() == SymbolPanelModel.COLUMNS, "a pack's symbols groups are one category, overlong items dropped");
+        check(plugins.get(1).title().equals("开心") && plugins.get(1).kaomoji() && !plugins.get(1).remembers()
+            && plugins.get(1).columns() == SymbolPanelModel.KAOMOJI_COLUMNS && plugins.get(1).symbols().equals(List.of("(^_^)")),
+            "a kaomoji group is laid out like kaomoji and not remembered");
+        check(!plugins.get(1).id().equals(plugins.get(2).id()), "two kaomoji groups of one pack have distinct ids");
+
+        List<SymbolPanelModel.Category> all = SymbolPanelModel.categories(List.of(), SymbolCategoryOrderPolicy.DEFAULT_ORDER, plugins);
+        List<String> ids = new java.util.ArrayList<>();
+        for (SymbolPanelModel.Category category : all) ids.add(category.id());
+        int kaomoji = ids.indexOf("kaomoji");
+        check(ids.get(kaomoji + 1).equals(plugins.get(1).id()) && ids.get(kaomoji + 2).equals(plugins.get(2).id()),
+            "kaomoji groups follow 颜文字: " + ids);
+        check(ids.get(ids.size() - 1).equals(arrows.id()), "symbols packs come after the built-in categories: " + ids);
+        check(SymbolPanelModel.categories(List.of(), SymbolCategoryOrderPolicy.DEFAULT_ORDER, List.of())
+            .equals(SymbolPanelModel.categories(List.of(), SymbolCategoryOrderPolicy.DEFAULT_ORDER)), "no plugins, no change");
+        check(SymbolPanelModel.initialCategory(List.of(), SymbolCategoryOrderPolicy.DEFAULT_ORDER, plugins)
+            == SymbolPanelModel.initialCategory(List.of(), SymbolCategoryOrderPolicy.DEFAULT_ORDER), "常用 stays the first page");
+        check(SymbolPanelModel.pluginCategories(null).isEmpty(), "no answer, no plugin categories");
     }
 
     private static void check(boolean condition, String message) {

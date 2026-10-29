@@ -21,7 +21,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.function.Predicate;
+import org.json.JSONObject;
 
 /** Device-only synthetic acceptance; reads both editor and IME accessibility windows. */
 public class DeviceSmoke extends Instrumentation {
@@ -65,6 +67,31 @@ public class DeviceSmoke extends Instrumentation {
         throw new AssertionError("Test input method selection did not settle after restart");
     }
 
+    /**
+     * 等系统放弃被强停的输入法连接，再开始本套件。
+     *
+     * <p>Android 11 以下 smoke.sh 不能附着到已运行的产品进程，以产品为目标的上一个套件结束时，系统连同 `:ime` 一起强停产品。输入法管理服务收到断开时把它当作服务崩溃，记下这一刻、等系统重启服务（`InputMethodManagerService.onServiceDisconnected` 把 `mLastBindTime` 设为现在），而强停已经移除了服务，系统不会再拉起它。断开后 `TIME_TO_RECONNECT`（3 秒）以内，编辑器取得焦点只得到「等待输入法绑定」，弹键盘的请求被丢掉；`ime disable/enable/set` 选回同一个输入法也不会重绑，因为当前绑定的 id 没变。下一个套件若在这 3 秒内打开编辑器，键盘就一直不出现（CI 上 API 28 的「deferred composition length 1 … IME showed []」）。过了这段时间，焦点请求会让系统断开重连，所以这里在看到「有连接、没有输入法接口」时等到它恢复或满 3 秒半。dumpsys 只读输入法绑定状态，不读编辑器内容。
+     */
+    private void outlastDeadImeConnection() throws Exception {
+        if (Build.VERSION.SDK_INT >= 31) return;
+        long deadline = SystemClock.uptimeMillis() + 3500;
+        while (SystemClock.uptimeMillis() < deadline) {
+            String state = shellOutput("dumpsys input_method");
+            if (!(state.contains("mHaveConnect=true") && state.contains("mCurMethod=null"))) return;
+            SystemClock.sleep(250);
+        }
+    }
+
+    private String shellOutput(String command) throws Exception {
+        try (var input = new ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(command))) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int length;
+            while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+
     /** 只读取默认输入法标识，不读取编辑器内容或用户设置日志。 */
     private boolean selectedIme(String ime) throws Exception {
         try (var input = new ParcelFileDescriptor.AutoCloseInputStream(
@@ -91,6 +118,32 @@ public class DeviceSmoke extends Instrumentation {
         }
     }
 
+    /** 共享偏好文件：`runtime-options.json` 里 `preferences_directory` 下的 `preferences.json`，限定在被测应用的私有目录里。 */
+    protected final File sharedPreferencesFile() throws Exception {
+        File root = getTargetContext().getFilesDir().getCanonicalFile();
+        File directory = new File(runtimeOptions().getString("preferences_directory")).getCanonicalFile();
+        if (!directory.toPath().startsWith(root.toPath())) throw new AssertionError("Preferences escaped test sandbox");
+        return new File(directory, "preferences.json");
+    }
+
+    /** 在现有共享偏好上改一项、修订号加一后发布；文件还不存在时从 runtime-options 里的出厂偏好开始。键盘每秒重读偏好，restartIme 之后一定读到。 */
+    protected final void putSharedPreference(String key, Object value) throws Exception {
+        File file = sharedPreferencesFile();
+        JSONObject document = file.exists()
+            ? new JSONObject(new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8))
+            : new JSONObject().put("revision", 0).put("preferences",
+                new JSONObject(runtimeOptions().getJSONObject("preferences").toString()));
+        document.getJSONObject("preferences").put(key, value);
+        document.put("format_version", 1).put("revision", document.getLong("revision") + 1);
+        publish(file, document.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private JSONObject runtimeOptions() throws Exception {
+        File root = getTargetContext().getFilesDir().getCanonicalFile();
+        return new JSONObject(new String(Files.readAllBytes(new File(root, "runtime-options.json").toPath()),
+            StandardCharsets.UTF_8));
+    }
+
     /** `uinput` 接上的键盘的标准输入，往里写注入命令就是在那块键盘上按键；没有接时为空。 */
     protected FileOutputStream uinputInput;
 
@@ -107,6 +160,7 @@ public class DeviceSmoke extends Instrumentation {
             AccessibilityServiceInfo info = automation.getServiceInfo();
             info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
             automation.setServiceInfo(info);
+            outlastDeadImeConnection();
             if (pinyinStartup) PinyinStartupDeviceSmoke.runChecks(this, pinyinHideResume);
             else runChecks();
             result.putString("stream", "MSIME_DEVICE_SMOKE_PASSED: " + successDescription() + "\n");
@@ -255,6 +309,11 @@ public class DeviceSmoke extends Instrumentation {
     protected Predicate<AccessibilityNodeInfo> described(String description) {
         return node -> equalsText("app.msime.android", node.getPackageName())
             && equalsText(description, node.getContentDescription());
+    }
+
+    /** 键盘工具栏的「剪贴板」按钮，只认可用的。输入法进程刚起来时偏好在后台线程读，读到「剪贴板历史」开着之前按钮是灰的，点了没有反应，后面等面板的步骤会等满超时（CI 的 API 35 上「clipboard phrase notice」的 launch 和剪贴板导出的键盘导出都在输入法冷启动后停在过这一步）。 */
+    protected Predicate<AccessibilityNodeInfo> clipboardEntry() {
+        return described("剪贴板").and(AccessibilityNodeInfo::isEnabled);
     }
 
     protected Predicate<AccessibilityNodeInfo> describedPrefix(String prefix) {
@@ -599,6 +658,6 @@ public class DeviceSmoke extends Instrumentation {
         // 同时接受全角与半角键面，由调用方断言实际插入内容。
         String chinese = app.msime.android.ChineseSymbolFaces.face(symbol, true);
         tap(key(symbol).or(key(chinese)));
-        tap(described("切换到字母键盘"));
+        tap(described("返回原键盘"));
     }
 }

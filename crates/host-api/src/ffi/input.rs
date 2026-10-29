@@ -26,6 +26,27 @@ pub extern "C" fn msime_client_set_candidate_page_size(handle: u64, size: u8) ->
     })
 }
 
+/// 即时投影混合候选的中文片段，不改语言集合、组字或磁盘偏好。
+/// 变体取最新请求的共享偏好；后续偏好更新可替换本次宿主临时设置。
+#[no_mangle]
+pub extern "C" fn msime_client_set_multilingual_output(
+    handle: u64,
+    traditional: bool,
+) -> *mut c_char {
+    response(|| {
+        with_session(handle, |session| {
+            let preferences = session
+                .requested
+                .as_ref()
+                .map_or(&session.applied, |snapshot| &snapshot.preferences);
+            session
+                .runtime
+                .set_multilingual_output(traditional, preferences.traditional_chinese_variant);
+            serialized_runtime_view(session)
+        })
+    })
+}
+
 /// Override the live host punctuation mode without persisting preferences.
 #[no_mangle]
 pub extern "C" fn msime_client_set_chinese_punctuation(handle: u64, enabled: bool) -> *mut c_char {
@@ -310,6 +331,70 @@ pub unsafe extern "C" fn msime_client_character_with_touch(
         None,
         Some((ascii, point)),
     )
+}
+
+/// 键位几何 JSON 的字节上限：26 个字母键加 `;` 和分离键盘的几个重复键，远不到这么多。
+const KEY_GEOMETRY_LIMIT: usize = 16 * 1024;
+
+/// 触屏宿主注册 26 键的字母键几何（只在布局变化时调用），形状见 `msime_client.h`。空串或 `id` 为 0 清除几何。不合格的 JSON 整份拒绝，原来的几何不变。
+///
+/// # Safety
+/// `json` 指向 `length` 个可读字节；`length` 为 0 时可以是空指针。缓冲不被保留。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_set_key_geometry(
+    handle: u64,
+    json: *const u8,
+    length: usize,
+) -> *mut c_char {
+    if length > KEY_GEOMETRY_LIMIT || (length > 0 && json.is_null()) {
+        return response(|| Err("invalid key geometry".into()));
+    }
+    let bytes = if length == 0 {
+        &[][..]
+    } else {
+        // SAFETY：由调用方契约保证。
+        unsafe { std::slice::from_raw_parts(json, length) }
+    };
+    let geometry = match msime_engine::touch::KeyGeometry::from_json(bytes) {
+        Ok(geometry) => geometry,
+        Err(error) => return response(|| Err(error)),
+    };
+    response(|| {
+        with_session(handle, |session| {
+            session.runtime.set_key_geometry(geometry);
+            serialized_runtime_view(session)
+        })
+    })
+}
+
+/// 触屏 26 键的一键，带上按下点 (x, y)（与注册的几何同一个坐标系）。先记下这一键的触点，再照 `msime_client_character` 原路派发，派发完不论结果如何都清掉触点。代次不符、坐标不是有限数或当前不是 26 键双拼时，与 `msime_client_character(ascii, shift)` 逐字节相同。
+#[no_mangle]
+pub extern "C" fn msime_client_touch_character(
+    handle: u64,
+    ascii: u8,
+    shift: bool,
+    geometry_id: u32,
+    x: f32,
+    y: f32,
+) -> *mut c_char {
+    // 会话不存在时这一步什么也不做，下面的派发照常报错。
+    let _ = with_session(handle, |session| {
+        let touch = session.runtime.key_touch(ascii, geometry_id, x, y);
+        session.runtime.set_key_touch(touch);
+        Ok(())
+    });
+    let view = dispatch(
+        handle,
+        Action::Character {
+            value: ascii,
+            shift,
+        },
+    );
+    let _ = with_session(handle, |session| {
+        session.runtime.set_key_touch(None);
+        Ok(())
+    });
+    view
 }
 
 /// 14 键的一键：`letter` 是这一组里的任一小写字母（宿主约定送首字母）。不在 14 键下、或不是 `a`–`z` 时 handled=false，会话不变。
@@ -907,6 +992,54 @@ pub extern "C" fn msime_client_all_candidates(handle: u64) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
             serde_json::to_value(session.runtime.all_candidates()).map_err(|e| e.to_string())
+        })
+    })
+}
+
+/// 座位 `start` 起最多 `count` 行候选，身份与 `msime_client_all_candidates` 同一座位的那一行相同；每键重画的横向候选条只取它建得出来的这一批。
+/// 引擎暂扣的尾部只在 `start` 到了 `total` 时才放出，放出来就换一代。
+#[no_mangle]
+pub extern "C" fn msime_client_candidate_range(
+    handle: u64,
+    start: usize,
+    count: usize,
+) -> *mut c_char {
+    response(|| {
+        with_session(handle, |session| {
+            serde_json::to_value(session.runtime.candidate_range(start, count))
+                .map_err(|e| e.to_string())
+        })
+    })
+}
+
+/// 一页最多报这么多座位；按宽度排的一行再宽也到不了。
+const MAX_DISPLAY_PAGE_SEATS: usize = 256;
+
+/// 宿主按自己的排版显示了与固定分页不同的一组候选（macOS 横排按宽度自适应）时，报出这一代里这些候选的序号：
+/// 二三候选键、五笔自定义选词键和翻译查询都按看得见的这一组，空列表清掉。只对 `generation` 这一代有效，
+/// 组字推进后自动失效。值为 `{"applied": bool}`：代次过期或序号越界时为假，原有显示页不变。
+///
+/// # Safety
+/// `indices` must point to `count` readable `size_t` values unless `count` is zero. The buffer is not retained.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_set_display_page(
+    handle: u64,
+    generation: u64,
+    indices: *const usize,
+    count: usize,
+) -> *mut c_char {
+    response(|| {
+        if count > MAX_DISPLAY_PAGE_SEATS || (count > 0 && indices.is_null()) {
+            return Err("invalid display page".into());
+        }
+        let seats = if count == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: the caller guarantees `count` readable values behind a non-null pointer.
+            unsafe { std::slice::from_raw_parts(indices, count) }.to_vec()
+        };
+        with_session(handle, |session| {
+            Ok(json!({"applied": session.runtime.set_display_page(generation, seats)}))
         })
     })
 }

@@ -11,6 +11,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import {
   HandwritingPanel,
   SettingsPage,
+  type LocalVoiceModel,
   type LocalVoiceModelProgress,
   type ResourcePackClient,
   type ResourcePackId,
@@ -297,7 +298,11 @@ test("a package that carries the Wubi table never downloads it", async () => {
   expect(screen.queryByRole("button", { name: "下载五笔码表" })).toBeNull();
 });
 
-function renderVoiceSettings(resourcePacks: ResourcePackClient, provider: string) {
+function renderVoiceSettings(
+  resourcePacks: ResourcePackClient,
+  provider: string,
+  models: LocalVoiceModel[] = [],
+) {
   const snapshot: Snapshot = {
     ...initial,
     preferences: {
@@ -316,6 +321,13 @@ function renderVoiceSettings(resourcePacks: ResourcePackClient, provider: string
         })),
         host: testHost({ platform: "macos" }),
         resourcePacks,
+        localVoiceModels: {
+          list: async () => ({ models, default: models[0]?.id ?? "", root: "/fixture/models" }),
+          install: async () => "",
+          cancel: async () => false,
+          remove: async () => {},
+          onProgress: async () => () => {},
+        },
       }}
     />,
   );
@@ -347,6 +359,41 @@ test("opening the voice page with on-device recognition already chosen offers th
   openVoiceServiceConfig();
   expect(await screen.findByRole("button", { name: "下载本地语音识别运行库" })).toBeTruthy();
   expect(packs.client.install).not.toHaveBeenCalled();
+});
+
+test("using a model under the factory on-device recognition downloads the speech runtime", async () => {
+  // 出厂服务就是本地识别，没有「切到本地」这一步；选用模型时才下载运行库，打开页面时不下载。
+  const installed: LocalVoiceModel = {
+    id: "x-asr-zh-en-streaming",
+    title: "中英流式",
+    description: "边说边出字。",
+    languages: ["zh", "en"],
+    streaming: true,
+    default: true,
+    desktop_only: false,
+    installed: true,
+    path: "/fixture/models/x-asr-zh-en-streaming",
+    installed_size: 200_000_000,
+    archive_size: 133_895_136,
+    memory: 500_000_000,
+    license_spdx: "Apache-2.0",
+    license_source: "https://example.com/x-asr",
+    license_terms: "",
+    license_notice: "模型按 Apache-2.0 许可分发。",
+    hotwords: "native",
+    import_files: [],
+  };
+  const packs = fakePacks({}, ["voice-runtime-macos"]);
+  renderVoiceSettings(packs.client, "local", [installed]);
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: "语音输入" }));
+  await waitFor(() => expect(packs.client.list).toHaveBeenCalled());
+  openVoiceServiceConfig();
+  const card = within(await screen.findByRole("listitem", { name: "中英流式" }));
+  expect(packs.client.install).not.toHaveBeenCalled();
+  fireEvent.click(card.getByRole("button", { name: "使用" }));
+  await waitFor(() => expect(packs.client.install).toHaveBeenCalledWith("voice-runtime-macos"));
+  expect(packs.client.install).toHaveBeenCalledTimes(1);
 });
 
 test("a host that bundles the dictionaries never downloads them", async () => {
@@ -749,4 +796,28 @@ test("语法模型卸载失败保留已安装状态并显示错误，允许重�
   fireEvent.click(screen.getByRole("button", { name: "删除语法模型·八股文（紧凑）" }));
   await waitFor(() => expect(packs.client.remove).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(screen.queryByText("操作失败，请重试。")).toBeNull());
+});
+
+test("语法模型只在用户检查后提示更新，下载仍需再次点击", async () => {
+  const id: ResourcePackId = "grammar-model-baguwen-compact";
+  const packs = fakePacks({ [id]: "installed" }, [id]);
+  const checkGrammarUpdates = vi.fn(async () => [
+    { pack: id, source_commit: "b".repeat(40), size: sizes[id] },
+  ]);
+  renderSettings("windows", Object.assign(packs.client, { checkGrammarUpdates }), {
+    ...initial,
+    preferences: {
+      ...initial.preferences,
+      sentence_association: { grammar_model: "baguwen_compact" },
+    },
+  });
+  await settingsFormReady();
+  selectSettingsTab("候选与联想");
+  expect(checkGrammarUpdates).not.toHaveBeenCalled();
+  expect(packs.client.install).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "检查语法模型·八股文（紧凑）更新" }));
+  await waitFor(() => expect(checkGrammarUpdates).toHaveBeenCalledTimes(1));
+  expect(packs.client.install).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "下载语法模型·八股文（紧凑）更新" }));
+  await waitFor(() => expect(packs.client.install).toHaveBeenCalledWith(id));
 });

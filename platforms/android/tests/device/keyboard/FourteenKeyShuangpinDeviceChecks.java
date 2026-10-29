@@ -1,6 +1,9 @@
 package app.msime.android.test;
 
+import android.graphics.Rect;
 import android.os.SystemClock;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import java.io.File;
@@ -84,6 +87,8 @@ final class FourteenKeyShuangpinDeviceChecks {
             t.tap(candidate("你好"));
             t.await(t.field("msime-test-plain").and(node -> DeviceSmoke.equalsText("你好你好", node.getText())));
 
+            if (eighteen) exactSwipeChecks();
+
             t.stage = "fourteen shuangpin English and symbols";
             t.tap(t.key("中"));
             t.await(t.key("q").and(AccessibilityNodeInfo::isClickable));
@@ -91,17 +96,17 @@ final class FourteenKeyShuangpinDeviceChecks {
             t.await(t.described(layoutKeyDescription));
             t.tap(t.key("123"));
             t.await(t.key("1").and(AccessibilityNodeInfo::isClickable));
-            t.tap(t.described("切换到字母键盘"));
+            t.tap(t.described("返回原键盘"));
             t.await(t.described(layoutKeyDescription));
             assertStored("xiaohe", layout);
 
-            t.stage = "fourteen shuangpin password and URL fallback";
+            t.stage = "fourteen shuangpin password fallback, URL keeps the layout";
             t.tap(t.field("msime-test-password"));
             t.await(t.key("q").and(AccessibilityNodeInfo::isClickable));
             absent(t.described(layoutKeyDescription));
+            // 网址框（浏览器地址栏同时是搜索框）按默认中英文进框，保留 14 键（#9725）。
             editor(true);
-            t.await(t.key("q").and(AccessibilityNodeInfo::isClickable));
-            absent(t.described(layoutKeyDescription));
+            t.await(t.described(layoutKeyDescription));
             editor(false);
             t.await(t.described(layoutKeyDescription));
             t.restartIme();
@@ -111,10 +116,8 @@ final class FourteenKeyShuangpinDeviceChecks {
 
             t.stage = "switch shuangpin profile preserves fourteen keys";
             typingSettings();
-            t.stage = "open Mandarin to switch shuangpin profile";
-            t.tap(t.key("普通话"));
             t.stage = "open shuangpin choices to switch profile";
-            t.tap(t.described("双拼（小鹤），更多选项"));
+            t.tap(t.described("双拼，小鹤双拼"));
             t.stage = "choose Microsoft shuangpin";
             t.tap(t.key("微软"));
             assertStored("microsoft", layout);
@@ -158,6 +161,79 @@ final class FourteenKeyShuangpinDeviceChecks {
         }
     }
 
+    /** 真实触摸覆盖左右选择、反向重选、取消、回中心及手势之后的普通点按。 */
+    private void exactSwipeChecks() throws Exception {
+        editor(false);
+        t.stage = "eighteen exact right swipe";
+        gesture("按键 B N", false, 40);
+        t.await(reading("n"));
+        t.stage = "eighteen exact swipe cancellation";
+        gesture("按键 B N", true, -40);
+        t.await(reading("n"));
+        t.stage = "eighteen exact swipe return to center";
+        gesture("按键 B N", false, 40, 0);
+        t.await(reading("n"));
+        t.stage = "eighteen exact swipe reversal";
+        gesture("按键 I O", false, 40, -40);
+        t.await(t.described("选择拼音 ni"));
+        absent(t.described("选择拼音 bi"));
+        gesture("字母 H", false);
+        gesture("按键 X C", false, 40);
+        t.tap(candidate("你好"));
+        t.await(t.field("msime-test-plain").and(node -> DeviceSmoke.equalsText("你好", node.getText())));
+
+        t.stage = "eighteen exact left letter";
+        gesture("按键 B N", false, -40);
+        gesture("按键 I O", false, -40);
+        t.await(t.described("选择拼音 bi"));
+        absent(t.described("选择拼音 ni"));
+        t.tap(t.key("⌫"));
+        t.tap(t.key("⌫"));
+
+        t.stage = "eighteen taps stay ambiguous after swipe";
+        gesture("按键 B N", false);
+        gesture("按键 I O", false);
+        t.await(t.described("选择拼音 bi"));
+        t.await(t.described("选择拼音 ni"));
+        t.tap(t.key("⌫"));
+        t.tap(t.key("⌫"));
+    }
+
+    /** 从节点中心注入坐标事件；不使用无障碍点击代替横滑。 */
+    private void gesture(String description, boolean cancel, float... offsetsDp) throws Exception {
+        t.automation.waitForIdle(500, 5000);
+        AccessibilityNodeInfo key = t.awaitStableBounds(t.described(description));
+        Rect bounds = new Rect();
+        key.getBoundsInScreen(bounds);
+        float density = t.getTargetContext().getResources().getDisplayMetrics().density;
+        float x = bounds.centerX();
+        float y = bounds.centerY();
+        long down = SystemClock.uptimeMillis();
+        injectTouch(down, MotionEvent.ACTION_DOWN, x, y);
+        try {
+            for (float offset : offsetsDp) {
+                SystemClock.sleep(16);
+                x = bounds.centerX() + offset * density;
+                injectTouch(down, MotionEvent.ACTION_MOVE, x, y);
+            }
+            injectTouch(down, cancel ? MotionEvent.ACTION_CANCEL : MotionEvent.ACTION_UP, x, y);
+        } catch (Exception | AssertionError error) {
+            injectTouch(down, MotionEvent.ACTION_CANCEL, x, y);
+            throw error;
+        }
+        t.dropStaleNodes();
+    }
+
+    private void injectTouch(long down, int action, float x, float y) {
+        MotionEvent event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0);
+        event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        try {
+            if (!t.automation.injectInputEvent(event, true)) throw new AssertionError("横滑触摸注入被拒绝");
+        } finally {
+            event.recycle();
+        }
+    }
+
     private void commitQing() throws Exception {
         t.await(t.described("选择拼音 qing"));
         // 合并键有多种读音；先锁定目标音节，再从展开候选选择，不依赖首行排名。
@@ -190,21 +266,23 @@ final class FourteenKeyShuangpinDeviceChecks {
         t.dropStaleNodes();
     }
 
+    // 输入页「语言与方案」按方案族分行，双拼一行直接列各双拼方案（#9653，见 2026-10-25-mobile-scheme-rows.md）。
     private void typingSettings() throws Exception {
         t.stage = "open the typing settings language section";
         t.shellDiscard("am start -f 0x10008000 -n app.msime.android/app.msime.android.home.HomeActivity --es msime_open_page TYPING");
         t.await(t.key("语言").and(AccessibilityNodeInfo::isClickable));
-        t.await(t.key("普通话"));
+        t.await(t.described("双拼，小鹤双拼"));
     }
 
+    // 双拼的 26／14／18 键排法在键盘页「布局」的「中文键盘」，只换排法、保留双拼方案（#9653）。
     private void layoutSetting(String profile, String before, String after) throws Exception {
-        typingSettings();
-        t.stage = "open Mandarin choices for " + profile;
-        t.tap(t.key("普通话"));
-        t.stage = "open shuangpin choices for " + profile;
-        t.tap(t.described("双拼（" + profile + "），更多选项"));
+        t.stage = "open the keyboard layout section for " + profile;
+        t.shellDiscard("am start -f 0x10008000 -n app.msime.android/app.msime.android.home.HomeActivity --es msime_open_page KEYBOARD_OPTIONS");
+        t.await(t.key("布局").and(AccessibilityNodeInfo::isClickable));
         t.stage = "open shuangpin layout choices from " + before;
-        t.tap(t.described("键盘布局（" + before + "），更多选项"));
+        t.await(t.key(before));
+        t.tap(t.key("中文键盘"));
+        t.await(t.key("保留当前双拼方案"));
         t.stage = "choose shuangpin layout " + after;
         t.tap(t.key(after));
     }

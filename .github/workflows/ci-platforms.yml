@@ -32,6 +32,7 @@ jobs:
       engine: ${{ steps.decide.outputs.engine }}
       ui: ${{ steps.decide.outputs.ui }}
       plugins: ${{ steps.decide.outputs.plugins }}
+      android_device: ${{ steps.decide.outputs.android_device }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,12 +46,12 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" != push && "$GITHUB_EVENT_NAME" != pull_request ]] ||
              [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "$BASE_SHA" 2>/dev/null || ! git cat-file -e "$HEAD_SHA" 2>/dev/null; then
-            printf 'android=true\nlinux=true\nharmonyos=true\nwindows=true\nweb=true\nengine=true\nui=true\nplugins=true\n' >> "$GITHUB_OUTPUT"
+            printf 'android=true\nlinux=true\nharmonyos=true\nwindows=true\nweb=true\nengine=true\nui=true\nplugins=true\nandroid_device=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # PR 合并或关闭后合并引用被删，签出拿不到 head 提交，下面三个点的 diff 会直接报错（2026-10-02 #3118 合并 13 秒后才开跑的 iOS CI 就红在这里）。PR 已经不在了，不必构建。
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]] && ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
-            printf 'android=false\nlinux=false\nharmonyos=false\nwindows=false\nweb=false\nengine=false\nui=false\nplugins=false\n' >> "$GITHUB_OUTPUT"; echo "PR 的 head 提交已取不到（PR 已关闭），跳过。"; exit 0
+            printf 'android=false\nlinux=false\nharmonyos=false\nwindows=false\nweb=false\nengine=false\nui=false\nplugins=false\nandroid_device=false\n' >> "$GITHUB_OUTPUT"; echo "PR 的 head 提交已取不到（PR 已关闭），跳过。"; exit 0
           fi
           # PR 要比的是它自己从分叉点起改了什么（三个点）。base.sha 是事件发生时目标分支的最新提交，PR 分支往往从更早的 develop 切出；两个点的 diff 比的是两棵树，会把分叉之后 develop 合进来的改动也算成本 PR 的，于是只改一个 workflow 的 PR 也被判成要编译全部平台（2026-10-02 #2902）。push 的 BASE_SHA 是推送前的提交，两个点正好是这次推送带来的改动。
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
@@ -58,7 +59,7 @@ jobs:
           else
             changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           fi
-          shared=false; ui=false; plugins=false
+          shared=false; ui=false; plugins=false; android_device=false
           android=false; linux=false; harmonyos=false; windows=false; web=false
           while IFS= read -r path; do
             [[ -z "$path" ]] && continue
@@ -67,9 +68,14 @@ jobs:
               packages/ui/*|apps/desktop/src/*|apps/desktop/tests/*|apps/desktop/index.html|apps/desktop/package.json|apps/desktop/tsconfig.json|apps/desktop/vite.config.ts|apps/desktop/app-icon.svg|apps/harmony/src/*|apps/harmony/index.html|apps/harmony/package.json|apps/harmony/tsconfig.json|apps/harmony/vite.config.ts|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|.nvmrc|.github/workflows/ci-platforms.yml)
                 ui=true ;;
             esac
-            # 脚本插件合集：插件本身、它们引用的 SDK 与模板、运行它们的沙箱和 msime-pack、几个脚本，以及插件包逐字节复制的 Unicode 许可证和常用字集生成器读的 Unihan 锁。plugins/ 和 docs/ 不在下面任何一条里，没有这一条时只改插件的 PR 什么都不跑；那两个 resources/ 文件在下面只触发 web 或什么都不触发，改了它们包就过期了。
+            # 脚本插件合集：插件本身、它们依赖的 SDK（crates/script-sdk）与模板、运行它们的沙箱和 msime-pack、几个脚本，以及插件包逐字节复制的 Unicode 许可证和常用字集生成器读的 Unihan 锁。plugins/ 和 docs/ 不在下面任何一条里，没有这一条时只改插件的 PR 什么都不跑；那两个 resources/ 文件在下面只触发 web 或什么都不触发，改了它们包就过期了。
+            # PR 上的设备验收只看键盘与设置界面的 Java、资源、清单、版本资源和设备套件本身：改了界面文字或交互却只在合并后才跑设备验收，nightly 就会在合并后才红（2026-10-27 #9924 改了皮肤卡片读屏文字，验收找不到旧文字）。共享 Rust 的改动太多，不在这里触发，仍由合并后的 push 和 nightly 兜底。
             case "$path" in
-              plugins/*|docs/script-plugin-template/*|crates/script-runtime/*|crates/pack-tool/*|scripts/build-script-plugins.sh|scripts/test-script-plugins.sh|scripts/test-script-plugin-data.py|scripts/build-official-plugins.sh|resources/licenses/Unicode-License-V3.txt|resources/character-glosses.lock.json)
+              platforms/android/java/*|platforms/android/res/*|platforms/android/AndroidManifest.xml|platforms/android/editions/*|platforms/android/tests/device/*|.github/workflows/android-device.yml)
+                android_device=true ;;
+            esac
+            case "$path" in
+              plugins/*|docs/script-plugin-template/*|crates/script-sdk/*|crates/script-runtime/*|crates/pack-tool/*|scripts/build-script-plugins.sh|scripts/test-script-plugins.sh|scripts/test-script-plugin-data.py|scripts/build-official-plugins.sh|resources/licenses/Unicode-License-V3.txt|resources/character-glosses.lock.json)
                 plugins=true ;;
             esac
             case "$path" in
@@ -97,8 +103,8 @@ jobs:
             android=true; linux=true; harmonyos=true; windows=true; web=true; plugins=true
           fi
           # 引擎作业跟着共享路径走（crates/、工作区清单、工具链等），只改平台目录时不跑。
-          printf 'android=%s\nlinux=%s\nharmonyos=%s\nwindows=%s\nweb=%s\nengine=%s\nui=%s\nplugins=%s\n' \
-            "$android" "$linux" "$harmonyos" "$windows" "$web" "$shared" "$ui" "$plugins" >> "$GITHUB_OUTPUT"
+          printf 'android=%s\nlinux=%s\nharmonyos=%s\nwindows=%s\nweb=%s\nengine=%s\nui=%s\nplugins=%s\nandroid_device=%s\n' \
+            "$android" "$linux" "$harmonyos" "$windows" "$web" "$shared" "$ui" "$plugins" "$android_device" >> "$GITHUB_OUTPUT"
 
   android:
     needs: changes
@@ -167,11 +173,19 @@ jobs:
         if: ${{ needs.changes.outputs.android != 'true' }}
         run: echo 'No Android or shared-platform changes; platform gate skipped.'
   # 上面只证明编译得过；这里在 API 28 和 35 的模拟器上真正运行 client-base、client-core、client-providers、client-services 单测和 APK。0.3.0 的三个设备上才出现的问题（词库准备失败、匿名账号写不进、Android 9 启动崩溃）全过了上面那个 job。
-  # 打 APK、起两台模拟器是打包级的验收，不在 PR 上跑：合进 develop 后的 push 跑一次，Release Android 发版前用同一个提交再跑一次（见 .agents/notes/implemented/process/2026-10-09-no-packaging-on-pull-requests.md）。
+  # 合进 develop 后的 push 在 API 28 和 35 上跑整套，Release Android 发版前用同一个提交再跑一次（见 .agents/notes/implemented/process/2026-10-09-no-packaging-on-pull-requests.md）。
   android-device:
     needs: changes
     if: ${{ needs.changes.outputs.android == 'true' && github.event_name != 'pull_request' }}
     uses: ./.github/workflows/android-device.yml
+
+  # PR 改了键盘或设置界面的 Java、资源或设备套件时，只在 API 35 上跑一遍设备验收，让作者合并前就看到界面文字、交互改动打破了哪条验收。它不是必需检查，失败不挡合并；API 28 和整套仍在合并后的 push 与 nightly 上跑（见 .agents/notes/implemented/process/2026-10-28-android-device-on-ui-prs.md）。
+  android-device-pr:
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.android_device == 'true' }}
+    uses: ./.github/workflows/android-device.yml
+    with:
+      matrix: '[{"api": 35, "smoke": ""}]'
 
   linux:
     needs: changes
@@ -189,6 +203,26 @@ jobs:
         if: ${{ needs.changes.outputs.linux != 'true' }}
         run: echo 'No Linux or shared-platform changes; platform gate skipped.'
 
+  # 上面的门禁只在 Debian bookworm 容器里编 Debug、跑 ctest；发版的 .rpm 在 Fedora 44 容器里以 Release 编、再跑一遍同一套 ctest（release-linux.yml 的 rpm 作业），Fedora 的 Pango、字体和编译器不同，有的测试只在那里失败：2026-10-27 的 nightly 就红在 linux-candidate-native-canvas-chrome，PR 上从来看不到。这里在 PR 上用同一个镜像、同一份 package-container.sh 编 full 版并跑 ctest，MSIME_PACKAGE_TESTS_ONLY=1 让它停在 ctest，不出包、不编桌面二进制，不违反「PR 上不打包」（.agents/notes/implemented/process/2026-10-09-no-packaging-on-pull-requests.md）。
+  linux-fedora:
+    needs: changes
+    name: Linux native host (Fedora)
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and test the native hosts in the Fedora packaging container
+        if: ${{ needs.changes.outputs.linux == 'true' }}
+        env:
+          MSIME_PACKAGE_FORMAT: rpm
+          MSIME_PACKAGE_TESTS_ONLY: '1'
+        run: bash platforms/linux/package-container.sh
+      - name: Linux platform unchanged
+        if: ${{ needs.changes.outputs.linux != 'true' }}
+        run: echo 'No Linux or shared-platform changes; platform gate skipped.'
+
   # 上面的容器构建只测 core 几个 crate，设置应用（msime-desktop）在 Linux 上没有任何地方编译过：首次配置页 linux_setup.rs 的测试从未在 CI 里跑过，Linux 专属的 clippy 警告也攒到了几十条。这里补上它的 clippy 和全部单元测试。
   linux-desktop:
     needs: changes
@@ -196,16 +230,27 @@ jobs:
     runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
-      RUSTC_WRAPPER: sccache
+      SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Depot 的 runner 启动时已把 SCCACHE_WEBDAV_ENDPOINT 指向 Depot Cache，配上 job 级 env 的 RUSTC_WRAPPER，rustc 的产物就跨运行缓存，不需要 token。CARGO_INCREMENTAL=0 是因为 sccache 不缓存增量编译。
+      # Depot 的 runner 启动时已把 SCCACHE_WEBDAV_ENDPOINT 指向 Depot Cache，rustc 的产物跨运行缓存，不需要 token。缓存只为加速：sccache 装不上或服务起不来时（Depot Cache 一时连不上，#9658 的 Web engine 就这样在 cargo 第一步退出）照常不带缓存编译，只有服务真正启动了，「Enable sccache」才把 RUSTC_WRAPPER 写进环境；SCCACHE_IGNORE_SERVER_IO_ERROR=1 让构建途中服务出错时退回直接编译。CARGO_INCREMENTAL=0 是因为 sccache 不缓存增量编译。
       - name: Install sccache
+        id: sccache
         if: ${{ needs.changes.outputs.linux == 'true' }}
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Enable sccache
+        if: ${{ needs.changes.outputs.linux == 'true' && steps.sccache.outcome == 'success' }}
+        shell: bash
+        run: |
+          if sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache did not start; the Rust build runs without the compile cache"
+          fi
       - name: Install the Tauri build dependencies
         if: ${{ needs.changes.outputs.linux == 'true' }}
         run: |
@@ -238,15 +283,26 @@ jobs:
     runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
-      RUSTC_WRAPPER: sccache
+      SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install sccache
+        id: sccache
         if: ${{ needs.changes.outputs.engine == 'true' }}
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Enable sccache
+        if: ${{ needs.changes.outputs.engine == 'true' && steps.sccache.outcome == 'success' }}
+        shell: bash
+        run: |
+          if sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache did not start; the Rust build runs without the compile cache"
+          fi
       # 拆字表（crates/engine/src/local/chaizi*.tsv）由生成器从锁定的 kfcd/chaizi 和 Unihan 生成并提交。MSIME_FETCH=1 让契约检查在缓存里没有输入时按锁下载并逐字节核对，而不是打印 skip；输入按两份锁的摘要缓存，锁不变就不重新下载。
       - name: Restore the pinned chaizi sources
         if: ${{ needs.changes.outputs.engine == 'true' }}
@@ -277,15 +333,26 @@ jobs:
     runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
-      RUSTC_WRAPPER: sccache
+      SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install sccache
+        id: sccache
         if: ${{ needs.changes.outputs.plugins == 'true' }}
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Enable sccache
+        if: ${{ needs.changes.outputs.plugins == 'true' && steps.sccache.outcome == 'success' }}
+        shell: bash
+        run: |
+          if sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache did not start; the Rust build runs without the compile cache"
+          fi
       - name: Restore the pinned Unihan zip
         if: ${{ needs.changes.outputs.plugins == 'true' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -447,6 +514,7 @@ jobs:
   windows-skin-gallery:
     needs: [changes, windows]
     name: Windows candidate skin gallery
+    # 留在 GitHub 托管的 runner：截图要从交互式桌面截，没确认过 Depot 的 Windows runner 有没有；这个 job 只跑一两分钟。
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
@@ -494,12 +562,29 @@ jobs:
   windows-settings:
     needs: changes
     name: Windows native settings
+    # 留在 GitHub 托管的 runner：冒烟要把设置窗口撑到 1000×780，Depot 的 Windows 机型主屏只有 800×600，显卡也只报这一档分辨率。
     runs-on: windows-2025
-    timeout-minutes: 40
+    # 完整 WinUI、Win7 设置、手写及多版本门禁已实测耗时 39 分钟，保留冷构建余量。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check settings snapshot file sharing
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & platforms/windows/tests/tools/settings_snapshot_test.ps1
+      # GitHub 的 Windows 镜像导出 VCPKG_INSTALLATION_ROOT；Depot 在同样的 C:\vcpkg 中提供它，但没有这个变量。
+      - name: Locate vcpkg
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            if (-not (Test-Path -LiteralPath 'C:\vcpkg\scripts\buildsystems\vcpkg.cmake' -PathType Leaf)) { throw 'vcpkg not found' }
+            "VCPKG_INSTALLATION_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
+          }
       - name: Build the settings host
         if: ${{ needs.changes.outputs.windows == 'true' }}
         shell: pwsh
@@ -517,6 +602,16 @@ jobs:
           & $msbuild[0] platforms/windows/settings/MSIME.Settings.vcxproj /restore /t:Build /p:Configuration=RelWithDebInfo /p:Platform=x64 /p:TargetName=msime-client-settings /p:HostApiLibrary="$env:GITHUB_WORKSPACE/target/debug/msime_host_api.dll.lib" /p:OutDir="$output" /p:IntDir="$env:GITHUB_WORKSPACE/target/windows-full/x64/settings-obj/" /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { throw 'Settings host build failed' }
           Copy-Item target/debug/msime_host_api.dll $output
+      # 共享存储替换设置文件时，目标被别的进程短暂打开（杀毒、备份、索引）要等它过去，而不是让设置页把这次保存当成失败、重读旧值。这几条测试在真的 Windows 上打开着目标去替换，macOS 和 Linux 的作业碰不到这种失败。
+      - name: Test shared storage replacement while the target is open
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --locked -p msime-client-base --lib -j 2 -- storage::tests::transient_replace storage::tests::replace_ storage::tests::persist_replacing
+          if ($LASTEXITCODE -ne 0) { throw 'Shared storage replacement tests failed' }
+          cargo test --locked -p msime-client-core --lib -j 2 -- preferences::tests::save_waits_for_a_reader preferences::tests::error_wordings_the_harmony_host_matches_on
+          if ($LASTEXITCODE -ne 0) { throw 'Preferences save retry tests failed' }
       - name: Build and test the compatibility settings host
         if: ${{ needs.changes.outputs.windows == 'true' }}
         shell: pwsh
@@ -603,7 +698,7 @@ jobs:
     needs: changes
     name: Windows release script tests
     # The release scripts are PowerShell run on Windows, and the cross-build container above has no pwsh, so their probe tests run on a Windows runner. None of them compiles anything.
-    runs-on: windows-2025
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -642,15 +737,26 @@ jobs:
     runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     env:
-      RUSTC_WRAPPER: sccache
+      SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install sccache
+        id: sccache
         if: ${{ needs.changes.outputs.web == 'true' }}
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Enable sccache
+        if: ${{ needs.changes.outputs.web == 'true' && steps.sccache.outcome == 'success' }}
+        shell: bash
+        run: |
+          if sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache did not start; the Rust build runs without the compile cache"
+          fi
       # wasm-bindgen CLI 必须和 crates/engine-wasm 钉住的 wasm-bindgen crate 同为 0.2.128，wasm-opt 用 binaryen version_133；两个官方 tarball 的 SHA-256 记在这里，下载后先校验再用。release-web-engine.yml 用同样的两份。
       - name: Install LLVM, the wasm target, wasm-bindgen and wasm-opt
         if: ${{ needs.changes.outputs.web == 'true' }}

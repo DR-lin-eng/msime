@@ -2,7 +2,7 @@ import type { InputScheme } from "../core/input-scheme";
 
 import { schemeTitle } from "./label-helpers";
 import type { EffectStyle, PluginPreferences } from "./plugin-preferences";
-import type { PluginKind, PluginPackage } from "./plugin-types";
+import type { PluginKind, PluginPackage, TouchPluginRules } from "./plugin-types";
 
 /** 各类插件统一的显示名。设置页、社区页和管理后台、官网都用这一套；旋律音效包另写作 `melodyKindLabel`。 */
 export const kindLabels: Record<PluginKind, string> = {
@@ -38,6 +38,37 @@ export const kindOrder: readonly PluginKind[] = [
   "wordbook",
   "symbol_set",
 ];
+
+/** 触屏设置的插件页列出、社区插件只给的类型：触屏键盘用得上的那几种，按宿主的能力收窄。按键音效包总在其中（旋律包另由调用方按 `mode` 排除）；指令表和短语表要宿主路由 / 和 K 模式（`triggers`）；辅助码表要设置里有辅助码；单词本和符号集要背单词、符号面板读插件。特效包、音乐包和脚本插件在触屏上不起作用，不在其中。 */
+export function touchPluginKinds({
+  triggers,
+  helpcode,
+  wordbookPacks,
+  symbolSetPacks,
+}: {
+  triggers: boolean;
+  helpcode: boolean;
+  wordbookPacks: boolean;
+  symbolSetPacks: boolean;
+}): PluginKind[] {
+  return kindOrder.filter((kind) => {
+    switch (kind) {
+      case "sound":
+        return true;
+      case "command_table":
+      case "phrase_table":
+        return triggers;
+      case "helpcode":
+        return helpcode;
+      case "wordbook":
+        return wordbookPacks;
+      case "symbol_set":
+        return symbolSetPacks;
+      default:
+        return false;
+    }
+  });
+}
 
 export const effectStyleOptions: readonly { value: EffectStyle; label: string }[] = [
   { value: "off", label: "关闭" },
@@ -76,6 +107,10 @@ export function pluginErrorMessage(error: unknown, fallback: string): string {
       return "这个 id 属于内置插件，不能覆盖或删除。";
     case "plugin_storage":
       return "插件目录不可用，请检查数据目录的权限。";
+    case "plugin_exists":
+      return "本机已经有一个同样 id 的插件，没有覆盖它。";
+    case "plugin_not_editable":
+      return `这个插件不能在设置页编辑${reason}。`;
     case "plugin_script_memory":
       return "启用后会超出输入法留给脚本插件的内存（64 MiB），先停用别的脚本插件再试。";
     case "plugin_script_limit":
@@ -88,6 +123,12 @@ export function pluginErrorMessage(error: unknown, fallback: string): string {
       return `授权不符合要求${reason}。`;
     case "plugin_script_missing":
       return `找不到这个脚本插件${reason}。`;
+    case "plugin_script_setting_invalid":
+      return `设置没有保存：值不符合插件的要求${reason}。`;
+    case "plugin_script_settings_format":
+      return "设置文件是更新版本的水杉输入法写的，这个版本不能修改它。";
+    case "storage":
+      return "插件的数据读写失败，请检查数据目录的权限。";
     case "mention_invalid":
       return `名单有误${reason}。`;
     case "mention_format":
@@ -167,16 +208,28 @@ export function schemeTableModeNote(scheme: InputScheme | undefined, mode: strin
   return `当前输入方案「${schemeTitle(scheme)}」打不开${mode}，切换到全拼、双拼或五笔后才能用。`;
 }
 
+/** 触屏键盘上怎样进入一个本地输入模式：功能面板「本地输入」里的那一项。接在句首，后面再写进入后输入什么。 */
+export function touchLocalModeEntry(title: string): string {
+  return `在键盘功能面板的「本地输入」里选「${title}」，`;
+}
+
 /** What the preferences currently do with a pack, as the list marks it: 使用中 for the selected sound, effect or music pack, 当前旋律 for the selected melody, 已启用 with its priority for an enabled command or phrase table; null when the pack is not in use or the host does not act on its kind (`kinds`, the same set the missing selections are limited to). A pack that is selected while the switch that plays it is off is marked 已选 or 已启用 with that switch named instead, and an enabled table whose mode the current scheme cannot open says so before any switch, so the list never says a pack is in use when the input method ignores it. */
 export function packMarker(
   pack: PluginPackage,
   preferences: PluginPreferences,
   kinds: ReadonlySet<PluginKind>,
   modes: PluginTableModes,
+  /** 触屏插件页：按键音效包按触屏键盘的「按键音」开关标记，旋律不标。 */
+  touch?: TouchPluginRules,
 ): string | null {
   if (!kinds.has(pack.kind)) return null;
   switch (pack.kind) {
     case "sound":
+      if (touch) {
+        if (soundPackUse(pack) === "sequence" || preferences.key_sound.pack !== pack.id)
+          return null;
+        return touch.keySoundEnabled === false ? "已选 · 按键音未开" : "使用中";
+      }
       if (soundPackUse(pack) === "sequence") {
         if (preferences.melody.pack !== pack.id) return null;
         return melodyPlays(preferences) ? "当前旋律" : "已选 · 按键旋律未开";
@@ -246,6 +299,8 @@ export function missingSelections(
   preferences: PluginPreferences,
   packages: readonly PluginPackage[],
   kinds: ReadonlySet<PluginKind>,
+  /** 宿主播放按键旋律；触屏键盘只播按键音，不报告旋律的选择。 */
+  melody = true,
 ): MissingSelection[] {
   const missing: MissingSelection[] = [];
   const add = (kind: PluginKind, id: string, use: string, soundUse?: SoundUse) => {
@@ -257,7 +312,7 @@ export function missingSelections(
     else missing.push({ kind, id, uses: [use], ...(mismatched ? { mismatched } : {}) });
   };
   add("sound", preferences.key_sound.pack, "当前音效包", "keys");
-  add("sound", preferences.melody.pack, "当前旋律", "sequence");
+  if (melody) add("sound", preferences.melody.pack, "当前旋律", "sequence");
   add("effect", preferences.effect_pack, "当前特效包");
   add("music", preferences.music.pack, "当前音乐包");
   for (const id of preferences.command_tables) add("command_table", id, "已启用的指令表");

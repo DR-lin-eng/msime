@@ -38,7 +38,7 @@
 
 ### 平台目录
 
-`platforms/{android,ios,macos,linux,windows,harmony}` 各自持有系统入口、平台适配和该平台的测试；`platforms/common` 放桌面宿主之间共用的 C++：Linux 与 Windows 编译的 `Telemetry`，以及 Linux 与 macOS 共用的词库维护租约 `DictionaryQuiesceLease.h`（单测在 `tests/`）。`shared/` 是跨语言而非跨平台的共享层：`shared/apple` 与 `shared/apple-bridge` 被 macOS 宿主和 iOS 键盘扩展同时依赖，`shared/backend`、`shared/backend-ui` 是 Swift Package 形态的账号与界面后端，`shared/voice` 是 C++ 的 provider 注册表与录音常量，`shared/snapshot` 是词库快照，`shared/input` 是 `CompositionDisplay.h` 与 `EnglishModeOutput.h` 两个 C++ 头文件。
+`platforms/{android,ios,macos,linux,windows,harmony}` 各自持有系统入口、平台适配和该平台的测试；`platforms/common` 放桌面宿主之间共用的 C++：Linux 与 Windows 编译的 `Telemetry`，以及 Linux 与 macOS 共用的词库维护租约 `DictionaryQuiesceLease.h`（单测在 `tests/`；租约格式在 `DictionaryQuiesceLeaseFormat.h`，Windows TIP 经 `platforms/windows/common/DictionaryQuiesceLease.h` 读同一份租约）。`shared/` 是跨语言而非跨平台的共享层：`shared/apple` 与 `shared/apple-bridge` 被 macOS 宿主和 iOS 键盘扩展同时依赖，`shared/backend`、`shared/backend-ui` 是 Swift Package 形态的账号与界面后端，`shared/voice` 是 C++ 的 provider 注册表与录音常量，`shared/snapshot` 是词库快照，`shared/input` 是 `CompositionDisplay.h` 与 `EnglishModeOutput.h` 两个 C++ 头文件。
 
 ### 引擎与资源
 
@@ -154,6 +154,8 @@ IPC 是三角色命名管道（Main / Aux / Diagnostic）。`PipePeer::bind` 校
 ArkTS 宿主，`module.json5` 声明 `mainElement: "KeyboardExtensionAbility"`、`type: "inputMethod"`，`deviceTypes` 覆盖 phone/tablet/2in1，四项权限（INTERNET、VIBRATE、READ_PASTEBOARD、MICROPHONE）。`inputmethodextability/KeyboardExtensionAbility.ets` 继承 `InputMethodExtensionAbility`，负责 panel 创建、caret 跟随、selectionChanged/textChanged 回调、HUD 与悬浮工具栏面板、硬件键路由；`keyboard/KeyboardView.ets` 与 `keyboard/KeyboardSession.ets` 是键面与会话的主体。NAPI 边界在 `native/client_napi.cpp`，73 个导出覆盖会话、候选管理、翻译、云与 AI 联想、语音、皮肤库、社区资源、个人词库和打字统计。
 
 能力按平台 API 实际具备的来：手写走 Core Vision Kit 的 `textRecognition`，语音走 Core Speech Kit 的离线短语音加 HTTP ASR 加豆包流式，录音提示音与静音走 AVPlayer 与 `CONCURRENCY_PAUSE_OTHERS`，录音设备用 `AudioRoutingManager`。AI 润色改为润色光标前文本，因为 `InputClient` 只提供 `getForwardSync`/`getBackwardSync`。明确不做的几项在 README 里带 SDK 查证记录：应用图标切换（`bundleManager` 与 `shortcutManager` 都没有对应 API）、独立的表情/剪贴板窗口（在本宿主它们是键面而不是窗口）。
+
+AI 生成类功能（AI 对话、AI 润色与高情商回复、AI 联想、AI 候选翻译、语音识别后的 AI 润色、AI 皮肤）在鸿蒙版拿到华为应用市场要求的实名认证、《安全评估报告》和生成内容标识资质之前不提供：总闸是 `HostCapabilities.ai_generation`（鸿蒙为 false），设置页和键盘都按它隐藏入口、不发请求，细节见 [platforms/harmony/README.md](../platforms/harmony/README.md#ai-生成类功能目前不提供)。
 
 设置页的形态是 HarmonyOS 特有的：`resource://` 的 origin 为 null，WebView 拒绝跨 origin 拉模块脚本和样式，所以 `apps/harmony` 把同一份 `@msime/ui` 打成**单文件** `entry/src/main/resources/rawfile/settings/index.html`，由 `platforms/harmony/stage-settings.sh` 在每次打 HAP 前构建，不提交进仓库（`entry/hvigorfile.ts` 在它缺失时拒绝打包）。它以前是提交的产物，改共享 UI 的 PR 之间因此反复冲突；`scripts/test-harmony-settings-bundle.py` 现在检查它没有被重新提交，并且仍能构建成单文件。
 

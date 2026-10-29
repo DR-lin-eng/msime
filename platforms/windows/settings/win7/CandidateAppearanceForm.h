@@ -266,12 +266,12 @@ private:
       {appearance_preedit, "candidate_preedit_style", L"候选窗口预编辑", 2, {"pinyin", "empty"}, {L"拼音分词", L"不显示"}},
       {appearance_inline, "tsf_preedit_style", L"行内预编辑", 3, {"raw", "pinyin", "empty"}, {L"原始按键", L"拼音分词", L"不显示"}},
   }};
-  struct NumberField { int id; const char* key; const wchar_t* title; int low; int high; int step; bool optional = false; };
+  struct NumberField { int id; const char* key; const wchar_t* title; int low; int high; int step; bool optional; };
   static constexpr std::array<NumberField, 5> number_fields{{
-      {appearance_font_size, "candidate_font_size", L"候选字号", 12, 32, 1},
-      {appearance_preedit_size, "candidate_preedit_font_size", L"预编辑字号", 12, 32, 1},
-      {appearance_scale, "candidate_scale_percent", L"整体大小（%）", 75, 150, 5},
-      {appearance_opacity, "candidate_opacity_percent", L"不透明度（%）", 50, 100, 5},
+      {appearance_font_size, "candidate_font_size", L"候选字号", 12, 32, 1, false},
+      {appearance_preedit_size, "candidate_preedit_font_size", L"预编辑字号", 12, 32, 1, false},
+      {appearance_scale, "candidate_scale_percent", L"整体大小（%）", 75, 150, 5, false},
+      {appearance_opacity, "candidate_opacity_percent", L"不透明度（%）", 50, 100, 5, false},
       {appearance_radius, "candidate_corner_radius", L"圆角大小（DIP）", 0, 16, 1, true},
   }};
   struct GameList { int id; int remove; const char* key; const wchar_t* title; };

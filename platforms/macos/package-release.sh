@@ -30,6 +30,7 @@
 #   MSIME_SPARKLE_APPCAST_BASE_URL    where the appcast-<edition>.xml files are served; defaults to the macos-appcast release
 #   MSIME_SPARKLE_DOWNLOAD_URL_PREFIX 更新包的下载地址前缀，缺省也是 macos-appcast release：更新包和 appcast 放在一起，不进版本发布页（见 platforms/macos/scripts/publish-sparkle-feed.sh）
 #   MSIME_BUILD_NUMBER 发布工作流传入的唯一构建号；未设置时使用 platforms/macos/build-number.txt
+#   MSIME_UPDATE_CHANNEL          这次产出的 Sparkle 更新属于哪个更新通道：stable（缺省）、beta 或 nightly，与偏好 update_channel 同名。只决定 appcast 和更新包的文件名（platforms/macos/scripts/sparkle_feed.py 的 names）：稳定版是 appcast-<版本 id>.xml、appcast-settings-<版本 id>.xml 和 <dmg_prefix>-VERSION-input-method.zip / -settings.zip，与引入通道之前相同；测试版和每日构建是 appcast-<通道>-<版本 id>.xml、appcast-settings-<通道>-<版本 id>.xml，更新包名里带通道和构建号。包里的 SUFeedURL 不随通道变，始终是稳定版的 feed，输入法和设置应用按用户在设置页选的通道由它推出要读的 appcast（src/core/UpdateChannelFeed.h）
 #
 # 产物是 universal 的：Apple 芯片和 Intel Mac 用同一个包。Rust 产物按两个 target 各编一次再用 lipo 合并，CMake 的目标和 Swift 后端经 CMAKE_OSX_ARCHITECTURES 编出双架构，打包后 check_app 逐个核对包里的 Mach-O 都含两种架构。需要 rustup target add aarch64-apple-darwin x86_64-apple-darwin。
 set -Eeuo pipefail
@@ -58,6 +59,14 @@ version="${1:-$(tr -d '[:space:]' < platforms/macos/version.txt)}"
   exit 2
 }
 out_dir="${2:-$repo_root/target/macos-package/dist}"
+update_channel="${MSIME_UPDATE_CHANNEL:-stable}"
+case "$update_channel" in
+  stable|beta|nightly) ;;
+  *) echo "MSIME_UPDATE_CHANNEL must be stable, beta or nightly, not '$update_channel'" >&2; exit 2 ;;
+esac
+# 测试版和每日构建的更新包名带构建号，取 CMake 用的同一个值。
+sparkle_build="${MSIME_BUILD_NUMBER:-$(tr -d '[:space:]' < platforms/macos/build-number.txt)}"
+sparkle_feed_tool="$repo_root/platforms/macos/scripts/sparkle_feed.py"
 : "${MSIME_SPARKLE_ROOT:?set MSIME_SPARKLE_ROOT to the directory containing Sparkle.framework 2.9.6}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}"
 build_dir="${MSIME_MACOS_BUILD_DIR:-$repo_root/target/macos-release}"
@@ -287,7 +296,14 @@ cmake --build "$build_dir" --config Release --parallel "$(sysctl -n hw.logicalcp
 # `backend-library-load` 加载 bundle 里的 MSIMEBackend.dylib（Release 构建会对它做优化、dead strip 和剥离符号，见 scripts/build_backend_swift.sh），确认输入法按名字查找的 Objective-C 类和 selector 都还在。
 ctest --test-dir "$build_dir" --no-tests=error --output-on-failure -R '^(bundle-contents|backend-library-load)$'
 
-built_bundle="$(only "$build_dir"/*.app)"
+# 构建目录里不止输入法一个 app bundle：测试用的 korean-system-input-acceptance.app（CMakeLists.txt 里的 MACOSX_BUNDLE 测试程序）也在这里，按通配符取唯一一个会找到两个而失败。只取 Info.plist 里有 InputMethodConnectionName 的那个，它才是输入法本体。
+input_method_bundles=()
+for candidate in "$build_dir"/*.app; do
+  if /usr/libexec/PlistBuddy -c 'Print :InputMethodConnectionName' "$candidate/Contents/Info.plist" >/dev/null 2>&1; then
+    input_method_bundles+=("$candidate")
+  fi
+done
+built_bundle="$(only ${input_method_bundles[@]+"${input_method_bundles[@]}"})"
 imk_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$built_bundle/Contents/Info.plist")"
 if [ "$imk_version" != "$version" ]; then
   echo "the input method reports $imk_version but the package is $version; the bundle takes its version from platforms/macos/version.txt, so pass the release version as VERSION or bump version.txt" >&2
@@ -347,9 +363,9 @@ dmgs=()
 # 更新 zip 和 appcast 都挂在滚动的 macos-appcast 上，不进版本发布页；zip 的摘要写进单独的 sparkle-SHA256SUMS，随它们一起上传。
 update_zips=()
 
-# 同一种签名与校验流程分别生成输入法和完整设置应用的更新归档。
+# 同一种签名与校验流程分别生成输入法和完整设置应用的更新归档。feed_name 是这个通道的 appcast 文件名，plist_feed_name 是 bundle 的 SUFeedURL 应当指向的稳定版 appcast：SUFeedURL 不随通道变。
 create_sparkle_update() {
-  local bundle="$1" archive_name="$2" feed_name="$3"
+  local bundle="$1" archive_name="$2" feed_name="$3" plist_feed_name="$4"
   local update_zip="$out_dir/$archive_name" appcast_dir="$work/$feed_name"
   local appcast="$out_dir/$feed_name" feed build_version
   rm -f "$update_zip"
@@ -360,7 +376,7 @@ create_sparkle_update() {
   printf '%s' "$sparkle_key" | "$MSIME_SPARKLE_ROOT/bin/generate_appcast" --ed-key-file - \
     --download-url-prefix "$sparkle_download_prefix" -o "$appcast" "$appcast_dir"
   feed="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$bundle/Contents/Info.plist")"
-  [ "$feed" = "${sparkle_appcast_base}$feed_name" ] || { echo "unexpected Sparkle feed for $edition" >&2; exit 1; }
+  [ "$feed" = "${sparkle_appcast_base}$plist_feed_name" ] || { echo "unexpected Sparkle feed for $edition" >&2; exit 1; }
   build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$bundle/Contents/Info.plist")"
   grep -qF "url=\"$sparkle_download_prefix$(basename "$update_zip")\"" "$appcast" || { echo "$appcast points at a different archive" >&2; exit 1; }
   grep -qF "<sparkle:version>$build_version</sparkle:version>" "$appcast" || { echo "$appcast offers a different build" >&2; exit 1; }
@@ -379,6 +395,10 @@ load_edition() {
   # 非英文离线释义按中文候选查，不提供中文方案的版本（日文、越南文和藏文版）不带：stage-resources.sh 不暂存，check_app 再确认包里没有。
   offline_glosses="$(python3 "$edition_tool" field --edition "$edition" features.offline_glosses)"
   wubi_bundled="$(python3 -I -c 'import json, sys; print(int(next(edition["default_scheme"] for edition in json.load(open(sys.argv[1]))["editions"] if edition["id"] == sys.argv[2]) == "wubi"))' "$repo_root/shared/contracts/editions.json" "$edition")"
+  # 这个版本在 update_channel 上的 appcast 和更新包文件名。
+  local names
+  names="$(python3 -I "$sparkle_feed_tool" names --channel "$update_channel" --edition "$edition" --prefix "$dmg_prefix" --version "$version" --build "$sparkle_build")"
+  IFS=$'\t' read -r input_feed_name settings_feed_name input_archive_name settings_archive_name <<< "$names"
 }
 
 # 打一个版本：暂存该版本的资源和输入法 bundle，打设置应用，出 DMG、签名并提交公证；挂载 DMG 的最终检查在全部版本装订之后（finish_edition）。下面这些变量对当前版本有效，check_app 也读它们。
@@ -416,7 +436,7 @@ codesign --verify --deep --strict "$staged_bundle"
 
 # ---- Sparkle 输入法更新 ----
 if [ -n "$sparkle_key" ]; then
-  create_sparkle_update "$staged_bundle" "$dmg_prefix-$version-input-method.zip" "appcast-$edition.xml"
+  create_sparkle_update "$staged_bundle" "$input_archive_name" "$input_feed_name" "appcast-$edition.xml"
 fi
 
 # ---- Settings app for this edition ----
@@ -490,6 +510,27 @@ fi
 sign "$app"
 codesign --verify --deep --strict "$app"
 
+# 资源完整性由 verify_resources 逐项校验；预算跟随本版本实际随包的锁定资源，再为目录、辅助码和其他小文件留固定 4 MiB 余量。
+core_dictionary_budget_kib() {
+  python3 - "$repo_root" "$edition" "$1" <<'PYBUDGET'
+import json
+import sys
+from pathlib import Path
+
+root, edition, staged = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+lock = root / ("resources/desktop-dictionary.lock.json" if edition == "full" else f"resources/editions/{edition}.lock.json")
+artifacts = json.loads(lock.read_text())["artifacts"]
+# 按 4 KiB 文件分配粒度向上取整；按需省略的锁条目不占本版本预算。
+locked_kib = sum((artifact["size"] + 4095) // 4096 * 4
+                 for artifact in artifacts if (staged / artifact["name"]).is_file())
+helpcodes = root / "resources/helpcodes"
+names = ("helpcode.txt", "zrm_helpcode_big_unique.txt", "shouyou2_0_helpcode.txt", "shouyouplus_helpcode.txt", "xiaohe_helpcode.txt", "jiajia_helpcode.txt", "wubi86_helpcode.txt", "ENGINE-NOTICE.md", "NOTICE.md", "NOTICE-wubi86.md")
+helpcodes_kib = sum((path.stat().st_size + 4095) // 4096 * 4
+                    for name in names if (path := helpcodes / name).is_file())
+print(locked_kib + helpcodes_kib + 4096)
+PYBUDGET
+}
+
 # The package is only worth shipping if it holds what the install button and first run read. Checked on the built app and again on the copy inside the mounted DMG.
 check_app() {
   local root="$1"
@@ -521,11 +562,12 @@ check_app() {
   test ! -e "$resources_dir/language-dictionaries"
   test ! -e "$resources_dir/handwriting/handwriting-zh_CN.model"
   test -f "$resources_dir/handwriting/Zinnia-LICENSE.txt"
-  # 核心词库的体积预算（KiB）。按需资源包被误放回 EngineResources，或者核心词库意外变大，都会在这里报出来。dict-v2.0.5 把五笔码表拆进单独的 msime-wubi.db，它与 msime-pinyin.db 合计比 dict-v2.0.2 的 msime.db 大约 5.7 MB，当时核心文件加 helpcodes/ 约 116900 KiB，预算 121000 KiB。dict-v2.0.7 的 msime-english.db 并入 SCOWL 英文词表，从 1626112 字节涨到 4521984 字节（约 +2.8 MB），另加 4 KiB 的 msime-scowl_Copyright.txt；核心文件按锁文件大小逐个向上取整到 4 KiB 合计 119224 KiB，加上 helpcodes/ 的 528 KiB 约 119752 KiB，原预算只剩约 1.2 MB 余量，所以抬到 124000 KiB，保持与此前相同的约 4 MB 余量。dict-v2.0.10 的 msime-wubi.db 并入 86 五笔词组补充表，从 13688832 字节涨到 15720448 字节（约 +2.0 MB），拼音库与二元、三元模型也略有变化，核心文件合计 121208 KiB，加上 helpcodes/ 约 121736 KiB，余量只剩约 2.2 MB，所以再抬到 126000 KiB，仍保持约 4 MB 余量。
-  local engine_kib
+  # 词库升级的体积由版本锁评审；预算只为本版本随包的文件加固定余量，额外资源仍会超限。
+  local engine_kib engine_budget_kib
   engine_kib="$(du -sk "$resources_dir/EngineResources" | cut -f1)"
-  test "$engine_kib" -le 126000 || {
-    echo "EngineResources is ${engine_kib} KiB, over the 126000 KiB core-dictionary budget: $resources_dir/EngineResources" >&2
+  engine_budget_kib="$(core_dictionary_budget_kib "$resources_dir/EngineResources")"
+  test "$engine_kib" -le "$engine_budget_kib" || {
+    echo "EngineResources is ${engine_kib} KiB, over the ${engine_budget_kib} KiB locked core-dictionary budget: $resources_dir/EngineResources" >&2
     exit 1
   }
   test -f "$resources_dir/Licenses/THIRD_PARTY_NOTICES.txt"
@@ -666,7 +708,7 @@ fi
 resources_kibs+=("$(du -sk "$app/Contents/Resources" | cut -f1)")
 # 供设置应用直接安装的归档取的是这个已签名的应用本身。公证票据不装订进应用，所以不必等公证结果，内容与等到之后再打相同；任何一个版本公证失败整个打包都失败，归档不会单独发出去。
 if [ -n "$sparkle_key" ]; then
-  create_sparkle_update "$app" "$dmg_prefix-$version-settings.zip" "appcast-settings-$edition.xml"
+  create_sparkle_update "$app" "$settings_archive_name" "$settings_feed_name" "appcast-settings-$edition.xml"
 fi
 dmgs+=("$dmg")
 }

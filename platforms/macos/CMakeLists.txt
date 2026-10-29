@@ -157,7 +157,7 @@ target_compile_options(MSIMEClientInputMethod PRIVATE -fobjc-arc -Wall -Wextra -
 target_link_libraries(MSIMEClientInputMethod PRIVATE apple-client msime-voice-providers "-framework AppKit" "-framework InputMethodKit" "-framework Carbon" "-framework AVFoundation" "-framework Speech")
 # 单按 Caps Lock 切换中英文时用 IOKit 的 IOHIDSetModifierLockState 撤回大写锁定（系统框架，不需要额外权限）。
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework IOKit")
-# build-number.txt 是本地构建的默认构建号；发布工作流传入 MSIME_BUILD_NUMBER，用全局工作流运行 ID 区分同一版本的 beta、nightly 和不同发布运行。CFBundleVersion 不直接用它，而是把版本号编进去：((主 × 1000 + 次) × 1000 + 修订) × 1,000,000,000 + 构建号。这样发布构建号可以在 1 到 999999999 之间增长，且跨版本保持单调；0.54.0 的本地构建 1 是 5400000000000000001。Sparkle 的安装进程（Autoupdate 的 SUPlainInstaller）只用标准比较器比新旧 bundle 的 CFBundleVersion，新的更小就当降级拒绝装，不经过输入法里的任何委托。设置应用把构建号按 u64 解析（apps/desktop/src-tauri/src/platform/macos/macos_input_source.rs 的 BundleVersion）。
+# build-number.txt 是本地构建的默认构建号；发布工作流传入 MSIME_BUILD_NUMBER，缺省是所构建提交的提交时间距 2026-01-01T00:00:00Z 的分钟数（release-macos.yml），同一版本号的正式版、测试版和每日构建按代码先后排序，同一个提交重跑得到同一个构建号。以前用工作流运行 ID 对 999999999 取模，约两个月回绕一次，回绕后的构建会被 Sparkle 当成降级；改用时间之后的构建号比那时发出的小，同一版本号内要等下一次版本号递增才能盖过它们（见 .agents/notes/implemented/feature/2026-10-25-macos-update-channels.md）。CFBundleVersion 不直接用它，而是把版本号编进去：((主 × 1000 + 次) × 1000 + 修订) × 1,000,000,000 + 构建号。这样发布构建号可以在 1 到 999999999 之间增长，且跨版本保持单调；0.54.0 的本地构建 1 是 5400000000000000001。Sparkle 的安装进程（Autoupdate 的 SUPlainInstaller）只用标准比较器比新旧 bundle 的 CFBundleVersion，新的更小就当降级拒绝装，不经过输入法里的任何委托。设置应用把构建号按 u64 解析（apps/desktop/src-tauri/src/platform/macos/macos_input_source.rs 的 BundleVersion）。
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build-number.txt" "${CMAKE_CURRENT_SOURCE_DIR}/version.txt")
 set(MSIME_BUILD_NUMBER "" CACHE STRING "macOS bundle 构建号；缺省使用 build-number.txt")
 if(NOT MSIME_BUILD_NUMBER)
@@ -192,7 +192,7 @@ endif()
 set(MSIME_EDITION "full" CACHE STRING "Edition id from shared/contracts/editions.json")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(MSIME_EDITION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/edition_bundle.py")
-# Sparkle 只在发布包里打开：package-release.sh 拿得到签更新的私钥时传入 appcast 所在的目录，这里拼出本版本的 SUFeedURL（appcast-<版本 id>.xml，edition_bundle.py 把 full 的改成别的版本的），写入 sparkle-public-key.txt 里的公钥，并打开每天一次的后台检查与静默更新。开发构建不带这些键：带了的话，本机编的输入法会被正式版覆盖。没有 feed 时 UpdateController 走官网下载页（MSIMEUpdateRouteForHost）。
+# Sparkle 只在发布包里打开：package-release.sh 拿得到签更新的私钥时传入 appcast 所在的目录，这里拼出本版本的 SUFeedURL（appcast-<版本 id>.xml，edition_bundle.py 把 full 的改成别的版本的；它始终是稳定版的 feed，用户在设置页选了测试版或每日构建时，UpdateController 由它推出同目录下的 appcast-<通道>-<版本 id>.xml，见 src/core/UpdateChannelFeed.h），写入 sparkle-public-key.txt 里的公钥，并打开每天一次的后台检查与静默更新。开发构建不带这些键：带了的话，本机编的输入法会被正式版覆盖。没有 feed 时 UpdateController 走官网下载页（MSIMEUpdateRouteForHost）。
 set(MSIME_SPARKLE_APPCAST_BASE_URL "" CACHE STRING "URL prefix of the appcast-<edition>.xml feeds; empty leaves Sparkle off")
 set(MSIME_SPARKLE_PLIST_KEYS "")
 if(MSIME_SPARKLE_APPCAST_BASE_URL)
@@ -1007,6 +1007,7 @@ target_link_libraries(shortcut-test PRIVATE "-framework AudioToolbox")
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework AudioToolbox")
 target_link_libraries(shortcut-test PRIVATE "-framework AVFoundation" "-framework Speech" "-framework CoreGraphics" "-framework CoreText" "-framework CoreAudio" "-framework UniformTypeIdentifiers")
 add_test(NAME shortcut COMMAND shortcut-test)
+add_test(NAME caps-lock COMMAND shortcut-test --caps-lock)
 add_test(NAME shortcut-expanded-scroll COMMAND shortcut-test --expanded-scroll)
 add_test(NAME shortcut-vim-mode COMMAND shortcut-test --vim-mode)
 add_test(NAME shortcut-nested-commit COMMAND shortcut-test --nested-commit)
@@ -1016,6 +1017,9 @@ add_test(NAME shortcut-cross-commit-spacing COMMAND shortcut-test --cross-commit
 # The controllers under test read runtime-options.json from Application Support, so each run gets an empty home of its own: an installed or demo profile on the developer's Mac must not reach into these cases.
 set(MSIME_SHORTCUT_TEST_HOME "${CMAKE_CURRENT_BINARY_DIR}/shortcut-test-home")
 file(MAKE_DIRECTORY "${MSIME_SHORTCUT_TEST_HOME}")
+set(MSIME_CAPS_LOCK_TEST_HOME "${CMAKE_CURRENT_BINARY_DIR}/caps-lock-test-home")
+file(MAKE_DIRECTORY "${MSIME_CAPS_LOCK_TEST_HOME}")
+set_tests_properties(caps-lock PROPERTIES TIMEOUT 30 ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_CAPS_LOCK_TEST_HOME}")
 set_tests_properties(shortcut-nested-commit PROPERTIES ENVIRONMENT "CFFIXED_USER_HOME=${MSIME_SHORTCUT_TEST_HOME}")
 # The ceiling is for the sanitizer leg, where the same binary takes several times as long: measured
 # at about 16 s unsanitized and about 120 s under AddressSanitizer on one machine. A ceiling that
@@ -1058,6 +1062,22 @@ list(REMOVE_ITEM MSIME_CONTROLLER_TEST_SOURCES tests/input/ShortcutTest.mm)
 add_executable(http-voice-controller-test tests/voice/HTTPVoiceControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES})
 target_sources(http-voice-controller-test PRIVATE src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 get_target_property(MSIME_CONTROLLER_TEST_LIBS shortcut-test LINK_LIBRARIES)
+add_executable(korean-romaja-controller-test tests/input/KoreanRomajaControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES}
+  src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm
+  src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
+target_link_libraries(korean-romaja-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
+target_compile_options(korean-romaja-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
+add_test(NAME korean-romaja-controller COMMAND korean-romaja-controller-test)
+set_tests_properties(korean-romaja-controller PROPERTIES TIMEOUT 60)
+
+# 系统输入验收独立于控制器测试：CI 只编译并探测条件，实际运行需要已安装输入源的桌面会话。
+add_executable(korean-system-input-acceptance MACOSX_BUNDLE tests/input/KoreanSystemInputAcceptance.mm)
+set_target_properties(korean-system-input-acceptance PROPERTIES
+  MACOSX_BUNDLE_GUI_IDENTIFIER "app.msime.tests.KoreanSystemInputAcceptance"
+  MACOSX_BUNDLE_BUNDLE_NAME "MSIME Korean System Input Acceptance")
+target_compile_options(korean-system-input-acceptance PRIVATE -fobjc-arc -Wall -Wextra -Werror)
+target_link_libraries(korean-system-input-acceptance PRIVATE "-framework AppKit" "-framework Carbon")
+add_test(NAME korean-system-input-prerequisites COMMAND korean-system-input-acceptance --probe)
 target_link_libraries(http-voice-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(http-voice-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME http-voice-controller COMMAND http-voice-controller-test)
@@ -1179,6 +1199,11 @@ add_executable(candidate-row-layout-test tests/candidate/CandidateRowLayoutTest.
 target_link_libraries(candidate-row-layout-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(candidate-row-layout-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME candidate-row-layout COMMAND candidate-row-layout-test)
+add_test(NAME candidate-user-geometry COMMAND candidate-row-layout-test --user-geometry)
+add_test(NAME candidate-host-appearance COMMAND candidate-row-layout-test --host-appearance)
+add_test(NAME candidate-adaptive-layout COMMAND candidate-row-layout-test --adaptive)
+# 光标后编辑：视图字段、首行右侧的提示和首选开头画淡。
+add_test(NAME candidate-caret-edit-suffix COMMAND candidate-row-layout-test --caret-edit-suffix)
 # 计时动效独立启动事件循环，不承接大排版矩阵的窗口与图层回调。
 add_test(NAME candidate-declared-motion COMMAND candidate-row-layout-test --declared-motion)
 # 大皮肤矩阵各自运行，保留 CI 的单项时限和全部排版断言。
@@ -1204,7 +1229,7 @@ add_test(NAME candidate-hover COMMAND candidate-hover-test)
 
 add_executable(settings-glass-test tests/settings/SettingsGlassTest.mm)
 target_compile_options(settings-glass-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(settings-glass-test PRIVATE "-framework AppKit" "-framework WebKit")
+target_link_libraries(settings-glass-test PRIVATE "-framework AppKit" "-framework WebKit" "-framework IOKit")
 add_test(NAME settings-glass COMMAND settings-glass-test)
 # Where the candidate window goes: under the caret, flipped above it when there is no room, and
 # clamped into the display it is on - including one whose coordinates are negative.
@@ -1238,6 +1263,10 @@ target_include_directories(skin-preview-test PRIVATE src)
 target_compile_options(skin-preview-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(skin-preview-test PRIVATE "-framework AppKit" "-framework CoreText")
 add_test(NAME skin-preview COMMAND skin-preview-test)
+# 252 组主题排版与绘制保留全部组合，各主题独立运行以沿用单项 20 秒预算。
+foreach(skin system shuishan light paper night ink)
+  add_test(NAME skin-preview-${skin} COMMAND skin-preview-test --theme-matrix ${skin})
+endforeach()
 add_executable(skin-settings-test tests/candidate/SkinSettingsTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/candidate/CandidateSkinAppearance.mm src/core/ChineseTextConversion.mm)
 foreach(translation_settings_consumer MSIMEClientInputMethod toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test candidate-appearance-defaults-test voice-hold-defaults-test skin-package-replace-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
   target_sources(${translation_settings_consumer} PRIVATE src/cloud/TranslationSettingsWindow.mm)
@@ -1367,8 +1396,10 @@ add_test(NAME voice-audio-muter COMMAND voice-audio-muter-test)
 add_executable(voice-cue-player-test tests/voice/VoiceCuePlayerTest.mm src/voice/VoiceCuePlayer.mm)
 target_compile_options(voice-cue-player-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_compile_definitions(voice-cue-player-test PRIVATE MSIME_VOICE_CUE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../windows/installer/assets/audios")
-target_link_libraries(voice-cue-player-test PRIVATE "-framework AppKit")
+target_link_libraries(voice-cue-player-test PRIVATE "-framework AppKit" "-framework AVFoundation" "-framework CoreAudio")
 add_test(NAME voice-cue-player COMMAND voice-cue-player-test)
+# 播放会卡在无人应答的麦克风授权框上时，测试跑完加载断言后以 77 退出，CTest 记为跳过而不是挂到超时。
+set_tests_properties(voice-cue-player PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(voice-input-level-test tests/voice/VoiceInputLevelTest.mm)
 target_compile_options(voice-input-level-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)

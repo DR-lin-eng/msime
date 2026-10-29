@@ -168,6 +168,10 @@ SessionController::SessionController(
            },
            [this](const FocusLease &lease, const FanyImeNamedpipeData &packet) {
              wait_candidate_render_for_key(lease, packet);
+           },
+           [this](const std::string &line) {
+             if (presentation_.rejected)
+               presentation_.rejected(line);
            }},
           transactions_) {
   if (!event_ || !healthy_ || !stop_service_ || interval.count() < 1 ||
@@ -591,22 +595,30 @@ SessionController::dedicated_english_state(const FocusLease &lease) {
   }
 }
 
-bool SessionController::exit_dedicated_english(const FocusLease &lease) {
+bool SessionController::exit_dedicated_english(const FocusLease &lease, bool *changed) {
+  if (changed) *changed = false;
   if (input_.on_worker_thread() || active_controller == this || stopping_.load())
     throw std::logic_error("Dedicated-English exit cannot reenter controller callbacks");
   std::unique_lock transaction(*transactions_, std::try_to_lock);
   if (!transaction.owns_lock()) return false;
-  bool exited = false;
-  auto submitted = input_.submit([&](InputState &state) {
+  // 超时后任务可能继续，结果和租约由任务持有，不能引用已退出的栈帧。
+  auto result = std::make_shared<std::pair<bool, bool>>(false, false);
+  auto submitted = input_.submit([this, lease, result](InputState &state) {
     if (stopping_ || !transport_.current(lease.transport)) return;
-    exited = state.dedicated_english(lease, true).has_value();
+    const auto before = state.dedicated_english(lease, false);
+    if (!before) return;
+    result->first = state.dedicated_english(lease, true).has_value();
+    result->second = before->at("dedicated_english").get<bool>();
   });
   if (!submitted || submitted->wait_for(std::chrono::seconds(2)) != std::future_status::ready)
     return false;
-  return submitted->get() == InputTaskStatus::Completed && exited;
+  const bool succeeded = submitted->get() == InputTaskStatus::Completed && result->first;
+  if (succeeded && changed) *changed = result->second;
+  return succeeded;
 }
 bool SessionController::set_dedicated_english(const FocusLease &lease,
-                                              bool enabled) {
+                                              bool enabled, bool *changed) {
+  if (changed) *changed = false;
   if (input_.on_worker_thread() || active_controller == this || stopping_.load())
     throw std::logic_error("Dedicated-English switch cannot reenter controller callbacks");
   // 这是用户在托盘里点的开关，只发一次、没有重试，所以锁忙时等着而不是放弃；等锁和等输入队列共用 2 秒。
@@ -614,15 +626,22 @@ bool SessionController::set_dedicated_english(const FocusLease &lease,
   const auto transaction = wait_transaction(*transactions_, stopping_, deadline);
   if (!transaction.owns_lock() || stopping_.load()) return false;
   // 等待可能超时，任务之后仍会在输入队列上运行，所以结果和租约放在任务自己持有的存储里，不引用这个栈帧。
-  auto applied = std::make_shared<bool>(false);
+  struct Applied { bool succeeded = false, changed = false; };
+  auto applied = std::make_shared<Applied>();
   auto submitted = input_.submit([this, lease, enabled, applied](InputState &state) {
     if (stopping_ || !transport_.current(lease.transport)) return;
-    if (auto view = state.set_dedicated_english(lease, enabled))
-      *applied = view->at("dedicated_english").get<bool>() == enabled;
+    const auto before = state.dedicated_english(lease, false);
+    if (!before) return;
+    if (auto view = state.set_dedicated_english(lease, enabled)) {
+      applied->succeeded = view->at("dedicated_english").get<bool>() == enabled;
+      applied->changed = before->at("dedicated_english").get<bool>() != enabled;
+    }
   });
   if (!submitted || submitted->wait_until(deadline) != std::future_status::ready)
     return false;
-  return submitted->get() == InputTaskStatus::Completed && *applied;
+  const bool succeeded = submitted->get() == InputTaskStatus::Completed && applied->succeeded;
+  if (succeeded && changed) *changed = applied->changed;
+  return succeeded;
 }
 bool SessionController::focus_current(const FocusLease &lease) {
   if (input_.on_worker_thread() || active_controller == this)
@@ -684,12 +703,12 @@ bool SessionController::send_tsf_config(const TsfLocalConfig &config) {
   if (stopping_)
     return false;
   const auto tickets = transport_.current_tickets();
-  const auto frames = tsf_config_frames(config);
   std::unique_lock transaction(*transactions_, std::try_to_lock);
   if (!transaction.owns_lock())
     return false;
   bool all_sent = true;
   for (const auto &ticket : tickets) {
+    const auto frames = tsf_config_frames(config, (ticket.capabilities & FanyImeProtocol::OrderedPreferences) != 0);
     for (const auto &frame : frames) {
       bool sent = false;
       try {

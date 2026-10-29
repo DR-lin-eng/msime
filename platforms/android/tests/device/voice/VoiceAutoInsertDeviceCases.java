@@ -51,6 +51,11 @@ final class VoiceAutoInsertDeviceCases {
                         @Override public java.io.File getFilesDir() { return null; }
                     };
                     method(ContextWrapper.class, "attachBaseContext", Context.class).invoke(service, isolated);
+                    // 聆听面板按产品路径解析皮肤，合成服务也必须装配真实样式组件。
+                    Class<?> stylerType = loader.loadClass("app.msime.android.ImeStyler");
+                    var stylerConstructor = stylerType.getDeclaredConstructor(serviceType);
+                    stylerConstructor.setAccessible(true);
+                    field(serviceType, "imeStyler").set(service, stylerConstructor.newInstance(service));
                     directory[0] = Files.createTempDirectory(context.getCacheDir().toPath(), "voice-insertion-");
                     Object store = storeType.getConstructor(Path.class).newInstance(directory[0]);
                     field(serviceType, "voiceResultStore").set(service, store);
@@ -69,11 +74,12 @@ final class VoiceAutoInsertDeviceCases {
                     owned[1] = entry;
                     checkUploadControls(entry, context, loader);
                     field(entryType, "generation").setLong(entry, 7);
+                    // 与产品的 notice 参数保持同一反射签名，不读取异常正文。
                     Method delivered = method(entryType, "delivered", long.class, String.class, String.class,
-                        byte[].class, long.class, String.class, String.class);
-                    delivered.invoke(entry, 7L, "synthetic direct", null, null, 0L, "zh-CN", "synthetic");
+                        String.class, byte[].class, long.class, String.class, String.class);
+                    delivered.invoke(entry, 7L, "synthetic direct", null, null, null, 0L, "zh-CN", "synthetic");
                     check(editor.getText().toString().equals("synthetic direct"), "识别完成必须直接上屏");
-                    delivered.invoke(entry, 6L, "stale", null, null, 0L, "zh-CN", "synthetic");
+                    delivered.invoke(entry, 6L, "stale", null, null, null, 0L, "zh-CN", "synthetic");
                     check(editor.getText().toString().equals("synthetic direct"), "旧识别不能上屏");
                     field(serviceType, "voiceActivityGeneration").setLong(service, 10);
                     ResultReceiver receiver = (ResultReceiver) method(serviceType,

@@ -136,7 +136,7 @@ const CHINESE_MAIN_COMPONENT: &str = "chinese-main";
 /// - 五笔码表只有 macOS 发布包可以不内置：本版本有五笔方案、而资源目录里没有它时列出（五笔版的发布包总带着它）。
 /// - 日文词典和语言词库只有 macOS 发布包不内置，macOS 上总是列出。Windows 随包带着它们，不列出也不下载。Linux 随包带着日文词典；语言词库只在用得到它的版本（版本表 `language_dictionaries` 非空）没有随包带齐时才列出，例如打包时没有备好词库、或不带它们的 Nix 包，否则粤拼、注音和笔画在这台机器上无从启用。
 /// - 手写模型只认汉字，不提供手写的版本（版本表 `features.handwriting` 为 false：日文、越南文和藏文版）不列出也不下载它。macOS 上提供手写的版本都列出它；Windows 上手写面板先用 Ink，只有 Ink 没有中文识别器、且没有随包或指定的模型时才列出；Linux 上没有随包或指定的模型时才列出。没列出时手写面板照常识别，不等下载。
-/// - 离线释义、Android 语音运行库和 OCR 模块只给 Android 使用，桌面不列出。
+/// - 离线释义、英文音标表、Android 语音运行库和 OCR 模块只给 Android 使用，桌面不列出。
 /// - macOS 的语音运行库只在 macOS 上、而且运行的输入法没有自带它时列出（锁文件还没固定它时这个资源包根本不存在）。Windows 和 Linux 随包带着各自的运行库。
 /// - 落定重排模型只给中文整句重排，不带中文主词库（版本表 `resources.components` 没有 `chinese-main`：日文、越南文和藏文版）的版本不列出也不下载它，与打包时不装它的规则相同。其他版本在没有随包模型时列出：会话总是优先用随包的那份，有它时下载的用不上。
 fn offered_by(pack: ResourcePack, edition: &Edition, installation: &Installation) -> bool {
@@ -178,8 +178,9 @@ fn offered_by(pack: ResourcePack, edition: &Edition, installation: &Installation
             .any(|component| component == CHINESE_MAIN_COMPONENT),
         // 白霜的 GPL 模型及其构建链许可尚未确认，不在桌面设置中提供。
         ResourcePack::GrammarBaishuang => false,
-        // Android 专属资源不出现在桌面入口；OCR 模块也不能由桌面下载或导入。
+        // Android 专属资源不出现在桌面入口；音标表仅由 Android 原生页按需提供。
         ResourcePack::OfflineGlosses
+        | ResourcePack::Pronunciations
         | ResourcePack::VoiceRuntime
         | ResourcePack::AndroidOcrModule => false,
         ResourcePack::Wubi => {
@@ -219,6 +220,10 @@ async fn install_pack<R: tauri::Runtime>(
     pack: ResourcePack,
 ) -> Result<PathBuf, HostActionError> {
     let root = state_root(&store);
+    let channel = store
+        .load()
+        .map(|snapshot| snapshot.preferences.update_channel)
+        .unwrap_or_default();
     let mirror = saved_model_mirror(store).await?;
     run_install(
         app,
@@ -227,7 +232,14 @@ async fn install_pack<R: tauri::Runtime>(
         RESOURCE_PACK_PROGRESS_EVENT,
         pack.id().to_owned(),
         move |progress, cancel| {
-            resource_packs::install(&root, pack, &[mirror.as_str()], progress, cancel)
+            resource_packs::install_for_channel(
+                &root,
+                pack,
+                channel,
+                &[mirror.as_str()],
+                progress,
+                cancel,
+            )
         },
     )
     .await
@@ -255,6 +267,27 @@ pub(crate) async fn resource_packs<R: tauri::Runtime>(
     .map_err(|_| HostActionError {
         code: "unavailable",
     })
+}
+
+/// 主动读取官方语法模型目录；只返回可选更新，不下载或替换本地模型。
+#[tauri::command]
+pub(crate) async fn resource_pack_check_grammar_updates(
+    store: tauri::State<'_, Arc<PreferencesStore>>,
+) -> Result<Vec<resource_packs::GrammarModelUpdate>, HostActionError> {
+    let root = state_root(store.inner());
+    let channel = store
+        .load()
+        .map(|snapshot| snapshot.preferences.update_channel)
+        .unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        resource_packs::check_grammar_updates(&root, channel).map_err(|_| HostActionError {
+            code: "grammar_model_catalog_unavailable",
+        })
+    })
+    .await
+    .map_err(|_| HostActionError {
+        code: "unavailable",
+    })?
 }
 
 /// 下载并安装一个资源包，返回安装目录。镜像沿用已保存的 `voice_input.asr_model_mirror`。
@@ -354,7 +387,10 @@ fn needed_by_preferences(preferences: &Preferences) -> Vec<ResourcePack> {
     if preferences.sentence_association.neural_desktop {
         needed.push(ResourcePack::SettledModel);
     }
-    if preferences.voice_input.asr_provider == "local" {
+    // 出厂服务就是本地识别，只看服务会让每个新用户一启动就下载运行库；没选用模型时运行库用不上，等设置页选用模型时再下载。
+    if preferences.voice_input.asr_provider == "local"
+        && !preferences.voice_input.asr_model_path.trim().is_empty()
+    {
         needed.push(ResourcePack::MacosVoiceRuntime);
     }
     needed
@@ -521,18 +557,21 @@ mod tests {
         assert!(!bundled_wubi_dictionary(&serde_json::json!({})));
     }
 
-    /// 语音用本地识别时，启动补齐 macOS 的语音运行库；别的识别服务不需要它。
+    /// 语音用本地识别、且选用了模型时，启动补齐 macOS 的语音运行库；别的识别服务、或出厂还没选模型时不需要它。
     #[test]
     fn local_recognition_needs_the_macos_voice_runtime() {
         let mut preferences = Preferences::default();
         preferences.sentence_association.neural_desktop = false;
-        preferences.voice_input.asr_provider = "doubao".into();
+        // 出厂就是本地识别但没有模型：新用户启动时不下载运行库。
+        assert_eq!(preferences.voice_input.asr_provider, "local");
         assert!(!needed_by_preferences(&preferences).contains(&ResourcePack::MacosVoiceRuntime));
-        preferences.voice_input.asr_provider = "local".into();
+        preferences.voice_input.asr_model_path = "/Users/fixture/voice-models/x-asr".into();
         assert_eq!(
             needed_by_preferences(&preferences),
             [ResourcePack::MacosVoiceRuntime]
         );
+        preferences.voice_input.asr_provider = "doubao".into();
+        assert!(!needed_by_preferences(&preferences).contains(&ResourcePack::MacosVoiceRuntime));
     }
 
     /// macOS 的语音运行库只在 macOS、且运行的输入法没有自带运行库时列出；Windows 和 Linux 从不列出。
@@ -648,7 +687,7 @@ mod tests {
         }
     }
 
-    /// 离线释义、语音运行库和 OCR 模块只给 Android，三个桌面平台都不列出。
+    /// 离线释义、英文音标表、语音运行库和 OCR 模块只给 Android，三个桌面平台都不列出。
     #[test]
     fn desktops_never_offer_the_android_packs() {
         for platform in [
@@ -658,6 +697,7 @@ mod tests {
         ] {
             for pack in [
                 ResourcePack::OfflineGlosses,
+                ResourcePack::Pronunciations,
                 ResourcePack::VoiceRuntime,
                 ResourcePack::AndroidOcrModule,
             ] {

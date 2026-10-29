@@ -59,6 +59,7 @@ fn frozen_snapshot(session: &Session) -> Result<EngineSnapshot> {
         wubi_unique_four_code: value.wubi_unique_four_code,
         candidate_annotations: Vec::with_capacity(count),
         candidate_sources: Vec::with_capacity(count),
+        multilingual_conversion: None,
         candidate_positions: Vec::with_capacity(count),
         candidate_corrected: Vec::with_capacity(count),
         candidate_answers_key: Vec::with_capacity(count),
@@ -67,6 +68,10 @@ fn frozen_snapshot(session: &Session) -> Result<EngineSnapshot> {
         conversion: value.conversion,
         conversion_focus_start: value.conversion_focus.0,
         conversion_focus_end: value.conversion_focus.1,
+        caret_edit_suffix: value.caret_edit_suffix,
+        caret_edit_prefix: value.caret_edit_prefix,
+        candidate_touch_supported: Vec::new(),
+        candidate_confident_correction: Vec::new(),
     };
     for (index, candidate) in value.candidates.into_iter().enumerate() {
         let mut annotation = value

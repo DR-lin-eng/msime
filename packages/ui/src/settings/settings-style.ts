@@ -199,6 +199,12 @@ export const managerBlock = "flex min-w-0 flex-col gap-3 [padding:var(--p-row-pa
 /** Prose at the head of a manager block, in the platform's secondary type. */
 export const managerNote = "m-0 leading-relaxed [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
 export const managerActions = "flex flex-wrap gap-1.5 [&_.secondary]:mt-0 [&_.primary]:mt-0";
+/** 词库同步的核对码：等宽、加大，两台设备上要逐位对照。 */
+export const syncCode = "m-0 font-mono text-lg tracking-[0.08em] tabular-nums select-all";
+/** 词库同步状态里的一段提示和它的按钮：本机等待允许、被挡下的删除。 */
+export const syncPrompt = "flex flex-col gap-2";
+/** 设备行说明里的核对码，等宽显示。 */
+export const syncCodeInline = "font-mono tabular-nums select-all";
 export const importPreview =
   "flex max-h-70 flex-col gap-[7px] overflow-y-auto rounded-lg border border-edge bg-raised px-3 py-2.5 [&>span]:text-xs [&>span]:text-muted [&>div]:flex [&>div]:flex-col [&>div]:gap-0.5 [&>div]:border-t [&>div]:border-[var(--divider-color)] [&>div]:pt-[7px] [&>div_span]:wrap-anywhere [&_code]:text-[11px] [&_code]:text-muted";
 
@@ -342,7 +348,7 @@ export const pageHeader =
 /** HarmonyOS 手机上标签页的根标题，设计稿给它 6/4/10 的内边距（`titlePad`）：文字距屏幕边缘 20px（列 16 加行 4），下方 10px 内边距之后才是到下一个块的间距。 */
 export const pageHeaderTabRoot =
   "max-phone:harmony:px-1 max-phone:harmony:pt-1.5 max-phone:harmony:pb-2.5";
-/** HarmonyOS 手机上「设置」根页面的标题，代替 `pageHeaderTabRoot`：设计稿的列中各块间隔 20px，所以标题的 10px 内边距加上这段间隔，让搜索框位于文字下方 30px。标题栏自身的 10px 外边距算在这 30px 里，所以这里的底部内边距是 20px；写成内边距而不是第二个外边距类，以免与上方的外边距冲突。 */
+/** HarmonyOS 手机上「首页」根页面的标题，代替 `pageHeaderTabRoot`：设计稿的列中各块间隔 20px，所以标题的 10px 内边距加上这段间隔，让搜索框位于文字下方 30px。标题栏自身的 10px 外边距算在这 30px 里，所以这里的底部内边距是 20px；写成内边距而不是第二个外边距类，以免与上方的外边距冲突。 */
 export const pageHeaderHome =
   "max-phone:harmony:px-1 max-phone:harmony:pt-1.5 max-phone:harmony:pb-5";
 /** HarmonyOS 手机上从推入标签页的页面返回的方式：标题前一个 40px 的圆形按钮，向列的边距伸出 10px、向标题靠 6px，让箭头与内容对齐。 */

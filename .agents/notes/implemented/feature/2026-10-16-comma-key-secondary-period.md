@@ -12,10 +12,11 @@ Status: implemented
 
 Android 逗号键右上角显示长按句号的键面，跟随中文标点状态使用 `。` 或 `.`；复用字母键已有的角标绘制与皮肤提示色。可见入口与英文长按的补充说明见[英文字母长按变体](2026-10-21-android-english-letter-options.md)。
 
-九键侧栏、数字与符号层、iPad/2in1、14 键和手写等自带底行的键面保留各自已有规则。热力图必须跟随实际底行，不再把句号画成独立键。
+九键侧栏、数字与符号层、iPad/2in1、14 键等自带底行的键面保留各自已有规则。手写底行沿用同一种长按，逗号长按输入问号、句号长按输入叹号，见[手写区铺满整行](2026-10-25-mobile-handwriting-full-width-pad.md)。热力图必须跟随实际底行，不再把句号画成独立键。
 
 ## Related decisions
 
+- [英文底行在空格左边放句点](2026-10-26-mobile-english-period-beside-space.md)：部分取代本篇「不再放独立句号键」的安排，只限英文模式：英文 26 键在空格左边另放句点，空格让出一份；中文 26 键仍按本篇只有逗号、长按输入句号，逗号长按在英文下也保留。
 - [26 键底行符号键](../../implemented/feature/2026-10-16-26key-bottom-row-symbol-key.md)：部分取代去掉逗号及最左符号键的安排，保留原符号面板动作、九键和其他键面边界；新决定来自产品方对冲突的明确答复。
 - [手机底行](../../implemented/feature/2026-10-09-mobile-bottom-row-symbols-and-return-yield.md)：保留语言键靠近回车与回车让位规则。
 - [热力图跟随键盘](../../implemented/bug-fix/2026-10-16-mobile-key-heatmap-follows-keyboard.md)：复用同一布局或同步其原生静态描述。

@@ -35,24 +35,31 @@ pub unsafe extern "C" fn msime_client_update_preferences(
 
 #[no_mangle]
 pub extern "C" fn msime_client_destroy(handle: u64) -> *mut c_char {
-    response(|| {
-        SESSIONS.with(|sessions| {
-            let mut session = sessions
-                .try_borrow_mut()
-                .map_err(|_| "reentrant host call")?
-                .remove(&handle)
-                .ok_or("unknown session or wrong thread")?;
-            // 还在组字时先发 composition_end{Destroyed}；是音乐所有者时关掉音乐。
-            session.lifecycle_destroy();
-            // A host may tear a session down without a focus-out first; what it counted is still written.
-            session.flush_selections();
-            // Dropping the engine session writes its own journal's delayed context learning; this also covers every other journal the process learned into, while this session still holds its dictionary access.
-            msime_engine::flush_personal_learning();
-            // 停顿模型可能仍在后台评分；销毁会话时放弃任务，避免模型残留在作业表中。
-            crate::ffi::settled::abandon_settled_job(handle);
-            drop(session);
-            Ok(Value::Null)
-        })
+    response(|| destroy_session(handle))
+}
+
+/// `msime_client_destroy` 的本体。
+pub(crate) fn destroy_session(handle: u64) -> Result<Value, String> {
+    SESSIONS.with(|sessions| {
+        let mut session = sessions
+            .try_borrow_mut()
+            .map_err(|_| "reentrant host call")?
+            .remove(&handle)
+            .ok_or("unknown session or wrong thread")?;
+        // 还在组字时先发 composition_end{Destroyed}；是音乐所有者时关掉音乐。
+        session.lifecycle_destroy();
+        // A host may tear a session down without a focus-out first; what it counted is still written.
+        session.flush_selections();
+        // 宿主经 `record` 攒在本进程里的上屏也在这里写出：销毁会话是收尾，之后进程可能就退出了。移动宿主在 UI 线程上销毁，交给后台线程写。
+        crate::ffi::session::flush_typing_statistics(
+            crate::ffi::session::FLUSHES_TYPING_STATISTICS_INLINE_ON_DESTROY,
+        );
+        // Dropping the engine session writes its own journal's delayed context learning; this also covers every other journal the process learned into, while this session still holds its dictionary access.
+        msime_engine::flush_personal_learning();
+        // 停顿模型可能仍在后台评分；销毁会话时放弃任务，避免模型残留在作业表中。
+        crate::ffi::settled::abandon_settled_job(handle);
+        drop(session);
+        Ok(Value::Null)
     })
 }
 
@@ -143,7 +150,7 @@ pub extern "C" fn msime_client_set_active(handle: u64, active: bool) -> bool {
     })
 }
 
-/// Write what would otherwise wait: the selection counts of every session on the calling thread and every queued personal-context transition of the process. The C++ Engine wrote its queue from `atexit` (personal_ngram_store.cpp:254-255); a host that can exit without a focus-out or a destroy, such as macOS `[NSApp terminate:]`, calls this from its will-terminate hook on the thread that owns its sessions. Sessions stay usable.
+/// Write what would otherwise wait: the selection counts of every session on the calling thread, the typing-statistics commits the process holds for every directory, and every queued personal-context transition of the process. The C++ Engine wrote its queue from `atexit` (personal_ngram_store.cpp:254-255); a host that can exit without a focus-out or a destroy, such as macOS `[NSApp terminate:]`, calls this from its will-terminate hook on the thread that owns its sessions. Sessions stay usable.
 #[no_mangle]
 pub extern "C" fn msime_client_flush_all() -> *mut c_char {
     response(|| {
@@ -155,6 +162,7 @@ pub extern "C" fn msime_client_flush_all() -> *mut c_char {
                 }
             }
         });
+        msime_client_services::typing_statistics::flush_pending_commits();
         msime_engine::flush_personal_learning();
         Ok(Value::Null)
     })

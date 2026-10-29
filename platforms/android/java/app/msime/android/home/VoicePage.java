@@ -55,13 +55,16 @@ import org.json.JSONObject;
  */
 public final class VoicePage extends ReloadingDetailPage {
     @Override protected java.util.List<String> sectionTitles() {
-        return java.util.List.of("识别", "服务", "模型", "润色", "隐私");
+        return java.util.List.of("识别", "服务", "润色", "隐私");
     }
 
     private static final String[] TRIGGER_LABELS = {"长按空格", "工具栏按钮", "无"};
     private static final int TRIGGER_SPACE = 0;
     private static final int TRIGGER_TOOLBAR = 1;
     private static final int TRIGGER_NONE = 2;
+    /** 「无」只是空格键和工具栏上不放语音入口，识别设置照旧保留；关掉长按空格语音后长按空格不进语音，松手仍是空格。「更多工具」面板的「语音输入」磁贴只在工具栏语音按钮露出时才藏（`ImeFunctionPanel`），选「无」时它还在，说明里照实写出来，免得用户以为语音整个关掉了（#10143）。 */
+    static final String TRIGGER_NONE_HINT = "空格键和工具栏上不放语音入口，长按空格只输入空格；要说话可在「更多工具」里点「语音输入」";
+    static final String TRIGGER_SHEET_HINT = "选「无」时" + TRIGGER_NONE_HINT;
 
     /**
      * 页面渲染时读到的偏好与识别器。
@@ -204,7 +207,8 @@ public final class VoicePage extends ReloadingDetailPage {
         int trigger = trigger(local.bool(AndroidLocalSettings.SPACE_VOICE),
             preferences.optBoolean("touch_voice_shortcut", false));
         GroupCard.Row[] triggerRow = new GroupCard.Row[1];
-        triggerRow[0] = recognition.nav("启动方式", null, TRIGGER_LABELS[trigger],
+        triggerRow[0] = recognition.nav("启动方式", trigger == TRIGGER_NONE ? TRIGGER_NONE_HINT : null,
+            TRIGGER_LABELS[trigger],
             () -> pickTrigger(trigger, triggerRow[0]));
 
         polishGroup(target, voice, state);
@@ -316,9 +320,9 @@ public final class VoicePage extends ReloadingDetailPage {
         });
     }
 
-    /** 模型页先说明本地识别缺哪一项，再列出模型的下载、取消、选用和删除。 */
+    /** 「服务」分页里识别服务下面的本地识别部分：先说明本地识别缺哪一项，再列出模型的下载、取消、选用和删除。本地模型本身就是一种识别服务，和服务选择放在同一个分页，页面最多四个分页。 */
     private void modelsGroup(LinearLayout target, JSONObject voice, State state) {
-        LinearLayout column = sectionColumn(target, "模型");
+        LinearLayout column = sectionColumn(target, "服务");
         GroupCard preparation = GroupCard.add(column, "本地识别准备");
         LocalVoiceModels.Model chosenModel = selectedModel(voice, state);
         preparation.value("已选模型", null, chosenModel == null ? "未选用" : chosenModel.title());
@@ -686,7 +690,7 @@ public final class VoicePage extends ReloadingDetailPage {
     }
 
     private void pickTrigger(int selected, GroupCard.Row row) {
-        OptionSheet sheet = new OptionSheet(requireContext(), "启动方式", null);
+        OptionSheet sheet = new OptionSheet(requireContext(), "启动方式", TRIGGER_SHEET_HINT);
         for (int index = 0; index < TRIGGER_LABELS.length; index++) {
             int choice = index;
             sheet.option(TRIGGER_LABELS[index], index == selected, () -> {

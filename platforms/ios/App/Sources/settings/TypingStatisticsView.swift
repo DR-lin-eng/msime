@@ -4,6 +4,12 @@ import SwiftUI
 ///
 /// 统计只保留聚合计数，所以设计稿里的常用词和最常打错两张卡片没有做：它们需要用户打过的词本身。
 struct TypingStatisticsView: View {
+  var body: some View {
+    StatisticsAuthenticationGate { NavigationStack { AuthenticatedTypingStatisticsView() } }
+  }
+}
+
+private struct AuthenticatedTypingStatisticsView: View {
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   @State private var statistics = TypingStatistics()
   /// 统计文档是否至少读到过一次，这样关闭提示说的是存储里的开关，而不是空的默认值。
@@ -16,6 +22,8 @@ struct TypingStatisticsView: View {
   @State private var tab = Tab.overview
   /// 读者选过之后按键热力图所用的键盘布局；nil 表示跟随当前输入方案。
   @State private var nineKeyChoice: Bool?
+  /// 用户的「按键布局」：热力图照它画底行和数字行，与键盘上看到的一致。
+  @State private var keyStyle = TouchKeyLayoutStyle.mirrored
   @State private var showsDailyDetail = false
   @State private var showsAbout = false
   @State private var availability = TypingStatisticsStore.Availability.neverWritten
@@ -93,6 +101,8 @@ struct TypingStatisticsView: View {
     .navigationDestination(isPresented: $showsDailyDetail) { TypingDailyDetailView(statistics: statistics) }
     .sheet(isPresented: $showsAbout) { about }
     .reloadOnAppearAndActive(reload)
+    // 自造词徽标取自键盘上次列出的个人词库那一页；打开页面时请键盘下次出现时重新列一次。
+    .task { try? PersonalDictionaryStore.forSettingsPages().requestRefresh() }
     .alert("清空所有打字统计？", isPresented: $confirmsReset) {
       Button("取消", role: .cancel) {}
       Button("清空", role: .destructive) { update { try $0.reset() } }
@@ -310,9 +320,9 @@ struct TypingStatisticsView: View {
         StatisticsLayoutSwitch(nineKey: Binding(get: { nineKey }, set: { nineKeyChoice = $0 }))
       }) {
         VStack(alignment: .leading, spacing: 10) {
-          StatisticsKeyboardHeatmap(heatmap: heatmap, nineKey: nineKey)
+          StatisticsKeyboardHeatmap(heatmap: heatmap, nineKey: nineKey, style: keyStyle)
             .statisticsCard(top: 10, horizontal: 4, bottom: 10)
-          let others = heatmap.others(nineKey: nineKey)
+          let others = heatmap.others(nineKey: nineKey, style: keyStyle)
           if !others.isEmpty {
             DisclosureGroup {
               VStack(spacing: 0) {
@@ -439,6 +449,8 @@ struct TypingStatisticsView: View {
   // MARK: - 加载
 
   private func reload() {
+    TouchKeyLayoutStyle.mirror(MetasequoiaInputSessionBridge.loadSharedPreferences())
+    keyStyle = TouchKeyLayoutStyle.mirrored
     update { _ in }
     syncUpload()
   }

@@ -78,6 +78,114 @@ if ! rg -q 'ShuangpinKeyHintPolicy\.profileWithoutView\(' \
   echo "Double-pinyin key hints must keep the remembered profile while the view is briefly missing" >&2
   exit 1
 fi
+# 26 键双拼的按下点（#10018）只经 type(char, View) 的最后一步送给引擎：辅助码的 Shift、英文直出、标点、字母网格和实体键盘都照常走 msime_client_character。哪一键带按下点由 TouchPointPolicySmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：NativeClient.touchCharacter 全宿主只有一处调用，在 touchCharacter 里，而它只由 type(char, View) 在 ImeTouchPoints.geometryFor 给出代次时调用。
+android_java="$repo_root/platforms/android/java/app/msime/android"
+touch_calls=$({ rg -c 'NativeClient\.touchCharacter\(' "$android_java" || true; } | awk -F: '{ total += $2 } END { print total + 0 }')
+type_body=$(sed -n '/^    void type(char key, View source) {$/,/^    }$/p' "$android_java/core/MSIMEInputService.java")
+touch_body=$(sed -n '/^    private boolean touchCharacter(int ascii, int geometryId, float x, float y) {$/,/^    }$/p' \
+  "$android_java/core/MSIMEInputService.java")
+if [[ "$touch_calls" != 1 ]] || ! rg -q 'NativeClient\.touchCharacter\(' <<< "$touch_body" \
+  || ! rg -q 'imeTouchPoints\.geometryFor\(' <<< "$type_body" \
+  || [[ $(rg -c 'touchCharacter\(output' "$android_java/core/MSIMEInputService.java") != 1 ]] \
+  || ! rg -q 'touchCharacter\(output' <<< "$type_body"; then
+  echo "Double-pinyin touch-downs must reach msime_client_touch_character only from type(char, View)" >&2
+  exit 1
+fi
+# 按键区只给点击时会取走按下点的键（shuangpinLetterKey 造的 ShuangpinHintButton：26 个字母和微软双拼的 `;`）记按下点。数字行、Shift、退格的按下从不被取走，记下来只会占着槽位；槽满时让出哪一个由 TouchPointPolicySmoke 覆盖，这里钉住接线。
+if [[ $(rg -c 'setTouchPoints\(' "$android_java/core/MSIMEInputService.java") != 1 ]] \
+  || ! rg -q 'setTouchPoints\(imeTouchPoints\.pending, key -> key instanceof ShuangpinHintButton\);' \
+    "$android_java/core/MSIMEInputService.java" \
+  || ! rg -q 'pressed != null && touchKey\.test\(pressed\)' "$android_java/keyboard/KeyboardKeyArea.java"; then
+  echo "Only double-pinyin letter keys may record touch-downs in the key area" >&2
+  exit 1
+fi
+# 功能面板「手写」磁贴再点一次要回到进入手写前的入口和中英状态（#9703）。0.5.0 取的是启用列表里第一个非手写入口，默认全拼 9 键、英文 26 键或小鹤双拼的用户关掉手写后都落到全拼 26 键。入口怎么选由 KeyboardSchemeSmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：离开手写经 handwritingReturn 取入口，并把记下的英文状态交给方案保存，保存成功后再进英文。
+toggle_body=$(sed -n '/^    void toggleHandwritingScheme() {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java")
+if ! rg -q 'KeyboardScheme\.handwritingReturn\(schemeBeforeHandwriting' <<< "$toggle_body" \
+  || ! rg -q 'englishBeforeHandwriting' <<< "$toggle_body" \
+  || ! rg -q 'if \(english && !dedicatedEnglish\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
+  echo "Leaving handwriting from the function panel must return to the scheme and English mode it was entered from" >&2
+  exit 1
+fi
+# 候选条按钮的最小宽度只有触控下限（CandidateAppearance.STRIP_CHIP_MIN_WIDTH_DP，CandidateAppearanceSmoke 覆盖它的值）；皮肤的 itemMinWidth 是桌面候选窗的格宽，`base = "microsoft"` 出厂 3.5em，套到候选条上一个字宽的候选也撑成一大格。样式在 ImeCandidates 里，JVM 冒烟碰不到，这里钉住接线。
+style_body=$(sed -n '/^    void styleCandidateButton(Button button) {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidates.java")
+if ! rg -q 'CandidateAppearance\.STRIP_CHIP_MIN_WIDTH_DP' <<< "$style_body" \
+  || rg -q '\.itemMinWidth' <<< "$style_body"; then
+  echo "Candidate strip buttons must keep only the touch minimum width, not the skin's desktop itemMinWidth" >&2
+  exit 1
+fi
+# 双拼触点纠错坐上首选的显式标记（#10018）：字段怎么读、读屏补什么、候选字和注释取什么颜色、不带标记的行颜色和改动前一样，都由 CandidateCorrectionMarkPolicySmoke 覆盖；接线在 InputMethodService 和 ImeCandidates 里，JVM 冒烟碰不到，这里钉住：候选条（含固定槽位）的 updateCandidateButton 和展开面板的 expandedCandidateButton 都经 CandidateCorrectionMarkPolicy 读 View JSON 候选上的字段，把结果交给 candidateLabel，并把「，已纠正」接进读屏描述；candidateLabel 是否建 span、候选字和注释的颜色都经这个策略决定，候选字的标记色只在策略给出时盖上，并且同一段加且只加一道下划线（首选 chip 上候选字本来就是强调色，只换颜色看不出来）；不带 corrected 的四参数重载传 false，翻译义项等其他调用方不会被标记。
+service_source="$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"
+update_body=$(sed -n '/^    void updateCandidateButton(Button button, JSONObject candidate, int slot, int visibleSlot) {$/,/^    }$/p' "$service_source")
+expanded_body=$(sed -n '/^    Button expandedCandidateButton(JSONObject candidate) {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidates.java")
+label_body=$(sed -n '/^                                        boolean highlighted, boolean corrected) {$/,/^    }$/p' "$service_source")
+for body in "$update_body" "$expanded_body"; do
+  if ! rg -q 'CandidateCorrectionMarkPolicy\.confident\(candidate\.opt\(CandidateCorrectionMarkPolicy\.FIELD\)\)' <<< "$body" \
+    || ! rg -q 'candidateLabel\([^;]*, corrected\)\)' <<< "$body" \
+    || ! rg -q 'CandidateCorrectionMarkPolicy\.accessibilitySuffix\(corrected\)' <<< "$body"; then
+    echo "Candidate strip and expanded panel must mark a confident shuangpin correction in colour and in the spoken description" >&2
+    exit 1
+  fi
+done
+plain_label_body=$(sed -n '/^                                        boolean highlighted) {$/,/^    }$/p' "$service_source")
+if ! rg -q 'CandidateCorrectionMarkPolicy\.plainLabel\(prefix, annotation, corrected\)' <<< "$label_body" \
+  || ! rg -q 'Integer mark = CandidateCorrectionMarkPolicy\.wordMark\(candidateAppearance, highlighted, corrected\);' <<< "$label_body" \
+  || ! rg -qU 'if \(mark != null\) \{\n\s*label\.setSpan\(new ForegroundColorSpan\(mark\), prefix\.length\(\), primary\.length\(\),\n\s*Spanned\.SPAN_EXCLUSIVE_EXCLUSIVE\);\n\s*\}' <<< "$label_body" \
+  || rg -q 'UnderlineSpan' <<< "$label_body" \
+  || ! rg -q 'int secondary = CandidateCorrectionMarkPolicy\.annotationColour\(candidateAppearance, highlighted, corrected\);' <<< "$label_body" \
+  || ! rg -q 'new ForegroundColorSpan\(secondary\), annotationStart' <<< "$label_body" \
+  || ! rg -q 'return candidateLabel\(prefix, text, annotation, highlighted, false\);' <<< "$plain_label_body"; then
+  echo "candidateLabel must take its spans and colours from CandidateCorrectionMarkPolicy and mark a confident correction in colour only, like iOS and HarmonyOS" >&2
+  exit 1
+fi
+# 每次按键的 render 末尾都会把候选重新上色一遍：外观和密度没变、按钮的底也还是上次装上的那块时，不能再给每个候选新建五块 GradientDrawable 和一个 StateListDrawable，文字配色也共用一份 ColorStateList。低端机上每键几十个候选、几百个短命 Drawable，是打字发热和卡顿的来源之一。
+if ! rg -q 'if \(!keepsChipFace\(button\)\) \{' <<< "$style_body" \
+  || rg -q 'ColorPolicy\.stateList' <<< "$style_body"; then
+  echo "Candidate chip styling must keep the installed chip face when appearance and density are unchanged" >&2
+  exit 1
+fi
+# 触屏候选条按位置复用按钮（ImeCandidateStrip.pool），每次 render 只重新绑定内容和点击目标；改回每次新建按钮，每键就要整排重建几十个 Button 再量一遍字宽。
+strip_add_body=$(sed -n '/^    private void add(int target, boolean style) {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidateStrip.java")
+if ! rg -q 'pool\.get\(visible\)' <<< "$strip_add_body" \
+  || ! rg -q 'bindStripCandidateButton\(' <<< "$strip_add_body"; then
+  echo "The touch candidate strip must reuse its pooled buttons instead of creating new ones on every render" >&2
+  exit 1
+fi
+# 触屏候选条每键只取它建得出来的一批（NativeClient.candidateRange），滚近尾部再取下一批。改回每键取整代候选（allCandidates / currentCandidateSnapshot），每键都要在主线程上解析几百到几千行的候选 JSON，首字母还会逼引擎把暂扣的整张声母表查出来；Rust 侧的分段语义由 input-runtime 和 host-api 的 candidate_range 测试覆盖。
+strip_source="$repo_root/platforms/android/java/app/msime/android/core/ImeCandidateStrip.java"
+if rg -q 'currentCandidateSnapshot\(|allCandidates\(' "$strip_source" \
+  || ! rg -q 's\.candidateRangeSnapshot\(0, wanted\)' "$strip_source" \
+  || ! rg -q 's\.candidateRangeSnapshot\(loaded, CandidateGridBatchPolicy\.BATCH\)' "$strip_source"; then
+  echo "The touch candidate strip must fetch one batch per render through candidateRange, not the whole candidate generation" >&2
+  exit 1
+fi
+# 英文释义和音标也在 render 里每键跑：只显示候选条时它们取引擎已放出的那一段（displayedCandidateSnapshot），整代只留给展开面板。直接调 currentCandidateSnapshot 会让开了释义或音标的用户首字母仍逼引擎查出整张声母表、主线程仍解析整代 JSON。
+service_source="$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"
+if awk '/private void scheduleCandidateGlosses\(\)/ || /private void scheduleCandidatePronunciations\(\)/ { inside = 1 } inside && /currentCandidateSnapshot\(\)/ { bad = 1 } inside && /^    }$/ { inside = 0 } END { exit !bad }' "$service_source" \
+  || ! awk '/private JSONObject displayedCandidateSnapshot\(\)/ { inside = 1 } inside && /candidateRangeSnapshot\(0, CandidateGlossModel\.MAX_CANDIDATES\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_source"; then
+  echo "Android candidate glosses and pronunciations must not fetch the whole candidate generation while only the strip is showing" >&2
+  exit 1
+fi
+# applySkin 每次 render 都走整棵键盘树，收着的面板（表情、符号网格可有几百格）不能每键跟着上一遍色：只在 applySkin 自己那几遍里跳过 GONE 子树并记下来，被直接显示出来时由画帧前的兜底补一次换肤。
+if ! rg -q 'skipHidden = true;' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
+  || ! rg -q 'skippedHidden\.add\(child\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
+  || ! rg -q 'addOnPreDrawListener\(restyleShown\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java"; then
+  echo "applySkin must skip hidden subtrees and restyle them when they are shown" >&2
+  exit 1
+fi
+# APNG 候选皮肤只在换帧那一刻重画（CandidateApngFrames.millisUntilNextFrame，CandidateCanvasDeviceSmoke 覆盖它的帧边界）。改回每次绘制都 postInvalidateOnAnimation，候选在屏上时整列按屏幕刷新率空转重画，而 APNG 一般 100 毫秒左右才换一帧。
+renderer_source="$repo_root/platforms/android/java/app/msime/android/candidate/CandidateCanvasRenderer.java"
+if rg -q 'postInvalidateOnAnimation' "$renderer_source" \
+  || ! rg -q 'millisUntilNextFrame\(elapsed, motion\)' "$renderer_source" \
+  || ! rg -q 'host\.postDelayed\(tick, nextFrame\)' "$renderer_source"; then
+  echo "The candidate canvas must schedule APNG redraws at the next frame boundary, not on every vsync" >&2
+  exit 1
+fi
 # Hangul composition is Engine state. Android labels the Dubeolsik keys and sends their ASCII letters; a syllable table here would be a second automaton that can drift from the Engine's.
 if ! rg -q '4 korean' "$repo_root/crates/host-api/include/msime_client.h" \
   || ! rg -q 'KOREAN_SCHEME = 4;' \
@@ -322,6 +430,14 @@ if ! rg -qF 'suspendCandidateTranslationRoute();' "$account_service" \
 fi
 if rg -n 'Authorization|DeepL-Auth-Key|Bearer|X-TC-' "$user_translation_client" "$user_translation_transport"; then
   echo "Android user translation requests must take every header from the shared descriptor" >&2
+  exit 1
+fi
+# 候选词翻译的范围（`candidate_translation_scope`）：键盘不调 msime_client_translation_query，范围要自己守。账号和用户服务两条取译文的路径、以及交给共享层的合并载荷，都经 CandidateTranslationPolicy.requestsTranslation 决定一个候选要不要在线译文（范围生效时只有高亮那一个）；两条偏好路径都读范围；离线释义的回答（CandidateGlossModel.decode 和合并载荷）都带 gloss 标记，否则共享层在「仅当前高亮」时只把它们画在高亮行。规则本身由 CandidateTranslationPolicySmoke 覆盖。
+if [ "$(rg -c 'CandidateTranslationPolicy\.requestsTranslation\(' "$account_service")" != 3 ] \
+  || [ "$(rg -c '= translationScopeFrom\(preferences\);' "$account_service")" != 2 ] \
+  || ! rg -qF '.put("gloss", answer.gloss())' "$account_service" \
+  || ! rg -qF '.put("gloss", true)' "$repo_root/platforms/android/java/app/msime/android/candidate/CandidateGlossModel.java"; then
+  echo "Android must request candidate translations only for the highlighted candidate under the highlighted scope and mark offline glosses" >&2
   exit 1
 fi
 # Turning 匿名使用统计 off has to stop reporting and clear the queue at once (the toggle promises it), not on the next start: the host process keeps Telemetry's own flag, so the privacy page must hand the saved value to Telemetry.setEnabled.
@@ -696,6 +812,15 @@ if ! rg -q 'forgetCurrentClip\(\);' <<< "$search_body" \
   echo "Android clipboard search must open the app's CLIPBOARD_SEARCH page from the panel header after forgetting the current clip, never a query field in the input method (#5973)" >&2
   exit 1
 fi
+# 搜索框固定在剪贴板历史页顶部；结果列表滚动时不得把查询框一起卷走（#9958）。
+clipboard_search_page="$repo_root/platforms/android/java/app/msime/android/home/ClipboardSearchPage.java"
+if ! rg -q 'protected View fixedNavigation\(\)' "$clipboard_search_page" \
+  || ! rg -q 'searchNavigation = new SearchPill' "$clipboard_search_page" \
+  || ! rg -q 'searchNavigation' "$clipboard_search_page" \
+  || rg -q 'target\.addView\(search' "$clipboard_search_page"; then
+  echo "Android clipboard search must keep its search field fixed above the scrolling results (#9958)" >&2
+  exit 1
+fi
 # 分享只把用户长按选中的一条记录交给系统选择器；输入法服务启动 chooser 必须带新任务标志，不能把历史列表或内部标识一起发出去。
 share_body=$(rg -A 24 'void shareClipboardText\(' \
   "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" || true)
@@ -719,6 +844,18 @@ if ! rg -A 30 'void renderClipboardSegmentation\(\)' \
     "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
     | rg_q_stdin 'new ScrollView\('; then
   echo "Android clipboard segmentation must scroll its word pieces separately from the pinned action bar (#5645)" >&2
+  exit 1
+fi
+# 多选剪贴板最多保留 20 项，并同时提供选中项导出和删除；导出走同一份认证与文件目录流程（#9957）。
+if ! rg -q 'ClipboardSelectionPolicy\.canSelect' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -q 'clipboardAction\(header, "导出"' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -q 'exportClipboardItems' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'exportSelectedText' \
+    "$repo_root/platforms/android/java/app/msime/android/clipboard/ClipboardHistoryStore.java"; then
+  echo "Android clipboard multi-selection must cap at 20 and export the selected records (#9957)" >&2
   exit 1
 fi
 # 「最近复制」占着工具栏那一行时，剪贴板历史入口要留在这一行上，不能逼用户先点 × 把这条永久关掉；从剪贴板插入过之后它也不能再回来，否则工具栏又换成刚插入的文字（#5692）。
@@ -906,9 +1043,9 @@ if ! rg -q 'bindInputMethodPicker\(languageButton\)' "$account_service" \
   echo "Android 中/英 keys must open the system input method picker on long press" >&2
   exit 1
 fi
-# 删除键上滑快速删除（#5585）：判定只在 BackspaceSwipePolicy，键的触摸监听按它决定松手是否清空，清空经服务的 deleteAllBeforeCursor 分段删除；连删的间隔按 BackspaceRepeatPolicy 逐级加速，不能写回固定间隔。
+# 删除键上滑快速删除（#5585、#9893）：判定和组字边界只在 BackspaceSwipePolicy，键的触摸监听按它决定松手清哪一层；清正文经服务的 deleteAllBeforeCursor 分段删除，连删间隔由 BackspaceRepeatPolicy 逐级加速。
 letter_rows="$repo_root/platforms/android/java/app/msime/android/core/ImeLetterRows.java"
-if ! rg -q 'BackspaceSwipePolicy\.clearsOnRelease\(backspaceSwipePhase\)' "$letter_rows" \
+if ! rg -q 'BackspaceSwipePolicy\.clearTarget\(backspaceSwipePhase' "$letter_rows" \
   || ! rg -q 'BackspaceRepeatPolicy\.repeatInterval\(repeats\)' "$letter_rows" \
   || rg -q 'BackspaceRepeatPolicy\.REPEAT_INTERVAL_MS' "$letter_rows" \
   || ! rg -q 'BackspaceSwipePolicy\.clearBeforeCursor' "$account_service"; then
@@ -928,6 +1065,120 @@ if ! rg -q 's\.imeNineKeyQuickPunctuation\.show\(\)' <<< "$symbol_key_body" \
   || ! sed -n '/boolean apply(String response) throws JSONException {$/,/^    }$/p' "$account_service" | rg_q_stdin 'imeNineKeyQuickPunctuation\.clear\(\)' \
   || ! rg -q 'case SYMBOL_PANEL -> s\.symbolPanelButton;' "$repo_root/platforms/android/java/app/msime/android/core/ImeBottomRow.java"; then
   echo "The Android nine-key 1 key must lay quick punctuation into the candidate strip until the next Engine transition, and 符 must open the symbol panel from the bottom row" >&2
+  exit 1
+fi
+# 触屏按键布局样式与顶部数字行（.agents/notes/implemented/feature/2026-10-27-touch-key-layout-styles.md）：排布和迁移规则由 TouchKeyStyleSmoke 覆盖，接线在 InputMethodService、云同步和设置页里，JVM 冒烟碰不到，这里钉住：本机旧的长空格和数字行两个键只有迁移读（AndroidLocalSettings 声明它们、KeyLayoutStyleMigration 读后删掉）；云同步导出前和键盘读实时偏好前先迁移；键盘从共享偏好读样式与数字行，变了经 touchGeometryKey 触发重画，底行签名带着样式；14 键与 18 键的字母块上方画顶部数字行。
+style_migration="$repo_root/platforms/android/java/app/msime/android/settings/KeyLayoutStyleMigration.java"
+legacy_readers=$(rg -l 'AndroidLocalSettings\.(NUMBER_ROW|LONG_SPACE_LAYOUT)\b' "$repo_root/platforms/android/java" | sed "s#^$repo_root/##" | LC_ALL=C sort | tr '\n' ' ')
+if [[ "$legacy_readers" != "platforms/android/java/app/msime/android/settings/KeyLayoutStyleMigration.java " ]] \
+  || ! sed -n '/public static Round run(/,/^    }$/p' "$repo_root/platforms/android/java/app/msime/android/account/RustCloudSync.java" \
+    | rg_q_stdin -U 'boolean settingsMigrated = KeyLayoutStyleMigration\.migrate\(context, preferencesDirectory\);\n\s*JSONObject inputs' \
+  || ! sed -n '/public static Round run(/,/^    }$/p' "$repo_root/platforms/android/java/app/msime/android/account/RustCloudSync.java" \
+    | rg_q_stdin 'if \(!settingsMigrated\) inputs\.put\("settings_locked", true\);' \
+  || ! sed -n '/private EngineStartOptions withLivePreferences(/,/^    }$/p' "$account_service" \
+    | rg_q_stdin -U 'KeyLayoutStyleMigration\.migrate\(this, directory\);\n\s*String response = candidateSkinResolver\.read\(directory\);' \
+  || ! rg -q 'removal\.put\(AndroidLocalSettings\.LONG_SPACE_LAYOUT, null\);' "$style_migration" \
+  || ! rg -q 'removal\.put\(AndroidLocalSettings\.NUMBER_ROW, null\);' "$style_migration" \
+  || ! rg -q '\+ ":" \+ touchKeyStyles \+ ":" \+ numberRowEnabled;' "$account_service" \
+  || ! rg -q 'preferences\.optBoolean\(TouchKeyStyle\.NUMBER_ROW_PREFERENCE, false\)' "$account_service" \
+  || ! rg -q '\+ ":" \+ english \+ ":" \+ style' "$repo_root/platforms/android/java/app/msime/android/core/ImeBottomRow.java" \
+  || ! sed -n '/private void rebuildFourteenKeyRows() {$/,/^    }$/p' "$letter_rows" | rg_q_stdin 'if \(builtNumberRow\) addNumberRow\(rows\.size\(\)\);'; then
+  echo "Android touch key layout styles must read the shared preferences, migrate the two legacy local keys before any settings export or live read, re-render when they change, and draw the number row on 14/18 keys" >&2
+  exit 1
+fi
+# 长空格样式留着的工具栏行看用户的 26 键样式和这块键盘的中文键面，不看此刻的中/英（TouchKeyStyle.Styles.keepsToolbarRow，规则由 TouchKeyStyleSmoke 覆盖）；这里钉住宿主的接线：工具栏行和隐藏工具栏时藏起按钮都读 longSpaceToolbarRowKept，英文模式下中文键面取只在中文时更新的 touchLayoutHint。之前读的是按此刻语言算的 longSpaceLayoutActive，工具栏隐藏时每次切中/英这一行都出没一次，键盘高度跟着跳。自动数字行与共享偏好分开传给 drawsNumberRow，自动数字行不扩到 14/18 键。
+if ! sed -n '/boolean toolbarRowHidden() {$/,/^    }$/p' "$account_service" | rg_q_stdin 'if \(longSpaceToolbarRowKept\(\)\) return false;' \
+  || ! sed -n '/boolean longSpaceToolbarRowKept() {$/,/^    }$/p' "$account_service" \
+    | rg_q_stdin 'int chineseLayout = dedicatedEnglish \? touchLayoutHint\(\) : displayedTouchLayout\(view\);' \
+  || ! sed -n '/boolean longSpaceToolbarRowKept() {$/,/^    }$/p' "$account_service" | rg_q_stdin 'touchKeyStyles\.keepsToolbarRow\(chineseLayout,' \
+  || ! rg -q 's\.toolbarHidden && s\.longSpaceToolbarRowKept\(\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeToolbar.java" \
+  || ! sed -n '/boolean numberRowDrawn() {$/,/^    }$/p' "$account_service" \
+    | rg_q_stdin 'drawsNumberRow\(numberRowEnabled, automaticNumberRow\.active\(\),' \
+  || ! sed -n '/boolean symbolExtraRowDrawn() {$/,/^    }$/p' "$account_service" \
+    | rg_q_stdin 'drawsSymbolExtraRow\(numberRowEnabled, automaticNumberRow\.active\(\),'; then
+  echo "Android must keep the long-space toolbar row by the user's 26-key style and the keyboard's Chinese face, not the momentary 中/英 mode, and pass the automatic number row separately from touch_number_row" >&2
+  exit 1
+fi
+# 底行样式和顶部数字行在 applyTouchGeometry 里读，冷启动的第一帧按皮肤片段算；片段里没有它们时每次键盘进程冷启动都先画标准底行、没有数字行，一两秒后实时偏好到了键盘整体高出一行、底行换样。这里钉住 applyTouchGeometry 读到的每个 TouchKeyStyle 偏好键都在 SKIN_HINT_KEYS 里。
+skin_hint_keys=$(sed -n '/private static final String\[\] SKIN_HINT_KEYS = {/,/};$/p' "$account_service")
+touch_style_reads=$(sed -n '/private static TouchKeyStyle\.Styles touchKeyStylesFrom(JSONObject preferences) {$/,/^    }$/p;/private static boolean numberRowFrom(JSONObject preferences) {$/,/^    }$/p' "$account_service" \
+  | rg -o 'TouchKeyStyle\.[A-Z_]+_PREFERENCE' | LC_ALL=C sort -u)
+if [[ -z "$skin_hint_keys" ]] || [[ "$(printf '%s\n' "$touch_style_reads" | wc -l | tr -d ' ')" -ne 4 ]] \
+  || ! sed -n '/private void applyTouchGeometry(JSONObject preferences) {$/,/^    }$/p' "$account_service" \
+    | rg_q_stdin 'touchKeyStyles = touchKeyStylesFrom\(preferences\);'; then
+  echo "Android check-host could not locate SKIN_HINT_KEYS or the touch key style readers in MSIMEInputService" >&2
+  exit 1
+fi
+while IFS= read -r key; do
+  if ! rg -qF "$key" <<< "$skin_hint_keys"; then
+    echo "Android SKIN_HINT_KEYS must remember $key so a cold-started keyboard draws the user's bottom row and number row from the first frame" >&2
+    exit 1
+  fi
+done <<< "$touch_style_reads"
+# 「按键布局」页的「顶部数字行」开关与 iOS、鸿蒙一样放在没有标题的一组；数字行只画在 26 键和 14/18 键上，本版本两类键面都没有时不列这个开关（与鸿蒙同一条规则）。各版本有哪几组由 TouchKeyStyleSmoke 钉住的 TouchKeyStyle.Groups 决定，这里钉住页面按它列组。
+style_page="$repo_root/platforms/android/java/app/msime/android/home/KeyLayoutStylesPage.java"
+style_render=$(sed -n '/private void render(@Nullable JSONObject preferences) {$/,/^    }$/p' "$style_page")
+if ! rg_q_stdin -U 'if \(!groups\.numberRow\(\)\) return;\n\s*GroupCard numbers = GroupCard\.add\(target, null\);' <<< "$style_render" \
+  || ! rg_q_stdin -F 'TouchKeyStyle.Groups groups = TouchKeyStyle.Groups.offeredBy(AppEdition.current());' <<< "$style_render" \
+  || ! rg_q_stdin -U 'if \(groups\.twentySix\(\)\)\n\s*styleGroup\(target, "26 键", .*\n.*TWENTY_SIX_KEY_NOTE\);' <<< "$style_render" \
+  || ! rg_q_stdin -U 'if \(groups\.fourteen\(\)\)\n\s*styleGroup\(target, "14 键与 18 键", .*\n.*FOURTEEN_KEY_NOTE\);' <<< "$style_render" \
+  || ! rg_q_stdin -U 'if \(groups\.nine\(\)\)\n\s*styleGroup\(target, "9 键", .*\n.*NINE_KEY_NOTE\);' <<< "$style_render" \
+  || ! rg_q_stdin -F 'numbers.toggle("顶部数字行", NUMBER_ROW_NOTE,' <<< "$style_render"; then
+  echo "Android 按键布局 must list each group by TouchKeyStyle.Groups with its note, and put 顶部数字行 in an untitled group hidden when the edition offers neither 26-key nor 14/18-key faces" >&2
+  exit 1
+fi
+# 「按键布局」各组卡片下方的说明、「顶部数字行」的说明和键盘页入口的副标题与 iOS、鸿蒙逐字相同（.agents/notes/implemented/feature/2026-10-27-touch-key-layout-styles.md）；键盘页只在本版本至少有一组样式时列入口（与鸿蒙 keyLayoutOffered 同一条规则），设置搜索同样不列这一页。
+if ! rg -qF 'static final String TWENTY_SIX_KEY_NOTE = "长空格：符号键移到工具栏；表情键：长按 123 打开符号。";' "$style_page" \
+  || ! rg -qF 'static final String FOURTEEN_KEY_NOTE = "表情键：长按 123 打开符号。";' "$style_page" \
+  || ! rg -qF 'static final String NINE_KEY_NOTE = "右侧大回车：回车竖占两行，符号键在左下角。";' "$style_page" \
+  || ! rg -qF 'static final String NUMBER_ROW_NOTE = "在 26 键、14 键和 18 键上方加一行 1 到 0；横屏时不显示。";' "$style_page" \
+  || ! sed -n '/    private void styleGroup(/,/^    }$/p' "$style_page" | rg_q_stdin -F 'group.footer(note);' \
+  || ! rg -q -U 'if \(TouchKeyStyle\.Groups\.offeredBy\(edition\)\.any\(\)\)\n\s*layout\.nav\("按键布局", "各类键盘的底行样式和顶部数字行", null,' \
+    "$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java" \
+  || ! rg -qF 'if (page == PageId.KEY_LAYOUT_STYLES && !keyLayoutOffered) continue;' \
+    "$repo_root/platforms/android/java/app/msime/android/home/KeyboardFragment.java" \
+  || ! rg -qF 'boolean keyLayoutOffered = TouchKeyStyle.Groups.offeredBy(AppEdition.current()).any();' \
+    "$repo_root/platforms/android/java/app/msime/android/home/KeyboardFragment.java"; then
+  echo "Android 按键布局 notes and entry subtitle must match iOS and HarmonyOS word for word, and the entry and its search result must only appear when the edition offers a style group" >&2
+  exit 1
+fi
+# 九键「右侧大回车」（tall_return）：排布由 TouchKeyStyleSmoke、KeyHeatmapLayoutSmoke 和 NineKeySidebarPolicySmoke 覆盖，接线在 InputMethodService 和设置页里，JVM 冒烟碰不到，这里钉住：拼音九键（含数字层）和笔画按 tallReturnDrawn 建一整块外框、高度按三行加底行；换了样式或进出密码框时 render 经 tallReturnStale 重建；符号栏按大回车取符号表；设置页把它叫「右侧大回车」，预览画外框最后两行。
+for builder in 'void rebuildNineKeyRows() {' 'void rebuildStrokeRows() {'; do
+  body=$(sed -n "/    $builder\$/,/^    }\$/p" "$layout_rows")
+  if ! rg_q_stdin 'boolean tallReturn = tallReturnDrawn\(\);' <<< "$body" \
+    || ! rg_q_stdin 'if \(tallReturn\) s\.imeStyler\.adjustBottomRowBlockHeight\(container\);' <<< "$body" \
+    || ! rg_q_stdin 'addTallReturnKey\(actions\);' <<< "$body" \
+    || ! rg_q_stdin 'hideActionRowForTallReturn\(\);' <<< "$body"; then
+    echo "Android $builder must build the tall-return frame as one block with the double-height return" >&2
+    exit 1
+  fi
+done
+if ! rg -q 'imeLetterRows\.numberPadStale\(\) \|\| imeLayoutRows\.tallReturnStale\(\)\)' "$account_service" \
+  || ! rg -q 'FrameLayout sidebar = symbolSidebar\(digits, true, tallReturn, true\);' "$layout_rows" \
+  || ! rg -q 'case TALL_RETURN -> "右侧大回车";' "$style_page" \
+  || ! rg -q 'if \(KeyboardActionRow\.drawsTallReturn\(touchLayout, style\)\) return tallReturnRows\(\);' \
+    "$repo_root/platforms/android/java/app/msime/android/home/BottomRowPreview.java"; then
+  echo "Android tall-return wiring is missing: render must rebuild on tallReturnStale, the sidebar must read the tall table, and the settings page must label 右侧大回车 and preview the frame" >&2
+  exit 1
+fi
+# 右侧大回车外框的列宽按画着的键面取（KeyboardActionRow.tallReturnSideWeight / tallReturnGridWeight / tallReturnGridShare，TouchKeyStyleSmoke 钉住份额）：笔画的数字层经 rebuildNineKeyRows 借九键数字九宫格，键面仍是笔画，大回车分支必须按 displayedTouchLayout 取份额，不能写死九键的 3 / 14，否则切 123 时 符、123 和回车横移。
+nine_body=$(sed -n '/    void rebuildNineKeyRows() {$/,/^    }$/p' "$layout_rows")
+if ! rg_q_stdin 'int frameLayout = s\.displayedTouchLayout\(s\.view\);' <<< "$nine_body" \
+  || ! rg_q_stdin 'float tallSide = KeyboardActionRow\.tallReturnSideWeight\(frameLayout\);' <<< "$nine_body" \
+  || ! rg_q_stdin 'container\.addView\(tallReturnLeftColumn\(sidebar, more\), LayoutPolicy\.weightedMatchParentParams\(tallSide\)\);' <<< "$nine_body" \
+  || ! rg_q_stdin 'tallReturnMiddleColumn\(grid, KeyboardActionRow\.tallReturnGridShare\(frameLayout\), digits\)' <<< "$nine_body" \
+  || ! rg_q_stdin 'LayoutPolicy\.weightedMatchParentParams\(KeyboardActionRow\.tallReturnGridWeight\(frameLayout\)\)' <<< "$nine_body" \
+  || [[ $(rg -c 'container\.addView\(actions, LayoutPolicy\.weightedMatchParentParams\(tallSide\)\);' <<< "$nine_body") != 1 ]]; then
+  echo "Android rebuildNineKeyRows must size the tall-return frame by the displayed face, so stroke's number layer keeps the stroke frame" >&2
+  exit 1
+fi
+# 右侧大回车接到符号栏末尾的 ！ 接替拼音九键右列 ！ 的手势（右上角印 0、上滑输入 0、长按上下标 0），否则字母层没有直接输入 0 的地方；哪一格由 NineKeySidebarPolicy.appendedExclamationIndex 定（NineKeySidebarPolicySmoke 钉住），绑定在 symbolSidebar 里。笔画右列的 ！ 本来没有这个手势，笔画不带。
+sidebar_body=$(sed -n '/    private FrameLayout symbolSidebar(boolean digits, boolean capped, int visibleRows, boolean tallReturn,$/,/^    }$/p' "$layout_rows")
+if ! rg_q_stdin 'NineKeySidebarPolicy\.appendedExclamationIndex\(digits,' <<< "$sidebar_body" \
+  || ! rg_q_stdin 'exclamation\.setDigitText\(SuperscriptShortcutPolicy\.ZERO\);' <<< "$sidebar_body" \
+  || ! rg_q_stdin 's\.imeLetterRows\.bindSuperscriptShortcut\(exclamation, symbol\);' <<< "$sidebar_body" \
+  || ! rg -q 'FrameLayout sidebar = tallReturn \? symbolSidebar\(false, true, true, false\)' "$layout_rows"; then
+  echo "Android tall-return sidebar ！ must carry the right-column ！ zero gestures on nine-key and not on stroke" >&2
   exit 1
 fi
 # 拼音九键格子上的长按数字画在右上角，字号和位置与 26 键字母的角标相同（KeyHintButton 的 CORNER_HINT_SP、CORNER_HINT_TOP_DP、CORNER_HINT_RIGHT_DP，基线按 ascent 算），iOS 的 keyNumberHint 也是上 3、右 5。绘制在 onDraw 里，JVM 冒烟碰不到，这里钉住它取的是同一组常量，而不是另写一套数字。
@@ -959,14 +1210,15 @@ for manifest in \
     exit 1
   fi
 done
-# 键区里的系统识别服务是 SpeechRecognizer 回调接线，JVM 冒烟只能覆盖 PlatformSpeechPolicy 和 ImeVoiceEntry.choose 这些纯逻辑，这里守住回调里不能被悄悄改回去的几处（#5553）：两条入口都按错误码提示、空结果不冒用错误码，权限拒绝或聆听前启动失败时转交识别窗口，系统识别服务不被 1.5 s 停顿截断，说完后收回音量光圈。
+# 键区里的系统识别服务是 SpeechRecognizer 回调接线，JVM 冒烟只能覆盖 PlatformSpeechPolicy 和 ImeVoiceEntry.choose 这些纯逻辑，这里守住回调里不能被悄悄改回去的几处（#5553）：两条入口都按错误码提示、空结果不冒用错误码，权限拒绝或聆听前启动失败时转交识别窗口，系统识别服务和豆包流式不被 1.5 s 停顿截断（豆包整句流式说到 15 秒才回第一段结果，#9886），说完后收回音量光圈。
 voice_entry="$repo_root/platforms/android/java/app/msime/android/core/ImeVoiceEntry.java"
 if ! rg -qF 'fail(PlatformSpeechPolicy.message(error))' "$voice_activity" \
   || ! rg -qF 'fail(PlatformSpeechPolicy.emptyResult())' "$voice_activity" \
   || ! rg -qF 'PlatformSpeechPolicy.message(error)' "$voice_entry" \
   || ! rg -qF 'PlatformSpeechPolicy.emptyResult()' "$voice_entry" \
   || ! rg -qF 's.launchVoiceActivity();' "$voice_entry" \
-  || ! rg -qF 'if (platform != null) return;' "$voice_entry" \
+  || ! rg -qF 'heard(session, firstResult(partialResults), false);' "$voice_entry" \
+  || ! rg -qF 'heard(session, update, false)' "$voice_entry" \
   || ! rg -qF 'listening.resetLevel();' "$voice_entry"; then
   echo "Android platform speech callbacks must keep coded errors, the activity hand-off, the uncut pause and the level reset" >&2
   exit 1
@@ -1039,6 +1291,16 @@ if ! rg -Uq 'android:name="app\.msime\.android\.MlKitImeInitProvider"[[:space:]]
   echo "Android native host must initialize ML Kit inside the isolated IME process" >&2
   exit 1
 fi
+# ML Kit 带进来的 Google datatransport 会把 FIREBASE_ML_SDK 诊断事件上传到 firebaselogging.googleapis.com（2026-10-25 真机抓包）。清单删掉它的后端发现服务、上传任务和闹钟入口，三者缺一都留着一条上传途径。
+for component in \
+    'service android:name="com\.google\.android\.datatransport\.runtime\.backends\.TransportBackendDiscovery" tools:node="remove"' \
+    'service android:name="com\.google\.android\.datatransport\.runtime\.scheduling\.jobscheduling\.JobInfoSchedulerService" tools:node="remove"' \
+    'receiver android:name="com\.google\.android\.datatransport\.runtime\.scheduling\.jobscheduling\.AlarmManagerSchedulerBroadcastReceiver" tools:node="remove"'; do
+  if ! rg -q "<$component />" "$repo_root/platforms/android/AndroidManifest.xml"; then
+    echo "Android host manifest must remove the ML Kit datatransport upload path: $component" >&2
+    exit 1
+  fi
+done
 # The rotating refresh token must be spent by one process only. The session provider stays in the main process (no android:process) and unexported; the :ime keyboard asks it for a token instead of refreshing its own copy.
 if ! rg -Uq 'android:name="app\.msime\.android\.AccountSessionProvider"[[:space:]]+android:authorities="\$\{applicationId\}\.account-session"[[:space:]]+android:exported="false"[[:space:]]*/>' \
     "$repo_root/platforms/android/AndroidManifest.xml"; then
@@ -1094,6 +1356,34 @@ if ! rg -q '"import_android_v1"' "$repo_root/platforms/android/java/app/msime/an
   echo "Android must convert the old snapshot queue before importing the old cloud sync progress" >&2
   exit 1
 fi
+# 离开输入框后的快照处理每次都要扫一遍整份用户词库算版本，必须像空闲同步一样延后排队、并在下一个要建会话的输入框开始时取消；改回失焦即排进工作线程，换输入框时新会话又要排在这次扫描后面。被取消的那一轮要记在 DictionarySnapshotBacklog 里：欠满一分钟就不再延后，服务销毁时还欠着的要补上，否则一直在几个输入框之间切换的用户永远等不到快照激活和输入记录合并。
+if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /scheduleDictionarySnapshotProcessing\(false\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/public void onStartInput\(EditorInfo info, boolean restarting\)/ { inside = 1 } inside && /cancelDictionarySnapshotProcessing\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'if \(generation != dictionarySnapshotGeneration\) return;' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/private void scheduleDictionarySnapshotProcessing\(boolean immediate\)/ { inside = 1 } inside && /dictionarySnapshotBacklog\.owe\(SystemClock\.uptimeMillis\(\)\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /if \(dictionarySnapshotBacklog\.owed\(\)\) scheduleDictionarySnapshotProcessing\(true\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
+  echo "Android must defer dictionary snapshot processing after a blur and cancel it when the next field starts a session" >&2
+  exit 1
+fi
+# 上屏统计在 native 里按目录攒着，最多每半分钟写一次，最后一段要靠宿主在失焦、收起键盘和销毁时叫一次 flush；销毁时的那次必须排在统计工作线程 shutdown 之前，否则排不进去，进程一退这段统计就丢了。
+if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! awk '/public void onWindowHidden\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { flush = NR } inside && /typingStatisticsWorker\.shutdown\(\);/ { shutdown = NR } inside && /^    }$/ { exit } END { exit !(flush && shutdown && flush < shutdown) }' "$service_java" \
+  || ! rg -q '"operation", "flush"' "$service_java"; then
+  echo "Android must flush pending typing statistics when the field loses focus, the keyboard hides, and before the statistics worker shuts down" >&2
+  exit 1
+fi
+# 同一输入框重启连接时留着会话，跳过了 startInputRuntime 里按资源包重算方案列表和音标可用的那一步；资源包装好或删掉之后必须走重建，否则切换器和音标要等换了输入框才跟上。
+if ! awk '/private boolean keepsSessionAcrossRestart\(/ { inside = 1 } inside && /ResourcePacks\.installedIds\(this\)\.equals\(installedResourcePackIds\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! rg -q 'installedResourcePackIds = installedPacks;' "$service_java"; then
+  echo "Android must rebuild the engine session on a same-field restart when the installed resource packs changed" >&2
+  exit 1
+fi
 # The host compiles against AndroidX and Material now, and those are AARs that only Gradle resolves,
 # so this script no longer compiles the whole source set -- `platforms/android/gradle-app` does, and
 # build-apk.sh drives it. What stays here is the part that is worth having without a Gradle daemon:
@@ -1140,6 +1430,21 @@ if ! rg -q 'installed\.headerAction\(manageButton\(context\)\)' "$lexicon_page" 
   echo "Android lexicon page must expose its four management actions from the installed header menu" >&2
   exit 1
 fi
+# 登录前的明示同意（.agents/notes/implemented/bug-fix/2026-10-27-login-privacy-consent.md）：勾选规则由 LoginConsentPolicySmoke 覆盖，接线在 LoginSheet 里，JVM 冒烟碰不到，这里钉住：面板上不再有「登录即表示同意」；每一个发请求的登录操作（经 begin 进入忙碌状态的 Apple、Google、发送验证码和验证码登录）都在同一行先过 confirmConsent；Google、Apple 和邮箱验证码的登录流程只从 LoginSheet 发起，新入口不能绕过面板；文字与提示和共享设置页 login-consent.tsx 的一字不差。
+login_sheet="$repo_root/platforms/android/java/app/msime/android/home/LoginSheet.java"
+login_consent="$repo_root/platforms/android/java/app/msime/android/home/LoginConsentPolicy.java"
+shared_login_consent="$repo_root/packages/ui/src/account/login-consent.tsx"
+if rg -q '登录即' "$login_sheet" \
+  || ! awk '/[^a-zA-Z]begin\("/ { calls++; if ($0 !~ /!confirmConsent\(\) \|\|/) bad = 1 } END { exit (bad || calls != 4) }' "$login_sheet" \
+  || rg -l 'SignIn\.(startGoogle|startApple|requestEmailCode|verifyEmailCode)\(' "$repo_root/platforms/android/java" \
+    | rg -v '/home/LoginSheet\.java$' >/dev/null \
+  || ! rg -qF 'export const LOGIN_CONSENT_PROMPT = "请先阅读并勾选同意《用户协议》和《隐私政策》";' "$shared_login_consent" \
+  || ! rg -qF 'aria-label="我已阅读并同意《用户协议》和《隐私政策》"' "$shared_login_consent" \
+  || ! rg -qF 'TEXT = "我已阅读并同意" + TERMS_TITLE + "和" + PRIVACY_TITLE;' "$login_consent" \
+  || ! rg -qF 'PROMPT = "请先阅读并勾选同意" + TERMS_TITLE + "和" + PRIVACY_TITLE;' "$login_consent"; then
+  echo "Every Android sign-in request must first pass LoginSheet's explicit consent checkbox, worded as the shared login-consent.tsx" >&2
+  exit 1
+fi
 #
 # Match the launcher activities by their path *inside the repository*. The absolute pattern this
 # started as, `*/home/*`, also matches every source on a GitHub runner, where the checkout itself
@@ -1160,6 +1465,16 @@ if [[ ${#client_sources[@]} -eq 0 ]]; then
   echo "No Android client sources selected for compilation; the source filter is wrong" >&2
   exit 1
 fi
+# 详情页最多四个顶部分类（.agents/notes/implemented/feature/2026-10-13-android-settings-top-tabs.md）：分类是等宽分段，第五个会把每段挤得比其他页面窄。条件性分类也算在内，它出现时同样会挤。
+for page in "$repo_root"/platforms/android/java/app/msime/android/home/*.java; do
+  titles=$(tr '\n' ' ' < "$page" | grep -oE 'sectionTitles\(\) *\{ *return +(java\.util\.)?List\.of\([^)]*\)' || true)
+  [ -n "$titles" ] || continue
+  count=$({ grep -o '"[^"]*"' <<< "$titles" || true; } | wc -l | tr -d ' ')
+  if [ "$count" -gt 4 ]; then
+    echo "Android detail page declares $count section tabs, more than four: ${page#"$repo_root/"}" >&2
+    exit 1
+  fi
+done
 # 冒烟测试按文件自动发现：`tests/` 下除设备套件外的每个 `.java` 都参与编译，每个以 `Smoke.java` 结尾的类都会运行，没有 `static void main(` 入口的会让检查直接失败而不是被跳过，新加冒烟不必再登记到这里。排除的三处各有原因：`tests/device/**` 是要装进模拟器的设备套件，`core/NativeSmoke.java` 要加载 `libmsime_android.so`，`settings/KeyboardGeometryStrictIntSmoke.java` 要真实的 `org.json`，而这里只有 android.jar 里抛 `Stub!` 的桩。路径同样按仓库内的相对路径匹配，理由见上面那段关于 /home/runner 的说明。
 test_sources=()
 smoke_classes=()
@@ -1191,9 +1506,12 @@ fi
 javac --release 17 -Xlint:all -Werror -cp "$android_jar" -d "$output_dir" \
   "${client_sources[@]}" \
   "$repo_root/platforms/android/java/app/msime/android/home/SignInAttemptPolicy.java" \
+  "$repo_root/platforms/android/java/app/msime/android/home/LoginConsentPolicy.java" \
   "$repo_root/platforms/android/java/app/msime/android/home/OnboardingChoicePolicy.java" \
   "$repo_root/platforms/android/java/app/msime/android/home/HelpcodeChoicePolicy.java" \
+  "$repo_root/platforms/android/gradle-app/ocr-module/src/main/java/app/msime/ocr/module/OcrPipeline.java" \
   "${test_sources[@]}"
+# 可选 OCR 模块的前后处理只用 Java 标准库，跟宿主的纯 Java 模型一起编译，由 tests/ocr/OcrPipelineSmoke.java 覆盖；模块里调用 ONNX Runtime 和 Android 图形接口的 OcrModule 只由 Gradle 编译。
 # 统一用 `$output_dir:$android_jar` 运行：改成自动发现前逐个核对过，原先按类分别给的 classpath（有的不带 android.jar）与统一 classpath 下 108 个冒烟的输出和退出码完全相同。
 for smoke in "${smoke_classes[@]}"; do
   if ! java -cp "$output_dir:$android_jar" "$smoke"; then

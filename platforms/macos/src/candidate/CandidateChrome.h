@@ -196,6 +196,8 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 @property(nonatomic, copy) NSString *glossReading;
 // 脚本插件给这一行加的注释，已经过 MSIMECandidateScriptAnnotationRun 收拾；画在释义行的最后一行，斜体，从不上屏，也不替换引擎的 annotation。没有时为空。
 @property(nonatomic, copy) NSString *scriptAnnotation;
+// 候选文字开头画成次要色（释义色）的 UTF-16 长度：光标后编辑里首选开头固定的那段（视图的 `caret_edit_prefix`）。0 时整段照常画。
+@property(nonatomic) NSUInteger dimmedPrefixLength;
 // Geometry from the panel's page layout; frames, drawing and hit testing all come from it. Without one the button lays itself out in its bounds.
 @property(nonatomic) msime::candidate::CandidateItemLayout itemLayout;
 @property(nonatomic) BOOL hasItemLayout;
@@ -386,16 +388,25 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
     // The number sits on the text's first line.
     CGFloat textTop = layout.contentTop + (layout.textHeight - wordSize.height) / 2;
     CGFloat firstLine = wordSize.height;
+    // 开头固定的那段换成释义色，量高和折行仍按整段同一字体的属性，画淡不改变版面。
+    NSColor *dimmedColor = self.translationColor ?: [titleColor colorWithAlphaComponent:MSIMECandidateTranslationOpacity];
+    const NSUInteger dimmed = MIN(self.dimmedPrefixLength, word.length);
+    void (^drawWord)(NSRect, NSDictionary *) = ^(NSRect rect, NSDictionary *attributes) {
+        if (dimmed == 0) { [word drawInRect:rect withAttributes:attributes]; return; }
+        NSMutableAttributedString *run = [[NSMutableAttributedString alloc] initWithString:word attributes:attributes];
+        [run addAttribute:NSForegroundColorAttributeName value:dimmedColor range:NSMakeRange(0, dimmed)];
+        [run drawInRect:rect];
+    };
     if (layout.textWrapped)
     {
         const CGFloat drawn = MSIMECandidateWrappedHeight(word, self.font, layout.textWidth);
         textTop = layout.contentTop + MAX(0.0, (layout.textHeight - drawn) / 2);
         firstLine = MSIMECandidateTextHeight(@"", self.font);
-        [word drawInRect:box(contentLeft, textTop, layout.textWidth, drawn) withAttributes:MSIMECandidateRunAttributes(self.font, titleColor, YES)];
+        drawWord(box(contentLeft, textTop, layout.textWidth, drawn), MSIMECandidateRunAttributes(self.font, titleColor, YES));
     }
     else
     {
-        [word drawInRect:box(contentLeft, textTop, MAX(layout.textWidth, ceil(wordSize.width)) + 1.0, wordSize.height) withAttributes:titleAttributes];
+        drawWord(box(contentLeft, textTop, MAX(layout.textWidth, ceil(wordSize.width)) + 1.0, wordSize.height), titleAttributes);
     }
     if (!self.hidesNumber) [number drawInRect:box(textLeft, textTop + (firstLine - numberSize.height) / 2, ceil(numberSize.width) + 1.0, numberSize.height)
         withAttributes:numberAttributes];
@@ -461,6 +472,8 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 @property(nonatomic) BOOL liquidGlassEnabled;
 @property(nonatomic, readonly) BOOL liquidGlassActive;
 @property(nonatomic, strong, readonly) NSView *candidateContentView;
+// 原窗口变高、变矮时，候选内容保持顶部对齐；零表示正常布局。
+@property(nonatomic) CGFloat resizingCandidateContentHeight;
 @property(nonatomic) msime::mac::SkinInsets canvasOuterInsets;
 @property(nonatomic) msime::mac::SkinInsets shadowOuterInsets;
 @property(nonatomic) msime::mac::CandidateShadow candidateShadow;
@@ -586,6 +599,8 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 {
     [super layout];
     [self updateGlassBackground];
+    [_candidateContentView setBoundsOrigin:NSMakePoint(0, self.resizingCandidateContentHeight > 0
+        ? self.resizingCandidateContentHeight - NSHeight(_candidateContentView.bounds) : 0)];
     if (self.clipsCandidateContent) {
         const CGFloat halfBorder = MAX(0.0, self.lineWidth) / 2.0;
         const NSRect bounds = NSInsetRect(_candidateContentView.bounds, halfBorder, halfBorder);
@@ -598,6 +613,14 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
         _candidateContentView.layer.mask = mask;
     } else {
         _candidateContentView.layer.mask = nil;
+    }
+}
+- (void)setFrameSize:(NSSize)size
+{
+    [super setFrameSize:size];
+    if (self.resizingCandidateContentHeight > 0) {
+        [self setNeedsLayout:YES];
+        [self layoutSubtreeIfNeeded];
     }
 }
 - (BOOL)isOpaque { return NO; }
@@ -714,7 +737,13 @@ static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
 @property(nonatomic, copy) void (^manualScrollBegan)(void);
 @property(nonatomic, copy) void (^lineScrollHandler)(BOOL previous);
 @property(nonatomic, copy) BOOL (^canScroll)(void);
+// 按需排版：后面还有没排的行时，可见范围离已排末尾不到 `lookaheadRows` 行就请调用方追加（见 appendRowOffsets:）。
+@property(nonatomic) BOOL hasMoreRows;
+@property(nonatomic) NSUInteger lookaheadRows;
+@property(nonatomic, copy) void (^rowsApproachingEnd)(NSUInteger visibleEnd);
 - (void)configureRowOffsets:(const std::vector<CGFloat> &)offsets width:(CGFloat)width;
+// 在已有行后面追加行：已建的行和当前滚动位置按新增的高度一起平移，看到的内容不动。
+- (void)appendRowOffsets:(const std::vector<CGFloat> &)offsets;
 - (void)scrollToTopOffset:(CGFloat)offset;
 - (NSRange)visibleRowRange;
 - (BOOL)scrollByRowBackwards:(BOOL)backwards;
@@ -761,6 +790,26 @@ static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
     NSParameterAssert(offsets.size() > 1);
     _rowOffsets = offsets;
     self.documentView.frame = NSMakeRect(0, 0, width, offsets.back());
+}
+- (void)appendRowOffsets:(const std::vector<CGFloat> &)offsets {
+    if (offsets.size() <= _rowOffsets.size() || !std::equal(_rowOffsets.begin(), _rowOffsets.end() - 1, offsets.begin())) return;
+    // 文档视图不翻转，行按距顶部的偏移从下往上摆：文档变高时已有内容整体上移同样的高度。
+    const CGFloat delta = offsets.back() - _rowOffsets.back();
+    const NSPoint origin = self.contentView.bounds.origin;
+    _positioning = YES;
+    @try {
+        _rowOffsets = offsets;
+        NSRect frame = self.documentView.frame;
+        frame.size.height = offsets.back();
+        self.documentView.frame = frame;
+        for (NSArray<NSView *> *buttons in _visibleRows.allValues)
+            for (NSView *button in buttons) [button setFrameOrigin:NSMakePoint(NSMinX(button.frame), NSMinY(button.frame) + delta)];
+        [self.contentView scrollToPoint:NSMakePoint(origin.x, origin.y + delta)];
+        [self reflectScrolledClipView:self.contentView];
+    } @finally {
+        _positioning = NO;
+    }
+    [self updateVisibleRows];
 }
 - (void)scrollToTopOffset:(CGFloat)offset {
     _positioning = YES;
@@ -814,12 +863,14 @@ static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
 - (void)updateVisibleRows {
     if (_updatingVisibleRows || _rowOffsets.size() < 2 || !self.makeRow) return;
     _updatingVisibleRows = YES;
+    NSUInteger visibleEnd = 0;
     @try {
         const CGFloat height = NSHeight(self.contentView.bounds);
         const CGFloat maximum = MAX(0.0, _rowOffsets.back() - height);
         const CGFloat top = std::clamp(_rowOffsets.back() - NSMaxY(self.documentVisibleRect), 0.0, maximum);
         const NSRange visible = self.visibleRowRange;
         const NSUInteger first = visible.location, end = NSMaxRange(visible);
+        visibleEnd = end;
         BOOL changed = NO;
         for (NSNumber *key in _visibleRows.allKeys) {
             if (key.unsignedIntegerValue >= first && key.unsignedIntegerValue < end) continue;
@@ -841,6 +892,9 @@ static inline CGFloat MSIMEExpandedCandidateScrollerPadding(CGFloat scale) {
     } @finally {
         _updatingVisibleRows = NO;
     }
+    // 追加会再次进入这里；没有更多行或调用方没追加时 hasMoreRows 变假或行数不变，就此停下。
+    if (self.hasMoreRows && self.rowsApproachingEnd && visibleEnd + self.lookaheadRows > _rowOffsets.size() - 1)
+        self.rowsApproachingEnd(visibleEnd);
 }
 - (void)scrollWheel:(NSEvent *)event {
     if (_handlingWheel || (self.canScroll && !self.canScroll())) return;

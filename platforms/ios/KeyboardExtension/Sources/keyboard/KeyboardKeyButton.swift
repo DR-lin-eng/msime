@@ -38,14 +38,23 @@ final class KeyboardKeyButton: UIButton {
       let smaller = font.withSize(size)
       if measure(text, smaller) <= width { return (text, smaller) }
     }
+    // 整段在最小字号下也放不下：留下最长的、接上「…」还放得下的前缀（0 到少一个字符），连「…」都放不下时为空。按长度二分，每次只量一次。原来从末尾一个字一个字地删、每删一个量一次，单字候选的 Unihan 释义常要删掉几十个字符，每次按键每个词块都要量几十次。只记量过确实放得下的结果，所以字宽偶尔不随长度单调增长时也不会画出超宽的一行。
     let floorFont = font.withSize(minimumGlossFontSize)
-    var characters = Array(text)
-    while !characters.isEmpty {
-      characters.removeLast()
-      let shortened = String(characters) + "…"
-      if measure(shortened, floorFont) <= width { return (shortened, floorFont) }
+    let characters = Array(text)
+    var fitted = ""
+    var low = 0
+    var high = characters.count - 1
+    while low <= high {
+      let length = (low + high) / 2
+      let shortened = String(characters[..<length]) + "…"
+      if measure(shortened, floorFont) <= width {
+        fitted = shortened
+        low = length + 1
+      } else {
+        high = length - 1
+      }
     }
-    return ("", floorFont)
+    return (fitted, floorFont)
   }
 
   /// 按住按钮时给手指的反馈，取自设计稿的 `style-active` 规则。
@@ -207,6 +216,7 @@ final class KeyboardKeyButton: UIButton {
       resetPressFeedback()
       removePressPreview()
       resetCornerHint()
+      touchDownLocation = nil
     }
   }
 
@@ -233,7 +243,7 @@ final class KeyboardKeyButton: UIButton {
     }
   }
 
-  /// 手指下滑（`SwipeHintPolicy`）或按住 `cornerHintHoldDelay` 时，这个键代替自身动作输入的字符，即字母键的角标（`LetterHintTable`）。为 nil 时按键只响应普通点按。与 Android 的 `ImeLetterRows.bindLetterGestures` 一致：两种手势都会把预览切到角标，松手时输入它。
+  /// 手指沿设定方向滑动（`SwipeHintPolicy`）或按住 `cornerHintHoldDelay` 时，这个键代替自身动作输入的字符，即字母键的角标（`LetterHintTable`）。为 nil 时按键只响应普通点按。与 Android 的 `ImeLetterRows.bindLetterGestures` 一致：两种手势都会把预览切到角标，松手时输入它。
   var cornerHint: String? {
     didSet {
       if cornerHint == nil { resetCornerHint() }
@@ -243,22 +253,44 @@ final class KeyboardKeyButton: UIButton {
   /// 松手时输入角标。触发它的触摸被取消而不是正常结束，所以按键自身的动作不会再执行一次。
   var onCornerHint: ((String) -> Void)?
 
-  /// 下滑是否输入角标：「滑动输入符号」（`KeyboardLayoutPreference.swipeSymbols`）关掉时为假。长按不受它影响，与 Android 的 `bindLetterGestures` 一致。
+  /// 滑动是否输入角标：「滑动输入符号」（`KeyboardLayoutPreference.swipeSymbols`）关掉时为假。长按不受它影响，与 Android 的 `bindLetterGestures` 一致。
   var swipesCornerHint = true
+  var cornerHintSwipeDirection: KeyboardLayoutPreference.SwipeDirection = .up
+  /// 为真时上滑、下滑都输入角标，不看 `cornerHintSwipeDirection`，纵向位移还要大于横向，按满 `cornerHintHoldDelay` 还没滑出去就不再起滑动（`SwipeHintPolicy.swipedEitherWay`）。「长空格」的逗号用它，与 Android 的 `ImeBottomRow.bindCommaSwipe` 一致。
+  var cornerHintSwipesEitherWay = false
+  /// 按住是否输入角标。为假时角标只靠滑动输入，按住留给按键自己的长按菜单（`menu`），例如 14 键「长空格」的逗号：上滑或下滑输入句号，长按仍打开常用标点。
+  var holdsCornerHint = true
 
   /// UIKit 默认的长按时长，与九键长按用的半秒相同；Android 等的是系统的长按超时。
   static let cornerHintHoldDelay: TimeInterval = 0.5
 
+  /// 是否记下按下点（#10018）：26 键的字母键和微软双拼的 `;`。其余按钮不记，按下时不必去找键区。
+  var recordsTouchDown = false
+
+  /// 这一次触摸按下时手指在键区（`KeyAreaStackView`）坐标里的位置：落在键距里被 `KeyGapRouting` 归给这个键的触摸也是手指的真实位置，不受按下缩放影响。松手输入时由按键的动作取走（`takeTouchDownLocation`）；触摸取消、改输角标或结束后都清掉，不会留给之后没有触摸的激活（`sendActions`、读屏）。
+  var touchDownLocation: CGPoint?
+
+  /// 取走并清掉这一次的按下点。
+  func takeTouchDownLocation() -> CGPoint? {
+    defer { touchDownLocation = nil }
+    return touchDownLocation
+  }
+
   /// 被跟踪的手指按下的位置，用窗口坐标，免得按下缩放扭曲滑动距离。
-  private var cornerHintDownY: CGFloat = 0
+  private var cornerHintDown: CGPoint = .zero
+  /// 按下时的触摸时间戳（`UITouch.timestamp`），`cornerHintSwipesEitherWay` 用它判断这次触摸是否已经归长按。
+  private var cornerHintDownTime: TimeInterval = 0
   private var cornerHintTriggered = false
   private var cornerHintHold: Timer?
 
   override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
     let began = super.beginTracking(touch, with: event)
     resetCornerHint()
+    touchDownLocation = began && recordsTouchDown ? keyArea.map { touch.location(in: $0) } : nil
     guard began, cornerHint != nil else { return began }
-    cornerHintDownY = touch.location(in: nil).y
+    cornerHintDown = touch.location(in: nil)
+    cornerHintDownTime = touch.timestamp
+    guard holdsCornerHint else { return began }
     cornerHintHold = Timer.scheduledTimer(withTimeInterval: Self.cornerHintHoldDelay, repeats: false) { [weak self] _ in
       MainActor.assumeIsolated {
         // 滑出按键的手指不再算按住，对应 Android 检查 `isPressed()`。
@@ -270,32 +302,56 @@ final class KeyboardKeyButton: UIButton {
   }
 
   override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-    if !cornerHintTriggered, swipesCornerHint, let hint = cornerHint,
-       SwipeHintPolicy.swiped(downY: cornerHintDownY, currentY: touch.location(in: nil).y) {
+    if !cornerHintTriggered, swipesCornerHint, let hint = cornerHint, cornerHintSwiped(touch) {
       triggerCornerHint(hint)
     }
     return super.continueTracking(touch, with: event)
   }
 
+  private func cornerHintSwiped(_ touch: UITouch) -> Bool {
+    let current = touch.location(in: nil)
+    guard cornerHintSwipesEitherWay else {
+      return SwipeHintPolicy.swiped(direction: cornerHintSwipeDirection, downY: cornerHintDown.y, currentY: current.y)
+    }
+    return SwipeHintPolicy.swipedEitherWay(down: cornerHintDown, current: current,
+                                           elapsed: touch.timestamp - cornerHintDownTime, holdDelay: Self.cornerHintHoldDelay)
+  }
+
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
     guard cornerHintTriggered, let hint = cornerHint else {
       resetCornerHint()
+      // 松手输入时按键的动作在这里面同步执行并取走按下点；手指滑出按键后松开不输入，按下点也不留下。
       super.touchesEnded(touches, with: event)
+      touchDownLocation = nil
       return
     }
     // 取消而不是结束这次触摸，与 Android 给按键发 `ACTION_CANCEL` 一样：按下反馈和预览消失，`touchUpInside` 不会触发。
     super.touchesCancelled(touches, with: event)
     resetCornerHint()
+    touchDownLocation = nil
     onCornerHint?(hint)
   }
 
   override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
     // 触摸被滑行输入接管或被系统取消时，什么也不输入。
     resetCornerHint()
+    touchDownLocation = nil
     super.touchesCancelled(touches, with: event)
   }
 
+  /// 这个键所在的键区。按键的祖先里最近的 `KeyAreaStackView`；不在键区里（面板、候选栏）时为 nil。
+  private var keyArea: KeyAreaStackView? {
+    var node = superview
+    while let current = node {
+      if let area = current as? KeyAreaStackView { return area }
+      node = current.superview
+    }
+    return nil
+  }
+
   private func triggerCornerHint(_ hint: String) {
+    // 这一下输入的是角标，不是字母，按下点不再有用。
+    touchDownLocation = nil
     cornerHintTriggered = true
     cornerHintHold?.invalidate()
     cornerHintHold = nil

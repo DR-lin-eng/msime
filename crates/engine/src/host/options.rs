@@ -66,6 +66,8 @@ pub struct EngineOptions {
     /// `shuangpin_profile` 为 4 时的键位表（`SessionOptions::shuangpin_custom_profile`）。双拼在 `enabled_schemes` 里时缺表或表不合法，建会话失败（`INVALID_CUSTOM_SHUANGPIN_PROFILE`）；宿主应先用 `validate_shuangpin_custom_profile` 校验，不合法就不要传 4。
     pub shuangpin_custom_profile: Option<ShuangpinCustomTable>,
     pub shuangpin_preedit_uses_raw: bool,
+    /// 独立粤语双拼入口强制解释同形两键码；其余入口为 false。
+    pub force_cantonese_shuangpin: bool,
     pub learning: bool,
     /// 回车上屏英文拼写时是否学进英文词库（`SessionOptions::learn_english_on_enter`）。参照实现出厂为开。
     pub learn_english_on_enter: bool,
@@ -81,6 +83,8 @@ pub struct EngineOptions {
     /// 0 是 86 五笔，1 是 98 五笔（`WubiProfileKind`）。
     pub wubi_profile: u8,
     pub helpcode: bool,
+    /// 一码辅助码严格筛选；关闭时仍按原来的规则重排候选。
+    pub strict_quanpin_helpcode: bool,
     /// Display only: filtering stays on while annotations are hidden.
     pub show_helpcode: bool,
     /// 双拼辅助码的触发方式（`SessionOptions::shuangpin_helpcode_modes`）；宿主按偏好 `shuangpin_helpcode.modes` 填，其它方案给默认值也不会被读。
@@ -118,6 +122,8 @@ pub struct EngineOptions {
     pub mixed_symbols: bool,
     /// 日文混输（实验，`SessionOptions::japanese_mixing`）。宿主只在会话带日文、日文模型在场时打开它。
     pub mixed_japanese: bool,
+    /// 连续输入所选语言；默认空集合关闭，由宿主完成版本与资源门控。
+    pub multilingual_languages: Vec<crate::multilingual::Language>,
     pub local_unicode: bool,
     /// Shift+T 日期时间快捷输入模式（`LocalModeOptions::date_time`）。行内日期时间混入普通候选由 `local_date_time_inline` 单独开关。
     pub local_date_time: bool,
@@ -165,10 +171,14 @@ pub struct EngineOptions {
     pub first_page_rows: usize,
     /// 只出单字（`SessionOptions::single_character_only`）。
     pub single_character_only: bool,
+    /// 移动光标后编辑光标后的部分（`SessionOptions::caret_edit_suffix`）。
+    pub caret_edit_suffix: bool,
     /// 0 Telex, 1 VNI (`vietnamese::InputMethod`).
     pub vietnamese_input_method: u8,
     /// 0 modern (hoà), 1 classic (hòa) (`vietnamese::ToneStyle`).
     pub vietnamese_tone_style: u8,
+    /// 0 两套式，1 罗马字（`KoreanLayout`）。
+    pub korean_layout: u8,
     /// Absolute path of `msime-cantonese.db`, empty when the host has none; the Cantonese scheme is unavailable without it.
     pub cantonese_dictionary: String,
     /// Absolute path of `msime-zhuyin.db`, empty when the host has none; the Zhuyin scheme is unavailable without it.
@@ -218,7 +228,9 @@ pub fn prepare_options_for(
         shuangpin_profile: ShuangpinProfileKind::Xiaohe as u8,
         shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
+        force_cantonese_shuangpin: false,
         single_character_only: false,
+        caret_edit_suffix: false,
         learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
@@ -229,6 +241,7 @@ pub fn prepare_options_for(
         wubi_z_wildcard: false,
         wubi_profile: WubiProfileKind::Wubi86 as u8,
         helpcode: true,
+        strict_quanpin_helpcode: false,
         show_helpcode: true,
         shuangpin_helpcode_modes: ShuangpinHelpcodeModes::default(),
         helpcode_schema: "ziranma".to_owned(),
@@ -253,6 +266,7 @@ pub fn prepare_options_for(
         mixed_kaomoji: false,
         mixed_symbols: false,
         mixed_japanese: false,
+        multilingual_languages: Vec::new(),
         local_unicode: true,
         local_date_time: true,
         local_date_time_inline: true,
@@ -282,6 +296,7 @@ pub fn prepare_options_for(
         first_page_rows: DEFAULT_FIRST_PAGE_ROWS,
         vietnamese_input_method: VietnameseInputMethod::Telex as u8,
         vietnamese_tone_style: VietnameseToneStyle::Modern as u8,
+        korean_layout: 0,
         cantonese_dictionary: String::new(),
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
@@ -313,6 +328,8 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
             .ok_or_else(|| EngineError::invalid(diagnostics::UNSUPPORTED_VIETNAMESE_METHOD))?;
     let vietnamese_tone_style = VietnameseToneStyle::from_u8(options.vietnamese_tone_style)
         .ok_or_else(|| EngineError::invalid(diagnostics::UNSUPPORTED_VIETNAMESE_TONE_STYLE))?;
+    let korean_layout = crate::KoreanLayout::from_u8(options.korean_layout)
+        .ok_or_else(|| EngineError::invalid(diagnostics::UNSUPPORTED_KOREAN_LAYOUT))?;
     // Only the two user switches; the quanpin dictionary widens them with missing and extra letters per request (`request_autocorrect_mask`), as the C++ did (bridge.cpp:376-378).
     let autocorrect_types = if options.autocorrect_transposition {
         autocorrect_type::TRANSPOSITION
@@ -329,9 +346,12 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.shuangpin_profile = shuangpin_profile;
     session.shuangpin_custom_profile = options.shuangpin_custom_profile.clone();
     session.shuangpin_preedit_uses_raw = options.shuangpin_preedit_uses_raw;
+    session.force_cantonese_shuangpin = options.force_cantonese_shuangpin;
     session.single_character_only = options.single_character_only;
+    session.caret_edit_suffix = options.caret_edit_suffix;
     session.vietnamese_input_method = vietnamese_input_method;
     session.vietnamese_tone_style = vietnamese_tone_style;
+    session.korean_layout = korean_layout;
     session.cantonese_dictionary = PathBuf::from(&options.cantonese_dictionary);
     session.zhuyin_dictionary = PathBuf::from(&options.zhuyin_dictionary);
     session.stroke_dictionary = PathBuf::from(&options.stroke_dictionary);
@@ -366,6 +386,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         enumeration_comma_slash: options.enumeration_comma_slash,
     };
     session.helpcode = options.helpcode;
+    session.strict_quanpin_helpcode = options.strict_quanpin_helpcode;
     session.helpcode_trigger_key = options.helpcode_trigger_key;
     session.shuangpin_helpcode_modes = options.shuangpin_helpcode_modes;
     session.helpcode_schema = options.helpcode_schema.clone();
@@ -391,6 +412,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         symbol_candidates: options.mixed_symbols,
     };
     session.japanese_mixing = options.mixed_japanese;
+    session.multilingual_languages = options.multilingual_languages.clone();
     session.local_modes = LocalModeOptions {
         unicode: options.local_unicode,
         date_time: options.local_date_time,

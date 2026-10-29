@@ -31,9 +31,15 @@ pub struct Candidate {
     /// True when Engine corrected the typed spelling for this candidate.
     /// Presentation layers may mark it without changing committed text.
     pub corrected: bool,
+    /// 这一行是 26 键双拼按首选规则坐上第一位的触点纠错（#10018）：宿主给它画平台已有的强调色，读屏标签后面接「，已纠正」；`annotation` 里的原始按键照旧显示。只会出现在第一位，为假时不出现在 JSON 里，没有触点的宿主（桌面、实体键盘）永远看不到它。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub confident_correction: bool,
     /// Engine fixed-position slot, or zero when dynamically ranked.
     pub fixed_position: u8,
     pub highlighted: bool,
+    /// 「仅当前高亮」的候选词翻译生效时，高亮这一行要留出译文的位置，回答还没到也留：竖排的宿主据此给这一行留一行译文高（两种目标语言时留两行，和横排的预留行数一样），移动高亮时窗口高度不跳。为假时不出现在 JSON 里，旧宿主可忽略。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub translation_reserved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<String>,
     /// 与 `translation` 同源的 UTF-8 字节范围；空时省略，旧宿主可忽略。
@@ -62,6 +68,8 @@ pub struct TranslationCandidates {
     pub generation: u64,
     pub scheme: u8,
     pub local_mode: String,
+    /// `candidates` 里高亮那一行的位置；高亮不在这一组座位里时为 `None`。
+    pub highlighted: Option<usize>,
     pub candidates: Vec<TranslationCandidate>,
 }
 
@@ -76,6 +84,22 @@ pub struct CandidateSnapshot {
     pub preedit: String,
     /// Engine-owned kana reading for Japanese, the composing Hangul for Korean; empty for other schemes.
     pub reading: String,
+    pub candidates: Vec<Candidate>,
+}
+
+/// 一代候选里按需取的一段（[`Runtime::candidate_range`]），身份与 [`CandidateSnapshot`] 里同一座位的那一行相同。
+///
+/// 触屏宿主的横向候选条每键都要重画，只取它这次建得出来的那一批，不必每键把整代候选（单个声母可有几千行）序列化一遍再在宿主主线程上解析。
+#[derive(Clone, Debug, Serialize)]
+pub struct CandidateRange {
+    pub session: u64,
+    pub generation: u64,
+    pub preedit: String,
+    /// Engine-owned kana reading for Japanese, the composing Hangul for Korean; empty for other schemes.
+    pub reading: String,
+    /// 这一代已经放出来的候选总数。引擎可能还扣着一段尾部（首字母只先给 24 行），从这个位置往后再取时才放出来。
+    pub total: usize,
+    /// 座位 `start` 起的候选，最多 `count` 行，到 `total` 为止。
     pub candidates: Vec<Candidate>,
 }
 
@@ -147,6 +171,12 @@ pub struct View {
     pub conversion_focus_start: usize,
     /// 光标处那一段的结尾，按 Unicode 标量计；光标在句末时等于 `conversion_focus_start`，没有候选。
     pub conversion_focus_end: usize,
+    /// 光标后编辑（偏好 `caret_edit_suffix`）正在生效：候选是组字光标后那段的，首选是整句。宿主在候选窗右侧显示「候选编辑：光标后」。没有生效时不出现在 JSON 里。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub caret_edit_suffix: bool,
+    /// 光标后编辑里首选（`Candidate::id.index` 为 0 的那一行）开头固定的那段文字：光标前那段原文的最佳转换，加上本模式已经暂存的部分。能分段画候选的宿主把首选的这几个字（按 Unicode 标量数）画淡。空时不出现在 JSON 里。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub caret_edit_prefix: String,
     pub page: usize,
     pub page_size: usize,
     pub page_count: usize,
@@ -208,6 +238,8 @@ pub enum SelectionHow {
     WubiAuto = 10,
     /// 九宫格组码到上限后再按一键，先选掉首选再接着打。
     GridLimit = 11,
+    /// `Command::CommitCandidate` 由引擎选择原始首行，呈现座位可经重排改变。
+    FirstCandidateCommand = 12,
 }
 
 /// 选中之后发生了什么。

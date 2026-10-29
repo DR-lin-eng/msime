@@ -121,10 +121,13 @@ export function LinuxSetupPage({
   status,
   client,
   edition,
+  repair = false,
   onComplete,
   sogou,
 }: {
   status: LinuxSetupStatus;
+  /** 已有配置的资源校验失败时，复用更新事务修复词库，不覆盖用户状态。 */
+  repair?: boolean;
   client: LinuxSetupClient;
   /** 本安装包所属的版本（`HostCapabilities.edition`），决定页面上的产品名和终端命令。 */
   edition?: EditionInfo;
@@ -132,7 +135,7 @@ export function LinuxSetupPage({
   sogou?: DictionaryClient["sogou"];
 }) {
   const names = linuxEditionNames(edition);
-  const updating = status.prepared && status.dictionaryOutdated === true;
+  const updating = status.prepared && (repair || status.dictionaryOutdated === true);
   const [download, setDownload] = useState(false);
   const [cloudCandidates, setCloudCandidates] = useState(false);
   const [phase, setPhase] = useState<Phase>("ready");
@@ -280,7 +283,9 @@ export function LinuxSetupPage({
             : failed
               ? `${action}没有完成`
               : updating
-                ? "词库需要更新"
+                ? repair
+                  ? "运行资源需要修复"
+                  : "词库需要更新"
                 : "准备词库和配置"}
         </h2>
         <p className="mt-2 mb-0 max-w-[400px] text-center text-[13px] leading-relaxed text-[var(--p-sub)]">
@@ -289,14 +294,16 @@ export function LinuxSetupPage({
               ? "已切换到当前版本的词库，用户词库已一并迁移，新的输入即使用新词库。"
               : "输入法配置已就绪。"
             : updating
-              ? "已安装的词库早于当前版本，输入法暂时继续使用旧词库。立即更新会取回新词库并切换，用户词库会一并迁移。"
+              ? repair
+                ? "将重新校验并取回当前版本的词库，保留已有偏好和用户词库。"
+                : "已安装的词库早于当前版本，输入法暂时继续使用旧词库。立即更新会取回新词库并切换，用户词库会一并迁移。"
               : `首次使用需要校验词库，并在 ${directory} 创建输入法配置。拼音切分、候选排序和词频学习都在本机完成。`}
         </p>
         {phase === "ready" && !updating && !blocked && (
           <div className="mt-5 flex w-full max-w-[400px] flex-col gap-2.5 text-left text-xs leading-[1.7] text-[var(--p-sub)] select-text">
             <label className="flex items-start gap-2">
               <ControlledCheckbox checked={download} disabled={busy} onChange={setDownload} />
-              <span>词库不完整时从固定地址下载（首次约 170 MB）</span>
+              <span>词库不完整时从固定地址下载（首次约 270 MB）</span>
             </label>
             <label className="flex items-start gap-2">
               <ControlledCheckbox
@@ -479,7 +486,17 @@ export function LinuxSetupPage({
                 action={() => void start()}
                 className={primary}
                 disabled={busy || Boolean(blocked)}
-                label={updating ? (error ? "重试" : "立即更新") : error ? "重新配置" : "开始配置"}
+                label={
+                  updating
+                    ? error
+                      ? "重试"
+                      : repair
+                        ? "立即修复"
+                        : "立即更新"
+                    : error
+                      ? "重新配置"
+                      : "开始配置"
+                }
               />
               {updating && (
                 <ActionButton

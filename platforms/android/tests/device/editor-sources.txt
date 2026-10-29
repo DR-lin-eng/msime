@@ -9,12 +9,14 @@ platforms/android/tests/device/core/EnglishCorrectionEditorActivity.java
 platforms/android/tests/device/keyboard/EnglishCorrectionDeviceSmoke.java
 platforms/android/tests/device/keyboard/EnglishSuggestionPendingChecks.java
 platforms/android/tests/device/core/DeviceSmoke.java
+platforms/android/tests/device/core/DeviceCredentialFixture.java
 platforms/android/tests/device/core/PinyinStartupDeviceSmoke.java
 platforms/android/tests/device/core/ImageClipProvider.java
 platforms/android/tests/device/core/EditorProbeProvider.java
 platforms/android/tests/device/clipboard/ClipboardImageDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidatePanelDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidateCanvasDeviceSmoke.java
+platforms/android/tests/device/keyboard/MultilingualInputDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidateUpstreamSkinDeviceSmoke.java
 platforms/android/tests/device/candidate/AiCandidateSeatDeviceSmoke.java
 platforms/android/tests/device/keyboard/MoreToolsDeviceSmoke.java
@@ -30,6 +32,7 @@ platforms/android/tests/device/keyboard/ChineseHelpcodeDeviceSmoke.java
 platforms/android/tests/device/keyboard/QuanpinSeparatorDeviceSmoke.java
 platforms/android/tests/device/keyboard/ChineseHelpcodeOffDeviceSmoke.java
 platforms/android/tests/device/keyboard/MicrosoftShuangpinDeviceSmoke.java
+platforms/android/tests/device/keyboard/ShuangpinTouchDeviceChecks.java
 platforms/android/tests/device/keyboard/EmailSuffixDeviceSmoke.java
 platforms/android/tests/device/keyboard/LongSymbolCellDeviceSmoke.java
 platforms/android/tests/device/keyboard/NumberRowDeviceSmoke.java
@@ -39,6 +42,7 @@ platforms/android/tests/device/keyboard/HardwareTranslationDeviceSmoke.java
 platforms/android/tests/device/keyboard/HardwareDigitChecks.java
 platforms/android/tests/device/voice/HandwritingDeviceSmoke.java
 platforms/android/tests/device/settings/PreferencesDeviceSmoke.java
+platforms/android/tests/device/settings/KeyLayoutBackupDeviceChecks.java
 platforms/android/tests/device/settings/WubiLookupDeviceSmoke.java
 platforms/android/tests/device/keyboard/ThemeModeDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidateSkinDeviceSmoke.java
@@ -52,6 +56,7 @@ platforms/android/tests/device/keyboard/NineKeyPanelDeviceSmoke.java
 platforms/android/tests/device/keyboard/FourteenKeyDeviceSmoke.java
 platforms/android/tests/device/keyboard/EighteenKeyQuanpinDeviceChecks.java
 platforms/android/tests/device/keyboard/FourteenKeyShuangpinDeviceChecks.java
+platforms/android/tests/device/keyboard/FourteenKeyWubiDeviceChecks.java
 platforms/android/tests/device/keyboard/EighteenKeyGeometryDeviceChecks.java
 platforms/android/tests/device/keyboard/NumberPadDeviceSmoke.java
 platforms/android/tests/device/keyboard/NineKeyShuangpinDeviceSmoke.java
@@ -67,6 +72,7 @@ platforms/android/tests/device/settings/AccountStorageDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardKeystoreDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardDriverDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardRelayDeviceSmoke.java
+platforms/android/tests/device/settings/DictionarySyncDeviceChecks.java
 platforms/android/tests/device/settings/BackendAccountSessionDeviceSmoke.java
 platforms/android/java/app/msime/android/AppVersionPolicy.java
 platforms/android/java/app/msime/android/BoundsPolicy.java
@@ -106,6 +112,9 @@ platforms/android/java/app/msime/android/account/TypingUploadApi.java
 platforms/android/java/app/msime/android/account/CloudClipboardApi.java
 platforms/android/java/app/msime/android/account/CloudClipboardE2e.java
 platforms/android/java/app/msime/android/account/CloudClipboardKeystore.java
+platforms/android/java/app/msime/android/dictionary/DictionaryWebDavSync.java
+platforms/android/java/app/msime/android/policy/DictionarySyncPolicy.java
+platforms/android/java/app/msime/android/policy/HostOptionsPolicy.java
 platforms/android/java/app/msime/android/candidate/CandidateTranslationStore.java
 platforms/android/java/app/msime/android/clipboard/CloudClipboardTextPolicy.java
 platforms/android/java/app/msime/android/clipboard/ClipboardEditKey.java
@@ -134,6 +143,7 @@ platforms/android/java/app/msime/android/keyboard/LetterHintTable.java
 platforms/android/java/app/msime/android/keyboard/KeyboardPressButton.java
 platforms/android/java/app/msime/android/keyboard/KeyboardPressFeedback.java
 platforms/android/java/app/msime/android/keyboard/KeyboardSkin.java
+platforms/android/java/app/msime/android/keyboard/KeyboardSkinModeChoice.java
 platforms/android/java/app/msime/android/keyboard/ZhuyinKeyboardLayout.java
 platforms/android/java/app/msime/android/policy/AccountSessionRoutingPolicy.java
 platforms/android/java/app/msime/android/policy/InputSchemeTraits.java
@@ -158,6 +168,7 @@ platforms/android/tests/device/keyboard/EmptyEditorBackspaceDeviceSmoke.java
 platforms/android/tests/device/clipboard/ClipboardEditPreparation.java
 platforms/android/tests/device/clipboard/PinyinClipboardEditPreparation.java
 platforms/android/tests/device/clipboard/ClipboardEditDeviceSmoke.java
+platforms/android/tests/device/clipboard/ClipboardCapacityDeviceSmoke.java
 platforms/android/tests/device/clipboard/ClipboardShareSinkActivity.java
 platforms/android/tests/device/clipboard/ClipboardSegmentActionsDeviceSmoke.java
 platforms/android/tests/device/clipboard/ClipboardPhraseNoticeDeviceCheck.java
@@ -188,6 +199,7 @@ platforms/android/tests/device/clipboard/TextEditRecentClipboardDeviceSmoke.java
 platforms/android/tests/device/clipboard/SpaceCopyDeviceChecks.java
 platforms/android/tests/device/keyboard/SpaceCopyEditorActivity.java
 platforms/android/tests/device/keyboard/NineKeyNumericLayoutDeviceSmoke.java
+platforms/android/tests/device/keyboard/TallReturnDeviceChecks.java
 platforms/android/tests/device/keyboard/ToolbarEdgesDeviceSmoke.java
 platforms/android/tests/device/keyboard/ToolbarScrollDeviceSmoke.java
 platforms/android/tests/device/settings/ChatNavigationDeviceSmoke.java
@@ -253,3 +265,6 @@ platforms/android/tests/device/keyboard/TextTrackpadDeviceChecks.java
 platforms/android/tests/device/keyboard/OcrProductDeviceSmoke.java
 platforms/android/tests/device/keyboard/OcrDocumentsProvider.java
 platforms/android/gradle-app/ocr-fixture/app/msime/ocr/fixture/SyntheticOcrFixture.java
+platforms/android/tests/device/keyboard/TextEditLineDeviceChecks.java
+platforms/android/tests/device/settings/OnboardingDeviceSmoke.java
+platforms/android/tests/device/keyboard/AboutEasterEggDeviceSmoke.java

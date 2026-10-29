@@ -48,6 +48,9 @@ struct Fixture {
     first_page_rows: usize,
     /// 九宫格组码的上限，代替引擎的 `DIGIT_LIMIT`；0 表示没有上限。到上限且有候选时，`grid_limit_pick_ready` 说可以先选首选。
     grid_limit: usize,
+    multilingual_conversion: Option<msime_engine::host::session::MultilingualComposition>,
+    /// 边缘选字回归直接给出引擎已确认的字符，不在夹具里复制汉字判断。
+    edge_commits: Option<[String; 2]>,
 }
 
 #[cfg(unix)]
@@ -1093,6 +1096,7 @@ impl InputEngine for Fixture {
             reading: self.reading.clone(),
             display_reading: self.reading.clone(),
             editing_text: self.text.clone(),
+            multilingual_conversion: self.multilingual_conversion.clone(),
             caret_position: self.text.len(),
             segment_raw_boundaries: vec![],
             candidates: if self.text.is_empty() {
@@ -1146,7 +1150,15 @@ impl InputEngine for Fixture {
         index: usize,
         edge: CandidateEdge,
     ) -> Result<EngineResult, RuntimeError> {
+        let edge_commit = self
+            .edge_commits
+            .as_ref()
+            .map(|values| values[edge as usize].clone());
         let mut result = self.select(index)?;
+        if let Some(text) = edge_commit {
+            result.commit = text;
+            return Ok(result);
+        }
         result.commit.push_str(match edge {
             CandidateEdge::FirstHan => "-first",
             CandidateEdge::LastHan => "-last",
@@ -1338,6 +1350,71 @@ fn second_third_candidate_shortcuts_select_current_page_on_all_character_routes(
             assert!(runtime.facts().selection.is_some());
         }
     }
+}
+
+#[test]
+fn display_page_moves_shortcuts_and_translation_query_to_the_shown_row() {
+    // 宿主按宽度排出的一行跨过固定页（每页 3 个）：显示的是 4–7，`;` `'` 选这一行的第二、三个。
+    for (key, slot) in [(b';', 1), (b'\'', 2)] {
+        let mut runtime = second_third_runtime(10);
+        let generation = runtime.view().generation;
+        assert!(runtime.set_display_page(generation, vec![4, 5, 6, 7]));
+        let texts: Vec<_> = runtime
+            .translation_candidates()
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect();
+        assert_eq!(texts, ["合成候选4", "合成候选5", "合成候选6", "合成候选7"]);
+        let transition = runtime.dispatch(Action::PunctuationAscii(key)).unwrap();
+        assert_eq!(transition.commit, Some(format!("合成候选{}", 4 + slot)));
+    }
+    // 显示的一行只有一个候选：没有第二、三个，键照原来的标点路径走，不选固定页里看不见的候选。
+    for key in *b";'" {
+        let mut runtime = second_third_runtime(10);
+        let generation = runtime.view().generation;
+        assert!(runtime.set_display_page(generation, vec![8]));
+        let transition = runtime.dispatch(Action::PunctuationAscii(key)).unwrap();
+        assert!(transition
+            .commit
+            .as_deref()
+            .is_some_and(|text| text.ends_with(char::from(key))));
+    }
+}
+
+#[test]
+fn display_page_only_holds_for_its_own_generation() {
+    let mut runtime = second_third_runtime(10);
+    let generation = runtime.view().generation;
+    // 过期的一代、越界的座位都不接受，原有显示页保持不变。
+    assert!(!runtime.set_display_page(generation + 1, vec![4, 5]));
+    assert!(!runtime.set_display_page(generation, vec![4, 10]));
+    assert!(runtime.display_page.is_none());
+    assert!(runtime.set_display_page(generation, vec![4, 5, 6]));
+    // 空列表清掉，回到固定页。
+    assert!(runtime.set_display_page(generation, Vec::new()));
+    assert_eq!(
+        runtime.translation_candidates().unwrap().candidates.len(),
+        3
+    );
+    // 组字推进到新的一代后，旧的显示页不再起作用。
+    assert!(runtime.set_display_page(generation, vec![4, 5, 6]));
+    runtime
+        .dispatch(Action::Character {
+            value: b'a',
+            shift: false,
+        })
+        .unwrap();
+    assert_ne!(runtime.view().generation, generation);
+    let texts: Vec<_> = runtime
+        .translation_candidates()
+        .unwrap()
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.text)
+        .collect();
+    assert_eq!(texts, ["合成候选0", "合成候选1", "合成候选2"]);
 }
 
 #[test]
@@ -1718,6 +1795,8 @@ fn runtime() -> Runtime<Fixture> {
             microsoft_shuangpin: false,
             first_page_rows: 0,
             grid_limit: 0,
+            multilingual_conversion: None,
+            edge_commits: None,
         },
         5,
     )
@@ -1775,6 +1854,8 @@ fn several_candidates_from_one_provider_take_their_seat_as_a_group() {
                 microsoft_shuangpin: false,
                 first_page_rows: 0,
                 grid_limit: 0,
+                multilingual_conversion: None,
+                edge_commits: None,
             },
             9,
         )
@@ -2023,6 +2104,8 @@ fn promoted_english_candidate_keeps_the_first_seat_with_cloud_and_ai() {
                 microsoft_shuangpin: false,
                 first_page_rows: 0,
                 grid_limit: 0,
+                multilingual_conversion: None,
+                edge_commits: None,
             },
             9,
         )
@@ -2360,6 +2443,8 @@ fn a_chosen_phrase_piece_waits_for_the_rest_of_the_phrase() {
                 microsoft_shuangpin: false,
                 first_page_rows: 0,
                 grid_limit: 0,
+                multilingual_conversion: None,
+                edge_commits: None,
             },
             5,
         )
@@ -2465,6 +2550,8 @@ fn a_phrase_piece_survives_the_reading_being_deleted() {
             microsoft_shuangpin: false,
             first_page_rows: 0,
             grid_limit: 0,
+            multilingual_conversion: None,
+            edge_commits: None,
         },
         5,
     )
@@ -3341,6 +3428,8 @@ fn candidate_codes_follow_candidates_in_page_and_complete_snapshots() {
             microsoft_shuangpin: false,
             first_page_rows: 0,
             grid_limit: 0,
+            multilingual_conversion: None,
+            edge_commits: None,
         },
         2,
     )
@@ -4620,6 +4709,210 @@ fn repeated_dedicated_english_preserves_real_grid_candidates() {
     }
 }
 
+/// 键位几何由 runtime 持有：宿主空闲时重建引擎（`replace_engine`）之后新引擎照样拿到它，带触点的按键照样按落点给纠错整句计价。代次不符、坐标不是有限数或清除几何之后，这一键不带触点。合成词库里小鹤 mw gr xi 是没关系，r 按成左下方的邻键 f 就成了 gen。
+#[test]
+fn key_geometry_survives_an_engine_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.scheme = 1;
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(
+        "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_m VALUES('mei','m','没',1000);\
+         CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_g VALUES('gen','g','跟',1000),('guan','g','关',500);\
+         CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_x VALUES('xi','x','系',1000);\
+         CREATE TABLE tbl_2_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);",
+    )
+    .unwrap();
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 5).unwrap();
+    runtime.focus(true).unwrap();
+    // QWERTY 字母键，键宽 10、键高 14，每排比上一排右移半个键。
+    let mut keys = [[0.0f32; 4]; 26];
+    for (letters, left, y) in [
+        ("qwertyuiop", 5.0, 7.0),
+        ("asdfghjkl", 10.0, 21.0),
+        ("zxcvbnm", 20.0, 35.0),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
+        }
+    }
+    let center = |key: u8| {
+        let [x, y, _, _] = keys[usize::from(key - b'a')];
+        (x, y)
+    };
+    runtime.set_key_geometry(Some(
+        msime_engine::touch::KeyGeometry::new(9, &keys, None, &[]).unwrap(),
+    ));
+    assert_eq!(runtime.key_geometry_id(), Some(9));
+    let (x, y) = center(b'f');
+    assert_eq!(runtime.key_touch(b'f', 8, x, y), None);
+    assert_eq!(runtime.key_touch(b'f', 9, f32::NAN, y), None);
+    // f 那一键落在 f 和左上方的 r 之间。
+    assert_eq!(
+        runtime.key_touch(b'f', 9, x - 2.5, y - 7.0),
+        Some(msime_engine::touch::KeyTouch {
+            dx: -5,
+            dy: -10,
+            copy: 0
+        })
+    );
+    let type_mwgfxi = |runtime: &mut Runtime<msime_engine::host::Session>| {
+        runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+        for byte in *b"mwgfxi" {
+            let (x, y) = center(byte);
+            let (x, y) = if byte == b'f' {
+                (x - 2.5, y - 7.0)
+            } else {
+                (x, y)
+            };
+            let touch = runtime.key_touch(byte, 9, x, y);
+            runtime.set_key_touch(touch);
+            runtime
+                .dispatch(Action::Character {
+                    value: byte,
+                    shift: false,
+                })
+                .unwrap();
+            runtime.set_key_touch(None);
+        }
+        // 落点支持的那一行在运行时重排之后仍然对得上自己的标记。
+        let cached = &runtime.cached;
+        let supported: Vec<&str> = cached
+            .candidate_touch_supported
+            .iter()
+            .zip(&cached.candidates)
+            .filter(|(supported, _)| **supported)
+            .map(|(_, text)| text.as_str())
+            .collect();
+        assert!(
+            cached.candidate_touch_supported.is_empty()
+                || cached.candidate_touch_supported.len() == cached.candidates.len()
+        );
+        supported == ["没关系"]
+    };
+
+    runtime
+        .replace_engine(msime_engine::host::Session::new(&options).unwrap(), 5)
+        .unwrap();
+    assert!(type_mwgfxi(&mut runtime));
+    assert!(texts(&runtime.view()).contains(&"没关系".to_owned()));
+
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    runtime.set_key_geometry(None);
+    assert_eq!(runtime.key_geometry_id(), None);
+    assert_eq!(runtime.key_touch(b'f', 9, x, y), None);
+    assert!(!type_mwgfxi(&mut runtime));
+}
+
+/// 首选规则（#10018 PR3）经 runtime 到视图：引擎把落点支持、明显更优的双拼纠错整句放在第一位时，重排器不把它换下去（模型偏爱字面整句也一样），字面整句留在前三，视图只给第一位那一行标 `confident_correction`，序列化成 JSON 时也只有它带这个字段。默认参数（m_sp 无穷大）下一行都不标，JSON 与没有这个字段时相同。
+#[test]
+fn a_confident_shuangpin_correction_leads_the_view_and_only_it_is_marked() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.scheme = 1;
+    options.autocorrect_transposition = true;
+    options.autocorrect_neighbor = true;
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(
+        "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_m VALUES('mei','m','没',1000);\
+         CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_g VALUES('gen','g','跟',1000),('guan','g','关',500);\
+         CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_x VALUES('xi','x','系',1000);\
+         CREATE TABLE tbl_2_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);",
+    )
+    .unwrap();
+    let mut keys = [[0.0f32; 4]; 26];
+    for (letters, left, y) in [
+        ("qwertyuiop", 5.0, 7.0),
+        ("asdfghjkl", 10.0, 21.0),
+        ("zxcvbnm", 20.0, 35.0),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
+        }
+    }
+    let typed = |tuning: Option<msime_engine::touch::TouchTuning>| {
+        let mut session = msime_engine::host::Session::new(&options).unwrap();
+        if let Some(tuning) = tuning {
+            session.set_touch_tuning(tuning);
+        }
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        // 模型偏爱字面整句「没跟系」的字：它若能重排，就会把字面整句提到第一位。
+        let model = favouring_model(&['没', '跟', '关', '系'], &['跟']);
+        runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
+        runtime.focus(true).unwrap();
+        runtime.set_key_geometry(Some(
+            msime_engine::touch::KeyGeometry::new(9, &keys, None, &[]).unwrap(),
+        ));
+        for byte in *b"mwgfxi" {
+            let [x, y, _, _] = keys[usize::from(byte - b'a')];
+            // f 那一键落在 r 的键心上。
+            let (x, y) = if byte == b'f' {
+                (x - 5.0, y - 14.0)
+            } else {
+                (x, y)
+            };
+            let touch = runtime.key_touch(byte, 9, x, y);
+            assert!(touch.is_some());
+            runtime.set_key_touch(touch);
+            runtime
+                .dispatch(Action::Character {
+                    value: byte,
+                    shift: false,
+                })
+                .unwrap();
+            runtime.set_key_touch(None);
+        }
+        runtime.view()
+    };
+    let marks = |view: &View| {
+        view.candidates
+            .iter()
+            .map(|candidate| {
+                let json = serde_json::to_value(candidate).unwrap();
+                assert_eq!(
+                    json.get("confident_correction").is_some(),
+                    candidate.confident_correction
+                );
+                candidate.confident_correction
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let tuning = msime_engine::touch::TouchTuning {
+        lead_margin: 0.0,
+        lead_penalty: 10.0,
+        ..msime_engine::touch::TouchTuning::default()
+    };
+    let view = typed(Some(tuning));
+    let words = texts(&view);
+    assert_eq!(words[0], "没关系", "{words:?}");
+    assert!(view.candidates[0].corrected);
+    assert_eq!(view.candidates[0].annotation, "mwgfxi");
+    assert!(words[..3].contains(&"没跟系".to_owned()), "{words:?}");
+    let marked = marks(&view);
+    assert!(marked[0] && marked[1..].iter().all(|marked| !marked));
+
+    let view = typed(None);
+    let words = texts(&view);
+    assert_ne!(words[0], "没关系", "{words:?}");
+    assert!(marks(&view).iter().all(|marked| !marked));
+}
+
 #[test]
 fn dedicated_english_caret_does_not_turn_rejected_keys_into_candidate_picks() {
     for value in *b"1! " {
@@ -5179,7 +5472,9 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         shuangpin_profile: 0,
         shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
+        force_cantonese_shuangpin: false,
         single_character_only: false,
+        caret_edit_suffix: false,
         learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
@@ -5190,6 +5485,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         wubi_z_wildcard: false,
         wubi_profile: 0,
         helpcode: false,
+        strict_quanpin_helpcode: false,
         show_helpcode: true,
         shuangpin_helpcode_modes: msime_engine::ShuangpinHelpcodeModes::default(),
         helpcode_schema: "ziranma".into(),
@@ -5212,6 +5508,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         mixed_kaomoji: false,
         mixed_symbols: false,
         mixed_japanese: false,
+        multilingual_languages: Vec::new(),
         local_unicode: true,
         local_date_time: true,
         local_date_time_inline: true,
@@ -5247,6 +5544,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         sentence_alternatives: true,
         vietnamese_input_method: 0,
         vietnamese_tone_style: 0,
+        korean_layout: 0,
         cantonese_dictionary: String::new(),
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
@@ -5957,6 +6255,61 @@ fn korean_runtime(directory: &std::path::Path) -> Runtime {
     let mut runtime = Runtime::new(session, 5).unwrap();
     runtime.focus(true).unwrap();
     runtime
+}
+
+#[test]
+fn korean_romaja_focus_commits_the_reading_and_new_client_discards_old_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.scheme = KOREAN_SCHEME;
+    options.korean_layout = 1;
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 5).unwrap();
+    assert_eq!(runtime.set_phrase_preedit(true), None);
+    runtime.focus(true).unwrap();
+    let mut committed = String::new();
+    for value in *b"hangug" {
+        let result = runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap();
+        assert!(result.handled);
+        assert!(result.view.phrase_prefix.is_empty());
+        committed.push_str(result.commit.as_deref().unwrap_or_default());
+    }
+    assert_eq!(committed, "한");
+    assert_eq!(runtime.view().preedit, "국");
+    let blur = runtime.focus(false).unwrap();
+    assert_eq!(blur.commit.as_deref(), Some("국"));
+    assert!(blur.view.editing_text.is_empty());
+    runtime.focus(true).unwrap();
+    for value in *b"bang" {
+        runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap();
+    }
+    assert_eq!(runtime.view().preedit, "방");
+    let attached = runtime.focus(true).unwrap();
+    assert!(attached.commit.is_none());
+    assert!(attached.view.editing_text.is_empty());
+    runtime
+        .dispatch(Action::Character {
+            value: b'a',
+            shift: false,
+        })
+        .unwrap();
+    assert_eq!(runtime.view().preedit, "ㅏ");
+    assert!(runtime
+        .dispatch(Action::Command(Command::Cancel))
+        .unwrap()
+        .view
+        .preedit
+        .is_empty());
 }
 
 /// Types `keys` and opens the Hanja list of the syllable they leave composing.
@@ -7181,6 +7534,8 @@ struct WubiMixedEngine {
     scheme: u8,
     answered_by_pinyin_fallback: bool,
     reading: String,
+    /// 快照报告光标后编辑正在生效（`EngineSnapshot::caret_edit_suffix`）。
+    caret_edit_suffix: bool,
 }
 
 impl WubiMixedEngine {
@@ -7228,6 +7583,7 @@ impl InputEngine for WubiMixedEngine {
             caret_position: self.reading.len(),
             segment_raw_boundaries: Vec::new(),
             candidates: words,
+            caret_edit_suffix: self.caret_edit_suffix && count > 0,
             ..EngineSnapshot::default()
         })
     }
@@ -7278,6 +7634,7 @@ fn typed_dyn_favouring(
             scheme,
             answered_by_pinyin_fallback,
             reading: String::new(),
+            caret_edit_suffix: false,
         },
         5,
     )
@@ -7354,6 +7711,8 @@ fn withholding_runtime(offered: usize, withheld: usize, page_size: u8) -> Runtim
             microsoft_shuangpin: false,
             first_page_rows: 0,
             grid_limit: 0,
+            multilingual_conversion: None,
+            edge_commits: None,
         },
         page_size,
     )
@@ -7624,6 +7983,63 @@ fn releasing_the_held_tail_publishes_a_new_generation() {
     assert_eq!(full.candidates.len(), 20);
     assert!(full.generation > before);
     assert_eq!(runtime.view().generation, full.generation);
+}
+
+#[test]
+fn candidate_range_copies_one_batch_without_releasing_the_held_tail() {
+    // 候选条每键只取一批：放出来的 12 行之内不向引擎要暂扣的 8 行，也不换代，首字母不必把整张声母表查出来。
+    let mut runtime = withholding_runtime(12, 8, 5);
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    let view = runtime.view();
+    let first = runtime.candidate_range(0, 48);
+    assert_eq!(first.generation, view.generation);
+    assert_eq!(first.total, 12);
+    assert_eq!(first.candidates.len(), 12);
+    let middle = runtime.candidate_range(3, 4);
+    assert_eq!(middle.generation, view.generation);
+    assert_eq!(
+        middle
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.index)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5, 6]
+    );
+    assert_eq!(runtime.view().generation, view.generation);
+    assert!(runtime.candidate_range(5, 0).candidates.is_empty());
+    assert_eq!(runtime.view().generation, view.generation);
+
+    // 和视图里同一座位的那一行是同一个身份、同一个候选。
+    assert_eq!(view.candidates.len(), 5);
+    for (ranged, shown) in first.candidates.iter().zip(&view.candidates) {
+        assert_eq!(ranged.id, shown.id);
+        assert_eq!(ranged.text, shown.text);
+    }
+}
+
+#[test]
+fn candidate_range_past_the_released_rows_releases_the_tail_in_a_new_generation() {
+    // 宿主把放出来的都建完了还要更多，才放出暂扣的尾部；座位可能重排，所以换一代，宿主据此从头取。
+    let mut runtime = withholding_runtime(12, 8, 5);
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    let before = runtime.view().generation;
+    let more = runtime.candidate_range(12, 48);
+    assert!(more.generation > before);
+    assert_eq!(more.total, 20);
+    assert_eq!(more.candidates.len(), 8);
+    assert_eq!(more.candidates[0].id.index, 12);
+    assert_eq!(runtime.view().generation, more.generation);
+    // 没有可放的了：同一代、一行不给，宿主据此停止追加。
+    let exhausted = runtime.candidate_range(20, 48);
+    assert_eq!(exhausted.generation, more.generation);
+    assert_eq!(exhausted.total, 20);
+    assert!(exhausted.candidates.is_empty());
+    assert_eq!(
+        runtime.candidate_range(0, 48).candidates.len(),
+        runtime.all_candidates().candidates.len()
+    );
 }
 
 #[test]
@@ -10190,6 +10606,7 @@ fn the_reranker_leaves_mixed_japanese_rows_alone() {
     }
 }
 
+mod caret_edit;
 mod facts;
 
 /// View 报告宿主设下的标点样式，缺省是弯引号、实心括号；换样式不动组字和候选。
@@ -10448,4 +10865,111 @@ fn literal_symbol_survives_runtime_punctuation_without_early_commit() {
             }
         }
     }
+}
+
+mod multilingual;
+
+/// 五笔 14 键的真实引擎：拼音主词库给词频，码表在同一个工作副本里。
+fn wubi_grid_runtime(root: &std::path::Path) -> Runtime {
+    let dictionaries = root.join("dictionaries");
+    std::fs::create_dir_all(&dictionaries).unwrap();
+    rusqlite::Connection::open(dictionaries.join(msime_engine::assets::MAIN_DICTIONARY))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_n VALUES('ni','n','你',3000000);\
+             CREATE TABLE tbl_1_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_d VALUES('duo','d','多',1500000);\
+             CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_h VALUES('hao','h','好',2000000);\
+             CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO wubi86 VALUES('qq','多',20),('wq','你',10),('wqiy','你',20),('qqiy','铄',20),\
+             ('vb','好',10),('xxxx','纟',10);",
+        )
+        .unwrap();
+    let mut options = real_engine_options(root);
+    options.scheme = 2;
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 5).unwrap();
+    runtime.focus(true).unwrap();
+    runtime.set_key_grid(Some(KeyGrid::FourteenKey)).unwrap();
+    runtime
+}
+
+fn grid_keys(runtime: &mut Runtime, letters: &[u8]) -> Transition {
+    let mut last = None;
+    for &letter in letters {
+        last = Some(runtime.dispatch(Action::GridKey(letter)).unwrap());
+    }
+    last.expect("至少一个键")
+}
+
+#[test]
+fn wubi_fourteen_key_reports_the_grid_and_the_top_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = wubi_grid_runtime(directory.path());
+    let view = grid_keys(&mut runtime, b"wq").view;
+    assert_eq!(view.key_grid, "fourteen_key");
+    assert_eq!(view.candidates[0].text, "你");
+    assert_eq!(view.nine_key_reading, "wq");
+    assert!(view.nine_key_spellings.is_empty());
+    assert_eq!(view.editing_text, "qq");
+}
+
+/// 四码之后的一键先顶首选，再开始下一组编码；「第五码顶字」关着也一样，因为 14 键没有混输拼音可以容纳这一键。
+#[test]
+fn wubi_fourteen_key_tops_the_first_candidate_on_a_fifth_key() {
+    for top_commit in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = wubi_grid_runtime(directory.path());
+        runtime.set_wubi_fifth_code_top_commit(top_commit);
+        grid_keys(&mut runtime, b"wqiy");
+        let topped = runtime.dispatch(Action::GridKey(b'v')).unwrap();
+        assert_eq!(topped.commit.as_deref(), Some("你"), "{top_commit}");
+        assert_eq!(topped.view.editing_text, "c");
+        let next = runtime.dispatch(Action::GridKey(b'b')).unwrap();
+        assert_eq!(next.view.candidates[0].text, "好");
+    }
+}
+
+#[test]
+fn wubi_fourteen_key_auto_commits_a_unique_fourth_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = wubi_grid_runtime(directory.path());
+    let committed = grid_keys(&mut runtime, b"zxzx");
+    assert_eq!(committed.commit.as_deref(), Some("纟"));
+    assert!(committed.view.editing_text.is_empty());
+
+    runtime.set_wubi_auto_commit_unique(false);
+    let kept = grid_keys(&mut runtime, b"zxzx");
+    assert!(kept.commit.is_none());
+    assert_eq!(kept.view.editing_text, "xxxx");
+}
+
+/// 14 键的组码不是可上屏的字母：原样上屏从高亮行结束组字，与全拼 14 键相同。
+#[test]
+fn wubi_fourteen_key_commit_raw_finishes_from_the_highlighted_row() {
+    for command in [Command::CommitRaw, Command::CommitRawWithoutLearning] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = wubi_grid_runtime(directory.path());
+        grid_keys(&mut runtime, b"wq");
+        let highlighted = runtime.dispatch(Action::NextCandidate).unwrap().view;
+        let expected = highlighted.candidates[1].text.clone();
+        assert_eq!(expected, "多");
+        let committed = runtime.dispatch(Action::Command(command)).unwrap();
+        assert_eq!(committed.commit.as_deref(), Some("多"), "{command:?}");
+        assert!(committed.view.editing_text.is_empty());
+    }
+}
+
+#[test]
+fn the_fourteen_key_grid_is_offered_to_quanpin_and_wubi_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = wubi_grid_runtime(directory.path());
+    runtime.set_key_grid(None).unwrap();
+    assert!(runtime.set_key_grid(Some(KeyGrid::FourteenKey)).is_ok());
+    assert!(matches!(
+        runtime.set_key_grid(Some(KeyGrid::EighteenKey)),
+        Err(RuntimeError::InvalidNineKeyScheme)
+    ));
 }

@@ -13,10 +13,15 @@ import android.os.Bundle;
 import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import androidx.annotation.Nullable;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.fragment.app.FragmentActivity;
+import androidx.biometric.BiometricManager;
+import androidx.biometric.BiometricPrompt;
+import androidx.core.content.ContextCompat;
 import androidx.lifecycle.ViewModel;
 import androidx.lifecycle.ViewModelProvider;
 import app.msime.android.ClipboardHistory;
@@ -25,6 +30,10 @@ import app.msime.android.ClipboardHistoryPolicy;
 import app.msime.android.ClipboardHistoryRetentionPolicy;
 import app.msime.android.ClipboardHistoryStore;
 import app.msime.android.ClipboardSearchPolicy;
+import app.msime.android.ClipboardOperationAuthenticationPolicy;
+import app.msime.android.ScrollTopButtonPolicy;
+import app.msime.android.SystemAuthenticators;
+import app.msime.android.AuthenticationPauseTracker;
 import app.msime.android.DeviceDataApi;
 import app.msime.android.R;
 import app.msime.android.ViewPolicy;
@@ -53,6 +62,11 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
     /** 删除、或编辑前在共享存储里找那一条还没回来时不再接受操作，免得同一条被删两次、删完又被编辑或连开两个编辑页。 */
     private boolean busy;
     @Nullable private GroupCard results;
+    @Nullable private ImageView topButton;
+    @Nullable private SearchPill searchNavigation;
+    private boolean authorized;
+    @Nullable private BiometricPrompt authentication;
+    private final AuthenticationPauseTracker pause = new AuthenticationPauseTracker();
 
     /** 查询框里的文字放在 ViewModel 里：旋转、换深浅模式会重建 Activity，Fragment 换成新实例，字段会回到空串。 */
     public static final class Query extends ViewModel {
@@ -61,9 +75,37 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
         boolean focused;
     }
 
+    /** 搜索框和导出按钮固定在详情页滚动区之外，历史结果滚动时仍可直接操作。 */
+    @Override @Nullable protected View fixedNavigation() {
+        Context context = requireContext();
+        LinearLayout navigation = new LinearLayout(context);
+        navigation.setOrientation(LinearLayout.HORIZONTAL);
+        navigation.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        navigation.setMinimumHeight(DimensionPolicy.pixels(context, 56));
+        ViewPolicy.setBackgroundColor(navigation, ThemeColorPolicy.page(context));
+        ViewPolicy.setSymmetricPaddingDp(context, navigation, 16, 4);
+        searchNavigation = new SearchPill(context);
+        searchNavigation.setHint("搜索剪贴板历史");
+        searchNavigation.field().setContentDescription("搜索剪贴板历史");
+        searchNavigation.field().setText(query == null ? "" : query.text);
+        searchNavigation.field().setSelection(searchNavigation.field().length());
+        searchNavigation.setOnQueryChange(text -> {
+            if (query != null) query.text = text;
+            renderResults();
+        });
+        navigation.addView(searchNavigation, new LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams exportParams = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        exportParams.setMarginStart(DimensionPolicy.pixels(context, 8));
+        navigation.addView(clipboardExport.button(), exportParams);
+        return navigation;
+    }
+
     @Override public void onCreate(@Nullable Bundle saved) {
         super.onCreate(saved);
         clipboardExport.restore(saved);
+        clipboardExport.onAuthenticationEnded(this::authenticationEnded);
         query = new ViewModelProvider(this).get(Query.class);
     }
 
@@ -73,41 +115,74 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
     }
 
     @Override protected void onContentReady() {
-        headerActions().addView(clipboardExport.button());
         LinearLayout target = contentColumn();
         if (target == null) return;
         Context context = target.getContext();
-        SearchPill search = new SearchPill(context);
-        search.setHint("搜索剪贴板历史");
-        search.field().setContentDescription("搜索剪贴板历史");
-        search.field().setText(query.text);
-        search.field().setSelection(search.field().length());
-        search.setOnQueryChange(text -> {
-            query.text = text;
-            renderResults();
-        });
-        target.addView(search, LayoutPolicy.matchWidthWrapParams());
 
         results = GroupCard.add(target, null).withDividers(Ui.ROW_PADDING_H);
+        FrameLayout root = (FrameLayout) requireView();
+        topButton = ImageViewPolicy.iconButton(context, R.drawable.ic_ms_arrow_upward,
+            ThemeColorPolicy.accent(context), "返回顶部", 48,
+            () -> scrollView().smoothScrollTo(0, 0));
+        FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
+            DimensionPolicy.pixels(context, 48), DimensionPolicy.pixels(context, 48));
+        topParams.gravity = android.view.Gravity.BOTTOM | android.view.Gravity.END;
+        topParams.setMargins(0, 0, DimensionPolicy.pixels(context, 16),
+            DimensionPolicy.pixels(context, Ui.TAB_BAR_HEIGHT + Ui.PAGE_PADDING_BOTTOM));
+        root.addView(topButton, topParams);
+        ViewPolicy.setVisible(topButton, false);
         // 读取放在 onBecameVisible：每次显示都会调到它，这里再读一次就重复了。
         renderResults();
+        requestAuthentication();
 
         if (!query.focused) {
             query.focused = true;
             // 打开这一页就是要搜，不用再点一下搜索框。
-            search.field().requestFocus();
-            WindowCompat.getInsetsController(requireActivity().getWindow(), search.field())
+            if (searchNavigation != null) searchNavigation.field().requestFocus();
+            if (searchNavigation != null) WindowCompat.getInsetsController(requireActivity().getWindow(), searchNavigation.field())
                 .show(WindowInsetsCompat.Type.ime());
         }
     }
 
     @Override protected boolean shouldReloadOnContentReady() { return false; }
 
+    @Override public void onPause() {
+        super.onPause();
+        pause.paused(authenticating());
+    }
+
+    /** 暂停时认证（含页内导出的认证）还开着，回来时是否重新认证由认证的结果决定，见 {@link AuthenticationPauseTracker}。 */
+    @Override protected void onVisible() {
+        if (pause.reentersOnVisible(authenticating())) reenter();
+    }
+
+    private boolean authenticating() { return authentication != null || clipboardExport.authenticating(); }
+
+    private void reenter() {
+        authorized = false;
+        requestAuthentication();
+    }
+
+    /** 认证在离开页面时被系统取消、而页面已经回到眼前：按重新进入处理，否则页面既没有授权也没有认证窗口。 */
+    private void authenticationEnded(boolean systemCanceled) {
+        if (pause.reentersOnEnd(systemCanceled, isResumed() && getView() != null)) reenter();
+    }
+
     @Override protected void onContentDestroyed() {
+        if (authentication != null) authentication.cancelAuthentication();
+        authentication = null;
+        authorized = false;
+        pause.reset();
         results = null;
+        searchNavigation = null;
+        topButton = null;
         clipboardExport.destroyed();
         // 视图没了，删除的回调就不会再交回来；不清掉的话这一页之后的操作全被挡住。
         busy = false;
+    }
+
+    @Override protected void onScrollChanged(int scrollY) {
+        if (topButton != null) ViewPolicy.setVisible(topButton, ScrollTopButtonPolicy.visible(scrollY));
     }
 
     /** 第一次显示、从编辑页回来、应用回到前台时都重读：键盘可能刚记下新复制的内容，编辑页可能刚改了一条。 */
@@ -119,11 +194,12 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
      * <p>设置里关掉开关只写偏好，清空历史要等键盘下一次实时读到偏好时才做（{@link ClipboardHistoryRetentionPolicy}）；水杉不是当前输入法、或关掉之后还没弹出过键盘时，历史还在存储里。这一页不经键盘也能打开（设置首页搜索、深链），不看开关就会把用户以为已经清掉的记录全列出来。所以开关关着时不列，并按同一条规则在这里清空：这一页读到的就是实时偏好。
      */
     @Override protected void reload() {
+        if (!authorized) return;
         HostTask.run(this, context -> {
             JSONObject preferences = KeyboardSheets.preferences(context);
             if (preferences == null) return null;
             boolean enabled = preferences.optBoolean("clipboard_history", false);
-            ClipboardHistoryStore store = new ClipboardHistoryStore(context.getFilesDir());
+            ClipboardHistoryStore store = ClipboardHistoryStore.forContext(context);
             if (ClipboardHistoryRetentionPolicy.clearsHistory(ClipboardHistoryRetentionPolicy.Source.LIVE, enabled)) {
                 store.clearQuietly();
                 return new Snapshot(false, List.of());
@@ -138,6 +214,43 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
             }
             renderResults();
         });
+    }
+
+    private void requestAuthentication() {
+        if (authentication != null) return;
+        if (!ClipboardOperationAuthenticationPolicy.requiresAuthentication()) {
+            authorized = true;
+            reload();
+            return;
+        }
+        int authenticators = SystemAuthenticators.allowed();
+        Context context = requireContext();
+        if (BiometricManager.from(context).canAuthenticate(authenticators)
+                != BiometricManager.BIOMETRIC_SUCCESS) {
+            MsToast.show(context, "这台设备没有可用的系统认证");
+            return;
+        }
+        authentication = new BiometricPrompt(this, ContextCompat.getMainExecutor(context),
+            new BiometricPrompt.AuthenticationCallback() {
+                @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult value) {
+                    authentication = null;
+                    authorized = true;
+                    if (getView() != null) reload();
+                    authenticationEnded(false);
+                }
+
+                @Override public void onAuthenticationError(int code, CharSequence message) {
+                    authentication = null;
+                    authorized = false;
+                    authenticationEnded(AuthenticationPauseTracker.systemCanceled(code, android.os.Build.VERSION.SDK_INT));
+                }
+            });
+        BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
+            .setTitle("验证身份")
+            .setSubtitle("搜索剪贴板历史会读取本机记录")
+            .setAllowedAuthenticators(authenticators)
+            .build();
+        authentication.authenticate(info);
     }
 
     /** 只重画结果卡片，搜索框不动：重建它会丢掉焦点和输入法的组字。 */
@@ -216,7 +329,7 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
         String text = item.text();
         HostTask.run(this, context -> {
             ClipboardHistory.Item current = ClipboardSearchPolicy.currentEditItem(
-                new ClipboardHistoryStore(context.getFilesDir()).load(), text);
+                ClipboardHistoryStore.forContext(context).load(), text);
             return current == null ? null : ClipboardEditKey.editKey(context, current.timestamp(), current.text());
         }, (String key) -> {
             busy = false;
@@ -236,7 +349,7 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
         busy = true;
         String text = item.text();
         HostTask.run(this, context -> {
-            new ClipboardHistoryStore(context.getFilesDir()).remove(text);
+            ClipboardHistoryStore.forContext(context).remove(text);
             return Boolean.TRUE;
         }, done -> {
             busy = false;

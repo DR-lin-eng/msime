@@ -49,6 +49,7 @@ function drawnTouchHeight(
   rowSpacingTenths: number,
   adjustment: number,
   strip: boolean = true,
+  extraRows: number = 0,
 ): number {
   let keys: number = 0;
   for (let row: number = 0; row < KeyboardMetrics.KEY_ROWS; row++) {
@@ -65,6 +66,8 @@ function drawnTouchHeight(
     (strip ? KeyboardMetrics.STRIP_HEIGHT_VP + KeyboardMetrics.STRIP_GAP_VP : 0) +
     keys +
     gaps +
+    // KeyboardView.surfaceHeight：竖屏手写多出的行不分摊高度调整，每行一个 ROW_HEIGHT_VP 加一道行距。
+    extraRows * (KeyboardMetrics.ROW_HEIGHT_VP + rowSpacingTenths / 10) +
     KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP
   );
 }
@@ -141,8 +144,54 @@ group("the touch frame the view draws is the panel height the ability asks for",
         Math.abs(bare - bareSized) < 1e-9,
         `without the strip, row spacing ${spacing}, adjustment ${adjustment}: drawn ${bare}, panel ${bareSized}`,
       );
+      // 竖屏手写多一行：画出的框架与面板高度仍然一致。
+      for (const strip of [true, false]) {
+        const tall: number = drawnTouchHeight(spacing, adjustment, strip, 1);
+        const tallSized: number = KeyboardMetrics.totalHeightVp(
+          spacing,
+          adjustment,
+          0,
+          18,
+          15,
+          false,
+          strip,
+          1,
+        );
+        check(
+          Math.abs(tall - tallSized) < 1e-9,
+          `handwriting, strip ${strip}, row spacing ${spacing}, adjustment ${adjustment}: drawn ${tall}, panel ${tallSized}`,
+        );
+      }
     }
   }
+});
+
+group("portrait handwriting is one key row taller, landscape keeps the old height", () => {
+  check(KeyboardMetrics.handwritingExtraRows(true, false) === 1, "portrait handwriting adds a row");
+  check(
+    KeyboardMetrics.handwritingExtraRows(true, true) === 0,
+    "landscape handwriting keeps three rows",
+  );
+  check(
+    KeyboardMetrics.handwritingExtraRows(false, false) === 0,
+    "every other face keeps the standard height",
+  );
+  const base: number = KeyboardMetrics.totalHeightVp(70, 0, 0, 18, 15, false);
+  check(
+    KeyboardMetrics.totalHeightVp(70, 0, 0, 18, 15, false, true, 1) === base + 44 + 7,
+    "one 44vp row and one 7vp gap at the default spacing",
+  );
+  check(
+    KeyboardMetrics.totalHeightVp(70, 30, 0, 18, 15, false, true, 1) -
+      KeyboardMetrics.totalHeightVp(70, 30, 0, 18, 15, false) ===
+      44 + 7,
+    "the user's height adjustment is applied once, not again for the extra row",
+  );
+  check(
+    KeyboardMetrics.totalHeightVp(70, 0, 0, 18, 15, true, true, 1) ===
+      KeyboardMetrics.totalHeightVp(70, 0, 0, 18, 15, true),
+    "the 2in1 frame does not look at the extra rows",
+  );
 });
 
 group("the strip keeps one height whatever the candidate fonts and glosses", () => {
@@ -292,6 +341,19 @@ group("触屏离开语音界面时放弃正在进行的录音", () => {
   check(!VoiceRecognitionPolicy.cancelsOnLeave(true, false, true), "没有在录音");
   check(!VoiceRecognitionPolicy.cancelsOnLeave(true, true, false), "并不是从语音界面离开");
   check(!VoiceRecognitionPolicy.cancelsOnLeave(false, true, true), "2in1 的语音面板另有规则");
+});
+
+group("触屏键盘收起时放弃正在进行的录音", () => {
+  check(
+    VoiceRecognitionPolicy.cancelsOnHide(true, true, false),
+    "键盘收起后麦克风和识别不能继续跑到上限",
+  );
+  check(!VoiceRecognitionPolicy.cancelsOnHide(true, false, false), "没有在录音");
+  check(
+    !VoiceRecognitionPolicy.cancelsOnHide(true, true, true),
+    "已经说完、正在等结果，不丢掉用户说完的话",
+  );
+  check(!VoiceRecognitionPolicy.cancelsOnHide(false, true, false), "2in1 的语音面板另有规则");
 });
 
 group("the 2in1 candidate window is sized for the card's 8vp padding", () => {

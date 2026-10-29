@@ -13,6 +13,7 @@ inline constexpr size_t candidate_expand_batch = 300;
 struct ExpandedCandidate {
   size_t index = 0;
   std::string text;
+  unsigned source = 0;
 };
 
 // 网格里排在当前页之后的第一项在 items 里的位置：items 按下标递增，当前页最后一个候选的下标是 last。
@@ -146,7 +147,8 @@ inline CandidateCardSize candidate_expand_card_size(const CandidateCardInput &in
   const auto shape = candidate_card_metrics(
       input.font_size, input.preedit_font_size, input.preedit_visible, input.logo_visible,
       input.page_width > 0.0, input.skin,
-      std::isfinite(input.number_width) ? input.number_width : 0.0, input.line_height);
+      std::isfinite(input.number_width) ? input.number_width : 0.0, input.line_height,
+      input.hint_width > 0.0);
   if (!shape.expand_panel || !input.horizontal)
     return collapsed;
   const double reserved = candidate_reserved_row_height(

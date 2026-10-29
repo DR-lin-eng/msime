@@ -36,11 +36,11 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * 输入页：语言与方案、中文（字符集、中英文之间加空格、拼音纠错、模糊音、云候选）、辅助码方案和翻译（候选词翻译、离线英文释义、目标语言）。
+ * 输入页：语言与方案、中文（字符集、中英文之间加空格、拼音纠错、模糊音、云候选）、辅助码方案和翻译（候选词翻译、翻译范围、离线英文释义、目标语言）。
  *
- * <p>语言列表是键盘自己的方案列表 `touch_keyboard_schemes.enabled` 按语言分组后的样子：普通话一直在，其他语言在列表里有它的方案时出现。在语言的面板里选一个方案，经 {@link SchemePreferences#withScheme} 同时写 `scheme` 那几个键和 `touch_keyboard_schemes.selected`（并在缺失时加进 `enabled`），否则键盘会按旧的 `selected` 解析方案；「移除」把这门语言的方案全部移出 `enabled`，键盘正用着它时先切回剩下的第一个方案；「添加语言」把这门语言的第一个方案加进 `enabled`，不切换。粤语只有粤拼（P18：仓颉、速成没有方案和码表）；英语没有自己的触屏方案（中英切换键一直在），所以不出现在列表里。
+ * <p>语言与方案列表是键盘自己的方案列表 `touch_keyboard_schemes.enabled` 按方案族分组后的样子：全拼、双拼、五笔、注音、笔画、手写和粤拼各自成行，其他语言按语言成行。在一行的面板里选一个方案，经 {@link SchemePreferences#withScheme} 同时写 `scheme` 那几个键和 `touch_keyboard_schemes.selected`（并在缺失时加进 `enabled`）；「移除」把这一行的方案全部移出 `enabled`，键盘正用着它时先切回剩下的第一个方案；「添加方案」把这一行的第一个方案加进 `enabled`，不切换。英语没有自己的触屏方案（中英切换键一直在），所以不出现在列表里。
  *
- * <p>日语的日文词典，粤拼、注音和笔画共用的语言词库，以及英文以外目标语言的离线释义都是按需下载的资源包（{@link ResourcePacks}）。还没下载的语言照样列在「添加语言」里，标出要下载的大小；添加时先把方案写进 `enabled`，再经 {@link ResourcePackService} 下载（按流量计费的网络先确认），词典到达前键盘不列出它，装好后下一次进入输入框就出现。已经添加、词典还没到的语言在列表里显示下载状态：需下载、下载中 x%、校验中、失败和原因，点开可以下载、取消、重试或移除。页面从不自己发起下载，只响应用户的点击。
+ * <p>日语的日文词典，粤拼、注音和笔画共用的语言词库，以及英文以外目标语言的离线释义都是按需下载的资源包（{@link ResourcePacks}）。还没下载的方案照样列在「添加方案」里，标出要下载的大小；添加时先把方案写进 `enabled`，再经 {@link ResourcePackService} 下载（按流量计费的网络先确认），词典到达前键盘不列出它，装好后下一次进入输入框就出现。已经添加、词典还没到的方案在列表里显示下载状态：需下载、下载中 x%、校验中、失败和原因，点开可以下载、取消、重试或移除。页面从不自己发起下载，只响应用户的点击。
  *
  * <p>辅助码方案列表先是内置方案，来自 `NativeClient.hostCapabilities` 的 `helpcode_schemas`，没有这个字段时用不含郑码的内置列表（P14）；后面是用户导入的码表（#7176），即 `msime_client_plugins` 的 `catalog` 里 `kind = "helpcode"` 的包。开关和方案都写进当前方案所属的那一份（双拼用 `shuangpin_helpcode`，其余用 `quanpin_helpcode`），选导入的码表写 `plugins.helpcode_pack_*`，规则见 {@link HelpcodeChoicePolicy}；关掉时不再列出方案。「导入辅助码表…」经系统文件选择器（SAF）选一个 `.txt`，严格按 UTF-8 解码后交给 `import_helpcode_table`，成功后自动选中它；「管理已导入的码表」里可以删除，删的是正在用的码表时退回内置方案。共享的辅助码设置没有「部首 / 笔画 / 混合」模式，所以本页不提供模式选择。
  */
@@ -63,14 +63,17 @@ public final class TypingPage extends ReloadingDetailPage {
     private static final List<KeyboardScheme> SHUANGPIN = List.of(KeyboardScheme.XIAOHE, KeyboardScheme.ZIRANMA,
         KeyboardScheme.MICROSOFT, KeyboardScheme.SHOUDAO);
 
-    /** 一门语言：徽标、名字和它的触屏方案（按面板里的顺序）。 */
+    /** 手机设置页的一行：中文方案族独立成行，其它语言按语言成行。 */
     private enum Language {
-        MANDARIN("汉", "普通话", KeyboardScheme.QUANPIN, KeyboardScheme.QUANPIN_EIGHTEEN_KEY, KeyboardScheme.QUANPIN_FOURTEEN_KEY,
-            KeyboardScheme.QUANPIN_NINE_KEY, KeyboardScheme.XIAOHE,
-            KeyboardScheme.ZIRANMA, KeyboardScheme.MICROSOFT, KeyboardScheme.SHOUDAO,
-            KeyboardScheme.NINE_KEY_SHUANGPIN, KeyboardScheme.WUBI,
-            KeyboardScheme.ZHUYIN, KeyboardScheme.ZHUYIN_NINE_KEY, KeyboardScheme.STROKE, KeyboardScheme.HANDWRITING),
-        CANTONESE("粤", "粤语", KeyboardScheme.CANTONESE),
+        QUANPIN("拼", "全拼", KeyboardScheme.QUANPIN, KeyboardScheme.QUANPIN_FOURTEEN_KEY,
+            KeyboardScheme.QUANPIN_EIGHTEEN_KEY, KeyboardScheme.QUANPIN_NINE_KEY),
+        SHUANGPIN("双", "双拼", KeyboardScheme.XIAOHE, KeyboardScheme.ZIRANMA,
+            KeyboardScheme.MICROSOFT, KeyboardScheme.SHOUDAO, KeyboardScheme.NINE_KEY_SHUANGPIN),
+        WUBI("五", "五笔", KeyboardScheme.WUBI),
+        ZHUYIN("注", "注音", KeyboardScheme.ZHUYIN, KeyboardScheme.ZHUYIN_NINE_KEY),
+        STROKE("笔", "笔画", KeyboardScheme.STROKE),
+        HANDWRITING("写", "手写", KeyboardScheme.HANDWRITING),
+        CANTONESE("粤", "粤拼", KeyboardScheme.CANTONESE),
         JAPANESE("あ", "日语", KeyboardScheme.JAPANESE, KeyboardScheme.JAPANESE_NINE_KEY),
         KOREAN("한", "韩语", KeyboardScheme.KOREAN),
         VIETNAMESE("越", "越南语", KeyboardScheme.VIETNAMESE),
@@ -104,6 +107,7 @@ public final class TypingPage extends ReloadingDetailPage {
     private static final String SAVED_IMPORT_SHUANGPIN = "helpcode_import_shuangpin";
 
     private boolean adding;
+    private boolean editingCloudCustom;
     /** 上一次渲染用的状态：下载进度只重画这一份，不必每个百分点都去读共享存储。 */
     @Nullable private State lastState;
     /** 下载进度变了就重画；某个资源包下载结束时重读一遍，换上新的安装状态。 */
@@ -136,6 +140,7 @@ public final class TypingPage extends ReloadingDetailPage {
     @Override protected void onContentDestroyed() {
         ResourcePackService.removeListener(packListener);
         lastState = null;
+        editingCloudCustom = false;
     }
 
     @Override protected void reload() {
@@ -250,7 +255,7 @@ public final class TypingPage extends ReloadingDetailPage {
             if (provided.isEmpty()) continue;
             List<KeyboardScheme> offered = offered(language, edition, state);
             KeyboardScheme shown = shownScheme(language, applied, enabled);
-            if (language != Language.MANDARIN && shown == null) {
+            if (shown == null) {
                 addable.add(language);
                 continue;
             }
@@ -264,6 +269,13 @@ public final class TypingPage extends ReloadingDetailPage {
             languages.addView(KeyboardSheets.badgeNavRow(context, language.badge, language.title, null,
                 shown == null ? null : schemeLabel(shown, preferences),
                 () -> showLanguage(language, offered, applied, preferences, state)));
+            if (language == Language.SHUANGPIN && offered.contains(KeyboardScheme.NINE_KEY_SHUANGPIN)) {
+                // 九键双拼是一种键盘加一张表：面板里只选中这个键盘，表在这一页里选、编辑、导入和导出，与 iOS 的「九键双拼方案与自定义」相同。
+                String table = NineKeyShuangpinKeypad.normalizedProfile(InputViewValuePolicy.textOr(preferences,
+                    "nine_key_shuangpin_profile", NineKeyShuangpinKeypad.DEFAULT_PROFILE));
+                languages.nav("九键双拼方案与自定义", null, NineKeyShuangpinKeypad.profileTitle(table),
+                    () -> SettingsNavigator.open(context, PageId.NINE_KEY_SHUANGPIN, null));
+            }
             if (language == Language.JAPANESE && offered.contains(KeyboardScheme.JAPANESE_NINE_KEY)) {
                 InputFeatureToggle toggle = InputFeatureToggle.JAPANESE_TOGGLE_INPUT;
                 languages.toggle(toggle.title(), toggle.description(),
@@ -272,7 +284,7 @@ public final class TypingPage extends ReloadingDetailPage {
             }
         }
         if (!addable.isEmpty()) {
-            languages.addView(KeyboardSheets.actionRow(context, adding ? "✓" : "＋", adding ? "完成" : "添加语言", () -> {
+            languages.addView(KeyboardSheets.actionRow(context, adding ? "✓" : "＋", adding ? "完成" : "添加方案", () -> {
                 adding = !adding;
                 reload();
             }));
@@ -290,8 +302,9 @@ public final class TypingPage extends ReloadingDetailPage {
         languages.nav("联系人", "导入姓名和手机号，输入姓名时优先显示", null,
             () -> SettingsNavigator.open(context, PageId.CONTACTS, null));
 
-        // 五笔查码（#6789）：本版本的方案列表里启用了五笔才列出，与共享设置页「五笔查码」一组出现的条件一致。
-        if (enabled.contains(KeyboardScheme.WUBI)) {
+        // 五笔查码（#6789）：本版本的方案列表里启用了五笔、五笔码表也在本机时才列出，与共享设置页「五笔查码」一组出现的条件一致。瘦包还没下载码表时查不出任何编码，五笔那一行给出下载入口。
+        if (enabled.contains(KeyboardScheme.WUBI)
+                && KeyboardScheme.WUBI.installed(state.languageDictionaries(), state.packs())) {
             GroupCard wubi = GroupCard.add(sectionColumn(target, "中文"), "五笔");
             wubi.nav(PageId.WUBI_LOOKUP.title(), "查汉字的 86、98 五笔编码", null,
                 () -> SettingsNavigator.open(context, PageId.WUBI_LOOKUP, null));
@@ -312,6 +325,8 @@ public final class TypingPage extends ReloadingDetailPage {
         JSONObject fuzzy = preferences.optJSONObject("fuzzy_pinyin");
         chinese.toggle("模糊音", "如 z/zh、an/ang 不分", fuzzy != null && fuzzy.optBoolean("enabled", false),
             checked -> savePreferences(values -> KeyboardSheets.child(values, "fuzzy_pinyin").put("enabled", checked)));
+        chinese.nav("模糊音规则", "逐项选择需要的声母和韵母", null,
+            () -> SettingsNavigator.open(context, PageId.FUZZY_PINYIN, null));
         InputFeatureToggle single = InputFeatureToggle.SINGLE_CHARACTER_ONLY;
         chinese.toggle(single.title(), single.description(),
             preferences.optBoolean(single.key(), single.enabledByDefault()),
@@ -354,13 +369,22 @@ public final class TypingPage extends ReloadingDetailPage {
             aux.toggle(shuangpin ? "在候选栏中显示双拼辅助码" : "在候选栏中显示全拼辅助码",
                 "关掉后候选旁不再标注辅助码，Shift 筛选照常可用", shownInCandidates,
                 checked -> saveHelpcode(family, shuangpin, "show_in_candidate_window", checked));
+            boolean strictFilter = helpcode != null && helpcode.optBoolean("strict_filter", false);
+            aux.toggle(shuangpin ? "双拼一码严格筛选" : "全拼一码严格筛选",
+                "关闭时一码只把匹配项前移；打开后排除辅助码不匹配的候选，两码始终严格筛选",
+                strictFilter, checked -> saveHelpcode(family, shuangpin, "strict_filter", checked));
         }
 
         GroupCard translation = GroupCard.add(sectionColumn(target, "翻译"), "翻译");
         InputFeatureToggle translations = InputFeatureToggle.CANDIDATE_TRANSLATIONS;
+        boolean translationsOn = preferences.optBoolean(translations.key(), translations.enabledByDefault());
         translation.toggle("候选词翻译", "为候选词附上译文；联网翻译用哪个服务在下面的「翻译服务」里选",
-            preferences.optBoolean(translations.key(), translations.enabledByDefault()),
-            checked -> savePreferences(values -> values.put(translations.key(), checked)));
+            translationsOn, checked -> savePreferences(values -> values.put(translations.key(), checked)));
+        // 「翻译范围」紧跟在「候选词翻译」下面，与共享设置页相同；候选词翻译关着时置灰，存的值不动。
+        CandidateTranslationPolicy.Scope scope =
+            CandidateTranslationPolicy.Scope.from(preferences.opt(CandidateTranslationPolicy.Scope.KEY));
+        translation.nav(CandidateTranslationPolicy.Scope.TITLE, CandidateTranslationPolicy.Scope.DESCRIPTION,
+            scope.title(), translationsOn ? () -> pickTranslationScope(scope) : null);
         translation.nav("翻译服务", "离线释义查不到的词用它补上译文", null,
             () -> SettingsNavigator.open(requireContext(), PageId.TRANSLATION_SERVICE, null));
         InputFeatureToggle gloss = InputFeatureToggle.CANDIDATE_ENGLISH_GLOSS;
@@ -369,6 +393,18 @@ public final class TypingPage extends ReloadingDetailPage {
         translation.toggle("离线英文释义", "给候选词标注离线释义；英语释义随应用自带，其他目标语言要下载离线释义词典",
             glossOn, checked -> savePreferences(values -> values.put(gloss.key(), checked),
                 () -> { if (checked) ensureGlosses(targetLanguage, state); }));
+        InputFeatureToggle pronunciation = InputFeatureToggle.CANDIDATE_PRONUNCIATION;
+        boolean pronunciationOn = preferences.optBoolean(pronunciation.key(), pronunciation.enabledByDefault());
+        java.io.File phonetics = new java.io.File(requireContext().getFilesDir(),
+            "bootstrap/pronunciations/en-phonetic.db");
+        boolean phoneticsReady = phonetics.isFile() || state.packs().contains(ResourcePacks.PRONUNCIATIONS);
+        String pronunciationDescription = phoneticsReady
+            ? pronunciation.description() : "离线音标词典未安装；打开后点下方「下载」，安装完成再进入输入框";
+        translation.toggle(pronunciation.title(), pronunciationDescription, pronunciationOn,
+            checked -> savePreferences(values -> values.put(pronunciation.key(), checked)));
+        if (pronunciationOn && !phoneticsReady)
+            packRow(translation, state, "离线英文音标词典", "仅供本机候选显示英文音标",
+                ResourcePacks.PRONUNCIATIONS);
         translation.nav("翻译目标语言", null, labelOf(List.of(TARGET_LANGUAGES), targetLanguage),
             () -> pickTargetLanguage(targetLanguage, glossOn, state));
         if (glossOn && needsGlosses(targetLanguage, state)) {
@@ -510,81 +546,19 @@ public final class TypingPage extends ReloadingDetailPage {
             JSONObject preferences, State state) {
         Context context = requireContext();
         OptionSheet sheet = new OptionSheet(context, language.title, offered.size() > 1 ? "选择输入方案" : null);
-        if (language == Language.MANDARIN) {
-            // 全拼的几种键数属于同一个方案，这里保留当前布局；换排法在「键盘 › 中文键盘」里。
-            boolean quanpin = applied == KeyboardScheme.QUANPIN || applied == KeyboardScheme.QUANPIN_FOURTEEN_KEY
-                || applied == KeyboardScheme.QUANPIN_EIGHTEEN_KEY
-                || applied == KeyboardScheme.QUANPIN_NINE_KEY;
-            KeyboardScheme quanpinChoice = quanpin ? applied : KeyboardScheme.QUANPIN;
-            if (offered.contains(quanpinChoice)) sheet.option("全拼", quanpin, () -> applyScheme(quanpinChoice, null));
-            List<KeyboardScheme> shuangpin = new ArrayList<>(SHUANGPIN.size());
-            for (KeyboardScheme scheme : SHUANGPIN) {
-                if (offered.contains(scheme)) shuangpin.add(scheme);
-            }
-            if (!shuangpin.isEmpty()) {
-                KeyboardScheme shown = shuangpin.contains(applied) ? applied : shuangpin.get(0);
-                sheet.submenu("双拼（" + shuangpinName(shown) + "）", shuangpin.contains(applied), () -> {
-                    OptionSheet next = new OptionSheet(context, "双拼", "选择双拼方案");
-                    for (KeyboardScheme scheme : shuangpin)
-                        next.option(shuangpinName(scheme), scheme == applied, () -> applyScheme(scheme, null));
-                    boolean fourteen = "fourteen_key".equals(InputViewValuePolicy.textOr(
-                        preferences, "touch_shuangpin_layout", "twenty_six_key"));
-                    boolean eighteen = "eighteen_key".equals(InputViewValuePolicy.textOr(
-                        preferences, "touch_shuangpin_layout", "twenty_six_key"));
-                    next.submenu("键盘布局（" + (eighteen ? "18 键" : fourteen ? "14 键" : "26 键") + "）", false, () -> {
-                        OptionSheet layouts = new OptionSheet(context, "双拼键盘布局", "保留当前双拼方案");
-                        layouts.option("26 键", !fourteen && !eighteen, () -> savePreferences(
-                            values -> values.put("touch_shuangpin_layout", "twenty_six_key")));
-                        layouts.option("14 键", fourteen, () -> savePreferences(
-                            values -> values.put("touch_shuangpin_layout", "fourteen_key")));
-                        layouts.option("18 键", eighteen, () -> savePreferences(
-                            values -> values.put("touch_shuangpin_layout", "eighteen_key")));
-                        return layouts;
-                    });
-                    return next;
-                });
-            }
-            if (offered.contains(KeyboardScheme.NINE_KEY_SHUANGPIN)) {
-                // 九键双拼是一种键盘加一张表：子菜单选表（选中即切到九键双拼键盘），自定义表在「九键双拼」页里编辑、导入和导出。
-                String table = NineKeyShuangpinKeypad.normalizedProfile(InputViewValuePolicy.textOr(preferences,
-                    "nine_key_shuangpin_profile", NineKeyShuangpinKeypad.DEFAULT_PROFILE));
-                boolean nineKeyShuangpin = applied == KeyboardScheme.NINE_KEY_SHUANGPIN;
-                boolean customSaved = preferences.optJSONObject("nine_key_shuangpin_custom_profile") != null;
-                sheet.submenu("九键双拼（" + NineKeyShuangpinKeypad.profileTitle(table) + "）", nineKeyShuangpin, () -> {
-                    OptionSheet next = new OptionSheet(context, "九键双拼", "选择九键双拼的表");
-                    for (String option : NineKeyShuangpinKeypad.BUILTIN_PROFILES)
-                        next.option(NineKeyShuangpinKeypad.profileTitle(option), nineKeyShuangpin && option.equals(table),
-                            () -> applyNineKeyShuangpin(option));
-                    if (customSaved)
-                        next.option("自定义", nineKeyShuangpin && NineKeyShuangpinKeypad.CUSTOM_PROFILE.equals(table),
-                            () -> applyNineKeyShuangpin(NineKeyShuangpinKeypad.CUSTOM_PROFILE));
-                    next.option("编辑自定义表…", false,
-                        () -> SettingsNavigator.open(context, PageId.NINE_KEY_SHUANGPIN, null));
-                    return next;
-                });
-            }
+        // 每行的方案直接列在这一层：双拼列小鹤、自然码、微软、首道和九键双拼，五笔列 86 和 98。再套一层子菜单，「双拼」行、方案面板、双拼面板就成了三层（双拼布局原先还在第四层）。双拼的 26／14／18 键布局在键盘页「中文键盘」里选，九键双拼的表在「九键双拼方案与自定义」页里选，与 iOS、鸿蒙相同。
+        if (language == Language.SHUANGPIN) {
+            for (KeyboardScheme scheme : offered)
+                sheet.option(SHUANGPIN.contains(scheme) ? shuangpinName(scheme) : scheme.title(), scheme == applied,
+                    () -> applyScheme(scheme, null));
+        } else if (language == Language.WUBI) {
             if (offered.contains(KeyboardScheme.WUBI)) {
                 String profile = KeyboardScheme.normalizedWubiProfile(
                     InputViewValuePolicy.textOr(preferences, "wubi_profile", KeyboardScheme.WUBI_86));
                 boolean wubi = applied == KeyboardScheme.WUBI;
-                sheet.submenu("五笔（" + wubiName(profile) + "）", wubi, () -> {
-                    OptionSheet next = new OptionSheet(context, "五笔", "选择五笔方案");
-                    for (String option : List.of(KeyboardScheme.WUBI_86, KeyboardScheme.WUBI_98))
-                        next.option(wubiName(option), wubi && option.equals(profile),
-                            () -> applyScheme(KeyboardScheme.WUBI, option));
-                    return next;
-                });
-            }
-            AppEdition edition = AppEdition.current();
-            for (KeyboardScheme scheme : List.of(KeyboardScheme.ZHUYIN, KeyboardScheme.ZHUYIN_NINE_KEY,
-                    KeyboardScheme.STROKE, KeyboardScheme.HANDWRITING)) {
-                if (offered.contains(scheme)) {
-                    sheet.option(mandarinName(scheme), scheme == applied, () -> applyScheme(scheme, null));
-                } else if (scheme.offeredBy(edition) && scheme.resourcePack() != null) {
-                    // 注音和笔画的词库还没到：照样列出并标明下载状态，选了先加进列表再下载，不切换。
-                    sheet.option(mandarinName(scheme) + "（" + packState(state, scheme.resourcePack()) + "）", false,
-                        () -> addLanguage(scheme, state));
-                }
+                for (String option : List.of(KeyboardScheme.WUBI_86, KeyboardScheme.WUBI_98))
+                    sheet.option(wubiName(option), wubi && option.equals(profile),
+                        () -> applyScheme(KeyboardScheme.WUBI, option));
             }
         } else {
             KeyboardScheme shown = language.schemes.contains(applied) ? applied : null;
@@ -592,27 +566,9 @@ public final class TypingPage extends ReloadingDetailPage {
                 sheet.option(schemeLabel(scheme, preferences), scheme == shown || (shown == null && offered.size() == 1),
                     () -> applyScheme(scheme, null));
             }
-            sheet.destructive("移除" + language.title, () -> removeLanguage(language));
         }
+        sheet.destructive("移除" + language.title, () -> removeLanguage(language));
         sheet.show();
-    }
-
-    /** 切到九键双拼键盘，并选用 `table` 这张表。 */
-    private void applyNineKeyShuangpin(String table) {
-        HostTask.run(this, context -> {
-            JSONObject pending = SchemePreferences.withScheme(HostStore.loadPreferences(context),
-                KeyboardScheme.NINE_KEY_SHUANGPIN, null);
-            if (pending == null) return null;
-            try {
-                pending.getJSONObject("preferences").put("nine_key_shuangpin_profile", table);
-            } catch (JSONException error) {
-                return null;
-            }
-            return HostStore.savePreferences(context, pending);
-        }, saved -> {
-            if (saved == null) MsToast.show(requireContext(), "切换失败，保留当前方案");
-            reload();
-        });
     }
 
     private static String shuangpinName(KeyboardScheme scheme) {
@@ -626,15 +582,6 @@ public final class TypingPage extends ReloadingDetailPage {
 
     private static String wubiName(String profile) {
         return KeyboardScheme.WUBI_98.equals(profile) ? "五笔 98" : "五笔 86";
-    }
-
-    private static String mandarinName(KeyboardScheme scheme) {
-        return switch (scheme) {
-            case ZHUYIN -> "注音";
-            case ZHUYIN_NINE_KEY -> "注音 9 键";
-            case STROKE -> "笔画";
-            default -> "手写";
-        };
     }
 
     private void applyScheme(KeyboardScheme scheme, @Nullable String wubiProfile) {
@@ -669,53 +616,71 @@ public final class TypingPage extends ReloadingDetailPage {
     private void cloudProviderSettings(LinearLayout target, JSONObject preferences) {
         JSONObject provider = preferences.optJSONObject("cloud_candidate_provider");
         if (provider == null) return;
-        GroupCard group = GroupCard.add(sectionColumn(target, "中文"), "云候选服务");
-        group.nav("来源", "只发送当前正在组的拼写", cloudRecipient(provider), () -> {
+        GroupCard group = GroupCard.add(sectionColumn(target, "中文"), "云候选服务")
+            .withDividers(Ui.ROW_PADDING_H);
+        String source = provider.optString("source", "google");
+        group.nav("来源", null, cloudSourceLabel(source), () -> {
             OptionSheet sheet = new OptionSheet(requireContext(), "云候选来源", null);
-            sheet.option("Google input-tools", "google".equals(provider.optString("source")),
+            sheet.option("Google 输入工具", "google".equals(source),
                 () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "google")));
             sheet.option("百度输入法", "baidu".equals(provider.optString("source")),
                 () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "baidu")));
-            sheet.option("自定义 HTTP 接口", "custom".equals(provider.optString("source")), () -> {
+            sheet.option("自定义 HTTP 接口", "custom".equals(source), () -> {
                 if (provider.optString("endpoint").isEmpty()) editCloudField(provider, "endpoint", "接口地址", true);
                 else savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "custom"));
             });
             sheet.show();
         });
-        if ("custom".equals(provider.optString("source"))) {
+        if ("custom".equals(source)) {
             group.toggle("允许上屏后云预测", "另将刚上屏的最多 64 个汉字发送到此服务；需要开启「上屏后联想」",
                 provider.optBoolean("prediction_enabled", false),
                 enabled -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("prediction_enabled", enabled)));
         }
-        group.nav("接口地址", "HTTPS 或本机 HTTP；GET 地址用 {query} 表示当前拼写", null,
-            () -> editCloudField(provider, "endpoint", "接口地址", false));
-        group.nav("请求方法", null, provider.optString("method"), () -> {
-            OptionSheet sheet = new OptionSheet(requireContext(), "请求方法", null);
-            for (String method : List.of("GET", "POST")) sheet.option(method, method.equals(provider.optString("method")),
-                () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("method", method)));
-            sheet.show();
-        });
-        group.nav("请求头（JSON）", "例如 Authorization；含凭据，只保存在本机", null,
-            () -> editCloudField(provider, "headers_json", "请求头（JSON）", false));
-        group.nav("请求体模板（JSON）", "POST 使用；字符串值中的 {query} 自动替换为当前拼写", null,
-            () -> editCloudField(provider, "body_template", "请求体模板（JSON）", false));
-        group.nav("响应格式", null, provider.optString("response_format"), () -> {
-            OptionSheet sheet = new OptionSheet(requireContext(), "响应格式", null);
-            String[][] formats = {{"candidates", "标准 candidates 数组"}, {"google", "Google input-tools"}, {"baidu", "百度输入法"}, {"json_path", "JSON 路径"}};
-            for (String[] format : formats) sheet.option(format[1], format[0].equals(provider.optString("response_format")),
-                () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("response_format", format[0])));
-            sheet.show();
-        });
-        group.nav("JSON 路径", "例如 data.0 或 choices.0.message.content，最终指向文本", provider.optString("response_path"),
-            () -> editCloudField(provider, "response_path", "JSON 路径", false));
-        group.nav("超时（毫秒）", "100–10000，默认值由共享层提供", String.valueOf(provider.optInt("timeout_ms")),
+        if (!"custom".equals(source)) {
+            group.nav("自定义接口设置", null, editingCloudCustom ? "收起" : null, () -> {
+                editingCloudCustom = !editingCloudCustom;
+                if (lastState != null) render(lastState);
+            });
+        }
+        if ("custom".equals(source) || editingCloudCustom) {
+            group.nav("接口地址", null, cloudEndpointLabel(provider),
+                () -> editCloudField(provider, "endpoint", "接口地址", false));
+            group.nav("请求方法", null, provider.optString("method", "GET"), () -> {
+                OptionSheet sheet = new OptionSheet(requireContext(), "请求方法", null);
+                for (String method : List.of("GET", "POST")) sheet.option(method, method.equals(provider.optString("method")),
+                    () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("method", method)));
+                sheet.show();
+            });
+            group.nav("请求头", null, cloudConfiguredLabel(provider.optString("headers_json")),
+                () -> editCloudField(provider, "headers_json", "请求头（JSON）", false));
+            if ("POST".equals(provider.optString("method"))) {
+                group.nav("请求体模板", null, cloudConfiguredLabel(provider.optString("body_template")),
+                    () -> editCloudField(provider, "body_template", "请求体模板（JSON）", false));
+            }
+            group.nav("响应格式", null, cloudResponseFormatLabel(provider.optString("response_format")), () -> {
+                OptionSheet sheet = new OptionSheet(requireContext(), "响应格式", null);
+                String[][] formats = {{"candidates", "标准候选数组"}, {"google", "Google 格式"}, {"json_path", "JSON 路径"}};
+                for (String[] format : formats) sheet.option(format[1], format[0].equals(provider.optString("response_format")),
+                    () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("response_format", format[0])));
+                sheet.show();
+            });
+            if ("json_path".equals(provider.optString("response_format"))) {
+                group.nav("JSON 路径", null, provider.optString("response_path", "data.0"),
+                    () -> editCloudField(provider, "response_path", "JSON 路径", false));
+            }
+        }
+        group.nav("超时", null, provider.optInt("timeout_ms", 2000) + " 毫秒",
             () -> editCloudField(provider, "timeout_ms", "超时（毫秒）", false));
-        group.toggle("缓存云候选", "仅在本机内存缓存，按来源隔离；无结果缓存 60 秒", provider.optBoolean("cache_enabled"),
+        group.toggle("缓存云候选", "仅保存在本机内存，无结果缓存 60 秒", provider.optBoolean("cache_enabled"),
             enabled -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("cache_enabled", enabled)));
+        group.footer("当前拼写发送至 " + cloudRecipient(provider)
+            + ("custom".equals(source) && provider.optBoolean("prediction_enabled", false)
+                ? "；另行开启的上屏后联想会发送刚上屏的最多 64 个汉字，不发送词库或输入历史。"
+                : "；不发送已上屏内容、词库或历史。"));
     }
 
     private void editCloudField(JSONObject provider, String key, String title, boolean selectCustom) {
-        InputDialog dialog = new InputDialog(requireContext(), title, "仅保存在本机；配置由共享层校验");
+        InputDialog dialog = new InputDialog(requireContext(), title, cloudFieldHelp(key));
         dialog.addField(title, "timeout_ms".equals(key) ? String.valueOf(provider.optInt(key)) : provider.optString(key),
             "timeout_ms".equals(key) ? android.text.InputType.TYPE_CLASS_NUMBER : 0);
         dialog.setValidator(values -> !"timeout_ms".equals(key) || values.get(0).matches("[0-9]{1,5}"));
@@ -727,11 +692,46 @@ public final class TypingPage extends ReloadingDetailPage {
         dialog.show();
     }
 
+    private static String cloudSourceLabel(String source) {
+        return switch (source) {
+            case "baidu" -> "百度输入法";
+            case "custom" -> "自定义接口";
+            default -> "Google";
+        };
+    }
+
     private static String cloudRecipient(JSONObject provider) {
         if (provider != null && "baidu".equals(provider.optString("source"))) return "百度输入法（olimenew.baidu.com）";
         if (provider == null || !"custom".equals(provider.optString("source"))) return "Google input-tools（inputtools.google.com）";
+        return cloudEndpointLabel(provider);
+    }
+
+    private static String cloudEndpointLabel(JSONObject provider) {
         String host = Uri.parse(provider.optString("endpoint").replace("{query}", "query")).getHost();
-        return host == null ? "所选自定义服务" : host;
+        return host == null ? "未设置" : host;
+    }
+
+    private static String cloudConfiguredLabel(String value) {
+        return value == null || value.isBlank() || "{}".equals(value) ? "未设置" : "已设置";
+    }
+
+    private static String cloudResponseFormatLabel(String format) {
+        return switch (format) {
+            case "google" -> "Google 格式";
+            case "json_path" -> "JSON 路径";
+            default -> "标准数组";
+        };
+    }
+
+    private static String cloudFieldHelp(String key) {
+        return switch (key) {
+            case "endpoint" -> "支持 HTTPS 或本机 HTTP。GET 地址用 {query} 填入当前拼写。地址仅保存在本机。";
+            case "headers_json" -> "JSON 对象，例如 {\"Authorization\":\"Bearer …\"}。请求头可能含凭据，仅保存在本机。";
+            case "body_template" -> "POST 请求使用 JSON 对象；字符串值中的 {query} 自动替换为当前拼写。";
+            case "response_path" -> "点分对象键或数组下标，最终指向候选文本，例如 data.0 或 choices.0.message.content。";
+            case "timeout_ms" -> "等待云候选的最长时间，可填写 100–10000 毫秒。";
+            default -> "仅保存在本机";
+        };
     }
 
     /** 把这门语言的方案移出 `enabled`；键盘正用着它时先切回剩下的第一个方案。 */
@@ -752,7 +752,9 @@ public final class TypingPage extends ReloadingDetailPage {
                 JSONObject schemes = KeyboardSheets.child(preferences, "touch_keyboard_schemes");
                 schemes.put("enabled", new JSONArray(ids));
                 JSONObject pending = snapshot;
-                if (language.schemes.contains(current)) {
+                // 词典还没到的方案（例如瘦包里码表没下载的五笔）不在可用列表里，`current` 已经解析成了别的方案，但偏好里存的 `scheme` 仍是它：也要切走，否则移除之后偏好还指着一个不在列表里的方案。
+                if (language.schemes.contains(current)
+                        || language.schemes.contains(SchemePreferences.storedScheme(preferences, edition))) {
                     schemes.remove("selected");
                     pending = SchemePreferences.withScheme(snapshot, remaining.get(0), null);
                     if (pending == null) return null;
@@ -914,7 +916,8 @@ public final class TypingPage extends ReloadingDetailPage {
             helpcode = new JSONObject()
                 .put("enabled", true)
                 .put("schema", shuangpin ? "lantian" : "ziranma")
-                .put("show_in_candidate_window", shuangpin);
+                .put("show_in_candidate_window", shuangpin)
+                .put("strict_filter", false);
             values.put(family, helpcode);
         }
         return helpcode;
@@ -922,6 +925,16 @@ public final class TypingPage extends ReloadingDetailPage {
 
     private void saveHelpcode(String family, boolean shuangpin, String member, Object value) {
         savePreferences(values -> helpcodeObject(values, family, shuangpin).put(member, value));
+    }
+
+    private void pickTranslationScope(CandidateTranslationPolicy.Scope selected) {
+        OptionSheet sheet = new OptionSheet(requireContext(), CandidateTranslationPolicy.Scope.TITLE,
+            CandidateTranslationPolicy.Scope.DESCRIPTION);
+        for (CandidateTranslationPolicy.Scope scope : CandidateTranslationPolicy.Scope.values()) {
+            sheet.option(scope.title(), scope == selected,
+                () -> savePreferences(values -> values.put(CandidateTranslationPolicy.Scope.KEY, scope.id())));
+        }
+        sheet.show();
     }
 
     private void pickTargetLanguage(String selected, boolean glossOn, State state) {

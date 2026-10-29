@@ -11,6 +11,10 @@ struct CandidatePanelSnapshot: Equatable, Sendable {
     var source = 0
     var fixedPosition = 0
     let index: UInt64
+    /// 是不是会话当前高亮的候选；「仅当前高亮」时只有它画候选词翻译。
+    var highlighted = false
+    /// 引擎按双拼触点首选规则让这一行纠错坐了首选（`confident_correction`），网格用强调色画它，读屏念「已纠正」。
+    var confidentCorrection = false
   }
 
   let generation: UInt64
@@ -64,7 +68,9 @@ struct CandidatePanelSnapshot: Equatable, Sendable {
       let fixedPosition = try optionalInteger(candidate["fixed_position"])
       if !CandidateMarker.isVisible(source: source) { return nil }
       return Entry(text: text, code: code, translation: translation, annotation: annotation,
-                   source: source, fixedPosition: fixedPosition, index: index)
+                   source: source, fixedPosition: fixedPosition, index: index,
+                   highlighted: candidate["highlighted"] as? Bool ?? false,
+                   confidentCorrection: candidate["confident_correction"] as? Bool ?? false)
     }
     return CandidatePanelSnapshot(generation: generation, preedit: preedit, entries: entries)
   }

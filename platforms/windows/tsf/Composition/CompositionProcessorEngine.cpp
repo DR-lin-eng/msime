@@ -10,6 +10,8 @@
 #include "RegKey.h"
 #include "Define.h"
 #include "../HostConfiguration.h"
+#include "../HostSessionMaintenance.h"
+#include "../../common/DictionaryQuiesceLease.h"
 #include <msctf.h>
 #include <string>
 #include <fmt/xchar.h>
@@ -212,6 +214,38 @@ bool CCompositionProcessorEngine::InitializeHostSession(const std::string &optio
     return _hostEngineAdapter->create(options, error);
 }
 
+bool CCompositionProcessorEngine::RefreshHostSessionForDictionaryMaintenance(bool composing)
+{
+    const auto configuration = msime::tsf::cached_host_configuration();
+    if (!_hostEngineAdapter || !configuration || configuration->hostOptions.empty())
+        return false;
+    switch (msime::tsf::host_session_maintenance_step(
+        msime::windows::dictionary_quiesced(configuration->userData), _hostEngineAdapter->valid(),
+        _hostSessionAwaitsDictionaryMaintenance, composing))
+    {
+    case msime::tsf::HostSessionMaintenanceStep::Release:
+        _hostEngineAdapter->destroy();
+        _hostSessionAwaitsDictionaryMaintenance = true;
+        return false;
+    case msime::tsf::HostSessionMaintenanceStep::Restore: {
+        std::string error;
+        if (!InitializeHostSession(configuration->hostOptions, &error))
+        {
+            _hostSessionAwaitsDictionaryMaintenance = msime::tsf::host_session_waits_for_maintenance(error);
+            return false;
+        }
+        _hostSessionAwaitsDictionaryMaintenance = false;
+        std::string ignored;
+        if (!configuration->preferenceSnapshot.empty())
+            (void)_hostEngineAdapter->update_preferences(configuration->preferenceSnapshot, &ignored, &error);
+        return true;
+    }
+    case msime::tsf::HostSessionMaintenanceStep::Keep:
+        break;
+    }
+    return false;
+}
+
 //+---------------------------------------------------------------------------
 //
 // SetupLanguageProfile
@@ -263,8 +297,11 @@ BOOL CCompositionProcessorEngine::SetupLanguageProfile(LANGID langid, REFGUID gu
         const auto configuration = msime::tsf::cached_host_configuration();
         const std::string options = configuration ? configuration->hostOptions : std::string{};
         std::string error;
-        if (!options.empty())
-            (void)InitializeHostSession(options, &error);
+        // 词库维护期间不建宿主会话：它会以共享方式拿住词库锁，让维护者等不到独占锁。租约撤掉后由偏好定时器补建。
+        if (!options.empty() && msime::windows::dictionary_quiesced(configuration->userData))
+            _hostSessionAwaitsDictionaryMaintenance = true;
+        else if (!options.empty() && !InitializeHostSession(options, &error))
+            _hostSessionAwaitsDictionaryMaintenance = msime::tsf::host_session_waits_for_maintenance(error);
     } else if (_hostEngineAdapter && _hostEngineAdapter->valid()) {
         std::string error, ignored;
         const auto configuration = msime::tsf::cached_host_configuration();
@@ -1170,7 +1207,12 @@ void CCompositionProcessorEngine::OnPreservedKey( //
         CCompartment CompartmentDoubleSingleByte(pThreadMgr, tfClientId,
                                                  Global::MetasequoiaIMEGuidCompartmentDoubleSingleByte);
         CompartmentDoubleSingleByte._GetCompartmentBOOL(isDouble);
-        CompartmentDoubleSingleByte._SetCompartmentBOOL(isDouble ? FALSE : TRUE);
+        if (SUCCEEDED(CompartmentDoubleSingleByte._SetCompartmentBOOL(isDouble ? FALSE : TRUE)))
+        {
+            const BOOL current = GetDoubleSingleByteMode(pThreadMgr, tfClientId);
+            if (current != isDouble)
+                SendDoubleSingleByteSwitchEventToUIProcessViaNamedPipe(current);
+        }
         *pIsEaten = TRUE;
     }
     else if (IsEqualGUID(rguid, _PreservedKey_Punctuation.Guid))
@@ -1180,11 +1222,14 @@ void CCompositionProcessorEngine::OnPreservedKey( //
             *pIsEaten = FALSE;
             return;
         }
-        // Ctrl + .: toggle Chinese/English punctuation
+        // Ctrl + . 切换后读回实际状态，标点锁或写入失败时不发成功提示。
         BOOL isPunctuation = FALSE;
         CCompartment CompartmentPunctuation(pThreadMgr, tfClientId, Global::MetasequoiaIMEGuidCompartmentPunctuation);
         CompartmentPunctuation._GetCompartmentBOOL(isPunctuation);
         SetPunctuationMode(pThreadMgr, tfClientId, isPunctuation ? FALSE : TRUE);
+        const BOOL current = GetPunctuationMode(pThreadMgr, tfClientId);
+        if (current != isPunctuation)
+            SendPuncSwitchEventToUIProcessViaNamedPipe(current);
         *pIsEaten = TRUE;
     }
     else

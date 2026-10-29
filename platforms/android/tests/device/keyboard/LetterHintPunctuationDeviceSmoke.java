@@ -17,11 +17,11 @@ import org.json.JSONObject;
 /**
  * 字母角标与底行逗号长按通过共享标点路由提交，长按松手不追加逗号。
  *
- * <p>中文标点生效时，下滑 v 交给 Engine 的标点路由：空闲时上屏「？」，组字中先按首选结束再接「？」，得到「你好？」而不是按字面上屏的拼音原文加 `?`；用工具面板关掉中文标点后同一手势仍按字面上屏 `?`。JVM 冒烟只覆盖键面表，覆盖不到经 Engine 结束组字这一步，所以在设备上驱动真实手势。下滑靠注入按下、移动、抬起三个触屏事件（「滑动输入符号」默认开、方向默认下滑），无障碍点击没有移动这一步。
+ * <p>中文标点生效时，上滑 v 交给 Engine 的标点路由：空闲时上屏「？」，组字中先按首选结束再接「？」，得到「你好？」而不是按字面上屏的拼音原文加 `?`；用工具面板关掉中文标点后同一手势仍按字面上屏 `?`。JVM 冒烟只覆盖键面表，覆盖不到经 Engine 结束组字这一步，所以在设备上驱动真实手势。上滑靠注入按下、移动、抬起三个触屏事件（「滑动输入符号」默认开、方向默认上滑），无障碍点击没有移动这一步。
  */
 public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
     private static final String PLAIN = "msime-test-plain";
-    /** 下滑距离（dp）：比 `SwipeHintPolicy.THRESHOLD_DP` 的 14 dp 大一截，不会落在阈值边上。 */
+    /** 滑动距离（dp）：比 `SwipeHintPolicy.THRESHOLD_DP` 的 14 dp 大一截，不会落在阈值边上。 */
     private static final float SWIPE_DP = 28f;
     private android.os.Bundle arguments;
 
@@ -53,7 +53,7 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
             return;
         }
         if (arguments != null && "true".equals(arguments.getString("letter-hold"))) {
-            runLetterHoldChecks();
+            runConfiguredChecks(false);
             return;
         }
         runConfiguredChecks(false);
@@ -64,23 +64,24 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         setChinesePunctuation(true);
 
         stage = "idle swipe";
-        swipeDown("v");
+        swipeUp("v");
         await(field(PLAIN).and(node -> equalsText("？", node.getText())));
 
         stage = "composition";
         for (String key : new String[] {"n", "i", "h", "a", "o"}) tap(described("字母 " + key.toUpperCase(java.util.Locale.ROOT)));
-        await(field(PLAIN).and(node -> equalsText("？nihao", node.getText())));
+        // 全拼组字在输入框里按音节分词显示（#9448，见 2026-10-23-quanpin-host-preedit-segmentation.md），提交的仍是候选。
+        await(field(PLAIN).and(node -> equalsText("？ni'hao", node.getText())));
         stage = "commit composition before symbol swipe";
         tap(key("空格"));
         await(field(PLAIN).and(node -> equalsText("？你好", node.getText())));
         stage = "committed composition swipe";
-        swipeDown("v");
+        swipeUp("v");
         await(field(PLAIN).and(node -> equalsText("？你好？", node.getText())));
 
         stage = "chinese punctuation off";
         setChinesePunctuation(false);
         stage = "ascii swipe";
-        swipeDown("v");
+        swipeUp("v");
         await(field(PLAIN).and(node -> equalsText("？你好？?", node.getText())));
 
         stage = "restore chinese punctuation";
@@ -156,11 +157,18 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
                 runEnglishSwipeChecks();
                 return;
             }
-            configureSwipe(true, "down", true, false);
+            if (arguments != null && "true".equals(arguments.getString("letter-hold"))) {
+                configureSwipe(true, "down", true, false);
+                runLetterHoldChecks();
+                return;
+            }
             if (!swipeOptions) {
+                // 删除方向字段，真实验证未配置时默认上滑，不用显式写 up 替代默认行为。
+                configureSwipe(true, null, true, false);
                 runPunctuationChecks();
                 return;
             }
+            configureSwipe(true, "down", true, false);
             stage = "up swipe drag uppercase";
             gestureOption("v", false, "up", "V", false);
             expect("V");
@@ -337,15 +345,32 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         throw new AssertionError("选择或取消后选项未关闭");
     }
 
+    /**
+     * 一次快速滑动。三个事件一起排进输入队列，不逐个等窗口事务：逐个同步注入再各睡 40 ms 时，CI 上慢的模拟器从按下到抬起实际会超过长按时长，关掉滑动时那一下就成了长按、弹出字母选项（运行 40205049019 的「disabled down swipe keeps the letter」）。
+     */
     private void simpleSwipe(String letter, String direction) throws Exception {
         Rect keyBounds = bounds(awaitStableBounds(described("字母 " + letter.toUpperCase(java.util.Locale.ROOT))));
         long started = SystemClock.uptimeMillis();
         float dy = 20 * getTargetContext().getResources().getDisplayMetrics().density;
-        inject(started, MotionEvent.ACTION_DOWN, keyBounds.centerX(), keyBounds.centerY());
-        inject(started, MotionEvent.ACTION_MOVE, keyBounds.centerX(),
-            keyBounds.centerY() + ("up".equals(direction) ? -dy : dy));
-        inject(started, MotionEvent.ACTION_UP, keyBounds.centerX(),
-            keyBounds.centerY() + ("up".equals(direction) ? -dy : dy));
+        float endY = keyBounds.centerY() + ("up".equals(direction) ? -dy : dy);
+        MotionEvent[] events = {
+            MotionEvent.obtain(started, started, MotionEvent.ACTION_DOWN, keyBounds.centerX(), keyBounds.centerY(), 0),
+            MotionEvent.obtain(started, started + 20, MotionEvent.ACTION_MOVE, keyBounds.centerX(), endY, 0),
+            MotionEvent.obtain(started, started + 40, MotionEvent.ACTION_UP, keyBounds.centerX(), endY, 0)};
+        injectQuickly(events);
+    }
+
+    /** 把一次手势的全部事件一起排进输入队列再等界面空闲，理由见 {@link #simpleSwipe}。 */
+    private void injectQuickly(MotionEvent... events) throws java.util.concurrent.TimeoutException {
+        try {
+            for (MotionEvent event : events) {
+                event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                if (!automation.injectInputEvent(event, false)) throw new AssertionError("触摸事件未送达");
+            }
+        } finally {
+            for (MotionEvent event : events) event.recycle();
+        }
+        automation.waitForIdle(300, 3000);
     }
 
     private void inject(long started, int action, float x, float y) {
@@ -403,8 +428,8 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         touch(bounds(await(described("输入 è"))));
         expected.append("è");
         await(field(PLAIN).and(node -> equalsText(expected.toString(), node.getText())));
-        stage = "English downward swipe remains literal";
-        swipeDown("w");
+        stage = "English default upward swipe remains literal";
+        swipeUp("w");
         expected.append("2");
         await(field(PLAIN).and(node -> equalsText(expected.toString(), node.getText())));
         stage = "O retains Chinese keyboard entry";
@@ -483,14 +508,15 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         holdLetter("q");
         tap(described("输入 Q"));
         await(field(PLAIN).and(node -> equalsText("Q", node.getText())));
-        stage = "long press symbol choice";
-        holdLetter("a");
-        tap(described("输入 @"));
-        await(field(PLAIN).and(node -> equalsText("Q@", node.getText())));
+        // 先测上滑，再输入会打开邮箱候选的 @，避免候选态门控把手势按普通点击处理。
         stage = "upward swipe uppercase choice";
         swipeUpLetter("w");
         tap(described("输入 W"));
-        await(field(PLAIN).and(node -> equalsText("Q@W", node.getText())));
+        await(field(PLAIN).and(node -> equalsText("QW", node.getText())));
+        stage = "long press symbol choice";
+        holdLetter("a");
+        tap(described("输入 @"));
+        await(field(PLAIN).and(node -> equalsText("QW@", node.getText())));
     }
 
     private void holdLetter(String value) throws Exception {
@@ -517,15 +543,9 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         float startY = bounds.centerY();
         float endY = startY - SWIPE_DP * getTargetContext().getResources().getDisplayMetrics().density;
         long started = SystemClock.uptimeMillis();
-        MotionEvent down = MotionEvent.obtain(started, started, MotionEvent.ACTION_DOWN, x, startY, 0);
-        MotionEvent move = MotionEvent.obtain(started, started + 40, MotionEvent.ACTION_MOVE, x, endY, 0);
-        MotionEvent up = MotionEvent.obtain(started, started + 80, MotionEvent.ACTION_UP, x, endY, 0);
-        try {
-            for (MotionEvent event : new MotionEvent[] {down, move, up}) {
-                event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                automation.injectInputEvent(event, true);
-            }
-        } finally { down.recycle(); move.recycle(); up.recycle(); }
+        injectQuickly(MotionEvent.obtain(started, started, MotionEvent.ACTION_DOWN, x, startY, 0),
+            MotionEvent.obtain(started, started + 40, MotionEvent.ACTION_MOVE, x, endY, 0),
+            MotionEvent.obtain(started, started + 80, MotionEvent.ACTION_UP, x, endY, 0));
         await(described("输入 " + value.toUpperCase(java.util.Locale.ROOT)));
     }
 
@@ -577,7 +597,8 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
     /** 英文角标包含三个非 ASCII 字符，期望表独立于产品字符表。 */
     private void runEnglishSwipeChecks() throws Exception {
         String letters = "dxcqwertyuiopasfghjklzvbnm";
-        String[] symbols = {"¥", "…", "、", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+        // 英文键盘的 X、C 角标从 #9995 起是下划线和反引号（中文键盘仍是 … 和 、），D 仍是非 ASCII 的 ¥。
+        String[] symbols = {"¥", "_", "`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
             "@", "#", "%", "&", "*", "(", ")", "\"", "~", "?", "!", "-", "/"};
         for (String direction : new String[] {"down", "up"}) {
             shellDiscard("am force-stop app.msime.android.test");
@@ -612,9 +633,9 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         expect("d");
     }
 
-    /** 在 `letter` 键中心按下，向下移过阈值后抬起。 */
-    private void swipeDown(String letter) throws Exception {
-        swipeLetter(letter, "down", false);
+    /** 在 `letter` 键中心按下，向上移过阈值后抬起。 */
+    private void swipeUp(String letter) throws Exception {
+        swipeLetter(letter, "up", false);
     }
 
     private void swipeLetter(String letter, String direction, boolean cancel) throws Exception {
@@ -627,21 +648,10 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         float distance = SWIPE_DP * getTargetContext().getResources().getDisplayMetrics().density;
         float endY = startY + ("up".equals(direction) ? -distance : distance);
         long downTime = SystemClock.uptimeMillis();
-        MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, startY, 0);
-        MotionEvent move = MotionEvent.obtain(downTime, downTime + 40, MotionEvent.ACTION_MOVE, x, endY, 0);
-        MotionEvent up = MotionEvent.obtain(downTime, downTime + 80,
-            cancel ? MotionEvent.ACTION_CANCEL : MotionEvent.ACTION_UP, x, endY, 0);
-        try {
-            for (MotionEvent event : new MotionEvent[] {down, move, up}) {
-                event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                if (!automation.injectInputEvent(event, true))
-                    throw new AssertionError("Swipe injection failed");
-            }
-        } finally {
-            down.recycle();
-            move.recycle();
-            up.recycle();
-        }
+        injectQuickly(MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, startY, 0),
+            MotionEvent.obtain(downTime, downTime + 40, MotionEvent.ACTION_MOVE, x, endY, 0),
+            MotionEvent.obtain(downTime, downTime + 80,
+                cancel ? MotionEvent.ACTION_CANCEL : MotionEvent.ACTION_UP, x, endY, 0));
         SystemClock.sleep(150);
     }
 }

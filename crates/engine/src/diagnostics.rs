@@ -43,10 +43,11 @@ pub const RUNTIME_ROOTS_OVERLAP: &str =
 pub const INCOMPLETE_RUNTIME_GENERATION: &str = "Incomplete runtime dictionary generation";
 /// Followed by the replay error.
 pub const RUNTIME_REPLAY_FAILED: &str = "Runtime dictionary replay failed: ";
-pub const RUNTIME_STAGING_EXISTS: &str = "Runtime dictionary staging directory already exists";
 /// Followed by the source path.
 pub const RUNTIME_COPY_FAILED: &str = "Unable to copy runtime dictionary: ";
 pub const RUNTIME_FINALIZE_FAILED: &str = "Cannot finalize runtime dictionary generation";
+/// 后面接文件名和原因，见 `format::check_format_version`。
+pub const DICTIONARY_FORMAT_UNSUPPORTED: &str = "Dictionary format version unsupported: ";
 pub const INVALID_DICTIONARY_STATE: &str = "Invalid or unavailable dictionary state";
 
 // ---- Host facade errors (the C++ bridge) ----
@@ -66,6 +67,7 @@ pub const UNSUPPORTED_WUBI_PROFILE: &str = "Unsupported wubi profile";
 pub const UNSUPPORTED_FREQUENCY_MODE: &str = "Unsupported frequency mode";
 pub const UNSUPPORTED_VIETNAMESE_METHOD: &str = "Unsupported Vietnamese input method";
 pub const UNSUPPORTED_VIETNAMESE_TONE_STYLE: &str = "Unsupported Vietnamese tone style";
+pub const UNSUPPORTED_KOREAN_LAYOUT: &str = "Unsupported Korean layout";
 pub const UNSUPPORTED_DICTIONARY_KIND: &str = "Unsupported dictionary kind";
 pub const EXPECTED_AT_MOST_ONE_ENTRY: &str = "Expected at most one dictionary entry";
 pub const EXPECTED_AT_MOST_ONE_WEIGHT: &str = "Expected at most one weight";

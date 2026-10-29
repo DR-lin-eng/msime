@@ -23,6 +23,11 @@ export {
 export { dictionaryErrorMessage } from "./dictionary/dictionary-errors";
 export { PluginNavRow, type PluginNavRowProps } from "./settings/plugin-nav-row";
 export { PluginActionBlock, type PluginActionBlockProps } from "./settings/plugin-action-block";
+export {
+  SettingsSubViewHeader,
+  type SettingsSubViewBackProps,
+  type SettingsSubViewHeaderProps,
+} from "./settings/settings-subview-header";
 
 export {
   type TouchKeyboardScheme,
@@ -115,6 +120,7 @@ export { useSettingsContentScrollReset } from "./settings/use-settings-content-s
 export { useUpdateCheck, type UseUpdateCheckOptions } from "./settings/use-update-check";
 export type {
   HostReleaseUpdate,
+  UpdateChannel,
   UpdateCheckRequest,
   UpdateCheckResult,
 } from "./settings/update-manifest";
@@ -429,6 +435,7 @@ export {
   type TypingStatisticsStatus,
   type StatisticsOverviewMetric,
 } from "./settings/typing-statistics";
+export { StatisticsSection, type StatisticsSectionProps } from "./settings/statistics-section";
 export type {
   TypingStatisticsUploadClient,
   TypingStatisticsUploadStatus,
@@ -468,6 +475,16 @@ export {
   type McpServerStatus,
 } from "./settings/mcp-connect";
 export { AccountPage } from "./account/account-page";
+export {
+  AccountMeSection,
+  AccountMeGroup,
+  AccountMeRow,
+  AccountMeSupportGroup,
+  type AccountMeGroupProps,
+  type AccountMeSectionProps,
+  type AccountMeRowProps,
+  type AccountMeSupportGroupProps,
+} from "./account/account-me-components";
 export type {
   AccountChallenge,
   AccountClient,
@@ -624,14 +641,43 @@ export {
   cloudClipboardRelayTokenIssue,
   cloudClipboardRelayUrlIssue,
   withCloudClipboardRelay,
+  withCloudClipboardWebDav,
+  cloudClipboardWebDavUrlIssue,
+  cloudClipboardWebDavUsernameIssue,
+  cloudClipboardWebDavPasswordIssue,
   type CloudClipboardRelayPreferences,
+  type CloudClipboardWebDavPreferences,
 } from "./settings/cloud-clipboard-relay";
 export {
+  dictionarySyncBudgetWaitMessage,
+  dictionarySyncConfigured,
+  dictionarySyncDeviceGroups,
+  dictionarySyncDevices,
+  dictionarySyncErrorMessage,
+  dictionarySyncRun,
+  dictionarySyncStatus,
+  withDictionarySyncWebDav,
+  type DictionarySyncAction,
+  type DictionarySyncClient,
+  type DictionarySyncRun,
+  type DictionarySyncStatus,
+  type DictionarySyncTrigger,
+  type DictionarySyncWebDavPreferences,
+} from "./settings/dictionary-sync";
+export {
+  DictionarySyncSection,
+  DICTIONARY_SYNC_NOTE,
+  DICTIONARY_SYNC_QUOTA_NOTE,
+} from "./settings/dictionary-sync-section";
+export {
   CloudClipboardRelaySection,
+  CLOUD_CLIPBOARD_WEBDAV_NOTE,
   type CloudClipboardRelaySectionProps,
 } from "./settings/cloud-clipboard-relay-section";
 export {
   useCloudClipboardRelay,
+  cloudClipboardWebDavProbeMessage,
+  type CloudClipboardWebDavProbeState,
   type UseCloudClipboardRelayOptions,
   type CloudClipboardRelayState,
   type CloudClipboardSyncMode,
@@ -712,6 +758,17 @@ export {
   MAX_MENTIONS,
   mentionListIssue,
   pluginErrorMessage,
+  AUTHORED_KINDS,
+  draftIssue,
+  emptyDraft,
+  packFromDraft,
+  parsePhraseLines,
+  parseWordLines,
+  type AuthoredGroup,
+  type AuthoredKind,
+  type AuthoredPack,
+  type AuthoredWord,
+  type AuthoringDraft,
   type MentionEntry,
   type PluginCatalogResult,
   type PluginClient,
@@ -736,6 +793,9 @@ export {
   type ScriptGrantDialogProps,
   type ScriptGrantsResult,
   type ScriptHealth,
+  type ScriptPluginState,
+  type ScriptSetting,
+  type ScriptSettingValue,
 } from "./settings/plugins-section";
 export {
   DEFAULT_MELODY_PACK,
@@ -1321,6 +1381,7 @@ export {
   type MobileKeyboardFeedback,
   type MobileKeyboardFeedbackClient,
   type MobileKeyboardFeedbackSectionProps,
+  type MobileKeySoundPackChoice,
 } from "./settings/mobile-keyboard-feedback-section";
 export {
   MobileKeyboardFeedbackSettings,
@@ -1678,6 +1739,8 @@ export {
 } from "./community/community-plugin-publish-dialog";
 export {
   communityPluginKinds,
+  communityPluginKindsFor,
+  communityPluginUnderReview,
   type CommunityPlugin,
   type CommunityPluginClient,
   type CommunityPluginKind,
@@ -1965,9 +2028,9 @@ export type {
 
 /** What a load or save that failed on an unreadable document says; the repair button sits beside exactly this message. */
 /**
- * The 设置 tab draws a gear, not the app.
+ * 「首页」标签画房子，不画应用标志。
  *
- * Its page icon is the app logo, which the design does not put in the bar either — its first tab is the `settings` glyph. Three of the four tabs would otherwise be a subject and the fourth a brand.
+ * 它的页面图标是应用标志，设计稿也没有把标志放进标签栏；否则四格里三格是功能、一格是品牌。
  */
 export {
   customTranslationKeyIssue,

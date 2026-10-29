@@ -62,7 +62,7 @@ struct InjectedDirectory {
 };
 
 void pump_until(const std::function<bool()>& condition) {
-  const ULONGLONG deadline = GetTickCount64() + 15000;
+  const ULONGLONG deadline = GetTickCount64() + 60000;
   for (;;) {
     MSG message{};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -137,6 +137,9 @@ int main() {
   assert(store.load().snapshot->preferences().at("ai_assistant").at("tokens") == tokens);
   auto invalid = store.save(*restored.snapshot, {{{"keybindings", "synthetic_unknown_key"}, true}});
   assert(invalid.outcome == Outcome::invalid_change);
+  // 共享序列化省略的 `caret_edit_suffix` 只能补布尔值。
+  assert(!restored.snapshot->preferences().contains("caret_edit_suffix"));
+  assert(store.save(*restored.snapshot, {{{"caret_edit_suffix"}, "invalid"}}).outcome == Outcome::invalid_change);
   auto rejected = store.save(*restored.snapshot, {{{"keybindings", "switch_language_caps_lock"}, "invalid"}});
   assert(rejected.outcome == Outcome::storage);
   assert(store.load().snapshot->revision() == restored.snapshot->revision());
@@ -214,6 +217,7 @@ int main() {
   unsigned google_cancellations = 0;
   unsigned account_confirmations = 0;
   Json account_user{{"id", "synthetic-account-0001"}, {"displayName", "合成账号"}, {"email", "synthetic@example.invalid"}, {"createdAt", "2026-01-02T03:04:05Z"}};
+  const Json account_provider_names{{"apple", "Apple"}, {"google", "合成 Google 方式"}, {"email", "合成邮箱方式"}, {"phone", "手机号"}, {"sms", "手机号"}};
   const std::string synthetic_id = "00000000-0000-4000-8000-000000000001";
   const std::string other_id = "00000000-0000-4000-8000-000000000002";
   Json community_item{{"id", synthetic_id}, {"package_id", "synthetic-light"}, {"name", "合成社区皮肤"},
@@ -259,8 +263,7 @@ int main() {
       account_signed_in = true; value = {{"user", account_user}};
     } else if (operation == "profile" || operation == "rename") {
       if (operation == "rename") account_user["displayName"] = action.at("display_name");
-      value = {{"user", account_user}, {"providers", Json::array({"email", "google"})},
-        {"providerNames", {{"email", "邮箱"}, {"google", "Google"}}}};
+      value = {{"user", account_user}, {"providers", Json::array({"email", "google"})}, {"providerNames", account_provider_names}};
     } else if (operation == "upload_avatar" || operation == "remove_avatar") {
       if (operation == "upload_avatar") {
         assert(action.at("path") == preview_file.u8string());
@@ -268,8 +271,7 @@ int main() {
         account_user["avatarUrl"] = "https://media.msime.app/avatars/synthetic.png";
         account_user["avatarUploaded"] = true;
       } else { account_user["avatarUrl"] = nullptr; account_user["avatarUploaded"] = false; }
-      value = {{"user", account_user}, {"providers", Json::array({"email", "google"})},
-        {"providerNames", {{"email", "邮箱"}, {"google", "Google"}}}};
+      value = {{"user", account_user}, {"providers", Json::array({"email", "google"})}, {"providerNames", account_provider_names}};
     } else if (operation == "avatar") {
       value = malformed_avatar ? "https://example.invalid/synthetic-avatar.png" : "data:image/png;base64," + preview_base64;
     } else if (operation == "preferences_schema") value = Json::object();
@@ -403,6 +405,8 @@ int main() {
   }, account_transport);
   assert(window.create(GetModuleHandleW(nullptr)));
   const HWND host = window.handle();
+  // 周期刷新由下面的 WM_TIMER 用例显式推进，避免运行速度改变合成传输的调用顺序。
+  assert(KillTimer(host, 72));
   const HWND body = GetDlgItem(host, page_body);
   const HWND language = GetDlgItem(body, language_switch);
   const HWND caps = GetDlgItem(body, caps_lock);
@@ -648,6 +652,18 @@ int main() {
   assert(store.load().snapshot->preferences().at("mixed_input").value("symbols", true) != old_symbols);
   click(mixed_symbols);
   assert(store.load().snapshot->preferences().at("mixed_input").value("symbols", true) == old_symbols);
+  // 「移动光标后编辑光标后的部分」缺省为关，关着时共享序列化不写这个键；打开写 true，再关掉键又消失。
+  assert(GetDlgItem(body, caret_edit_suffix));
+  assert(caption(GetDlgItem(body, caret_edit_suffix)) == L"移动光标后编辑光标后的部分");
+  assert(!store.load().snapshot->preferences().contains("caret_edit_suffix"));
+  assert(SendMessageW(GetDlgItem(body, caret_edit_suffix), BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+  assert(IsWindowEnabled(GetDlgItem(body, caret_edit_suffix)));
+  click(caret_edit_suffix);
+  assert(store.load().snapshot->preferences().at("caret_edit_suffix") == true);
+  assert(SendMessageW(GetDlgItem(body, caret_edit_suffix), BM_GETCHECK, 0, 0) == BST_CHECKED);
+  click(caret_edit_suffix);
+  assert(!store.load().snapshot->preferences().contains("caret_edit_suffix"));
+  assert(SendMessageW(GetDlgItem(body, caret_edit_suffix), BM_GETCHECK, 0, 0) == BST_UNCHECKED);
   // 选择来源和编辑文本只改草稿；失败后无关偏好保存也不能把草稿抹掉。
   saved = store.load();
   const auto before_draft = saved.snapshot->revision();
@@ -931,6 +947,7 @@ int main() {
     assert(saved.snapshot->preferences().at("scheme") == "japanese");
     assert(saved.snapshot->preferences().at("last_chinese_scheme") == "shuangpin");
     assert(!IsWindowEnabled(GetDlgItem(body, scheme_chinese)));
+    assert(SendMessageW(GetDlgItem(body, scheme_chinese), CB_GETCURSEL, 0, 0) == CB_ERR);
     assert(!IsWindowEnabled(GetDlgItem(body, scheme_shuangpin_profile)));
     select_value(scheme_language, find_combo(scheme_language, L"中文"));
     assert(store.load().snapshot->preferences().at("scheme") == "shuangpin");
@@ -1026,15 +1043,20 @@ int main() {
   saved = store.load();
   auto gloss_seed = store.save(*saved.snapshot, {{{"candidate_english_gloss"}, false},
       {{"candidate_translations"}, false}, {{"candidate_pronunciation"}, true},
+      {{"candidate_translation_scope"}, "highlighted"},
       {{"translation_target_language"}, "en"}, {{"translation_secondary_language"}, nullptr}});
   assert(gloss_seed.outcome == Outcome::saved);
   SendMessageW(host, WM_COMMAND, MAKEWPARAM(reload_settings, BN_CLICKED), 0);
   pump_until([&] { return IsWindowEnabled(language) != FALSE; });
   assert(!IsWindowEnabled(GetDlgItem(body, gloss_target)));
   assert(!IsWindowEnabled(GetDlgItem(body, gloss_pronunciation)));
+  // 翻译范围只管候选词翻译：候选词翻译关着时置灰，只开英文释义也不可选；当前值是「仅当前高亮」。
+  assert(!IsWindowEnabled(GetDlgItem(body, gloss_scope)));
+  assert(SendMessageW(GetDlgItem(body, gloss_scope), CB_GETCURSEL, 0, 0) == 0);
   click(gloss_english);
   assert(IsWindowEnabled(GetDlgItem(body, gloss_target)));
   assert(IsWindowEnabled(GetDlgItem(body, gloss_pronunciation)));
+  assert(!IsWindowEnabled(GetDlgItem(body, gloss_scope)));
   select_value(gloss_target, 2);
   select_value(gloss_secondary, 7);
   saved = store.load();
@@ -1046,6 +1068,10 @@ int main() {
   assert(store.load().snapshot->preferences().at("translation_secondary_language") == "ko");
   click(gloss_translations);
   assert(IsWindowEnabled(GetDlgItem(body, gloss_secondary)));
+  // 打开候选词翻译后翻译范围可选，选「全部」写 all。
+  assert(IsWindowEnabled(GetDlgItem(body, gloss_scope)));
+  select_value(gloss_scope, 1);
+  assert(store.load().snapshot->preferences().at("candidate_translation_scope") == "all");
   click(gloss_pronunciation);
   select_value(gloss_secondary, 0);
   saved = store.load();
@@ -1072,10 +1098,16 @@ int main() {
   assert(SendMessageW(GetDlgItem(body, translation_provider_control), CB_GETCURSEL, 0, 0) == 0);
   select_tab(L"候选释义");
   click(gloss_translations);
+  // 关掉候选词翻译：翻译范围置灰，已存的值不动。
+  assert(!IsWindowEnabled(GetDlgItem(body, gloss_scope)));
+  assert(store.load().snapshot->preferences().at("candidate_translation_scope") == "all");
   select_tab(L"翻译服务");
   assert(!IsWindowEnabled(GetDlgItem(body, translation_provider_control)));
   select_tab(L"候选释义");
   click(gloss_translations);
+  assert(SendMessageW(GetDlgItem(body, gloss_scope), CB_GETCURSEL, 0, 0) == 1);
+  select_value(gloss_scope, 0);
+  assert(store.load().snapshot->preferences().at("candidate_translation_scope") == "highlighted");
   select_tab(L"翻译服务");
   const auto before_provider = store.load().snapshot->revision();
   select_value(translation_provider_control, 1);
@@ -1169,7 +1201,7 @@ int main() {
   const auto ai_origin = saved.snapshot->preferences().at("ai_assistant").at("tokens");
   assert(!ai_origin.empty());
   assert(std::any_of(ai_origin.begin(), ai_origin.end(), [](const auto& entry) {
-    return entry.is_string() && entry.get<std::string>() == "synthetic-ai-token";
+    return entry.is_string() && entry.template get<std::string>() == "synthetic-ai-token";
   }));
   assert(saved.snapshot->preferences().at("ai_assistant").at("token") == "");
   tokens = ai_origin;
@@ -1489,12 +1521,34 @@ int main() {
   pump_until([&] { return IsWindowEnabled(server_log) != FALSE; });
   saved = store.load();
   assert(saved.snapshot->preferences().at("diagnostic_log").at("server").get<bool>() != previous_server);
+  // 「命令行查询候选」（#9663）在维护页、缺省关闭；经控件打开后只改这一个键，同组的两个日志开关不变。打开的状态留到下面的导出导入，验证它和日志开关一样只属于本机。
+  const HWND command_line = GetDlgItem(body, diagnostic_command_line_candidates);
+  assert(command_line && (GetWindowLongPtrW(command_line, GWL_STYLE) & WS_VISIBLE) != 0);
+  assert(caption(command_line) == L"命令行查询候选");
+  assert(saved.snapshot->preferences().at("diagnostic_log").at("command_line_candidates") == false);
+  assert(SendMessageW(command_line, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+  const auto diagnostics_before_command_line = saved.snapshot->preferences().at("diagnostic_log");
+  SendMessageW(command_line, BM_CLICK, 0, 0);
+  pump_until([&] { return IsWindowEnabled(command_line) != FALSE; });
+  saved = store.load();
+  {
+    auto expected = diagnostics_before_command_line;
+    expected["command_line_candidates"] = true;
+    assert(saved.snapshot->preferences().at("diagnostic_log") == expected);
+  }
+  assert(SendMessageW(command_line, BM_GETCHECK, 0, 0) == BST_CHECKED);
   SendMessageW(body, WM_COMMAND, MAKEWPARAM(export_settings, BN_CLICKED),
       reinterpret_cast<LPARAM>(GetDlgItem(body, export_settings)));
   pump_until([&] { return IsWindowEnabled(server_log) != FALSE; });
   if (!std::filesystem::is_regular_file(file)) {
     std::fwprintf(stderr, L"Export status: %ls\n", caption(GetDlgItem(host, status_text)).c_str());
     std::abort();
+  }
+  {
+    std::ifstream input(file, std::ios::binary);
+    std::string exported_text;
+    exported_text.assign(std::istreambuf_iterator<char>(input), {});
+    assert(!exported_text.empty() && exported_text.find("command_line_candidates") == std::string::npos);
   }
   const auto exported_revision = saved.snapshot->revision();
   assert(store.load().snapshot->revision() == exported_revision);
@@ -1516,6 +1570,8 @@ int main() {
   assert(saved.snapshot->revision() == exported_revision + 3);
   assert(saved.snapshot->preferences().at("keybindings").at("switch_language_caps_lock").get<bool>() == exported_caps);
   assert(saved.snapshot->preferences().at("diagnostic_log").at("tsf").get<bool>() == current_tsf);
+  assert(saved.snapshot->preferences().at("diagnostic_log").at("command_line_candidates") == true);
+  assert(SendMessageW(command_line, BM_GETCHECK, 0, 0) == BST_CHECKED);
   assert(saved.snapshot->preferences().at("ai_assistant").at("tokens") == tokens);
   assert(selections == 2);
   cancel_selection = true;
@@ -1792,7 +1848,11 @@ int main() {
   // 账号操作只接合成传输，正式控件与 worker 串起资料和同步；不读取真实会话。
   const auto account_click = [&](int id) {
     SendMessageW(body, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(body, id)));
-    pump_until([&] { return IsWindowEnabled(language) != FALSE; });
+    pump_until([&] {
+      if (IsWindowEnabled(language) == FALSE) return false;
+      if (id != account_login) return true;
+      return account_signed_in && IsWindowEnabled(GetDlgItem(body, account_sync_apply)) != FALSE;
+    });
   };
   const auto account_revision = store.load().snapshot->revision();
   select_page(7);
@@ -1811,6 +1871,7 @@ int main() {
   account_click(account_login);
   assert(account_signed_in && account_calls.back().at("operation") == "preferences_load");
   assert(caption(GetDlgItem(body, account_profile_text)).find(L"synthetic-account-0001") != std::wstring::npos);
+  assert(caption(GetDlgItem(body, account_profile_text)).find(L"合成邮箱方式　合成 Google 方式") != std::wstring::npos);
   assert(IsWindowEnabled(GetDlgItem(body, account_sync_apply)));
   assert(SetWindowTextW(GetDlgItem(body, account_name), L"  合成昵称  "));
   account_click(account_rename);

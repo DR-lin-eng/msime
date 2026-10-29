@@ -44,7 +44,10 @@ int main() {
     assert(theme_data::value(catalog) && !catalog.at("value").at("models").empty());
     Json model = catalog.at("value").at("models").front(); model["path"] = (directory / L"models/synthetic").u8string();
     std::mutex mutex; std::vector<Json> requests; bool malformed = false, installed = false, allow = false, picker_cancel = false;
-    std::atomic<bool> block_install{false}, install_started{false}, malformed_devices{false}; HANDLE gate = CreateEventW(nullptr, TRUE, FALSE, nullptr); assert(gate);
+    std::string install_error;
+    std::atomic<bool> block_models{true}, models_started{false}, block_install{false}, install_started{false}, malformed_devices{false}, empty_devices{false};
+    HANDLE models_gate = CreateEventW(nullptr, TRUE, FALSE, nullptr); assert(models_gate);
+    HANDLE gate = CreateEventW(nullptr, TRUE, FALSE, nullptr); assert(gate);
     const DWORD ui_thread = GetCurrentThreadId(); unsigned picks = 0;
     const auto transport = [&](const std::string& bytes) {
       const auto request = Json::parse(bytes); const auto& config = request.at("config");
@@ -53,16 +56,25 @@ int main() {
       { std::lock_guard<std::mutex> lock(mutex); requests.push_back(request); }
       if (operation == "cancel") { assert(SetEvent(gate)); return Json{{"ok",true},{"value",true}}.dump(); }
       if (service != "voice.settings") return Json{{"ok",true},{"value",{{"message","合成配置测试成功"}}}}.dump();
+      if (operation == "models" && block_models) { models_started = true; assert(WaitForSingleObject(models_gate, 10000) == WAIT_OBJECT_0); }
       if (operation == "capture_devices" && malformed_devices) return Json{{"ok",true},{"value",{Json{{"label",1}}}}}.dump();
+      if (operation == "capture_devices" && empty_devices) return Json{{"ok",true},{"value",Json::array()}}.dump();
       if (operation == "capture_devices") return Json{{"ok",true},{"value",{{{"backend","windows"},{"id","synthetic-device"},{"label","合成麦克风🙂"}}}}}.dump();
       if (operation == "install" && block_install) { install_started = true; assert(WaitForSingleObject(gate, 10000) == WAIT_OBJECT_0); return Json{{"ok",false},{"error","local_model_cancelled"}}.dump(); }
       std::lock_guard<std::mutex> lock(mutex);
+      if (operation == "install" && !install_error.empty())
+        return Json{{"ok",false},{"error",install_error},
+          {"catalog",{{"ok",true},{"value",{{"models",{model}},{"default",model.at("id")}}}}}}.dump();
       if (operation == "install") installed = true;
       if (operation == "remove") installed = false;
       model["installed"] = installed;
       const Json listing{{"ok",true},{"value",{{"models",{model}},{"default",model.at("id")}}}};
       if (malformed) return Json{{"ok",true},{"value",{{"models",1}}}}.dump();
-      if (operation == "models") return listing.dump();
+      if (operation == "models") {
+        auto response = listing;
+        response["voice_provider_catalog"] = Json{{"ok", true}, {"value", providers}};
+        return response.dump();
+      }
       return Json{{"ok",true},{"value",operation == "install" ? Json{{"path",model.at("path")}} : Json()}, {"catalog",listing}}.dump();
     };
     const auto last = [&] { std::lock_guard<std::mutex> lock(mutex); assert(!requests.empty()); return requests.back(); };
@@ -73,7 +85,12 @@ int main() {
     assert(window.open_route("settings:voice") && window.create(GetModuleHandleW(nullptr)));
     const auto host = window.handle(), body = GetDlgItem(host,page_body), selector = GetDlgItem(host,page_selector);
     const auto control = [&](int id) { const auto value = GetDlgItem(body,id); assert(value); return value; };
-    const auto wait = [&] { pump([&] { return SendMessageW(selector,CB_GETCURSEL,0,0) == 19 && IsWindowEnabled(GetDlgItem(body,language_switch)); }); }; wait();
+    // 目录在后台读取时页面先显示占位项，创建窗口不会等待服务目录返回。
+    pump([&] { return models_started.load(); });
+    assert(SendMessageW(control(Form::asr_provider), CB_GETCOUNT, 0, 0) == 1);
+    assert(!IsWindowEnabled(control(Form::asr_provider)));
+    block_models = false; assert(SetEvent(models_gate));
+    const auto wait = [&] { pump([&] { return SendMessageW(selector,CB_GETCURSEL,0,0) == 19 && IsWindowEnabled(GetDlgItem(body,language_switch)) && IsWindowEnabled(GetDlgItem(body,Form::asr_provider)); }); }; wait();
     const auto click = [&](int id) { assert(IsWindowEnabled(control(id))); SendMessageW(control(id),BM_CLICK,0,0); wait(); };
     const auto choose = [&](int id, int index) { SendMessageW(control(id),CB_SETCURSEL,index,0); SendMessageW(body,WM_COMMAND,MAKEWPARAM(id,CBN_SELCHANGE),reinterpret_cast<LPARAM>(control(id))); wait(); };
     const auto set = [&](int id, const wchar_t* value) { assert(SetWindowTextW(control(id),value)); };
@@ -92,7 +109,13 @@ int main() {
     assert(count() == invalid_before && store.load().snapshot->revision() == revision);
     set(Form::asr_endpoint,L"https://synthetic.example.test/audio"); click(Form::save);
     choose(Form::hold_key,2); click(Form::save); assert(voice().at("hotkey_ctrl_win") == true && voice().at("hotkey_ralt") == false && voice().at("hotkey_rctrl_ralt") == false);
-    click(Form::device_refresh); assert(SendMessageW(control(Form::devices),CB_GETCOUNT,0,0) == 2); choose(Form::devices,1);
+    choose(Form::asr_provider,provider_index("asr","doubao"));
+    empty_devices = true; click(Form::device_refresh);
+    assert(!IsWindowEnabled(control(Form::enabled)) && text(Form::device_status).find("未检测到麦克风") != std::string::npos);
+    // 无麦克风只应收窄录音入口，已选豆包服务的网络处理参数仍可编辑。
+    assert(IsWindowEnabled(control(Form::hold_key)) && IsWindowEnabled(control(Form::punc)) && IsWindowEnabled(control(Form::itn)) && IsWindowEnabled(control(Form::ddc)));
+    empty_devices = false; click(Form::device_refresh);
+    assert(IsWindowEnabled(control(Form::enabled)) && SendMessageW(control(Form::devices),CB_GETCOUNT,0,0) == 2); choose(Form::devices,1);
     assert(voice().at("capture_device") == "synthetic-device" && voice().at("capture_backend") == "windows");
     assert(text(Models::detail).find("语言：") != std::string::npos && text(Models::detail).find("流式识别：") != std::string::npos);
     malformed_devices = true; click(Form::device_refresh);
@@ -105,11 +128,39 @@ int main() {
     click(Models::use); assert(voice().at("asr_provider") == "local" && !IsWindowEnabled(control(Form::test_asr)));
     allow = false; const auto before_remove = count(); click(Models::remove); assert(count() == before_remove);
     allow = true; click(Models::remove); assert(voice().at("asr_model_path") == "");
+    // 从真实窗口的下载按钮经过异步响应回到表单，失败不应改写偏好或阻止重试。
+    const auto failure_revision = store.load().snapshot->revision();
+    struct Failure { const char* code; const char* message; };
+    const Failure failures[] = {
+      {"local_model_network: synthetic-detail", "下载失败：无法连接下载服务器。请检查网络，或设置下载镜像后再试。"},
+      {"local_model_http_status: 503", "下载失败：服务器拒绝了请求。请稍后重试，或更换下载镜像。"},
+      {"local_model_checksum_mismatch: synthetic-detail", "下载的文件校验不通过，已丢弃。请重试；若使用了镜像，请确认镜像内容完整。"},
+      {"local_model_format_mismatch: synthetic-detail", "下载的文件校验不通过，已丢弃。请重试；若使用了镜像，请确认镜像内容完整。"},
+      {"local_model_io: synthetic-detail", "无法写入模型文件，请确认磁盘空间充足。"},
+      {"local_model_cancelled: synthetic-detail", "安装已取消。"},
+      {"future_model_error: synthetic-detail", "操作失败，请重试。"},
+    };
+    for (const auto& failure : failures) {
+      { std::lock_guard<std::mutex> lock(mutex); install_error = failure.code; }
+      click(Models::install);
+      assert(text(Models::notice) == failure.message);
+      assert(IsWindowEnabled(control(Models::install)) && !IsWindowEnabled(control(Models::cancel)));
+      assert(store.load().snapshot->revision() == failure_revision);
+    }
+    // 格式错误经公共归一化后，离线导入仍显示专属校验提示。
+    { std::lock_guard<std::mutex> lock(mutex); install_error = "local_model_format_mismatch: synthetic-detail"; }
+    click(Models::add_file); click(Models::import_model);
+    assert(text(Models::notice) == "所选文件和模型目录里的校验值不符，可能没下载完整或版本不对，请重新下载后再导入。");
+    assert(IsWindowEnabled(control(Models::import_model)) && IsWindowEnabled(control(Models::install)));
+    assert(store.load().snapshot->revision() == failure_revision);
+    { std::lock_guard<std::mutex> lock(mutex); install_error.clear(); }
     block_install = true; assert(ResetEvent(gate)); SendMessageW(control(Models::install),BM_CLICK,0,0);
     pump([&] { return install_started.load(); }); assert(IsWindowEnabled(control(Models::cancel)) && !IsWindowEnabled(control(Models::install)));
     SendMessageW(control(Models::cancel),BM_CLICK,0,0); wait(); block_install = false;
     assert(!IsWindowEnabled(control(Models::install)) && text(Models::notice).find("取消") != std::string::npos);
-    click(Models::refresh); click(Models::choose_directory); assert(voice().at("asr_model_path") == (directory / L"models/custom").u8string());
+    // 刷新模型列表会再次带回服务目录；重新填充选择器时不能覆盖表单里尚未保存的编辑。
+    set(Form::language,L"ja-JP"); click(Models::refresh); assert(text(Form::language) == "ja-JP"); set(Form::language,L"en-US");
+    click(Models::choose_directory); assert(voice().at("asr_model_path") == (directory / L"models/custom").u8string());
     { std::lock_guard<std::mutex> lock(mutex); malformed = true; } click(Models::refresh);
     assert(!IsWindowEnabled(control(Models::install)) && !IsWindowEnabled(control(Models::use)));
     // 直接用共享安装入口验证注册后的首次回调可取消，文件和网络都不必开始。
@@ -117,7 +168,7 @@ int main() {
     CancelContext context{model.at("id").get<std::string>(),false};
     const auto cancelled = theme_data::response(msime_client_voice_local_model_install(reinterpret_cast<const uint8_t*>(shared_request.data()),shared_request.size(),cancel_registered,&context));
     assert(context.called && cancelled.at("ok") == false && cancelled.at("error") == "local_model_cancelled");
-    DestroyWindow(host); assert(CloseHandle(gate));
+    DestroyWindow(host); assert(CloseHandle(models_gate)); assert(CloseHandle(gate));
   }
   assert(SetEnvironmentVariableW(L"MSIME_CLIENT_STATE_DIR",size ? previous.c_str() : nullptr)); std::error_code error; std::filesystem::remove_all(directory,error);
   std::puts("Windows 7 voice: native settings, shared provider isolation and validation, preserved old settings, model requests and cancellation passed");

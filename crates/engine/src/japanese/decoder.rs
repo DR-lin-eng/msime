@@ -95,7 +95,7 @@ const SHARED_MODEL_CAPACITY: usize = if cfg!(test) { 256 } else { 2 };
 
 /// 判断同一路径上的模型文件是否换过：长度和修改时间，unix 上加设备号和 inode，Windows 上加创建时间。rename 进来的新文件 inode 一定不同，长度和修改时间也几乎一定不同。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     len: u64,
     modified: Option<SystemTime>,
     #[cfg(unix)]
@@ -125,7 +125,7 @@ impl FileIdentity {
     }
 
     /// 路径上此刻那个普通文件的身份；不存在、不是普通文件（含符号链接）时为 `None`，与 `load` 的拒绝条件一致。
-    fn at(path: &Path) -> Option<Self> {
+    pub(crate) fn at(path: &Path) -> Option<Self> {
         let metadata = std::fs::symlink_metadata(path).ok()?;
         metadata.file_type().is_file().then(|| Self::of(&metadata))
     }
@@ -515,6 +515,14 @@ impl JapaneseDictionary {
             shared.released.push(released);
         }
         Some(model)
+    }
+
+    /// 只取已经就绪的共享模型，不获取加载锁，也不读取和校验模型内容。
+    pub(crate) fn cached(path: &Path) -> Option<Arc<JapaneseDictionary>> {
+        if let Some(preloaded) = lock(&PRELOADED).get(path) {
+            return Some(Arc::clone(preloaded));
+        }
+        lock(&SHARED).current(path, SHARED_MODEL_CAPACITY)
     }
 
     /// 放掉进程级缓存对全部模型的强引用。正在用它的会话照常用到结束，这期间再要同一路径拿到的仍是这一份（不另读一份，内存告警时也不会因此多出一份）；没人用了它就随之释放，之后第一个查日文的会话重新读文件。宿主的清缓存动作经 `Session::reset_cache` 调到这里，iOS 键盘扩展在内存告警时靠它交出前缀索引和映射。预载的模型不受影响，它们只能由 [`JapaneseDictionary::unload`] 放掉。

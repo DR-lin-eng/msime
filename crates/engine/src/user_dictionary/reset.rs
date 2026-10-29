@@ -13,7 +13,9 @@ use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::paths::RuntimePaths;
 use crate::user_dictionary::generation::{copy_private_file, merge_split_wubi, weakly_canonical};
-use crate::user_dictionary::journal::{close_cached_journals, ensure_schema, open_database};
+use crate::user_dictionary::journal::{
+    checkpoint_journal, close_cached_journals, ensure_schema, open_database,
+};
 
 /// SQLite files that sit beside the journal. A leftover `-wal` would bring the learned data the user just erased back on the next open.
 const JOURNAL_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
@@ -64,6 +66,8 @@ pub fn reset_learned_data_with(paths: &RuntimePaths, main_dictionary: bool) -> R
         .map_or(0, |elapsed| elapsed.as_nanos())
         .to_string();
     let journal = paths.user(assets::USER_JOURNAL);
+    // 日志是 WAL 时，最近的学习可能还在 `-wal` 里、没并回主文件。先并回并清空 `-wal`：失败回滚或被杀后放回的备份本身就是完整的日志，新日志发布后、旁路文件删掉之前，原名旁边也只剩一个空 `-wal`，套不到新日志上。
+    checkpoint_journal(&journal);
     // 词库在前、日志在最后：`swap` 按顺序把 `sources` 配给前面的词库。
     let mut replacements: Vec<Replacement> = names
         .iter()
@@ -170,6 +174,76 @@ fn restore(replacements: &[Replacement]) {
     }
 }
 
+/// 重置在两次改名之间被杀时，从时间戳最新的普通文件备份恢复缺失的 `target`，再删除源文件名下同一时间戳没发布的 `.reset.` 副本。词库现名没有备份时也查找合法旧名备份，发布到请求的现名，供代次回放使用；现有文件与备份都按现名优先。准备代次时在打开词库和日志之前调用。
+///
+/// `target` 在（包括符号链接）时不动它，最终发布也不得覆盖检查之后竞争者放回的文件；失败保留备份。恢复后原重置进程若还活着，它缺少已删除的 `.reset.` 副本，后续发布失败会走原有回滚；这里不提供跨文件事务原子性。
+pub(crate) fn restore_interrupted_reset(target: &Path) {
+    match fs::symlink_metadata(target) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        _ => return,
+    }
+    // 旧文件挪开后 `RuntimePaths::dictionary` 已看不到它，只会给出现名；备份仍使用旧文件名。
+    let backup = newest_reset_backup(target).or_else(|| {
+        let name = target.file_name()?.to_str()?;
+        let (_, legacy) = assets::LEGACY_NAMES
+            .iter()
+            .find(|(current, _)| *current == name)?;
+        let legacy = target.with_file_name(legacy);
+        match fs::symlink_metadata(&legacy) {
+            Err(error) if error.kind() == ErrorKind::NotFound => newest_reset_backup(&legacy),
+            _ => None,
+        }
+    });
+    if let Some(backup) = backup {
+        backup.publish(target);
+    }
+}
+
+struct ResetBackup {
+    path: PathBuf,
+    unpublished: PathBuf,
+}
+
+/// 选择与发布分开：目录枚举结束后，其他准备者仍可能先把目标放回来。
+fn newest_reset_backup(target: &Path) -> Option<ResetBackup> {
+    let directory = target.parent()?;
+    let name = target.file_name()?.to_str()?;
+    let prefix = format!(".{name}.backup.");
+    fs::read_dir(directory)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let stamp = entry
+                .file_name()
+                .to_str()?
+                .strip_prefix(&prefix)?
+                .to_owned();
+            let order = stamp
+                .parse::<u128>()
+                .ok()
+                .filter(|_| stamp.bytes().all(|byte| byte.is_ascii_digit()))?;
+            is_real_file(&entry.path()).then_some((order, stamp, entry.path()))
+        })
+        .max_by_key(|(order, _, _)| *order)
+        .map(|(_, stamp, path)| ResetBackup {
+            path,
+            unpublished: affixed(target, ".reset.", &stamp),
+        })
+}
+
+impl ResetBackup {
+    fn publish(self, target: &Path) {
+        let Ok(mut backup) = tempfile::TempPath::try_from_path(self.path) else {
+            return;
+        };
+        // 这是唯一的原件，失败或输掉发布竞争都不能让 `TempPath::drop` 删除它。
+        backup.disable_cleanup(true);
+        if backup.persist_noclobber(target).is_ok() {
+            remove_ignoring_errors(&self.unpublished);
+        }
+    }
+}
+
 /// `.<name><infix><stamp>` beside `target`, built on the native string so a profile directory such as `C:\Users\陆傲天` survives unchanged; everything added is ASCII.
 fn affixed(target: &Path, infix: &str, stamp: &str) -> PathBuf {
     let mut name = OsString::from(".");
@@ -223,6 +297,74 @@ fn reject_redirected_directory(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::user_dictionary::replay::tests::{sql, weight};
+
+    /// 两个准备者先看到缺失目标；最新备份先发布后，迟到的旧备份不能覆盖它，也不能被失败路径清理。
+    #[test]
+    fn a_late_reset_recovery_preserves_the_winners_file_and_its_own_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join(assets::USER_JOURNAL);
+        let older = affixed(&target, ".backup.", "100");
+        let newest = affixed(&target, ".backup.", "200");
+        let older_stage = affixed(&target, ".reset.", "100");
+        fs::write(&older, b"older synthetic journal").unwrap();
+        fs::write(&newest, b"newest synthetic journal").unwrap();
+        fs::write(&older_stage, b"unpublished synthetic journal").unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&target).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+
+        newest_reset_backup(&target).unwrap().publish(&target);
+        // 迟到者此前同样看到了缺失；枚举时最新备份已被赢家取走，只剩旧备份。
+        newest_reset_backup(&target).unwrap().publish(&target);
+
+        assert_eq!(fs::read(&target).unwrap(), b"newest synthetic journal");
+        assert_eq!(fs::read(&older).unwrap(), b"older synthetic journal");
+        assert_eq!(
+            fs::read(&older_stage).unwrap(),
+            b"unpublished synthetic journal"
+        );
+    }
+
+    /// 现有词库沿用路径解析的优先级；两种名称都只有备份时优先恢复现名备份。
+    #[test]
+    fn reset_recovery_follows_current_and_legacy_name_priority() {
+        for (name, legacy) in [
+            (assets::MAIN_DICTIONARY, "msime.db"),
+            (assets::ENGLISH_DICTIONARY, "english.db"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let paths = RuntimePaths {
+                dictionaries: root.path().to_owned(),
+                ..RuntimePaths::default()
+            };
+            let current = root.path().join(name);
+            let old = root.path().join(legacy);
+            let current_backup = affixed(&current, ".backup.", "100");
+            let old_backup = affixed(&old, ".backup.", "200");
+            fs::write(&current, b"existing synthetic dictionary").unwrap();
+            fs::write(&old_backup, b"legacy synthetic backup").unwrap();
+            restore_interrupted_reset(&paths.dictionary(name));
+            assert_eq!(
+                fs::read(&current).unwrap(),
+                b"existing synthetic dictionary"
+            );
+            assert!(old_backup.exists());
+
+            fs::rename(&current, &old).unwrap();
+            fs::write(&current_backup, b"current synthetic backup").unwrap();
+            restore_interrupted_reset(&paths.dictionary(name));
+            assert_eq!(fs::read(&old).unwrap(), b"existing synthetic dictionary");
+            assert!(current_backup.exists());
+            assert!(!current.exists());
+
+            fs::remove_file(&old).unwrap();
+            restore_interrupted_reset(&paths.dictionary(name));
+            assert_eq!(fs::read(&current).unwrap(), b"current synthetic backup");
+            assert!(!current_backup.exists());
+            assert_eq!(fs::read(&old_backup).unwrap(), b"legacy synthetic backup");
+        }
+    }
 
     fn paths(root: &Path) -> RuntimePaths {
         let path = |name: &str| {
@@ -350,6 +492,52 @@ mod tests {
                 .collect();
             assert!(leftovers.is_empty(), "{leftovers:?}");
         }
+    }
+
+    /// 重置学习数据连双拼按两键码学的纠错（#10018）一起清掉：新日志里两张表是空的，共用的纠错档案下次刷新就读不到旧记录。
+    #[test]
+    fn reset_clears_shuangpin_typo_learning() {
+        use crate::types::ShuangpinProfileKind;
+        use crate::user_dictionary::typo_profile::{PersonalTypoProfile, ShuangpinTypoOutcome};
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = paths(temporary.path());
+        sql(
+            &paths.resource(assets::MAIN_DICTIONARY),
+            "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);",
+        );
+        sql(
+            &paths.resource(assets::ENGLISH_DICTIONARY),
+            "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);",
+        );
+        let journal = paths.user(assets::USER_JOURNAL);
+        let profile = PersonalTypoProfile::shared(&journal);
+        profile
+            .record_shuangpin(
+                ShuangpinProfileKind::Xiaohe,
+                &[(*b"gf", *b"gr")],
+                ShuangpinTypoOutcome::Accepted,
+            )
+            .unwrap();
+        profile
+            .record_shuangpin_suppression(ShuangpinProfileKind::Xiaohe, "mwgfxi")
+            .unwrap();
+        assert!(profile.has_shuangpin_counts());
+
+        reset_learned_data(&paths).unwrap();
+
+        for table in [
+            "shuangpin_typo_counts",
+            "shuangpin_autocorrect_suppressions",
+        ] {
+            assert_eq!(
+                weight(&journal, &format!("SELECT count(*) FROM {table}")),
+                Some(0),
+                "{table}"
+            );
+        }
+        profile.refresh_if_changed();
+        assert!(!profile.has_shuangpin_counts());
+        assert!(!profile.shuangpin_suppressed(ShuangpinProfileKind::Xiaohe, "mwgfxi"));
     }
 
     #[test]

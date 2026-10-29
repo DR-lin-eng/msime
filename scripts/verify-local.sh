@@ -230,7 +230,7 @@ scope_classify() {
     platforms/macos/*) echo macos; echo named ;;
     platforms/ios/* | resources/* | scripts/* | tools/*) echo named ;;
     # 没有 --quick 阶段从这些路径构建：常驻的契约检查、Rust workspace 检查和 agent-notes 阶段覆盖它们。脚本插件（plugins/）不属于任何平台，由 CI 的 Script plugins 作业和 scripts/test-script-plugins.sh 测试。
-    docs/* | crates/dict-builder/* | crates/pack-tool/* | crates/mcp-server/* | plugins/* | \
+    docs/* | crates/dict-builder/* | crates/pack-tool/* | crates/script-sdk/* | crates/mcp-server/* | plugins/* | \
       .agents/* | *.md | LICENSE | .editorconfig) ;;
     *) echo all ;;
   esac
@@ -688,19 +688,90 @@ else
   echo "  run platforms/linux/build-container.sh"
 fi
 
+# Windows 原生配置可能链接显式 MSVC 目标，而本机默认 Rust 是 GNU；必须重建缓存里真正链接的那一份。
+build_windows_host_library() {
+  local library profile_dir cargo_dir cargo_root profile target runtime build_status cargo_path msvc_tools host_arch target_arch linker linker_key
+  local target_args=() cargo_env=()
+  library=$(sed -n 's/^MSIME_HOST_LIBRARY:[A-Z]*=//p' "$MSIME_NATIVE_BUILD/CMakeCache.txt" 2>/dev/null | head -1)
+  if [ -z "$library" ]; then
+    echo "native: $MSIME_NATIVE_BUILD/CMakeCache.txt names no MSIME_HOST_LIBRARY"
+    return 1
+  fi
+  if command -v cygpath >/dev/null 2>&1; then
+    library=$(cygpath -u "$library") || return 1
+  fi
+  profile_dir=$(dirname "$library")
+  cargo_dir=$(cd "$(dirname "$profile_dir")" && pwd -P) || return 1
+  cargo_root=$(cd target && pwd -P) || return 1
+  if [ "$cargo_dir" != "$cargo_root" ]; then
+    target=$(basename "$cargo_dir")
+    if [ "$(dirname "$cargo_dir")" != "$cargo_root" ]; then
+      echo "native: configured host library is outside this checkout's target directory: $library"
+      return 1
+    fi
+    case "$target" in
+      *-pc-windows-msvc|*-pc-windows-gnu) target_args=(--target "$target") ;;
+      *) echo "native: unsupported Rust target directory: $cargo_dir"; return 1 ;;
+    esac
+  fi
+  profile=$(basename "$profile_dir")
+  [ "$profile" = debug ] && profile=dev
+  cargo_path="$PATH"
+  if [ -n "${VCToolsInstallDir:-}" ]; then
+    msvc_tools="$VCToolsInstallDir"
+    if command -v cygpath >/dev/null 2>&1; then msvc_tools=$(cygpath -u "$msvc_tools") || return 1; fi
+    host_arch=${VSCMD_ARG_HOST_ARCH:-x64}
+    target_arch=${VSCMD_ARG_TGT_ARCH:-x64}
+    [ "$host_arch" = amd64 ] && host_arch=x64
+    [ "$target_arch" = amd64 ] && target_arch=x64
+    msvc_tools="${msvc_tools%/}/bin/Host$host_arch/$target_arch"
+    # Git Bash 的 link.exe 是硬链接工具；仅给 Cargo 调整顺序，其他脚本仍使用原来的 Unix 工具。
+    if [ -f "$msvc_tools/link.exe" ]; then cargo_path="$msvc_tools:$cargo_path"; fi
+  fi
+  case "${target:-}" in
+    *-pc-windows-msvc)
+      linker=$(sed -n 's/^CMAKE_LINKER:[A-Z]*=//p' "$MSIME_NATIVE_BUILD/CMakeCache.txt" | head -1)
+      if command -v cygpath >/dev/null 2>&1 && [ -n "$linker" ]; then linker=$(cygpath -u "$linker") || return 1; fi
+      [ -n "$linker" ] || linker="${msvc_tools:-}/link.exe"
+      if [ ! -f "$linker" ]; then
+        echo "native: MSVC linker is unavailable; configure CMAKE_LINKER or initialize the Visual Studio environment"
+        return 1
+      fi
+      # 为实际 Rust 目标传入绝对路径，不能只凭 Bash 的 PATH 推断原生 rustc 会选谁。
+      linker_key=$(printf 'CARGO_TARGET_%s_LINKER' "$target" | tr '[:lower:]-' '[:upper:]_')
+      if command -v cygpath >/dev/null 2>&1; then linker=$(cygpath -w "$linker") || return 1; fi
+      cargo_env=("$linker_key=$linker")
+      echo "native: $linker_key=$linker"
+      ;;
+  esac
+  echo "native: rebuilding $library"
+  # macOS 系统 Bash 在 nounset 下把空数组视为未设置，可选参数只在数组非空时展开。
+  env PATH="$cargo_path" ${cargo_env[@]+"${cargo_env[@]}"} cargo build -p msime-host-api --locked --profile "$profile" ${target_args[@]+"${target_args[@]}"} 2>&1 |
+    tee "$MSIME_NATIVE_BUILD/host-library-build.log" | tail -2
+  build_status=${PIPESTATUS[0]}
+  if [ "$build_status" -ne 0 ]; then
+    cat "$MSIME_NATIVE_BUILD/host-library-build.log"
+    return 1
+  fi
+  runtime="$profile_dir/msime_host_api.dll"
+  [ -f "$runtime" ] || runtime="$profile_dir/libmsime_host_api.so"
+  if [ ! -f "$runtime" ]; then
+    echo "native: configured host runtime was not produced: $profile_dir"
+    return 1
+  fi
+  mkdir -p "$MSIME_NATIVE_BUILD/Debug" && cp -f "$runtime" "$MSIME_NATIVE_BUILD/Debug/"
+}
+
 note "compile: native host"
 if ! scoped windows desktop; then
   :
 elif [ -d "$MSIME_NATIVE_BUILD" ]; then
-  # The native tests link the Rust library, so it has to be current or they
-  # fail to start with an entry-point error that looks like a test failure.
-  cargo build -p msime-host-api 2>&1 | tail -2
-  [ "${PIPESTATUS[0]}" -eq 0 ] || fail "cargo build -p msime-host-api"
-  for built in target/debug/msime_host_api.dll target/debug/libmsime_host_api.so; do
-    [ -f "$built" ] && cp -f "$built" "$MSIME_NATIVE_BUILD/Debug/" 2>/dev/null
-  done
-  cmake --build "$MSIME_NATIVE_BUILD" --config Debug 2>&1 | grep -Ei "error C[0-9]|error LNK" | head -5
-  cmake --build "$MSIME_NATIVE_BUILD" --config Debug >/dev/null 2>&1 || fail "native build"
+  if build_windows_host_library; then
+    cmake --build "$MSIME_NATIVE_BUILD" --config Debug 2>&1 | grep -Ei "error C[0-9]|error LNK" | head -5
+    cmake --build "$MSIME_NATIVE_BUILD" --config Debug >/dev/null 2>&1 || fail "native build"
+  else
+    fail "cargo build -p msime-host-api (configured native host library)"
+  fi
 elif [ -n "$cross_vcpkg" ]; then
   # Not a Windows host, but the MinGW toolchain and a bootstrapped vcpkg are
   # both here, so the Windows compile gate can run anyway.
@@ -946,6 +1017,8 @@ fi
 
 note "rust tests"
 : > "$collected.rust"
+# 用户词库日志改用 WAL 之后，每个还开着的日志除了主文件还占着 `-wal`、`-shm`，WAL 连接持锁期间别的连接关掉的描述符也要等它们一起放；msime-engine 与 msime-host-api 的测试并行建几百个临时日志，进程里同时开着的文件从约 100 涨到近 400。macOS 上 launchd 给的软上限是 256（经 SSH 的 rbuild 也是），会让夹具随机报 `unable to open database file` / `Too many open files`。这里只抬软上限，硬上限更低时保持原样。
+ulimit -n 4096 2>/dev/null || true
 # The neural sentence model tests (msime-engine's lattice::neural and settling tests, msime-input-runtime's settle test) skip without the shipped models, and neither model is in the repository. Fetch the pinned pair so they run here; the path is absolute because cargo runs each test binary from its own crate directory. A failed fetch is not a test failure: the tests skip and say why.
 if python3 scripts/fetch_neural_model.py --out "$root/target/neural-model" > "$collected.neural-model" 2>&1; then
   export MSIME_NEURAL_MODEL_DIR="$root/target/neural-model"
@@ -1013,7 +1086,7 @@ note "clippy: first-party crates"
 # "frontend not built" indistinguishable on a developer machine.
 clippy_failed=""
 for crate in msime-path-trust msime-client-base msime-client-core msime-client-providers msime-client-services msime-engine msime-engine-wasm msime-host-api msime-host-macos \
-             msime-host-windows msime-input-runtime msime-mcp-server msime-tauri-mobile-platform msime-script-runtime msime-pack-tool msime-dict-builder msime-clipboard-relay; do
+             msime-host-windows msime-input-runtime msime-mcp-server msime-tauri-mobile-platform msime-script-runtime msime-script-sdk msime-pack-tool msime-dict-builder msime-clipboard-relay; do
   cargo clippy -p "$crate" --all-targets -- -D warnings >/dev/null 2>&1 ||
     clippy_failed="$clippy_failed  $crate"$'\n'
 done
@@ -1088,15 +1161,18 @@ if [ -n "${MSIME_EVAL_RESOURCES:-}" ] && [ -d "${MSIME_EVAL_RESOURCES:-}" ]; the
   #
   # `fourteen-key` 和 `fourteen-key-sentences` 是同样两份集合在全拼 14 键上打：每个字母换成它所在键的组码（这一组的首字母），从 `GridKey` 送进去。14 键与九键共用一套解码，只换码表，所以两者的数字可以直接比。
   # `particles`、`particles-nine-key`、`particles-fourteen-key` 是常用词接句末语气词（债券吗、标注呀）在三种键盘上打：n-gram 表没有句尾，这类口语短句其余几份集合都量不到。
-  for set in sentences harvested neutral words nine-key nine-key-sentences fourteen-key fourteen-key-sentences particles particles-nine-key particles-fourteen-key; do
+  # `nine-key-prefix` 和 `fourteen-key-prefix` 是同一份词级集打到末音节的声母就停（吃饭 打 chif），金标准仍是整个词。其余集合每条都打全了读音，补全词往后排只会让它们变好；停在声母上的用户要的正是补全词，排序改动要在这两份上一起看。
+  for set in sentences harvested neutral words nine-key nine-key-prefix nine-key-sentences fourteen-key fourteen-key-prefix fourteen-key-sentences particles particles-nine-key particles-fourteen-key; do
     case "$set" in
       sentences) args="--set resources/eval/sentences-v1.tsv" ;;
       harvested) args="--set resources/eval/sentences-v2.tsv" ;;
       neutral) args="--set resources/eval/sentences-neutral-v1.tsv" ;;
       words) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000" ;;
       nine-key) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000 --nine-key" ;;
+      nine-key-prefix) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000 --nine-key --cut-last-syllable initial" ;;
       nine-key-sentences) args="--set resources/eval/sentences-nine-key-v1.tsv --nine-key" ;;
       fourteen-key) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000 --grid fourteen" ;;
+      fourteen-key-prefix) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000 --grid fourteen --cut-last-syllable initial" ;;
       fourteen-key-sentences) args="--set resources/eval/sentences-nine-key-v1.tsv --grid fourteen" ;;
       particles) args="--set resources/eval/sentences-particles-v1.tsv" ;;
       particles-nine-key) args="--set resources/eval/sentences-particles-v1.tsv --nine-key" ;;

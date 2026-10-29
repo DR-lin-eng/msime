@@ -10,8 +10,13 @@ import { useTimeout } from "../core/use-timeout";
 import { FluentIcon, type FluentIconName } from "../core/fluent-icons";
 import { msimeFramePath, msimeStrokePath } from "../core/brand-logo";
 import { appThemeStyle, seasonAttr } from "../core/app-theme-style";
-import type { HostChromeClient, ImeSetupClient, ResolvedAppTheme } from "../core/host-contracts";
-import { makeDefaultAction, useImeSetupState } from "../keyboard/setup-status-card";
+import type {
+  HostChromeClient,
+  ImeSetupClient,
+  OobeClient,
+  ResolvedAppTheme,
+} from "../core/host-contracts";
+import { makeDefaultAction, useImeSetupState, useOobeState } from "../keyboard/setup-status-card";
 import { KeyboardSwitchGuideHost } from "../keyboard/keyboard-switch-guide";
 import { useSettingsPlatform } from "../theme/settings-platform";
 import { useHarmonyWelcomeSystemBars } from "../settings/use-settings-theme";
@@ -48,6 +53,8 @@ export interface OnboardingActions {
   prepareResources: () => Promise<void>;
   openSystemKeyboardSettings: () => Promise<void>;
   showInputMethodPicker: () => Promise<void>;
+  /** 跨平台 OOBE 状态；宿主无法确认系统键盘时保留 `null`。 */
+  oobe?: OobeClient;
 }
 
 /** How long the first-launch splash stays up before the flow opens on its own. */
@@ -340,6 +347,7 @@ export function WelcomeFlowPage({
   appTheme,
   inputSchemes,
   wubiProfile,
+  savedEnglishGloss,
   chrome,
 }: {
   actions: OnboardingActions;
@@ -360,6 +368,8 @@ export function WelcomeFlowPage({
   inputSchemes?: readonly InputScheme[];
   /** HarmonyOS：已保存的五笔码表，让五笔卡片写明正在用哪一套。 */
   wubiProfile?: Preferences["wubi_profile"];
+  /** 已保存的「候选下方显示译文」（`candidate_english_gloss`）。用户没碰开关时开关和示例按它显示；没碰开关就离开时仍不写回（见 `OnboardingChoices.candidateEnglishGloss`）。 */
+  savedEnglishGloss?: boolean;
   /** HarmonyOS 手机：宿主的系统栏，先按启动页着色，再按各步骤的页面着色。 */
   chrome?: HostChromeClient;
 }) {
@@ -374,6 +384,8 @@ export function WelcomeFlowPage({
   const step = steps.indexOf(page);
   const [scheme, setScheme] = useState<OnboardingInputScheme>(editionScheme ?? "quanpin");
   const [gloss, setGloss] = useState<boolean>();
+  // 开关和示例显示的值：用户切换过就用切换后的，否则用已保存的偏好。重放流程时，已开着释义的用户不会看到一个关着的开关。
+  const shownGloss = gloss ?? savedEnglishGloss ?? false;
   const [error, setError] = useState("");
   const prepared = useRef(false);
   // 用户是否已选定键盘：点过某个键盘，或走过了提供键盘的那一步；在此之前点跳过不动已保存的方案。
@@ -393,7 +405,11 @@ export function WelcomeFlowPage({
   const harmonyPhone = platform === "harmony";
   const [splashing, setSplashing] = useState(splash && !desktop);
   const endSplash = useCallback(() => setSplashing(false), []);
-  const setupState = useImeSetupState(harmony ? setup : undefined);
+  const reportedSetupState = useImeSetupState(harmony ? setup : undefined);
+  const oobeState = useOobeState(actions.oobe);
+  const setupState =
+    reportedSetupState ??
+    (oobeState ? { enabled: oobeState.systemEnabled, current: oobeState.systemCurrent } : null);
   const schemeCards = harmony
     ? harmonySchemeCards(desktop, edition, inputSchemes, wubiProfile)
     : [];
@@ -627,7 +643,7 @@ export function WelcomeFlowPage({
             {harmonyGlossSamples.map(([word, meaning], index) => (
               <div className={onboarding.hGlossCell(index === 0)} key={word}>
                 <span>{word}</span>
-                {gloss && (
+                {shownGloss && (
                   <small style={{ color: harmonyStripColors(Boolean(appTheme), dark).gloss }}>
                     {meaning}
                   </small>
@@ -637,7 +653,7 @@ export function WelcomeFlowPage({
           </div>
           <div className={onboarding.hGlossRow(desktop)}>
             <span>显示英文释义</span>
-            <Switch aria-label="显示英文释义" checked={gloss ?? false} onChange={setGloss} />
+            <Switch aria-label="显示英文释义" checked={shownGloss} onChange={setGloss} />
           </div>
         </>
       ) : (
@@ -990,7 +1006,7 @@ export function WelcomeFlowPage({
               {glossSamples.map(([word, meaning], index) => (
                 <div className={onboarding.glossCandidate(index === 0)} key={word}>
                   <span>{word}</span>
-                  {gloss && <small>{meaning}</small>}
+                  {shownGloss && <small>{meaning}</small>}
                 </div>
               ))}
             </div>
@@ -999,7 +1015,7 @@ export function WelcomeFlowPage({
                 <strong>显示英文释义</strong>
                 <small>稍后可以在「标点与翻译」中修改。</small>
               </span>
-              <Switch aria-label="显示英文释义" checked={gloss ?? false} onChange={setGloss} />
+              <Switch aria-label="显示英文释义" checked={shownGloss} onChange={setGloss} />
             </div>
           </section>
         )}

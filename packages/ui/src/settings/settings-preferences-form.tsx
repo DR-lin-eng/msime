@@ -1,4 +1,5 @@
 import { SettingsSearchPage } from "./settings-page-fieldset";
+import type { PluginOpenRequest } from "./use-settings-shell-state";
 import { canReloadSettingsPage, canRestoreDefaultsOnPage } from "./settings-page-visibility";
 import { SettingsFormFooter } from "./settings-form-footer";
 import { SettingsFormFrame } from "./settings-form-frame";
@@ -35,6 +36,8 @@ export interface SettingsPreferencesFormProps {
   desktopSkinTabs: CommunityViews["desktopTabs"];
   skinCommunityShown: boolean;
   pluginCommunityShown: boolean;
+  /** 社区装好脚本插件后要在「我的插件」里打开的包。 */
+  pluginOpenRequest?: PluginOpenRequest | null;
   externalActions: Pick<
     ReturnType<typeof createSettingsExternalActions>,
     "onOpenDocumentation" | "onOpenSystemKeyboardSettings"
@@ -50,6 +53,7 @@ export function SettingsPreferencesForm({
   desktopSkinTabs,
   skinCommunityShown,
   pluginCommunityShown,
+  pluginOpenRequest = null,
   externalActions,
   onRestoreDefaults,
   reloadSettings,
@@ -70,6 +74,7 @@ export function SettingsPreferencesForm({
     iosPlatform,
     androidPlatform,
     handwritingOnScreenKeyboardPage,
+    showAiGeneration,
   } = model;
   return (
     <SettingsFormFrame showReload={false} busy={busy}>
@@ -93,9 +98,12 @@ export function SettingsPreferencesForm({
         <SettingsSearchPage.Provider value="expression">
           <ExpressionSettingsPage />
         </SettingsSearchPage.Provider>
-        <SettingsSearchPage.Provider value="ai">
-          <AiSettingsPage />
-        </SettingsSearchPage.Provider>
+        {/* 不提供 AI 生成类功能的宿主（HarmonyOS）不挂「AI 辅助」页，搜索也搜不到它。 */}
+        {showAiGeneration && (
+          <SettingsSearchPage.Provider value="ai">
+            <AiSettingsPage />
+          </SettingsSearchPage.Provider>
+        )}
         <SettingsSearchPage.Provider value="shortcuts">
           <ShortcutSettingsPage />
         </SettingsSearchPage.Provider>
@@ -118,7 +126,7 @@ export function SettingsPreferencesForm({
           <ToolsSettingsPage />
         </SettingsSearchPage.Provider>
         <SettingsSearchPage.Provider value="plugins">
-          <PluginsSettingsPage hidden={pluginCommunityShown} />
+          <PluginsSettingsPage hidden={pluginCommunityShown} openRequest={pluginOpenRequest} />
         </SettingsSearchPage.Provider>
         <SettingsSearchPage.Provider value="developer">
           <DeveloperSettingsPage />

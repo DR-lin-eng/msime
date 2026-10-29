@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.Animation;
 import android.view.inputmethod.EditorInfo;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
@@ -112,6 +113,12 @@ public final class CommunityFragment extends Fragment {
     @Override public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup parent,
                                        @Nullable Bundle state) {
         return inflater.inflate(R.layout.page_community, parent, false);
+    }
+
+    // 压在 home_content 回退栈里的完整列表不继承 HomeTabFragment，换 tab 清栈时同样不播回退动画（#10092）。
+    @Override @Nullable public Animation onCreateAnimation(int transit, boolean enter, int nextAnim) {
+        Animation none = HomeTabFragment.leavingWithoutAnimation(this);
+        return none != null ? none : super.onCreateAnimation(transit, enter, nextAnim);
     }
 
     @Override public void onViewCreated(@NonNull View view, @Nullable Bundle state) {
@@ -406,10 +413,17 @@ public final class CommunityFragment extends Fragment {
     private void use(CommunityCatalog.Item item) {
         JSONObject design = item.payload();
         if (design == null) return;
+        Boolean editingDark = getParentFragment() instanceof SkinsPage page ? page.editingDark() : null;
         adapter.setAction(item.id(), CommunityAdapter.Action.BUSY);
         HostTask.run(this, context -> {
-            JSONObject saved = KeyboardSheets.write(context, preferences ->
-                KeyboardSheets.applyDesign(preferences, design));
+            JSONObject saved = KeyboardSheets.write(context, preferences -> {
+                boolean dark = editingDark != null ? editingDark : app.msime.android.KeyboardSkin.resolveDark(
+                    preferences.optString("screen_keyboard_theme", "follow"),
+                    preferences.optString("theme", "system"), AppMode.dark(context));
+                preferences.put(app.msime.android.KeyboardSkinModeChoice.key(dark),
+                    app.msime.android.KeyboardSkinModeChoice.design(item.id()));
+                KeyboardSheets.applyDesignFeedback(preferences, design);
+            });
             if (saved == null) return Boolean.FALSE;
             KeyboardSheets.applyLocalFeedback(context, design);
             KeyboardSheets.recordSkin(context, item.id());

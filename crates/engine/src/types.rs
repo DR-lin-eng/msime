@@ -33,6 +33,8 @@ pub enum CandidateSource {
     /// octagram `.gram` 语法模型参与词格解码时，解码首选的整句行。句子仍是词格
     /// 解出来的，搭配强度表只负责逐边加分；落库/学习判定与 `Generated` 同类。
     Collocation = 17,
+    /// 连续多语言转换的完整路径；整段消费，不调频、不学习跨语言整句，也不参与候选管理。
+    Multilingual = 18,
 }
 
 impl CandidateSource {
@@ -55,6 +57,7 @@ impl CandidateSource {
             15 => Self::CloudPending,
             16 => Self::Contact,
             17 => Self::Collocation,
+            18 => Self::Multilingual,
             _ => return None,
         })
     }
@@ -102,7 +105,7 @@ pub enum SchemeType {
     Shuangpin = 1,
     Wubi = 2,
     JapaneseRomaji = 3,
-    /// Korean Hangul on the Dubeolsik layout: syllables compose in the preedit and commit themselves; the only candidates are the composing syllable's Hanja, after `Command::ConvertHanja`.
+    /// 韩语两套式或罗马字布局：音节在预编辑中组合，稳定前缀逐步上屏；`Command::ConvertHanja` 打开当前音节的汉字候选。
     Korean = 4,
     /// Cantonese in toneless Jyutping read against `msime-cantonese.db`: candidates are Traditional as stored, a candidate covering the leading syllables commits at once and leaves the rest composing, and nothing is learned.
     Cantonese = 5,
@@ -253,7 +256,7 @@ impl SchemeType {
         }
     }
 
-    /// Shift+字母打开除 K 以外的本地模式；K、`/` 和 `@` 由 `opens_table_modes` 单独判断。
+    /// 没有组字时，Shift+字母打开按拼音拼写查的本地模式（E、M、J、R）和计算模式 V；K、C、U、T、Y、S 和 `/`、`@` 由 `opens_table_modes` 判断（`InputSession::local_mode_for_entry`）。
     pub const fn opens_local_modes(self) -> bool {
         match self {
             Self::Quanpin | Self::Shuangpin => true,
@@ -268,7 +271,7 @@ impl SchemeType {
         }
     }
 
-    /// 没有组字时，Shift+K 打开短语模式，`/` 和 `@` 打开指令和提及模式；五笔也提供这些只查本地表的入口。
+    /// 没有组字时，Shift+K 打开短语模式，`/` 和 `@` 打开指令和提及模式，Shift+C、U、T、Y、S 打开拆字、Unicode、日期时间、临时英文和符号模式；五笔也提供这些不经过方案拼写的入口。
     pub const fn opens_table_modes(self) -> bool {
         match self {
             Self::Quanpin | Self::Shuangpin | Self::Wubi => true,
@@ -795,6 +798,10 @@ pub struct WordItem {
     pub sentence_association: bool,
     /// Word boundaries of a decoded sentence, for personal context learning.
     pub sentence_words: Vec<String>,
+    /// 26 键双拼按触点计价的纠错整句，而且落点支持把它留在引擎给的座位上（分数不比字面整句低出 `TouchTuning::show_margin`）：runtime 不把它当整句的次选读法挪到表尾。其余行永远为假。
+    pub touch_supported: bool,
+    /// 26 键双拼按触点计价的纠错整句，触点支持而且明显比字面整句好，按首选规则（`shuangpin::dictionary` 的 `confident_correction`）坐了第一位。宿主据此给首选画强调色、读屏念「已纠正」（视图里的 `confident_correction`）。带它的行同时 `touch_supported`；其余行永远为假。
+    pub confident_correction: bool,
 }
 
 impl WordItem {
@@ -1033,6 +1040,8 @@ pub struct QueryRequest {
     /// 双拼辅助码的触发方式；`enable_shuangpin_helpcode` 为真时才读。
     pub shuangpin_helpcode_modes: ShuangpinHelpcodeModes,
     pub enable_quanpin_helpcode: bool,
+    /// 一码辅助码是否严格排除未命中的候选；默认关闭以保持历史排序。
+    pub strict_quanpin_helpcode: bool,
     /// 会话的「拼音纠错」开关。名字带 quanpin 是历史原因：双拼也按它决定是否给纠错整句。
     pub enable_quanpin_autocorrect_transposition: bool,
     pub enable_quanpin_autocorrect_neighbor: bool,
@@ -1048,6 +1057,14 @@ pub struct QueryRequest {
     pub korean_hanja: bool,
     /// 五笔通配：码里确实有 `z`，provider 改用模式匹配而不是前缀范围扫描（见 [`WubiInputOptions::z_wildcard`]）。
     pub wubi_z_wildcard: bool,
+    /// 五笔 14 键：`normalized_input` 每一位是一组字母的代表字母（`wubi::grid`），provider 展开成这几组字母的每种组合再查码表。
+    pub wubi_grid: bool,
+    /// 26 键双拼每个按键的触点，与 `raw_input` 逐字节对齐，没有触点的位置为 `None`。只要不是双拼、没有注册几何、一个触点都没有、输入里有 `'` 或句中辅助码生效，就必须是空 Vec 而不是全 `None`：桌面请求因此与没有这个字段时逐字节相同。
+    pub key_touches: Vec<Option<crate::touch::KeyTouch>>,
+    /// 触点所在的那份几何；`key_touches` 为空时为 `None`。
+    pub key_geometry: Option<std::sync::Arc<crate::touch::KeyGeometry>>,
+    /// 按触点计价的参数。只有 Rust 侧（评测示例）能改，见 [`crate::host::Session::set_touch_tuning`]。
+    pub touch_tuning: crate::touch::TouchTuning,
     /// False means no query at all.
     pub valid: bool,
 }
@@ -1181,6 +1198,16 @@ impl KeyResult {
 pub enum CandidateEdge {
     FirstHan = 0,
     LastHan = 1,
+}
+
+impl CandidateEdge {
+    /// 引擎以词定字使用的首个或末个汉字；没有汉字时返回空串。
+    pub fn character(self, text: &str) -> &str {
+        match self {
+            Self::FirstHan => crate::text::first_han_char(text),
+            Self::LastHan => crate::text::last_han_char(text),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -1409,6 +1436,8 @@ pub struct PluginCommand {
     pub trigger: String,
     /// 1..=8 个字符，由 runtime 画在插件注释格里，不进引擎的注释。
     pub title: String,
+    /// 清单里写了 `arguments = "extended"`：完整打出触发词之后，参数除了小写字母还收数字和 [`crate::local::command::EXTENDED_ARGUMENT_SYMBOLS`]，这时宿主把数字当输入、不当选词键（见 `InputSession::spelling_symbols`）。
+    pub extended: bool,
 }
 
 /// 宿主提供的一条 K 模式短语（来自已启用的短语表插件）。宿主已经校验过；Engine 仍然跳过它用不了的行，而不是照单全收。

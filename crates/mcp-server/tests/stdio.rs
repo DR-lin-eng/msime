@@ -137,10 +137,13 @@ async fn read_only_by_default() {
         tool_names(&client).await,
         [
             "get_candidate_skin",
+            "get_plugin",
             "get_preferences",
             "get_typing_statistics",
             "list_candidate_skins",
+            "list_community_plugins",
             "list_community_skins",
+            "list_plugins",
             "list_quick_phrases",
             "read_diagnostic_log",
             "set_diagnostic_log"
@@ -164,7 +167,7 @@ async fn an_agent_manages_quick_phrases_and_preferences() {
     let directory = tempfile::tempdir().unwrap();
     let options = fixture(directory.path());
     let (client, _child) = start(&options, &["--allow-write"]).await;
-    assert_eq!(tool_names(&client).await.len(), 15);
+    assert_eq!(tool_names(&client).await.len(), 23);
 
     // Quick phrases: add, list, replace, remove, with a failure in the middle of a batch.
     let outcome = ok(
@@ -301,7 +304,7 @@ async fn an_agent_imports_reweighs_and_explains_dictionary_words() {
     client.cancel().await.unwrap();
 
     let (client, _child) = start(&options, &["--allow-write", "--allow-dictionary-read"]).await;
-    assert_eq!(tool_names(&client).await.len(), 19);
+    assert_eq!(tool_names(&client).await.len(), 27);
 
     let outcome = ok(
         &client,
@@ -644,10 +647,13 @@ fn the_command_line_runs_the_same_tools() {
         names,
         [
             "get_candidate_skin",
+            "get_plugin",
             "get_preferences",
             "get_typing_statistics",
             "list_candidate_skins",
+            "list_community_plugins",
             "list_community_skins",
+            "list_plugins",
             "list_quick_phrases",
             "read_diagnostic_log",
             "set_diagnostic_log"
@@ -1156,5 +1162,267 @@ async fn an_agent_manages_candidate_skins() {
     );
     assert!(!directory.path().join("skins/dusk").exists());
 
+    client.cancel().await.unwrap();
+}
+
+/// `fixture` 加上几个拼音词：你、好两个单字和「你好」「拟好」两个词。
+fn pinyin_fixture(root: &Path) -> std::path::PathBuf {
+    let options = fixture(root);
+    for name in ["resources", "dictionaries"] {
+        rusqlite::Connection::open(root.join(name).join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_n VALUES('ni','n','你',100);
+                 CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_h VALUES('hao','h','好',100);
+                 INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',1000),('ni''hao','nh','拟好',80);",
+            )
+            .unwrap();
+    }
+    options
+}
+
+/// 用户在设置页「维护与诊断」里打开或关掉命令行查询候选。
+fn allow_command_line_candidates(state: &Path, enabled: bool) {
+    let store = msime_client_core::preferences::PreferencesStore::new(state);
+    let snapshot = store.load().unwrap();
+    let mut preferences = snapshot.preferences;
+    preferences.diagnostic_log.command_line_candidates = enabled;
+    store.save(snapshot.revision, preferences).unwrap();
+}
+
+fn json_lines(text: &str) -> Vec<Value> {
+    text.lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn candidates_stay_off_until_the_user_turns_them_on() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = pinyin_fixture(directory.path());
+    let (code, answer, error) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 3, "{error}");
+    assert_eq!(answer["error"]["code"], "disabled");
+    assert_eq!(answer["keys"], "nihao");
+    assert!(answer.get("candidates").is_none());
+    assert!(error.contains("命令行查询候选"), "{error}");
+    // allow 开关不能代替用户在设置里的选择。
+    let (code, _, _) = run_cli(
+        &options,
+        &[
+            "--allow-dictionary-read",
+            "--allow-write",
+            "candidates",
+            "nihao",
+        ],
+        None,
+    );
+    assert_eq!(code, 3);
+    // 助手经 config set（update_preferences）也打不开它。
+    let (code, _, error) = run_cli_text(
+        &options,
+        &[
+            "--allow-write",
+            "config",
+            "set",
+            "diagnostic_log_command_line_candidates=true",
+        ],
+        None,
+    );
+    assert_eq!(code, 1, "{error}");
+    let (code, _, _) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 3);
+    // 流式读取同样在第一行就停下。
+    let (code, lines, _) = run_cli_text(&options, &["candidates"], Some("nihao\nni\n"));
+    assert_eq!(code, 3);
+    let lines = json_lines(&lines);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["error"]["code"], "disabled");
+}
+
+#[test]
+fn candidates_print_what_typing_the_keys_offers_as_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = pinyin_fixture(directory.path());
+    allow_command_line_candidates(directory.path(), true);
+
+    let (code, answer, error) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(answer["keys"], "nihao");
+    assert_eq!(answer["caret"], 5);
+    assert_eq!(answer["editing_text"], "nihao");
+    assert_eq!(answer["editing_caret"], 5);
+    assert_eq!(answer["committed"], json!([]));
+    assert!(answer["preedit"].is_string());
+    assert!(answer["page_size"].as_u64().unwrap() > 0);
+    assert_eq!(
+        answer["candidates"][0],
+        json!({ "text": "你好", "code": "ni'hao", "source": "dictionary", "annotation": "", "corrected": false })
+    );
+    assert_eq!(answer["candidates"][1]["text"], "拟好");
+
+    // `|` 标出光标：光标在 ni 之后时只转换 ni。
+    let (code, answer, error) = run_cli(&options, &["candidates", "ni|hao", "--limit", "1"], None);
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(
+        (answer["keys"].clone(), answer["caret"].clone()),
+        (json!("nihao"), json!(2))
+    );
+    assert_eq!(answer["editing_caret"], 2);
+    assert_eq!(
+        answer["candidates"],
+        json!([{ "text": "你", "code": "ni", "source": "dictionary", "annotation": "", "corrected": false }])
+    );
+
+    // 偏好每次现读：在设置里关掉之后，下一次就不给了。
+    allow_command_line_candidates(directory.path(), false);
+    let (code, _, _) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 3);
+}
+
+#[test]
+fn candidates_read_stdin_one_line_of_json_for_each_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = pinyin_fixture(directory.path());
+    allow_command_line_candidates(directory.path(), true);
+    let (code, lines, error) = run_cli_text(
+        &options,
+        &["candidates", "--limit", "2"],
+        Some("nihao\r\n  ni|hao  \n\nni hao\na|b|c\nnihao2\nnihao"),
+    );
+    // 拒绝的行各自得到错误行，其余照常；读完 stdin 以 0 退出。
+    assert_eq!(code, 0, "{error}");
+    let lines = json_lines(&lines);
+    assert_eq!(lines.len(), 7, "{lines:?}");
+    assert_eq!(lines[0]["candidates"][0]["text"], "你好");
+    assert_eq!(lines[0]["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(lines[1]["caret"], 2);
+    assert_eq!(lines[1]["candidates"][0]["text"], "你");
+    for (index, keys) in [(2, ""), (3, "ni hao"), (4, "a|b|c")] {
+        assert_eq!(lines[index]["keys"], keys);
+        assert_eq!(
+            lines[index]["error"]["code"], "invalid_input",
+            "{}",
+            lines[index]
+        );
+    }
+    // 数字键照打字时那样选词上屏，只看不学：最后一行的顺序没有变。
+    assert_eq!(lines[5]["committed"], json!(["拟好"]));
+    assert_eq!(lines[5]["candidates"], json!([]));
+    assert_eq!(lines[6]["candidates"][0]["text"], "你好");
+}
+
+#[test]
+fn every_candidates_failure_has_its_own_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = pinyin_fixture(directory.path());
+    allow_command_line_candidates(directory.path(), true);
+
+    // 按键不合规：7。
+    for keys in ["ni hao", "a|b|c", "1"] {
+        let (code, answer, error) = run_cli(&options, &["candidates", keys], None);
+        assert_eq!(code, 7, "{keys}: {error}");
+        assert_eq!(answer["error"]["code"], "invalid_input");
+    }
+
+    // 词库正在维护：5。
+    let maintenance = msime_client_services::dictionary::access::DictionaryAccess::try_maintenance(
+        &directory.path().join("user"),
+        &directory.path().join("dictionaries"),
+    )
+    .unwrap()
+    .unwrap();
+    let (code, answer, error) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 5, "{error}");
+    assert_eq!(answer["error"]["code"], "busy");
+    drop(maintenance);
+
+    // 词库打不开：6。
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&options).unwrap()).unwrap();
+    let working = document.clone();
+    document["dictionaries"] = json!(directory.path().join("nowhere"));
+    std::fs::write(&options, document.to_string()).unwrap();
+    let (code, answer, error) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 6, "{error}");
+    assert_eq!(answer["error"]["code"], "unavailable");
+    std::fs::write(&options, working.to_string()).unwrap();
+
+    // 输入法没在这个用户下设置过：4。
+    let missing = directory.path().join("missing/runtime-options.json");
+    let (code, answer, error) = run_cli(&missing, &["candidates", "nihao"], None);
+    assert_eq!(code, 4, "{error}");
+    assert_eq!(answer["error"]["code"], "not_set_up");
+
+    // 命令行写错：2，stdout 不输出。
+    for args in [
+        &["candidates", "a", "b"][..],
+        &["candidates", "a", "--scheme", "wubi"],
+        &["candidates", "a", "--limit", "0"],
+        &["candidates", "a", "--limit", "501"],
+    ] {
+        let (code, stdout, _) = run_cli_text(&options, args, None);
+        assert_eq!((code, stdout.as_str()), (2, ""), "{args:?}");
+    }
+
+    let (code, _, error) = run_cli(&options, &["candidates", "nihao"], None);
+    assert_eq!(code, 0, "{error}");
+}
+
+/// 代理照用户的话写一张 K 模式短语表：装上、在列表里看到、照结果告诉用户怎么打开、读回、删掉。结构化结果要符合工具声明的输出 schema。
+#[tokio::test]
+async fn an_agent_makes_a_phrase_table_plugin() {
+    let directory = tempfile::tempdir().unwrap();
+    let options = fixture(directory.path());
+    let (client, _child) = start(&options, &["--allow-write"]).await;
+    let manifest = "schema_version = 1\nkind = \"phrase_table\"\nid = \"signature\"\nname = \"邮件签名\"\nversion = \"1.0.0\"\nlicense = \"CC0-1.0\"\n[[phrases]]\nkey = \"qm\"\ntext = \"合成签名 someone@example.com\"\n";
+
+    let installed = ok(&client, "create_plugin", json!({ "manifest": manifest })).await;
+    assert_eq!(installed["kind"], "phrase_table");
+    assert_eq!(installed["id"], "signature");
+    assert_eq!(installed["replaced"], false);
+    assert!(installed["next_step"].as_str().unwrap().contains("启用"));
+    assert!(directory
+        .path()
+        .join("plugins/phrase_table/signature/plugin.toml")
+        .is_file());
+
+    let listed = ok(&client, "list_plugins", json!({})).await;
+    let plugins = listed["plugins"].as_array().unwrap();
+    assert_eq!(plugins.len(), 1, "{listed}");
+    assert_eq!(plugins[0]["summary"], "1 K-mode phrases under keys qm");
+    assert_eq!(plugins[0]["active"], false);
+    assert_eq!(listed["selection"]["phrase_tables"], json!([]));
+
+    let files = ok(
+        &client,
+        "get_plugin",
+        json!({ "kind": "phrase_table", "id": "signature" }),
+    )
+    .await;
+    assert_eq!(files["manifest"], manifest);
+    assert_eq!(files["files"], json!([]));
+
+    // 已经装着时不给 replace 就拒绝，并说怎么替换。
+    after_write_interval().await;
+    let error = refused(&client, "create_plugin", json!({ "manifest": manifest })).await;
+    assert!(error.contains("replace: true"), "{error}");
+
+    after_write_interval().await;
+    let deleted = ok(
+        &client,
+        "delete_plugin",
+        json!({ "kind": "phrase_table", "id": "signature" }),
+    )
+    .await;
+    assert_eq!(
+        deleted,
+        json!({ "kind": "phrase_table", "id": "signature", "still_selected_in": [] })
+    );
+    assert!(!directory
+        .path()
+        .join("plugins/phrase_table/signature")
+        .exists());
     client.cancel().await.unwrap();
 }

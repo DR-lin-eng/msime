@@ -1,4 +1,5 @@
 import type { CloudCandidateProviderPreferences } from "../settings/cloud-candidates-section";
+import type { CandidateTranslationScope } from "../settings/candidate-translation-options-section";
 import type { InputScheme, ChineseScheme } from "./input-scheme";
 import type { PreeditPreferences } from "../settings/preedit-preferences";
 import type {
@@ -10,6 +11,7 @@ import type { PunctuationPreferences } from "../settings/punctuation-preferences
 import type { KeybindingPreferences } from "../settings/keybinding-preferences";
 import type { WubiPreferences } from "../settings/wubi-preferences";
 import type { VietnamesePreferences } from "../settings/vietnamese-preferences";
+import type { KoreanPreferences } from "../settings/korean-preferences";
 import type { FloatingToolbarPreferences } from "../settings/floating-toolbar-preferences";
 import type { TraditionalChineseVariant } from "../settings/chinese-output-preferences";
 import type {
@@ -17,7 +19,10 @@ import type {
   ShuangpinCustomProfile,
 } from "../settings/shuangpin-custom-profile";
 import type { AppInputModeRule } from "../settings/app-input-mode-rules";
-import type { CloudClipboardRelayPreferences } from "../settings/cloud-clipboard-relay-preferences";
+import type {
+  CloudClipboardRelayPreferences,
+  CloudClipboardWebDavPreferences,
+} from "../settings/cloud-clipboard-relay-preferences";
 import type { VoiceInputPreferences } from "../settings/voice-input-preferences";
 import type { NetworkProxyPreferences } from "../settings/network-proxy-preferences";
 import type { TouchKeyboardSchemePreferences } from "../settings/touch-keyboard-scheme-helpers";
@@ -32,6 +37,7 @@ import type {
 } from "../settings/candidate-paging-preferences";
 import type { SentenceAssociationPreferences } from "../settings/sentence-association-preferences";
 import type { MixedInputPreferences } from "../settings/mixed-input-preferences";
+import type { MultilingualInputPreferences } from "../settings/multilingual-input-section";
 import type { FrequencyPreferences } from "../settings/frequency-preferences";
 import type { AiAssistantPreferences } from "../settings/ai-assistant-preferences";
 import type { LocalModePreferences } from "../settings/local-mode-preferences";
@@ -62,12 +68,18 @@ export type Preferences = PunctuationPreferences &
     clipboard_history_limit?: number;
     /** 自建云剪贴板中继的地址和令牌；缺省或地址为空表示走水杉账号。两项要么都空，要么都合规，见 `crates/client-core/src/preferences.rs` 的 `CloudClipboardRelayPreferences`。 */
     cloud_clipboard_relay?: CloudClipboardRelayPreferences;
+    /** 存放云剪贴板的 WebDAV 网盘；缺省或地址为空表示不用。三项要么都空，要么都合规，与 `cloud_clipboard_relay` 只能二选一，见 `crates/client-core/src/preferences.rs` 的 `CloudClipboardWebDavPreferences`。 */
+    cloud_clipboard_webdav?: CloudClipboardWebDavPreferences;
+    /** 同步「我的词条」的 WebDAV 网盘；缺省表示不同步。三项要么都空，要么都合规，规则与 `cloud_clipboard_webdav` 相同但各配各的，见 `crates/client-core/src/preferences.rs` 的 `DictionarySyncWebDavPreferences` 和 `docs/dictionary-webdav-sync.md`。 */
+    dictionary_sync_webdav?: CloudClipboardWebDavPreferences;
     cloud_candidates?: boolean;
     next_word_prediction?: boolean;
     cloud_candidate_provider?: CloudCandidateProviderPreferences;
     /** 云候选、翻译、AI、语音、账号、更新检查和下载共用的代理设置；本机与局域网目标一律直连。 */
     network?: NetworkProxyPreferences;
     candidate_translations?: boolean;
+    /** 候选词翻译画在哪些候选下面：`highlighted` 只翻译当前高亮的候选（缺省，新装和旧文档都是它），`all` 翻译当前页每个候选。「显示英文释义」的离线释义不受它限制。见 `crates/client-core/src/preferences.rs` 的 `CandidateTranslationScope`。 */
+    candidate_translation_scope?: CandidateTranslationScope;
     candidate_english_gloss?: boolean;
     candidate_pronunciation?: boolean;
     /** 候选译文中显示 n.、v. 等词性标记；缺省为开启（对齐 Windows v0.11.1 出厂配置）。 */
@@ -90,8 +102,11 @@ export type Preferences = PunctuationPreferences &
     translation_ai?: boolean;
     /** 各宿主共用的匿名用量上报（每日活跃、会话结束与崩溃摘要）；缺省为开启。 */
     usage_reporting?: boolean;
+    /** 桌面应用检查更新跟的发布通道，关于页「版本与更新」里选；等于缺省的稳定版时 client-core 不写进文档。只属于本机，不进设置文件、不进账号同步。 */
+    update_channel?: "stable" | "beta" | "nightly";
     floating_toolbar?: FloatingToolbarPreferences;
     mixed_input?: MixedInputPreferences;
+    multilingual_input?: MultilingualInputPreferences;
     fuzzy_pinyin?: FuzzyPinyinPreferences;
     frequency?: FrequencyPreferences;
     word_character?: WordCharacterPreferences;
@@ -104,15 +119,18 @@ export type Preferences = PunctuationPreferences &
     navigation?: NavigationPreferences;
     keybindings?: KeybindingPreferences;
     scheme: InputScheme;
-    /** 触屏键盘的布局；`fourteen_key` 是全拼 14 键，`nine_key_shuangpin` 是九键双拼，都只配全拼。 */
+    /** 触屏键盘的布局；14 键和 18 键都是全拼组码键面，九键双拼也只配全拼。 */
     touch_keyboard_layout?:
       | "twenty_six_key"
       | "nine_key"
       | "handwriting"
       | "fourteen_key"
-      | "nine_key_shuangpin";
+      | "nine_key_shuangpin"
+      | "eighteen_key";
     /** Android 双拼的 26 / 14 / 18 键、iOS 双拼的 26 / 14 键选择；缺省为 26 键，与全拼布局独立保存。 */
     touch_shuangpin_layout?: "twenty_six_key" | "fourteen_key" | "eighteen_key";
+    /** Android、iOS 和鸿蒙五笔的 26 / 14 键选择；缺省为 26 键，与全拼、双拼布局独立保存。 */
+    touch_wubi_layout?: "twenty_six_key" | "fourteen_key";
     touch_keyboard_schemes?: TouchKeyboardSchemePreferences;
     touch_keyboard_width_percent?: number;
     touch_key_spacing_tenths?: number;
@@ -121,7 +139,7 @@ export type Preferences = PunctuationPreferences &
     touch_voice_shortcut?: boolean;
     /** 九宫格数字层的排列：电话（1 2 3 在上）或计算器（7 8 9 在上）。 */
     touch_number_keypad_order?: "phone" | "calculator";
-    /** Android 文本编辑面板的七个侧边键；其他宿主保留该顺序。 */
+    /** Android 文本编辑面板的八个侧边键；其他宿主保留该顺序。 */
     touch_text_edit_button_order?: (
       | "copy"
       | "paste"
@@ -130,11 +148,22 @@ export type Preferences = PunctuationPreferences &
       | "space"
       | "number_pad"
       | "delete"
+      | "select_line"
     )[];
     /** 26 键按「123」时的数字层：一行 1 到 0，或九宫格那样的 3×3 数字键。 */
     touch_twenty_six_key_number_layout?: "row" | "nine_key";
     /** 触屏 26 键双拼时在字母键底部画声母/韵母提示；缺省为关。 */
     touch_shuangpin_key_hints?: boolean;
+    /** 全拼 26 键组字时第三排左端保留 ⇧（点一下臂辅助码）而不换成「分词」；缺省为关。 */
+    touch_quanpin_shift?: boolean;
+    /** 手机触屏中文 26 键字母层（全拼、26 键双拼、五笔 26 键、粤拼等）底行的样式；英文 26 键、iPad 全尺寸键盘和鸿蒙 2in1 不受它影响。缺省为现有底行，client-core 不写进文档；桌面宿主保留、不读。 */
+    touch_twenty_six_key_style?: "standard" | "comma_period" | "long_space" | "emoji";
+    /** 手机触屏 14 键与 18 键字母层（全拼、双拼、五笔 14 键）底行的样式。缺省为现有底行，client-core 不写进文档；桌面宿主保留、不读。 */
+    touch_fourteen_key_style?: "standard" | "long_space" | "emoji";
+    /** 手机触屏九键字母层（拼音九键、九键双拼、笔画）底行的样式；除 `tall_return`（右侧大回车：回车跨右列下两行，符 移到符号栏下方，右列的 ！ 并进符号栏）外，符号栏和右侧功能列不变。缺省为现有底行，client-core 不写进文档；桌面宿主保留、不读。 */
+    touch_nine_key_style?: "standard" | "comma_period" | "emoji" | "tall_return";
+    /** 手机触屏 26 键、14 键和 18 键字母层上方的 1 到 0 数字行；窗口太矮时宿主不画。缺省为关，client-core 不写进文档；桌面宿主保留、不读。 */
+    touch_number_row?: boolean;
     /** 触屏键盘的拼写写进输入框还是只画在候选栏；缺省为输入框。与桌面候选窗的 `candidate_preedit_style` 无关。 */
     touch_spelling_position?: "editor" | "candidate_bar";
     touch_toolbar?: Partial<TouchToolbarPreferences>;
@@ -160,8 +189,11 @@ export type Preferences = PunctuationPreferences &
     /** 「输入时显示双拼键位提示」。没选过时文档里没有这一项，按关显示；macOS 那时仍沿用本机旧的选择。 */
     shuangpin_keymap_hint?: boolean;
     vietnamese?: VietnamesePreferences;
+    korean?: KoreanPreferences;
     /** 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字；缺省为关。 */
     single_character_only?: boolean;
+    /** 移动光标后编辑光标后的部分（桌面宿主）：缺省为关，关着时 Rust 端不写这个键。 */
+    caret_edit_suffix?: boolean;
     candidate_page_size: number;
     number_row_selection?: boolean;
     candidate_follow_cursor?: boolean;
@@ -175,6 +207,8 @@ export type Preferences = PunctuationPreferences &
     input_mode_status_item?: boolean;
     candidate_layout?: "horizontal" | "vertical";
     show_candidate_page_number?: boolean;
+    /** macOS 候选窗首行的输入状态文字和枝叶装饰，缺省显示。 */
+    show_candidate_status?: boolean;
     /** 候选窗和悬浮工具栏左端的水杉 logo。新装默认隐藏，旧文档缺这个字段时读成显示。 */
     show_app_logo?: boolean;
     /** 「展开候选」：横排候选窗按 Tab、↓ 展开成多行候选网格，默认关闭。 */
@@ -188,7 +222,12 @@ export type Preferences = PunctuationPreferences &
     learning: boolean;
     /** 回车上屏英文时把该单词写入英文词库；Windows 出厂缺省为开启。 */
     enter_learns_english_word?: boolean;
-    diagnostic_log?: { server?: boolean; tsf?: boolean };
+    diagnostic_log?: {
+      server?: boolean;
+      tsf?: boolean;
+      /** 允许终端里的 `msime candidates` 按本机设置和词库输出候选；缺省关闭，和诊断日志一样只属于本机，不随云同步和设置文件导出。 */
+      command_line_candidates?: boolean;
+    };
     /** 只有 Windows TSF 读取：游戏声明自己画候选却不画时由水杉的候选窗显示。由 Windows 原生设置页编辑，这个页面没有对应控件；缺省为开启、两张进程表为空。 */
     game_compatibility?: {
       candidate_overlay?: boolean;

@@ -1538,6 +1538,8 @@ impl From<PreferencesError> for CommandError {
                 PreferencesError::InvalidAppInputModeRules => "app_input_mode_rules_invalid",
                 PreferencesError::InvalidVimModeApps => "vim_mode_apps_invalid",
                 PreferencesError::InvalidCloudClipboardRelay => "cloud_clipboard_relay_invalid",
+                PreferencesError::InvalidCloudClipboardWebDav => "cloud_clipboard_webdav_invalid",
+                PreferencesError::InvalidDictionarySyncWebDav => "dictionary_sync_webdav_invalid",
                 PreferencesError::UnsupportedFormat | PreferencesError::Json(_) => "format",
                 _ => "storage",
             },
@@ -1656,9 +1658,99 @@ async fn load_preferences(
     store: tauri::State<'_, std::sync::Arc<PreferencesStore>>,
 ) -> Result<PreferencesSnapshot, CommandError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || store.load().map_err(CommandError::from))
-        .await
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = store.load().map_err(CommandError::from)?;
+        #[cfg(target_os = "macos")]
+        if should_request_caps_lock_hid_access(&snapshot.preferences) {
+            platform::macos::request_caps_lock_hid_access();
+        }
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|_| CommandError { code: "storage" })?
+}
+
+#[cfg(target_os = "macos")]
+fn should_request_caps_lock_hid_access(
+    preferences: &msime_client_core::preferences::Preferences,
+) -> bool {
+    preferences.keybindings.switch_language_caps_lock
+}
+
+/// 真实桌面设置宿主的 OOBE 快照；启用状态只在系统查询成功时提供。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tauri::command]
+async fn desktop_oobe_status(
+    runtime: tauri::State<'_, RuntimeOptionsState>,
+    store: tauri::State<'_, Arc<PreferencesStore>>,
+) -> Result<msime_client_core::oobe::OobeState, CommandError> {
+    let runtime = runtime.inner().clone();
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let resources_ready = runtime
+            .snapshot()
+            .map(|document| msime_host_api::runtime_resources_ready(&document))
+            .unwrap_or(false);
+        let mut state = msime_client_core::oobe::OobeState {
+            resources_ready: Some(resources_ready),
+            preferences_saved: Some(store.load().is_ok()),
+            // 桌面安装器没有「看过欢迎页」的持久化事实，不从准备结果推断。
+            onboarding_seen: None,
+            ..Default::default()
+        };
+        #[cfg(target_os = "macos")]
+        {
+            state.system_enabled = macos_input_source::input_source_enabled();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let setup = linux_setup::input_method_status();
+            state.system_enabled = setup.0;
+            state.system_current = setup.1;
+        }
+        Ok(state)
+    })
+    .await
+    .map_err(|_| CommandError { code: "storage" })?
+}
+
+/// 从安装包重新准备运行资源并重读同一份配置；保留用户状态和偏好。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn repair_macos_oobe_resources(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, RuntimeOptionsState>,
+) -> Result<(), CommandError> {
+    let resources = app
+        .path()
+        .resource_dir()
         .map_err(|_| CommandError { code: "storage" })?
+        .join("EngineResources");
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = runtime
+            .path
+            .as_ref()
+            .ok_or(CommandError { code: "storage" })?;
+        let parent = path.parent().ok_or(CommandError { code: "storage" })?;
+        let launch = macos_launch::resolve_with_resources(
+            parent,
+            Some(&resources),
+            Some(path.as_os_str().to_owned()),
+            None,
+        )
+        .map_err(|_| CommandError { code: "storage" })?;
+        if !msime_host_api::runtime_resources_ready(&launch.document) {
+            return Err(CommandError { code: "storage" });
+        }
+        *runtime
+            .document
+            .lock()
+            .map_err(|_| CommandError { code: "storage" })? = launch.document;
+        Ok(())
+    })
+    .await
+    .map_err(|_| CommandError { code: "storage" })?
 }
 
 async fn save_preferences_impl(
@@ -1715,13 +1807,13 @@ async fn save_preferences(
     runtime: tauri::State<'_, RuntimeOptionsState>,
     platform: tauri::State<'_, MobilePlatform<tauri::Wry>>,
     expected_revision: u64,
-    preferences: Preferences,
+    preferences: serde_json::Value,
 ) -> Result<PreferencesSnapshot, CommandError> {
     save_preferences_impl(
         store.inner().clone(),
         runtime.inner().clone(),
         expected_revision,
-        preferences,
+        Preferences::from_submission(preferences).map_err(CommandError::from)?,
         platform.inner().clone(),
     )
     .await
@@ -1733,13 +1825,13 @@ async fn save_preferences(
     store: tauri::State<'_, std::sync::Arc<PreferencesStore>>,
     runtime: tauri::State<'_, RuntimeOptionsState>,
     expected_revision: u64,
-    preferences: Preferences,
+    preferences: serde_json::Value,
 ) -> Result<PreferencesSnapshot, CommandError> {
     save_preferences_impl(
         store.inner().clone(),
         runtime.inner().clone(),
         expected_revision,
-        preferences,
+        Preferences::from_submission(preferences).map_err(CommandError::from)?,
     )
     .await
 }
@@ -2425,6 +2517,45 @@ async fn cloud_clipboard_request(
         return Ok(value);
     }
     platform::cloud_clipboard::cloud_clipboard_request(&account.session, action).await
+}
+
+/// WebDAV 设置的「测试连接」（`docs/cloud-clipboard-webdav.md`）：用设置页里还没保存的地址、账号和应用密码，在网盘上试一遍云剪贴板日志要用的行为，通过答 `{}`；通过后删掉本机的日志缓存，防回退从网盘现在的样子重新开始。不合格是 `webdav_unsupported`，账号或密码不对是 `relay_unauthorized`。会联网，大约二十个请求。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn cloud_clipboard_webdav_probe(
+    account: tauri::State<'_, desktop_account::AccountState>,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<Value, CommandError> {
+    let directory = account.directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        msime_host_api::cloud_clipboard::webdav_probe(&url, &username, &password, Some(&directory))
+    })
+    .await
+    .map_err(|_| CommandError {
+        code: "unavailable",
+    })?
+    .map_err(|code| CommandError { code })
+}
+
+/// 「我的词条」经 WebDAV 网盘同步的一个动作（`docs/dictionary-webdav-sync.md`，动作和结果见 `msime_client.h` 的 `msime_client_dictionary_sync`），macOS 与 Linux 的共享设置页用。HostOptions 取词库命令用的同一份，状态目录是账号目录下的 `dictionary-sync/`，与输入法共用（`platform::dictionary_sync`）。除 `status` 外都会联网，放在阻塞线程上。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tauri::command]
+async fn dictionary_sync(
+    options: tauri::State<'_, DictionaryHostOptions>,
+    account: tauri::State<'_, desktop_account::AccountState>,
+    action: Value,
+) -> Result<Value, CommandError> {
+    let options = options.inner().clone();
+    let directory = platform::dictionary_sync::directory(&account.directory);
+    tauri::async_runtime::spawn_blocking(move || {
+        platform::dictionary_sync::request(options.snapshot()?, &directory, action)
+    })
+    .await
+    .map_err(|_| CommandError {
+        code: "dictionary_sync_unavailable",
+    })?
 }
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -3884,15 +4015,26 @@ fn macos_settings_launch(route: Option<SurfaceRoute>) -> bool {
     route.is_none_or(|route| route.panel().is_none())
 }
 
-/// 升级后的第一次启动：本进程执行的程序已被新文件替换时，把这次启动交给新程序，自己退出，否则用户看到的一直是旧界面（见 `linux_program_handover`）。先隐藏所有窗口，让页面把待保存的编辑写完，过 [`linux_program_handover::FLUSH_GRACE`] 再放开单实例的 D-Bus 名、以转来的参数启动新程序并退出；新程序因此拿得到这个名字，不会又把参数转回来。正在下载或删除模型、资源包时不交接，免得把它打断，等下一次启动再说。返回是否接手了这次启动；没有接手时由调用方照旧激活界面。
+/// 把设置交给一个新进程，自己退出。两种情况要交：
+///
+/// - 升级后的第一次启动：本进程执行的程序已被新文件替换，不交的话用户看到的一直是旧界面（见 `linux_program_handover`），新进程执行原路径上的新程序。
+/// - 状态目录换了：本进程启动时还没有 runtime-options.json，偏好、更新记录等都落在本应用的数据目录；首次配置（设置里的首次配置页或终端里的 `msime-linux-setup`）写出这份文件后，输入法读写的是其中的 `preferences_directory`（见 `LinuxStateDirectory`）。这些状态对象在启动时就定了目录，进程里换不了，新进程执行同一个程序，按准备好的文件重新定目录。
+///
+/// 收到下一次启动时（`args`、`cwd` 是转来的参数）和离开首次配置页时（`leave_linux_setup_window`，传本进程自己的参数）各检查一次。先隐藏所有窗口，让页面把待保存的编辑写完，过 [`linux_program_handover::FLUSH_GRACE`] 再放开单实例的 D-Bus 名、以 `args` 启动新进程并退出；新进程因此拿得到这个名字，不会又把参数转回来。正在下载或删除模型、资源包时不交接，免得把它打断，等下一次启动再说。返回是否交了出去；没有交时由调用方照旧激活界面。
 #[cfg(target_os = "linux")]
-fn hand_over_to_replaced_program(app: &tauri::AppHandle, args: &[String], cwd: &str) -> bool {
+fn hand_over_settings_process(app: &tauri::AppHandle, args: &[String], cwd: &str) -> bool {
     static HANDING_OVER: AtomicBool = AtomicBool::new(false);
     if HANDING_OVER.load(Ordering::Acquire) {
         // 交接已经开始：新程序启动后就能拿到单实例名，这次启动的参数也会由它处理。
         return true;
     }
-    let Some(program) = linux_program_handover::running_program_replaced() else {
+    let program = linux_program_handover::running_program_replaced().or_else(|| {
+        app.try_state::<LinuxStateDirectory>()
+            .is_some_and(|directory| directory.moved())
+            .then(|| std::env::current_exe().ok())
+            .flatten()
+    });
+    let Some(program) = program else {
         return false;
     };
     if app
@@ -3927,8 +4069,9 @@ fn hand_over_to_replaced_program(app: &tauri::AppHandle, args: &[String], cwd: &
         match command.spawn() {
             Ok(_) => app.exit(0),
             Err(_) => {
-                // 新程序起不来：留在旧程序上，至少把用户要的界面打开。
-                eprintln!("msime: could not start the upgraded settings program");
+                // 新进程起不来：留在本进程上，至少把用户要的界面打开；放开交接标记，离开首次配置页时还能再试一次。
+                eprintln!("msime: could not start the new settings process");
+                HANDING_OVER.store(false, Ordering::Release);
                 if let Some(linger) = app.try_state::<DesktopSettingsLinger>() {
                     linger.quitting.store(false, Ordering::Release);
                 }
@@ -5009,6 +5152,60 @@ fn linux_runtime_state_directory_at(options_path: &Path) -> Result<Option<PathBu
     }
 }
 
+/// Linux 设置进程的状态目录（偏好、剪贴板历史、统计、后台更新记录、账号会话、皮肤和插件都在这里），以及它是怎么定下来的。
+///
+/// 目录在启动时定下，之后交给各个状态对象，进程里不再换。首次运行时 runtime-options.json 还不存在，只能先用 `fallback`（本应用的数据目录）；首次配置页写出这份文件后，它的 `preferences_directory` 才是输入法读写的目录。[`Self::moved`] 回答启动时定下的目录是否已经不是现在该用的那个，是的话由 `hand_over_settings_process` 把设置交给一个新进程，新进程按准备好的文件重新定目录。`MSIME_CLIENT_STATE_DIR` 指定的目录由调用方负责，永远不算换过。
+#[cfg(any(target_os = "linux", test))]
+struct LinuxStateDirectory {
+    /// 启动时定下的目录，各状态对象用的就是它。
+    startup: PathBuf,
+    /// 启动时读的 runtime-options.json；目录由 `MSIME_CLIENT_STATE_DIR` 指定、或没有给出这份文件时为 `None`。
+    options: Option<PathBuf>,
+    /// runtime-options.json 不存在或没写 `preferences_directory` 时用的目录。
+    fallback: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl LinuxStateDirectory {
+    fn resolve(
+        state_override: Option<std::ffi::OsString>,
+        options: Option<PathBuf>,
+        fallback: PathBuf,
+    ) -> Result<Self, String> {
+        if let Some(value) = state_override {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                return Err("MSIME_CLIENT_STATE_DIR must be absolute".into());
+            }
+            return Ok(Self {
+                startup: path,
+                options: None,
+                fallback,
+            });
+        }
+        let configured = match options.as_deref() {
+            Some(path) => linux_runtime_state_directory_at(path)?,
+            None => None,
+        };
+        Ok(Self {
+            startup: configured.unwrap_or_else(|| fallback.clone()),
+            options,
+            fallback,
+        })
+    }
+
+    /// 按现在的 runtime-options.json 该用的目录已经不是启动时定下的那个。文件读不了或内容不对时不算：新进程启动时同样读不了它，交过去只会起不来。
+    fn moved(&self) -> bool {
+        let Some(options) = self.options.as_deref() else {
+            return false;
+        };
+        match linux_runtime_state_directory_at(options) {
+            Ok(configured) => configured.as_ref().unwrap_or(&self.fallback) != &self.startup,
+            Err(_) => false,
+        }
+    }
+}
+
 #[cfg(any(target_os = "ios", test))]
 fn ios_host_options_document(
     contents: Option<&str>,
@@ -5260,7 +5457,7 @@ pub fn run() {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         #[cfg(target_os = "linux")]
-        if hand_over_to_replaced_program(app, &args, &_cwd) {
+        if hand_over_settings_process(app, &args, &_cwd) {
             return;
         }
         let route = second_launch_route(&args);
@@ -5361,7 +5558,20 @@ pub fn run() {
             let directory = macos_launch.preferences_directory.clone();
             #[cfg(target_os = "android")]
             let directory = app.path().app_data_dir()?.join("files/bootstrap/state");
-            #[cfg(not(any(target_os = "android", target_os = "macos")))]
+            // 首次运行时 runtime-options.json 还不存在，目录先落在本应用的数据目录；首次配置写出这份文件后由 `hand_over_settings_process` 换到新进程，见 `LinuxStateDirectory`。
+            #[cfg(target_os = "linux")]
+            let state_directory = LinuxStateDirectory::resolve(
+                std::env::var_os("MSIME_CLIENT_STATE_DIR"),
+                std::env::var_os("MSIME_CLIENT_HOST_OPTIONS")
+                    .or_else(|| std::env::var_os("MSIME_IBUS_OPTIONS"))
+                    .map(PathBuf::from),
+                app.path().app_data_dir()?,
+            )?;
+            #[cfg(target_os = "linux")]
+            let directory = state_directory.startup.clone();
+            #[cfg(target_os = "linux")]
+            app.manage(state_directory);
+            #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "linux")))]
             let directory = match std::env::var_os("MSIME_CLIENT_STATE_DIR") {
                 Some(value) => {
                     let path = std::path::PathBuf::from(value);
@@ -5371,11 +5581,9 @@ pub fn run() {
                     path
                 }
                 None => {
-                    #[cfg(target_os = "linux")]
-                    let runtime_directory = linux_runtime_state_directory()?;
                     #[cfg(target_os = "windows")]
                     let runtime_directory = windows_server_preferences_directory();
-                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                    #[cfg(not(target_os = "windows"))]
                     let runtime_directory: Option<PathBuf> = None;
                     match runtime_directory {
                         Some(path) => path,
@@ -5791,6 +5999,10 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             ai_test,
             load_preferences,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            desktop_oobe_status,
+            #[cfg(target_os = "macos")]
+            repair_macos_oobe_resources,
             restored_default_preferences,
             #[cfg(not(target_os = "ios"))]
             recover_preferences,
@@ -5823,6 +6035,10 @@ pub fn run() {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_plugins::remove_plugin_pack,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::load_authored_plugin_pack,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::save_authored_plugin_pack,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_plugins::load_plugin_mentions,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_plugins::save_plugin_mentions,
@@ -5832,6 +6048,12 @@ pub fn run() {
             desktop_plugins::set_script_grant,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_plugins::reorder_scripts,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::script_plugin_state,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::set_script_settings,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::clear_script_data,
             vocabulary::load_vocabulary_review,
             vocabulary::answer_vocabulary_card,
             vocabulary::set_vocabulary_settings,
@@ -5901,6 +6123,8 @@ pub fn run() {
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_resource_packs::resource_packs,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            desktop_resource_packs::resource_pack_check_grammar_updates,
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_resource_packs::resource_pack_install,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_resource_packs::resource_pack_cancel,
@@ -5922,6 +6146,10 @@ pub fn run() {
             dictionary_request,
             dictionary_scel_text,
             cloud_clipboard_request,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            cloud_clipboard_webdav_probe,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            dictionary_sync,
             cloud_clipboard_can_send_text,
             cloud_dictionary_request,
             load_emoji_catalog,
@@ -5982,6 +6210,8 @@ pub fn run() {
             linux_setup::leave_linux_setup_window,
             #[cfg(target_os = "linux")]
             linux_setup::open_fcitx5_configtool,
+            #[cfg(target_os = "linux")]
+            linux_setup::open_linux_input_method_settings,
             #[cfg(target_os = "android")]
             android_account::android_open_input_method_settings,
             #[cfg(target_os = "android")]

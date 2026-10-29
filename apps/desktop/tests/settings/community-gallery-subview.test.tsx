@@ -145,7 +145,8 @@ function renderPhone(
       client={{
         load: vi.fn().mockResolvedValue(initial),
         save: vi.fn().mockResolvedValue(initial),
-        host: testHost({ platform }),
+        // 回复模板是高情商回复的提示词：鸿蒙按 AI 生成类资质到位、总闸打开时的样子报 `ai_generation`；这些用例也画「发布设计」，所以按实名认证到位时的样子报 `community_contribution`，总闸关着的样子由 `community/community-contribution-gate.test.tsx` 覆盖。
+        host: testHost({ platform, ai_generation: true, community_contribution: true }),
         home: {},
         account: account(),
         communitySkins: skins,
@@ -325,7 +326,7 @@ test("another touch host's 浏览更多词库 switches to the 社区 tab's 词�
 
   window.history.back();
   expect(await screen.findByRole("heading", { level: 1, name: /^(词库|词库管理)$/ })).toBeTruthy();
-  expect(within(bar).getByRole("button", { name: "设置" }).getAttribute("aria-current")).toBe(
+  expect(within(bar).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBe(
     "page",
   );
 });

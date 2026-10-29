@@ -25,7 +25,9 @@ fn options(root: &Path) -> EngineOptions {
         shuangpin_profile: 0,
         shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
+        force_cantonese_shuangpin: false,
         single_character_only: false,
+        caret_edit_suffix: false,
         learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
@@ -36,6 +38,7 @@ fn options(root: &Path) -> EngineOptions {
         wubi_z_wildcard: false,
         wubi_profile: 0,
         helpcode: false,
+        strict_quanpin_helpcode: false,
         show_helpcode: true,
         shuangpin_helpcode_modes: crate::types::ShuangpinHelpcodeModes::default(),
         helpcode_schema: "ziranma".into(),
@@ -58,6 +61,7 @@ fn options(root: &Path) -> EngineOptions {
         mixed_kaomoji: false,
         mixed_symbols: false,
         mixed_japanese: false,
+        multilingual_languages: Vec::new(),
         local_unicode: true,
         local_date_time: true,
         local_date_time_inline: true,
@@ -93,6 +97,7 @@ fn options(root: &Path) -> EngineOptions {
         sentence_alternatives: true,
         vietnamese_input_method: 0,
         vietnamese_tone_style: 0,
+        korean_layout: 0,
         cantonese_dictionary: String::new(),
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
@@ -380,6 +385,141 @@ fn hand_written_glosses_apply_without_a_learned_store() {
             .to_string(),
         crate::diagnostics::CANDIDATE_GLOSS_UNAVAILABLE
     );
+}
+
+/// 释义来源在查询线程里按路径加文件身份缓存，省掉每个按键重新打开词库；同一线程上改写自定义译文、删掉学到的释义库、换掉发布词库，下一次查询都要看到新文件，结果与每次重新打开相同。替换的文件都比原来长，免得粗粒度的修改时间和复用的 inode 让新旧文件看起来一样。
+#[test]
+fn cached_glosses_follow_replaced_and_removed_files() {
+    let resources = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let packaged = resources.path().join("msime-english.db");
+    Connection::open(&packaged)
+        .unwrap()
+        .execute_batch(&format!(
+            "{ENGLISH_SCHEMA} INSERT INTO zh_en_glosses VALUES('测试','packaged gloss');"
+        ))
+        .unwrap();
+    let resources_path = resources.path().to_str().unwrap();
+    let user_path = user.path().to_str().unwrap();
+    let candidates = vec![("测试".into(), 0)];
+    let glosses = || candidate_glosses_with_user(resources_path, user_path, &candidates).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+
+    let custom = user.path().join("custom_translations.txt");
+    std::fs::write(&custom, "测试\thand written gloss\n").unwrap();
+    assert_eq!(glosses(), vec!["hand written gloss"]);
+    std::fs::write(
+        &custom,
+        "# edited in Settings\n测试\tedited hand written gloss\n",
+    )
+    .unwrap();
+    assert_eq!(glosses(), vec!["edited hand written gloss"]);
+    std::fs::remove_file(&custom).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+
+    assert!(save_candidate_gloss(
+        user_path,
+        true,
+        "测试",
+        "learned gloss"
+    ));
+    assert_eq!(glosses(), vec!["learned gloss"]);
+    assert!(save_candidate_gloss(
+        user_path,
+        true,
+        "测试",
+        "relearned gloss"
+    ));
+    assert_eq!(glosses(), vec!["relearned gloss"]);
+    std::fs::remove_file(user.path().join("translation-glosses.db")).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss"]);
+
+    std::fs::remove_file(&packaged).unwrap();
+    Connection::open(&packaged)
+        .unwrap()
+        .execute_batch(&format!(
+            "{ENGLISH_SCHEMA} INSERT INTO zh_en_glosses VALUES('测试','replaced gloss');
+             CREATE TABLE padding(value BLOB); INSERT INTO padding VALUES(zeroblob(65536));"
+        ))
+        .unwrap();
+    assert_eq!(glosses(), vec!["replaced gloss"]);
+    assert_eq!(
+        candidate_glosses(resources_path, &candidates).unwrap(),
+        vec!["replaced gloss"]
+    );
+    std::fs::remove_file(&packaged).unwrap();
+    assert!(candidate_glosses(resources_path, &candidates).is_err());
+}
+
+/// 离线释义库的连接同样按文件身份缓存：换成另一种语言的文件、再删掉，下一次查询给出和重新打开一样的结果。
+#[test]
+fn cached_offline_target_glosses_follow_replaced_and_removed_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zh-fr.db");
+    offline_gloss_database(&path, "fr", 1);
+    let candidates = vec![("猫".into(), 0)];
+    let glosses = || candidate_target_glosses(path.to_str().unwrap(), "fr", &candidates);
+    assert_eq!(glosses().unwrap(), vec!["chat, chatte; félin"]);
+    assert_eq!(glosses().unwrap(), vec!["chat, chatte; félin"]);
+
+    std::fs::remove_file(&path).unwrap();
+    offline_gloss_database(&path, "ja", 1);
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE padding(value BLOB); INSERT INTO padding VALUES(zeroblob(65536));",
+        )
+        .unwrap();
+    assert_eq!(
+        glosses().unwrap_err().to_string(),
+        "Offline gloss dictionary language mismatch"
+    );
+    assert_eq!(
+        candidate_target_glosses(path.to_str().unwrap(), "ja", &candidates).unwrap(),
+        vec!["chat, chatte; félin"]
+    );
+
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        glosses().unwrap_err().to_string(),
+        "Offline gloss dictionary unavailable"
+    );
+    assert!(!path.exists(), "a read-only open must not create the file");
+}
+
+/// 键盘收起、内存吃紧时宿主释放调用线程的释义缓存；之后的查询重新打开词库、重新读自定义译文，结果与释放前相同，没打开过任何缓存时释放也不出错。
+#[test]
+fn released_gloss_caches_reopen_on_the_next_query() {
+    release_gloss_caches();
+    let resources = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    Connection::open(resources.path().join("msime-english.db"))
+        .unwrap()
+        .execute_batch(&format!(
+            "{ENGLISH_SCHEMA} INSERT INTO zh_en_glosses VALUES('测试','packaged gloss');"
+        ))
+        .unwrap();
+    std::fs::write(
+        user.path().join("custom_translations.txt"),
+        "你好\thand written gloss\n",
+    )
+    .unwrap();
+    let target = resources.path().join("zh-fr.db");
+    offline_gloss_database(&target, "fr", 1);
+    let resources_path = resources.path().to_str().unwrap();
+    let user_path = user.path().to_str().unwrap();
+    let candidates = vec![("测试".into(), 0), ("你好".into(), 0)];
+    let glosses = || candidate_glosses_with_user(resources_path, user_path, &candidates).unwrap();
+    let target_candidates = vec![("猫".into(), 0)];
+    let target_glosses =
+        || candidate_target_glosses(target.to_str().unwrap(), "fr", &target_candidates).unwrap();
+    assert_eq!(glosses(), vec!["packaged gloss", "hand written gloss"]);
+    assert_eq!(target_glosses(), vec!["chat, chatte; félin"]);
+
+    release_gloss_caches();
+    assert_eq!(glosses(), vec!["packaged gloss", "hand written gloss"]);
+    assert_eq!(target_glosses(), vec!["chat, chatte; félin"]);
 }
 
 #[cfg(unix)]
@@ -932,6 +1072,9 @@ fn invalid_options_return_errors_instead_of_unwinding_into_rust() {
     value.vietnamese_tone_style = 2;
     assert_eq!(message(&value), "Unsupported Vietnamese tone style");
     value.vietnamese_tone_style = 1;
+    value.korean_layout = 2;
+    assert_eq!(message(&value), "Unsupported Korean layout");
+    value.korean_layout = 1;
     assert!(Session::new(&value).is_ok());
     value.resources = "relative".into();
     assert_eq!(message(&value), "Runtime directories must be absolute");
@@ -1165,6 +1308,57 @@ fn shuangpin_key_hints_reject_an_unknown_profile() {
     assert!(shuangpin_key_hints("").is_empty());
     assert!(shuangpin_key_hints("xiaohe-v2").is_empty());
     assert!(shuangpin_key_hints("quanpin").is_empty());
+}
+
+/// 评测工具靠它把全拼用例编成双拼按键：按名字取内置方案，`custom` 和不认识的名字没有表可编。
+#[test]
+fn encode_shuangpin_uses_the_named_builtin_profile() {
+    assert_eq!(
+        encode_shuangpin("ni'hao", "xiaohe").as_deref(),
+        Some("ni'hc")
+    );
+    assert_eq!(
+        encode_shuangpin("a'ming", "microsoft").as_deref(),
+        Some("oa'm;")
+    );
+    for profile in ["custom", "", "quanpin", "xiaohe-v2"] {
+        assert_eq!(encode_shuangpin("ni'hao", profile), None, "{profile}");
+    }
+    assert_eq!(encode_shuangpin("ni'bad", "xiaohe"), None);
+}
+
+/// 音节表与方案无关：首道双拼编不出 `den`（`en` 和 `ia` 同在 `k` 上，解回 `dia`），`den` 仍是音节。
+#[test]
+fn shuangpin_syllables_do_not_depend_on_the_profile() {
+    for syllable in ["de", "den", "a", "na", "zhuang", "yo"] {
+        assert!(is_shuangpin_syllable(syllable), "{syllable}");
+    }
+    for piece in ["", "d", "zhei", "ni'hao", "xyz"] {
+        assert!(!is_shuangpin_syllable(piece), "{piece}");
+    }
+    assert_eq!(encode_shuangpin("den", "shoudao"), None);
+    assert_eq!(encode_shuangpin("den", "xiaohe").as_deref(), Some("df"));
+}
+
+/// 内置方案里只有微软双拼用 `;` 键；`custom` 和不认识的名字没有表，答不了。
+#[test]
+fn shuangpin_uses_semicolon_follows_the_builtin_table() {
+    for (profile, expected) in [
+        ("xiaohe", false),
+        ("ziranma", false),
+        ("shoudao", false),
+        ("microsoft", true),
+        ("smart_abc", false),
+    ] {
+        assert_eq!(
+            shuangpin_uses_semicolon(profile),
+            Some(expected),
+            "{profile}"
+        );
+    }
+    for profile in ["custom", "", "quanpin"] {
+        assert_eq!(shuangpin_uses_semicolon(profile), None, "{profile}");
+    }
 }
 
 #[test]
@@ -2039,6 +2233,7 @@ fn session_options_map_every_host_field() {
     value.fuzzy_pinyin_rules = u32::MAX;
     value.wubi_mixed_pinyin = true;
     value.helpcode = true;
+    value.strict_quanpin_helpcode = true;
     value.helpcode_schema = "xiaohe".into();
     value.chinese_punctuation = false;
     value.paired_punctuation = false;
@@ -2081,6 +2276,7 @@ fn session_options_map_every_host_field() {
     assert_eq!(mapped.fuzzy_pinyin.rules, crate::fuzzy_rule::ALL);
     assert!(mapped.wubi.mixed_pinyin);
     assert!(mapped.helpcode);
+    assert!(mapped.strict_quanpin_helpcode);
     assert_eq!(mapped.helpcode_schema, "xiaohe");
     assert!(!mapped.chinese_punctuation);
     assert!(!mapped.paired_punctuation);
@@ -3789,4 +3985,115 @@ fn resource_dictionary_browse_distinguishes_missing_files_and_preserves_model_pa
     assert_eq!(std::fs::read(path).unwrap(), bytes);
     assert!(dictionary_resource_entries(&options, Japanese, "", 0, 1001).is_err());
     assert!(dictionary_resource_entries(&options, Japanese, "", 1_000_001, 1).is_err());
+}
+
+fn multilingual_fixture(root: &Path) -> EngineOptions {
+    let mut value = helpcode_fixture(root, "", "");
+    value.helpcode = false;
+    value.mixed_english = false;
+    value.multilingual_languages = vec![
+        crate::multilingual::Language::Chinese,
+        crate::multilingual::Language::English,
+        crate::multilingual::Language::Japanese,
+    ];
+    Connection::open(Path::new(&value.dictionaries).join("msime-english.db"))
+        .unwrap()
+        .execute_batch("INSERT INTO english_words VALUES('hello','hello',100);")
+        .unwrap();
+    std::fs::write(
+        Path::new(&value.resources).join("msime-japanese.dat"),
+        crate::japanese::decoder::test_model::bytes(
+            &[("おはよう", "おはよう", 0, 0, 500)],
+            1,
+            &[0],
+        ),
+    )
+    .unwrap();
+    value
+}
+
+#[test]
+fn host_multilingual_options_map_the_selected_languages() {
+    let root = tempfile::tempdir().unwrap();
+    let value = multilingual_fixture(root.path());
+    assert_eq!(
+        options::session_options(&value)
+            .unwrap()
+            .multilingual_languages,
+        value.multilingual_languages
+    );
+}
+
+#[test]
+fn host_multilingual_snapshot_keeps_the_raw_identity_and_language_ranges() {
+    use crate::multilingual::Language;
+    let root = tempfile::tempdir().unwrap();
+    let value = multilingual_fixture(root.path());
+    let mut session = Session::new(&value).unwrap();
+    type_text(&mut session, b"hellonihaoohayou");
+    let snapshot = session.snapshot().unwrap();
+    let index = snapshot
+        .candidate_sources
+        .iter()
+        .position(|source| *source == CandidateSource::Multilingual as u8)
+        .expect("宿主应保留连续混合行");
+    assert_eq!(snapshot.candidates[index], "hello你好おはよう");
+    let metadata = snapshot
+        .multilingual_conversion
+        .expect("宿主快照应保留语言边界");
+    assert_eq!(metadata.raw_input, "hellonihaoohayou");
+    assert_eq!(metadata.raw_input, snapshot.editing_text);
+    assert_eq!(
+        metadata
+            .conversion
+            .segments
+            .iter()
+            .map(|segment| (
+                segment.language,
+                segment.input.clone(),
+                segment.text.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (Language::English, 0..5, "hello"),
+            (Language::Chinese, 5..10, "你好"),
+            (Language::Japanese, 10..16, "おはよう"),
+        ]
+    );
+    assert_eq!(session.select(index).unwrap().commit, "hello你好おはよう");
+    assert!(session
+        .snapshot()
+        .unwrap()
+        .multilingual_conversion
+        .is_none());
+    type_text(&mut session, b"nihao");
+    assert!(session
+        .snapshot()
+        .unwrap()
+        .multilingual_conversion
+        .is_none());
+    session.command(Command::Cancel).unwrap();
+    assert!(session
+        .snapshot()
+        .unwrap()
+        .multilingual_conversion
+        .is_none());
+}
+
+/// The iOS keyboard destroys its session whenever it goes away and builds one on the next appearance; the personal context model survives that only if the session records the journal as it lets go. Not on Windows, where a store that only read the journal records nothing rather than keep a probe connection open.
+#[cfg(not(windows))]
+#[test]
+fn dropping_a_session_records_its_journal_for_the_next_one() {
+    let root = tempfile::tempdir().unwrap();
+    let options = helpcode_fixture(root.path(), "", "");
+    let journal = super::options::runtime_paths(&options).user(crate::assets::USER_JOURNAL);
+    let connection = Connection::open(&journal).unwrap();
+    crate::user_dictionary::journal::ensure_schema(&connection).unwrap();
+    connection
+        .execute_batch("INSERT INTO personal_bigram(previous,word,count) VALUES('你','好',2);")
+        .unwrap();
+    drop(connection);
+    let store = crate::user_dictionary::ngram_store::PersonalNgramStore::for_journal(&journal);
+    drop(Session::new(&options).unwrap());
+    assert!(store.settled_for_tests());
 }

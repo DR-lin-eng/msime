@@ -6,11 +6,14 @@ import { withoutRemovedPack, type PluginPreferences } from "./plugin-preferences
 import {
   missingSelections,
   packKindLabel,
+  soundPackUse,
+  touchPluginKinds,
   pluginErrorCode,
   pluginErrorMessage,
   schemeOpensTableModes,
 } from "./plugin-catalog-helpers";
 import type {
+  AuthoredPack,
   MentionEntry,
   PluginCatalogResult,
   PluginClient,
@@ -18,6 +21,7 @@ import type {
   PluginPackage,
   ScriptCapability,
   ScriptGrantsResult,
+  TouchPluginRules,
 } from "./plugin-types";
 import type { PluginLibraryFilter } from "./plugin-library-view";
 import { runningScriptIds } from "./plugin-script-model";
@@ -37,7 +41,11 @@ interface PluginsSectionOptions {
   mentionMode: boolean;
   scheme?: InputScheme;
   helpcode: boolean;
+  /** 触屏插件页才读：单词本和符号集装上就生效，宿主接了它们才列出。 */
+  wordbookPacks?: boolean;
+  symbolSetPacks?: boolean;
   scriptPlugins: boolean;
+  touch?: TouchPluginRules;
   active: boolean;
   onChange: (preferences: PluginPreferences) => void;
   onError: (message: string) => void;
@@ -57,7 +65,10 @@ export function usePluginsSection({
   mentionMode,
   scheme,
   helpcode,
+  wordbookPacks = false,
+  symbolSetPacks = false,
   scriptPlugins,
+  touch,
   active,
   onChange,
   onError,
@@ -75,6 +86,10 @@ export function usePluginsSection({
   const [savedMentions, setSavedMentions] = useState<MentionEntry[]>([]);
   const [scriptGrants, setScriptGrants] = useState<ScriptGrantsResult | null>(null);
   const mentionsEditable = triggers && Boolean(client);
+  // 宿主提供编辑器的读写时，列表有「新建插件」，用户包的详情有「编辑」。
+  const authoring = Boolean(client?.loadAuthoredPack && client?.saveAuthoredPack);
+  // 刚在编辑器里保存的包：它的详情页顶上说明还差哪一步才能用上。
+  const [justSaved, setJustSaved] = useState<{ kind: PluginKind; id: string } | null>(null);
   // 只有运行脚本插件的桌面宿主有授权方法。
   const scriptsShown = scriptPlugins && Boolean(client?.scriptGrants);
   // 方案不支持 K、/ 和 @ 时，列表优先说明方案限制。
@@ -146,21 +161,37 @@ export function usePluginsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, client, mentionsEditable, scriptsShown]);
 
-  const navigation = usePluginNavigation(active);
+  const navigation = usePluginNavigation(active, Boolean(touch));
 
   const { command_tables, phrase_tables } = preferences;
   const effectPacksDrawn = typingEffects && effectStyles && effectPacks;
   const packsListed = Boolean(client) && catalogState === "loaded";
   // 仅对宿主实际使用的包类型报告缺失和标记使用中。
   const actedKinds = new Set<PluginKind>([
-    ...(keySound ? (["sound"] as const) : []),
+    ...(keySound || touch ? (["sound"] as const) : []),
     ...(music ? (["music"] as const) : []),
     ...(triggers ? (["command_table", "phrase_table"] as const) : []),
     ...(effectPacksDrawn ? (["effect"] as const) : []),
     ...(helpcode ? (["helpcode"] as const) : []),
   ]);
   // 列出宿主使用但目录中已不存在的选择，供用户恢复默认。
-  const missing = packsListed ? missingSelections(preferences, catalog.packages, actedKinds) : [];
+  const missing = packsListed
+    ? missingSelections(preferences, catalog.packages, actedKinds, !touch)
+    : [];
+  // 触屏插件页只列触屏键盘用得上的包（`touchPluginKinds`），音效包里只列按键包；其余的只在列表里说一句有几个。桌面照旧全列。
+  const listedKinds = touch
+    ? new Set<PluginKind>(touchPluginKinds({ triggers, helpcode, wordbookPacks, symbolSetPacks }))
+    : null;
+  const listed = (pack: PluginPackage) =>
+    !listedKinds ||
+    (listedKinds.has(pack.kind) && (pack.kind !== "sound" || soundPackUse(pack) === "keys"));
+  const listedCatalog: PluginCatalogResult = listedKinds
+    ? {
+        packages: catalog.packages.filter(listed),
+        issues: catalog.issues.filter((issue) => listedKinds.has(issue.kind)),
+      }
+    : catalog;
+  const unlisted = listedKinds ? catalog.packages.filter((pack) => !listed(pack)) : [];
 
   // 导入或删除已经成功后，重读失败单独报告读取错误。
   const refresh = async () => {
@@ -220,6 +251,25 @@ export function usePluginsSection({
       // 原包已被删除，由导航按原入口类型恢复列表焦点。
       navigation.backToList();
     }, "删除失败，请重试。");
+  };
+
+  // 编辑器里的保存：失败时抛出，由编辑器就地说明。成功后重读目录，打开这个包的详情。
+  const saveAuthored = async (pack: AuthoredPack, replace: boolean) => {
+    const generation = clientGeneration.current;
+    const saved = await client!.saveAuthoredPack!(pack, replace);
+    if (generation !== clientGeneration.current) return;
+    setNotice(`已保存${packKindLabel(saved)}「${saved.name}」。`);
+    await refresh();
+    if (generation !== clientGeneration.current) return;
+    setJustSaved({ kind: saved.kind, id: saved.id });
+    const savedView = { kind: "pack", packKind: saved.kind, id: saved.id } as const;
+    const savedRow = `pack/${saved.kind}/${saved.id}`;
+    // 编辑保存后退回原来那层详情；新建保存后由详情顶替编辑器那层，返回时回到列表。
+    if (navigation.view.kind === "edit") {
+      navigation.goBack(() => navigation.openView(savedView, savedRow));
+    } else {
+      navigation.openView(savedView, savedRow, true);
+    }
   };
 
   const scriptPacks = scriptsShown ? catalog.packages.filter((pack) => pack.kind === "script") : [];
@@ -287,7 +337,7 @@ export function usePluginsSection({
   const saveMentions = async () => {
     if (mentionIssue) return;
     await runPluginAction(async (isCurrent) => {
-      const trimmed = mentions.map((entry) => ({ text: entry.text.trim(), key: entry.key }));
+      const trimmed = mentions.map((entry) => ({ ...entry, text: entry.text.trim() }));
       await client!.saveMentions(trimmed);
       if (!isCurrent()) return;
       setMentions(trimmed);
@@ -305,6 +355,8 @@ export function usePluginsSection({
   return {
     ...navigation,
     catalog,
+    listedCatalog,
+    unlisted,
     catalogState,
     notice,
     libraryFilter,
@@ -318,6 +370,10 @@ export function usePluginsSection({
       ? "有未保存的修改"
       : `${savedMentions.length} 条，只保存在本机${mentionModeGap}`,
     working,
+    authoring,
+    justSaved,
+    clearJustSaved: () => setJustSaved(null),
+    saveAuthored,
     scriptsShown,
     scriptPacks,
     scriptGrants,

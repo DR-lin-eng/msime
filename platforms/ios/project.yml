@@ -78,12 +78,14 @@ targets:
         CFBundleLocalizations: [zh-Hans]
         # 按住空格说话：键盘扩展不能录音，App 在后台保持录音会话，替键盘录音识别（App/Services/VoiceSessionService.swift）。会话空闲 5 分钟自动关闭。
         UIBackgroundModes: [audio, processing]
+        NSFaceIDUsageDescription: 验证身份以查看打字统计
     sources:
       - path: App/Sources
       - path: App/Services
       - path: KeyboardExtension/Sources
         includes:
           - input/FourteenKeyLayout.swift
+          - input/EighteenKeyLayout.swift
       - path: ../../shared/backend
         excludes:
           - Tests/**
@@ -272,6 +274,11 @@ targets:
         buildPhase: resources
         type: folder
         optional: true
+      # stage-resources.sh 暂存的内置按键音包（`mode = "keys"` 的那几个，连同各自的 plugin.toml 许可），键盘按选中的音效播放；设置 App 从内嵌的键盘扩展里读同一份来列出音效和试听。
+      - path: ../../target/ios/sound-packs
+        buildPhase: resources
+        type: folder
+        optional: true
       - path: SharedResources/KeyboardBrand.png
         buildPhase: resources
       # 表情面板的水杉娘表情包：66 张 320px 透明 WebP 和清单，三个手机键盘共用仓库里的同一份。
@@ -322,6 +329,11 @@ targets:
         buildPhase: resources
         type: folder
         optional: true
+      # 同键盘扩展：按键音包的测试经 `msime_client_key_sound_pack` 读这一份。
+      - path: ../../target/ios/sound-packs
+        buildPhase: resources
+        type: folder
+        optional: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.msime.ios.keyboard-test-host
@@ -363,6 +375,10 @@ targets:
       # 辅助码页导入码表的选择规则和导入、删除流程（#7176），HelpcodeChoicePolicyTests 与 HelpcodeSettingsTests 直接测它们。
       - path: App/Sources/settings/HelpcodeChoicePolicy.swift
       - path: App/Sources/settings/HelpcodeSettingsView.swift
+      # 插件页的目录、标记、偏好写法和编辑器规则，以及社区插件的翻页，PluginCatalogTests 与 PluginEditorModelTests 直接测它们。
+      - path: App/Sources/plugins/PluginCatalog.swift
+      - path: App/Sources/plugins/PluginEditorModel.swift
+      - path: App/Services/CommunityPluginAPI.swift
       - path: App/Sources/app/IOSRustAccount.swift
       - path: App/Sources/app/ViewRequestGeneration.swift
       - path: App/Sources/app/ViewRequestTask.swift
@@ -485,6 +501,8 @@ targets:
           - build-native.sh
           - tools/**
       - path: KeyboardTests/input/InputSchemeTestSupport.swift
+      # 登录前的同意勾选规则，LoginConsentPolicyTests 直接测它。
+      - path: App/Sources/account/LoginConsentPolicy.swift
       - path: App/Services/BoundedFileReader.swift
       - path: App/Services/CustomService.swift
       - path: App/Services/AIProviderCatalog.swift

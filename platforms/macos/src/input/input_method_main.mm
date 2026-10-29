@@ -3,6 +3,7 @@
 #import "InputModeIdentifiers.h"
 #import "InputModeStatusItem.h"
 #import "InputSourceRegistration.h"
+#import "InputControllerActivity.h"
 #import "../settings/PreferencesWindowController.h"
 #import "../settings/RuntimeOptions.h"
 #import "InputAssistance.h"
@@ -11,6 +12,7 @@
 #import "../core/FloatingToolbarPanel.h"
 #import "../core/UsageReporting.h"
 #import "../core/UpdateController.h"
+#import "MSIMEClientSession.h"
 #import "../candidate/CandidateSkin.h"
 #import "../voice/VoiceAudioMuter.h"
 #include "../core/DiagnosticLog.h"
@@ -40,6 +42,22 @@ static void MSIMEConfigureMovableState(void) {
         if (state.path.length > 0)
             metasequoia::mac::SetDefaultSkinsRoot(std::filesystem::path(state.path.fileSystemRepresentation) / "skins");
     }
+}
+
+// 「我的词条」的网盘自动同步在 Rust 的后台线程里跑（msime_client.h 的 msime_client_dictionary_sync_start），这里只交出运行时配置文件和与设置应用共用的状态目录：设置应用的 dictionary_sync 命令用的是同一个 Application Support/<设置应用 bundle id>/dictionary-sync（apps/desktop/src-tauri/src/platform/dictionary_sync.rs）。后台线程每一轮重读配置和偏好，没配置网盘、设置应用还没生成设备身份时什么也不做，从不自己生成身份。起它只是开一个线程，不在主线程上读写文件或联网。
+static void MSIMEStartDictionarySync(void) {
+    NSString *optionsPath = MSIMERuntimeOptionsPath();
+    NSString *state = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
+    if (optionsPath.length == 0 || !optionsPath.isAbsolutePath || state.length == 0) return;
+    NSDictionary *request = @{
+        @"options_path": optionsPath,
+        @"directory": [state stringByAppendingPathComponent:@"dictionary-sync"],
+    };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+    if (!body) return;
+    char *response = msime_client_dictionary_sync_start(static_cast<const uint8_t *>(body.bytes), body.length);
+    if (response && !strstr(response, "\"ok\":true")) NSLog(@"MSIME dictionary sync did not start: %s", response);
+    if (response) msime_client_string_free(response);
 }
 
 int main(int argc, const char *argv[]) {
@@ -123,6 +141,8 @@ int main(int argc, const char *argv[]) {
         NSDictionary *reportingOptions = MSIMELoadRuntimeOptions();
         id reportingPreferences = reportingOptions[@"preferences_directory"];
         MSIMEUsageReportingStart([reportingPreferences isKindOfClass:NSString.class] && [reportingPreferences isAbsolutePath] ? reportingPreferences : nil);
+        // 同样只在输入法进程里：独立设置窗口已经在上面返回。
+        MSIMEStartDictionarySync();
         // Recover a prior crashed capture before accepting new IMK sessions.
         // A running owner holds the journal lock, so this cannot undo its mute.
         [[[MSIMEVoiceAudioMuter alloc] init] restore];
@@ -158,7 +178,31 @@ int main(int argc, const char *argv[]) {
                     if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) [[MSIMEUpdateController sharedController] installDownloadedUpdateIfReady];
                 }];
         // 带 feed 的发布包在这里启动 Sparkle，它才会按 SUScheduledCheckInterval 在后台检查和下载；没有 feed 的构建不创建更新控制器，「检查更新…」用到时再建。
-        if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) (void)[MSIMEUpdateController sharedController];
+        // 先在后台队列读出偏好里的更新通道（update_channel），回到主线程再带着它创建控制器：Sparkle 启动后安排的第一次检查就取用户所选通道的 appcast，读偏好文件也不占用处理按键的主线程。偏好读不出来时按稳定版。之后的通道变化由 InputController 读偏好时交给控制器。
+        if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) {
+            NSString *updatePreferences = [reportingPreferences isKindOfClass:NSString.class] && [reportingPreferences isAbsolutePath]
+                ? [reportingPreferences copy] : nil;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                id channel = nil;
+                if (updatePreferences) {
+                    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:updatePreferences error:nil];
+                    NSDictionary *preferences = [snapshot[@"preferences"] isKindOfClass:NSDictionary.class] ? snapshot[@"preferences"] : nil;
+                    channel = preferences[@"update_channel"];
+                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    MSIMEUpdateController *updates = [MSIMEUpdateController sharedControllerWithUpdateChannelPreference:channel];
+                    // 切换输入源和离开电脑时都先看用户手上有没有没完成的东西，有就这次不装（UpdateController.h）。
+                    updates.unfinishedWork = ^BOOL {
+                        return MSIMEInputControllerHasUnfinishedInput() || MSIMEUpdateWindowsHoldUserWork(NSApp.windows);
+                    };
+                    // 从不切走水杉的用户，在熄屏、切走登录会话或半小时没有任何输入时装后台下好的更新（UpdateController.h）。闲置时长取整个登录会话的输入，不只是打给水杉的按键。
+                    [updates installDownloadedUpdateWhenAwayWithWorkspaceCenter:NSWorkspace.sharedWorkspace.notificationCenter
+                                                                      idleClock:^CFTimeInterval {
+                                                                          return CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType);
+                                                                      }];
+                });
+            });
+        }
         Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
         id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
         if ([shared respondsToSelector:@selector(startClipboardCaptureWithOptions:)]) {
@@ -169,6 +213,8 @@ int main(int argc, const char *argv[]) {
         MSIMEStopNightLearning();
         if ([shared respondsToSelector:@selector(stopClipboardCapture)]) [shared performSelector:@selector(stopClipboardCapture)];
         [sourceMonitor stop];
+        // 正在跑的那一次同步最多等两秒，与使用统计收尾的宽限相同；没等完也不要紧，每一步都已写盘。被 SIGTERM 结束时不经过这里，进程直接退出，道理相同。
+        (void)msime_client_dictionary_sync_stop(2000);
         MSIMEUsageReportingStop();
         (void)server;
     }

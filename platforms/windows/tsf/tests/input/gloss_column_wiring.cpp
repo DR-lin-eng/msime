@@ -74,10 +74,14 @@ int main(int argc, char **argv) {
            "the computed bit is what goes on the wire");
 
     const std::string presenter = read(root + "/UI/CandidateListUIPresenter.cpp");
-    // 数字与空格进入同一个带类型的回复处理器，释义不能回退为宿主候选。
+    // 宿主会话拥有组字时数字在 _HandleCandidateWorker 里选词：先读 Server 的回复，CommitExactText 时上屏释义，不向宿主会话选词。
     const std::string worker = between(presenter, "HRESULT CMetasequoiaIME::_HandleCandidateWorker(", "\n}\n");
-    expect(worker, "return _HandleCandidateFinalize(ec, pContext, requestId, prefetchedText);", true,
-           "digits share the typed Server reply handler");
+    expect_before(worker, "TryReadDataFromServerPipeWithTimeout(requestId, /*abortTransportOnTimeout=*/false)",
+                  "_SelectHighlightedHostCandidate(ec, pContext, reply->msg_type", "the host digit path reads the Server's reply before selecting");
+    expect_before(worker, "Global::DataFromServerMsgType::CommitExactText", "_SelectHighlightedHostCandidate(ec, pContext, reply->msg_type",
+                  "an exact-text reply is committed instead of the host candidate");
+    expect(worker, "return _CommitServerExactText(ec, pContext, exactText);", true, "the host digit path commits the gloss");
+    // 空格、回车和非宿主会话的数字走 _HandleCandidateFinalize，同一个上屏函数。
     const std::string finalize = between(presenter, "HRESULT CMetasequoiaIME::_HandleCandidateFinalize(", "\n}\n");
     expect(finalize, "return _CommitServerExactText(ec, pContext, serverCandidateString);", true, "the finalize path commits the gloss");
     // Server 已经取消了组字，宿主会话也要丢掉，否则下一个字母接着旧拼音组字。

@@ -12,15 +12,13 @@
 
 #![no_std]
 
-#[path = "../../../../docs/script-plugin-template/sdk/msime_script.rs"]
-mod msime_script;
-
 #[path = "../../shared/common_chars.rs"]
 mod common_chars;
+#[path = "../../shared/rare_scan.rs"]
 mod scan;
 
 use core::ptr::addr_of_mut;
-use msime_script::{candidates, event, filter, hook, local_mode, log, Error};
+use msime_script_sdk::{candidates, event, filter, hook, local_mode, log, Error};
 
 /// 候选窗口最多 20 行（宿主的上限）。
 const MAX_ROWS: usize = 20;
@@ -43,7 +41,7 @@ static mut TEXT: [u8; ROW_BYTES] = [0; ROW_BYTES];
 
 #[no_mangle]
 pub extern "C" fn msime_abi() -> i32 {
-    msime_script::ABI_VERSION
+    msime_script_sdk::ABI_VERSION
 }
 
 #[no_mangle]

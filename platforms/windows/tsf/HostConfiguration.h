@@ -1,16 +1,21 @@
 #pragma once
 
 #include "../common/InputSchemeTraits.h"
+#include <filesystem>
 #include <memory>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include <string>
 
 namespace msime::tsf {
 struct HostConfiguration {
+  std::uint64_t revision = 0;
   std::string directory;
   nlohmann::json preferences;
   std::string preferenceSnapshot;
   std::string hostOptions;
+  // hostOptions 里的 user_data：词库维护租约写在它下面（../common/DictionaryQuiesceLease.h）。没有或不是绝对路径时为空，TIP 就当作没有租约。
+  std::filesystem::path userData;
   msime::windows::scheme::LanguageDictionaryPresence dictionaries;
 };
 

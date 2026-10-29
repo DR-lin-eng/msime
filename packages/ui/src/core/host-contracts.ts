@@ -47,6 +47,57 @@ export interface ImeSetupState {
   current: boolean | null;
 }
 
+/** 跨平台首次运行引导的事实快照；`null` 是宿主无法可靠查询，不是未完成。 */
+export interface OobeState {
+  resourcesReady: boolean | null;
+  systemEnabled: boolean | null;
+  systemCurrent: boolean | null;
+  preferencesSaved: boolean | null;
+  onboardingSeen: boolean | null;
+}
+
+export type OobeStep =
+  | "prepare_resources"
+  | "enable_system_input_method"
+  | "make_default_input_method"
+  | "save_preferences";
+
+/** 宿主提供 OOBE 状态时使用的读取和通知接口。 */
+export interface OobeClient {
+  read(): OobeState | null;
+  subscribe(listener: (state: OobeState) => void): () => void;
+  refresh?(): void;
+  /** 重试宿主的资源准备，桌面宿主可以打开自己的安装或配置页。 */
+  prepareResources?(): Promise<void>;
+  /** 打开宿主的安装或系统配置入口。 */
+  openSetup?(): Promise<void>;
+}
+
+export function oobeFlowComplete(state: OobeState): boolean {
+  return (
+    state.onboardingSeen === true &&
+    state.resourcesReady === true &&
+    state.preferencesSaved === true
+  );
+}
+
+export function oobeSystemReady(state: OobeState): boolean {
+  return state.systemEnabled === true && state.systemCurrent === true;
+}
+
+export function oobeComplete(state: OobeState): boolean {
+  return oobeFlowComplete(state) && oobeSystemReady(state);
+}
+
+/** 只返回明确失败的第一步；未知值交给宿主显示无法确认，不强行当成失败。 */
+export function oobeNextAction(state: OobeState): OobeStep | null {
+  if (state.resourcesReady === false) return "prepare_resources";
+  if (state.systemEnabled === false) return "enable_system_input_method";
+  if (state.systemCurrent === false) return "make_default_input_method";
+  if (state.preferencesSaved === false) return "save_preferences";
+  return null;
+}
+
 export interface ImeSetupClient {
   /** 最近已知的状态；宿主尚不能回答时为 null。 */
   read(): ImeSetupState | null;
@@ -54,6 +105,16 @@ export interface ImeSetupClient {
   subscribe(listener: (state: ImeSetupState) => void): () => void;
   /** 请宿主现在重新读一次，有变化时照常通知订阅者。用于宿主看不到变化的时候：HarmonyOS 上从键盘的 🌐 菜单切换输入法，不会触发宿主监听的 `imeChange`。 */
   refresh?(): void;
+}
+
+/**
+ * 宿主自己征得的隐私政策授权（目前只有 HarmonyOS：首次启动时由原生弹窗询问）。没有授权时宿主不提供账号、社区、云同步、检查更新这些联网入口，设置页在「隐私」里说明现状并给出重新打开弹窗的入口。
+ */
+export interface PrivacyConsentClient {
+  /** 用户是否已同意当前版本的隐私政策。授权变化时宿主换一个新的 client。 */
+  granted: boolean;
+  /** 重新打开宿主的授权弹窗，用户在其中同意、拒绝或撤回同意。 */
+  review(): Promise<void>;
 }
 
 export interface HostChromeClient {

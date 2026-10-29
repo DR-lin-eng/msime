@@ -79,6 +79,7 @@ static NSString *const CandidateFollowCursorKey = @"MSIMEClientCandidateFollowCu
 static NSString *const InputModeHUDKey = @"MSIMEClientInputModeHUD";
 static NSString *const InputModeStatusItemKey = @"MSIMEClientInputModeStatusItem";
 static NSString *const AppLogoKey = @"MSIMEClientAppLogo";
+static NSString *const CandidateStatusKey = @"MSIMEClientCandidateStatus";
 static NSString *const CandidatePageNumberKey = @"MSIMEClientCandidatePageNumber";
 static NSString *const ExpandCandidatesKey = @"MSIMEClientExpandCandidates";
 static NSString *const CandidateExpandButtonKey = @"MSIMEClientCandidateExpandButton";
@@ -451,6 +452,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         AppInputModeRulesKey : @"sharedAppInputModeRules",
         VimModeAppsKey : @"sharedVimModeApps",
         AppLogoKey : @"sharedShowsAppLogo",
+        CandidateStatusKey : @"sharedShowsCandidateStatus",
         CandidatePageNumberKey : @"sharedShowsCandidatePageNumber",
         ExpandCandidatesKey : @"sharedExpandCandidates",
         CandidateExpandButtonKey : @"sharedShowsCandidateExpandButton",
@@ -611,6 +613,7 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             InputModeHUDKey : ^id(MSIMEAppearancePreferences *p) { return @(p.inputModeHUD); },
             InputModeStatusItemKey : ^id(MSIMEAppearancePreferences *p) { return @(p.inputModeStatusItem); },
             AppLogoKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsAppLogo); },
+            CandidateStatusKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidateStatus); },
             CandidatePageNumberKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidatePageNumber); },
             ExpandCandidatesKey : ^id(MSIMEAppearancePreferences *p) { return @(p.expandCandidates); },
             CandidateExpandButtonKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidateExpandButton); },
@@ -1145,6 +1148,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSNumber *_sharedCandidateFollowCursor;
     NSNumber *_sharedInputModeHUD;
     NSNumber *_sharedInputModeStatusItem;
+    NSNumber *_sharedShowsCandidateStatus;
     NSNumber *_sharedShowsAppLogo;
     NSNumber *_sharedShowsCandidatePageNumber;
     NSNumber *_sharedExpandCandidates;
@@ -1184,6 +1188,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id _sharedCandidatePadding;
     /// 共享文档的 `candidate_window_fit_content`：用户要求候选窗严格按文字宽度收紧；与皮肤 `fit_content` 是或关系。
     NSNumber *_sharedCandidateFitContent;
+    NSString *_sharedCandidateCountMode;
+    NSNumber *_sharedCandidateMaxWidth;
+    NSNumber *_sharedCandidateColumns;
     NSDictionary<NSString *, id> *_sharedCandidateGeometry;
     NSSlider *_candidateScaleSlider;
     NSTextField *_candidateScaleLabel;
@@ -1454,6 +1461,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     merged[@"input_mode_hud"] = @(self.inputModeHUD);
     merged[@"input_mode_status_item"] = @(self.inputModeStatusItem);
     merged[@"show_app_logo"] = @(self.showsAppLogo);
+    if ([_defaults objectForKey:CandidateStatusKey] != nil) merged[@"show_candidate_status"] = @(self.showsCandidateStatus);
     merged[@"show_candidate_page_number"] = @(self.showsCandidatePageNumber);
     merged[@"expand_candidates"] = @(self.expandCandidates);
     merged[@"show_candidate_expand_button"] = @(self.showsCandidateExpandButton);
@@ -1882,6 +1890,15 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)setInputModeStatusItem:(BOOL)value {
     _sharedInputModeStatusItem = nil;
     [_defaults setBool:value forKey:InputModeStatusItemKey];
+    [self preferencesChanged];
+}
+- (BOOL)showsCandidateStatus {
+    if (_sharedShowsCandidateStatus) return _sharedShowsCandidateStatus.boolValue;
+    return [_defaults objectForKey:CandidateStatusKey] == nil ? YES : [_defaults boolForKey:CandidateStatusKey];
+}
+- (void)setShowsCandidateStatus:(BOOL)value {
+    _sharedShowsCandidateStatus = nil;
+    [_defaults setBool:value forKey:CandidateStatusKey];
     [self preferencesChanged];
 }
 - (BOOL)showsAppLogo {
@@ -3104,6 +3121,11 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (BOOL)candidateWindowFitContent {
     return [_sharedCandidateFitContent boolValue];
 }
+- (BOOL)adaptiveCandidateCount {
+    return !self.vertical && [_sharedCandidateCountMode isEqual:@"adaptive"];
+}
+- (CGFloat)candidateMaxWidth { return _sharedCandidateMaxWidth ? _sharedCandidateMaxWidth.doubleValue : 420; }
+- (NSUInteger)candidateColumns { return _sharedCandidateColumns ? _sharedCandidateColumns.unsignedIntegerValue : 6; }
 - (msime::mac::CandidateWindowStyle)candidateWindowStyle {
     msime::mac::CandidateWindowStyle style;
     style.scale = self.candidateScalePercent / 100.0;
@@ -3267,6 +3289,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     }
     id layout = preferences[@"candidate_layout"];
     if ([@[@"horizontal", @"vertical"] containsObject:layout]) _sharedVertical = @([layout isEqual:@"vertical"]);
+    id countMode = preferences[@"candidate_count_mode"];
+    _sharedCandidateCountMode = [@[@"fixed", @"adaptive"] containsObject:countMode] ? countMode : nil;
+    id maxWidth = preferences[@"candidate_max_width"];
+    _sharedCandidateMaxWidth = ValidCandidateStyleInteger(maxWidth, 160, 1200) ? maxWidth : nil;
+    id columns = preferences[@"candidate_columns"];
+    _sharedCandidateColumns = ValidCandidateStyleInteger(columns, 1, 10) ? columns : nil;
     id followCursor = preferences[@"candidate_follow_cursor"];
     if (LocalModeBoolean(followCursor)) _sharedCandidateFollowCursor = followCursor;
     id inputModeHUD = preferences[@"input_mode_hud"];
@@ -3275,6 +3303,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if (LocalModeBoolean(inputModeStatusItem)) _sharedInputModeStatusItem = inputModeStatusItem;
     id appLogo = preferences[@"show_app_logo"];
     if (LocalModeBoolean(appLogo)) _sharedShowsAppLogo = appLogo;
+    id candidateStatus = preferences[@"show_candidate_status"];
+    if (LocalModeBoolean(candidateStatus)) _sharedShowsCandidateStatus = candidateStatus;
     id pageNumber = preferences[@"show_candidate_page_number"];
     if (LocalModeBoolean(pageNumber)) _sharedShowsCandidatePageNumber = pageNumber;
     id expandCandidates = preferences[@"expand_candidates"];
@@ -4616,7 +4646,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"单按 Shift 切换中英文" control:_shiftTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Control 切换中英文" control:_controlTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Caps Lock 切换中英文"
-                  detail:@"轻点（300 毫秒内松开）切换中英文，不打开大写锁定；按住更久照常打开大写锁定。若打开了系统的「使用大写锁定键切换 ABC」，请先把它关掉。"
+                  detail:@"轻点（300 毫秒内松开）切换中英文，不打开大写锁定；按住更久照常打开大写锁定。若打开了系统的「使用大写锁定键切换 ABC」，请先把它关掉。部分外接键盘不报告 Caps Lock 是否按住，第一次在这类键盘上轻点时，系统会请求「输入监控」授权：允许后轻点才能切换，不允许时轻点照常打开大写锁定。"
                  control:_capsLockTapShortcutToggle
                      aka:@[@"中英文切换", @"大写锁定"]],
         [self settingRow:@"Control + Option + 空格切换中英文" control:_controlOptionSpaceShortcutToggle aka:@[@"中英文切换"]],

@@ -15,13 +15,14 @@ namespace msime::settings::win7 {
 enum ControlId {
   page_body = 99, language_switch = 100, caps_lock, japanese_toggle, traditional_toggle, fullwidth_toggle,
   reload_settings, page_tabs, status_text, reference_text, page_selector,
-  page_navigation = 120, page_heading, page_description,
+  page_navigation = 120, page_heading, page_description, setup_state, setup_action,
   toolbar_enabled = 200, toolbar_language, toolbar_scheme, toolbar_fullwidth,
   toolbar_punctuation, toolbar_character_set, toolbar_emoji, toolbar_handwriting,
   toolbar_keyboard, toolbar_voice, toolbar_settings, toolbar_size, toolbar_summary,
   toolbar_preview, toolbar_preview_description, toolbar_theme,
   diagnostic_server = 300, diagnostic_tsf, restart_service, open_data_directory,
   open_logs_directory, export_settings, import_settings, data_directory_text,
+  diagnostic_command_line_candidates,
   word_character_keys = 400, backspace_reverts, navigation_minus_equal, navigation_comma_period,
   navigation_brackets, navigation_mouse_wheel, navigation_arrows, navigation_left_right,
   traditional_output = 500, output_description, chinese_english_spacing, fullwidth_output,
@@ -31,6 +32,7 @@ enum ControlId {
   cloud_response_format, cloud_response_path, cloud_timeout, cloud_cache, cloud_save,
   mixed_enabled = 750, mixed_english, mixed_first_page_count, mixed_emoji, mixed_symbols,
   mixed_kaomoji, mixed_japanese, learn_candidates, single_character_only, word_lattice,
+  multilingual_enabled, multilingual_chinese, multilingual_english, multilingual_japanese, caret_edit_suffix,
   default_ime_mode = 800, ime_mode_scope, input_mode_hud, app_rule_name, app_rule_add,
   app_rule_list, app_rule_mode, app_rule_remove,
   shift_letter_modes = 900, local_mode_first = 910, fuzzy_enabled = 930, fuzzy_reset,
@@ -42,6 +44,7 @@ enum ControlId {
   scheme_wubi_third, scheme_wubi_save, scheme_vietnamese_method, scheme_vietnamese_tone,
   scheme_wubi_lookup_text, scheme_wubi_lookup, scheme_wubi_result,
   gloss_english = 1100, gloss_translations, gloss_pronunciation, gloss_target, gloss_secondary,
+  gloss_scope,
   translation_provider_control = 1200, translation_tencent_first = 1210,
   translation_niutrans_first = 1230, translation_custom_first = 1250,
   appearance_layout = 1300, appearance_page_size, appearance_logo, appearance_follow,
@@ -95,11 +98,14 @@ enum ControlId {
   cloud_clipboard_text, cloud_clipboard_add, cloud_clipboard_devices, cloud_clipboard_device_detail,
   cloud_clipboard_approve, cloud_clipboard_reject, cloud_clipboard_remove,
   cloud_clipboard_reset, cloud_clipboard_notice, cloud_clipboard_metadata,
+  cloud_clipboard_webdav_url, cloud_clipboard_webdav_username, cloud_clipboard_webdav_password,
+  cloud_clipboard_webdav_test, cloud_clipboard_webdav_save, cloud_clipboard_webdav_clear,
   dictionary_kind = 2200, dictionary_user_only, dictionary_query, dictionary_search,
   dictionary_page, dictionary_previous, dictionary_next, dictionary_entries,
   dictionary_entry_source, dictionary_key, dictionary_value, dictionary_weight,
   dictionary_new, dictionary_save, dictionary_delete, dictionary_format,
   dictionary_import, dictionary_export, dictionary_reset, dictionary_notice, dictionary_export_all,
+  dictionary_sync_open,
   dictionary_updates_enabled = 2250, dictionary_updates_version, dictionary_updates_refresh,
   dictionary_updates_check, dictionary_updates_rollback, dictionary_updates_notice,
 };
@@ -120,6 +126,8 @@ public:
   struct CloudClipboardServices {
     CommunityTransport account;
     CommunityTransport relay;
+    // WebDAV「测试连接」；为空时调用 msime_client_cloud_clipboard_webdav_probe。
+    CommunityTransport webdav_probe;
   };
   explicit SettingsWindow(FilePicker file_picker = {}, Confirmation confirmation = {}, FolderPicker folder_picker = {},
       CommunityTransport community_transport = {}, CommunityTransport statistics_upload_transport = {}, CommunityTransport account_transport = {}, ClipboardServices clipboard = {}, CloudClipboardServices cloud_clipboard = {}, CommunityTransport dictionary_transport = {}, CommunityTransport update_transport = {}, CommunityTransport voice_transport = {}, SurfaceLauncher surface_launcher = {}, McpPage::Services mcp_services = {});

@@ -18,7 +18,7 @@ Status: implemented
 
 ### 函数面
 
-33 个函数与草案一一对应（之后为按方案准备追加了 `prepare_runtime_for`、`reset_learning_for`，见下文「不分方案」一条），按代码调整的地方：
+33 个函数与草案一一对应（ABI 1.1 为按方案准备追加了 `prepare_runtime_for`、`reset_learning_for`，见下文「不分方案」一条），按代码调整的地方：
 
 - 四个函数不返回状态码：`abi_version` 返回 `(major << 16) | minor`，`version` 和 `last_error` 返回 `const char*`，`string_free` 无返回值。其余 29 个返回 `int32_t`。
 - `prepare_runtime` 用 `char**` 交回代次目录，由 `string_free` 释放：采用方要把它原样放进选项的 `paths.dictionaries`，自己拼路径在 Windows 上容易错。所以 `string_free` 释放的是库交出的一切字符串，不只 JSON。

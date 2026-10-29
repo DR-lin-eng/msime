@@ -26,7 +26,7 @@ Status: implemented
 - `reset_learned_data_for(paths, schemes)` 按同一规则换回词库；`reset_learned_data_with(paths, false)`（门面）不再要求资源目录有英文库。`prepare_runtime_paths_for` 与 `reset_learned_data_for` 从 crate 根导出。
 - 没有英文库时不建空库：会话只在方案集合不要求英文库、代次里也没有它时跳过回车学词（`InputSession::can_learn_english_words`），不报诊断；要求它的集合照旧由学词时的建表补出（没经过准备的目录，测试夹具就是这样）。个人词典编辑在没有主库也没有英文库时以 `NO_ENGLISH_DICTIONARY` 失败，不在代次里建库。读英文库的地方（`EnglishDictionary::open`、九键英文、多语言、释义）本来就把缺文件当作没有行。
 - 不分方案集合的根入口 `edit_personal_dictionary`、`personal_dictionary_entries`、`edit_bundled_dictionary_entry` 按代次实际有没有 `msime-pinyin.db` 决定能编辑、列出什么（以前写死「有主库」，在不读主库的代次上编辑任何词都以「Cannot open dictionary」失败）。
-- C ABI 追加 `msime_engine_prepare_runtime_for(paths, content_id, len, schemes, out)` 与 `msime_engine_reset_learning_for(paths, schemes)`，`schemes` 是方案位集合（第 n 位是序号 n 的方案），0 和不认识的位是 `INVALID_ARGUMENT`；个人词典的列表与编辑经上面的根入口按代次内容走。这个 ABI 还没有发布过，所以加在 1.0 里，不升次版本。
+- C ABI 追加 `msime_engine_prepare_runtime_for(paths, content_id, len, schemes, out)` 与 `msime_engine_reset_learning_for(paths, schemes)`，`schemes` 是方案位集合（第 n 位是序号 n 的方案），0 和不认识的位是 `INVALID_ARGUMENT`；个人词典的列表与编辑经上面的根入口按代次内容走。msime-engine-capi 0.1.0、0.1.1 已经以 ABI 1.0 发布到 crates.io，这些追加按「每次追加加一」把次版本升到 1.1：`MSIME_ENGINE_ABI_MINOR`、`.pc` 的 Version 和库文件版本（`libmsime_engine.so.1.1.0`、`libmsime_engine.1.1.0.dylib`，SONAME 不变）一起改，打包脚本与发布工作流里的库文件名跟着改。
 
 最小数据集写在 `docs/data-formats.md` §20、`crates/engine/README.md` 和 `crates/engine-capi/README.md`：韩语、越南语、藏文什么也不用带，日文只要 `msime-japanese.dat`（缺了只出假名），粤语、注音、笔画只要各自的语言库，`msime-english.db` 在这些方案里只是专用英文的可选项。
 
@@ -38,13 +38,13 @@ Status: implemented
 - **不要求英文库的集合一律不复制它** —— 规则最简单。但 msime 自己的日文、越南文、藏文版本随包带着英文库、靠它给专用英文出补全和存英文个人词，一律不复制会改掉这些版本的行为；按「带了就复制」两边都不变。
 - **没有英文库时一律跳过学词（不看方案集合）** —— 判断只看文件。但 `host/tests.rs` 等夹具的代次没有英文库、靠学词时建表，产品契约在这些用例里会跟着变；限定在不要求英文库的集合上，要求它的集合与以前逐字节相同。
 - **C ABI 的 `reset_learning` 按代次里有没有主库自己推断，不加 `_for`** —— 少一个函数。不行：重置途中被杀时主库副本可能还挪在备份里，按文件推断会把它当成不读主库的代次；准备与重置都显式带集合更不容易出错。个人词典的列表与编辑只在准备好的代次上运行，按代次内容推断没有这个问题。
-- **升 C ABI 次版本到 1.1** —— 符合「每次追加加一」。ABI 还没有发布过，没有哪个 1.0 的库缺这两个函数；升版只会让第一个发布的版本号带着一段不存在的历史，还要同步改 `.pc`、库文件版本和 README。
+- **不升 C ABI 次版本，直接加进 1.0** —— 少改 `.pc`、库文件名和发布工作流。不行：1.0 已经随 crates.io 上的 0.1.0、0.1.1 发布，前端按 `msime_engine_abi_version()` 判断能不能调后加的函数，不升版它们就分不出旧库。
 
 ## Consequences
 
 - **收益**：第三方经核心 API 或 C ABI 就能得到 msime 的回车学词策略和「上屏但不学」；只用非中文方案的采用方可以不带 `msime-pinyin.db` 和 `msime-english.db`，也就不带它们的 GPL-3.0 数据，提案的宽松许可数据集不再被这条挡住。
 - **行为变化**：只限于方案集合不读主库的情况——资源目录没带英文库时准备和重置不再失败；这样的代次里专用英文的回车不学词、不建库，个人词典编辑报 `NO_ENGLISH_DICTIONARY`。根入口的个人词典函数在没有主库的代次上能编辑英文词（以前一律失败）。msime 产品（全部方案、随包带全部文件）和带英文库的单语版本不变。
-- **代价**：核心 `Command` 多一个变体，组字内部三处 `match` 为穷尽并列它；不要求英文库的就绪代次不会自动吸收之后放进资源目录的英文库，要换 `content_id`。C ABI 从 33 个函数变成 35 个。
+- **代价**：核心 `Command` 多一个变体，组字内部三处 `match` 为穷尽并列它；不要求英文库的就绪代次不会自动吸收之后放进资源目录的英文库，要换 `content_id`。C ABI 从 33 个函数变成 35 个，次版本升到 1.1，库文件名随之变化（打包与发布工作流已同步）。
 - **审计**：提案的硬点表、运行时文件表、最小数据集与缺口清单就地更新事实；[engine-host-dogfood](2026-10-29-engine-host-dogfood.md) 的「没做的」、[engine-library-defaults-errors-log-and-lock](2026-10-29-engine-library-defaults-errors-log-and-lock.md) 的剩余项和 [engine-capi](2026-10-29-engine-capi.md) 的「不分方案」就地改成现状并链到这里（部分重叠）；[Esc 保留已选词与回车学英文词改为可配](../feature/2026-10-21-esc-keeps-selection-and-enter-learns-english.md) 讲产品总开关的由来，它的 Problem 记的是当时门面里的位置，部分重叠、互不改写；[核心会话收尾](2026-10-29-core-session-lifecycle-and-journal-threads.md)、[主库文件内版本](2026-10-29-main-dictionary-in-file-version.md) 无关。
 
 ## Verification

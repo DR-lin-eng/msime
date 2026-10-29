@@ -34,4 +34,4 @@ Status: implemented
 ## Consequences
 
 - **收益**：之后用这个构建器发布的笔画与注音库，文件内的 `license` 和随库的许可证文本都覆盖所有来源；六个平台都带词库来源说明，渠道里漏掉它契约测试就失败。
-- **代价与已知上限**：`license` 元数据和随库的许可证文本只有在 msime-dictionary 用合入后的构建器重新发布语言词库（`release-built-dictionaries.yml`，`msime_ref` 指向含这次改动的 develop），并把 `resources/language-dictionaries.lock.json` 换到那次发布后才进入安装包；在那之前分发的仍是 `dict-v2.0.39` 的文件。libtabe 的 `COPYING` 取自 GitHub 上的源码镜像，不是 libtabe 的原始发布包。iOS 和 HarmonyOS 不带 msime 自己的 GPL-3.0 全文（Android 带 `client-LICENSE.txt`），拼音库的 rime-ice 数据也是 GPL-3.0，这次没有改；这牵涉应用商店分发 GPL 作品的产品决定。CC BY-SA 4.0、CC BY 4.0 与 GPL-3.0 数据合在一起分发的关系未经法务审阅。
+- **代价与已知上限**：`license` 元数据和随库的许可证文本只有在 msime-dictionary 用合入后的构建器重新发布语言词库（`release-built-dictionaries.yml`，`msime_ref` 指向含这次改动的 develop），并把 `resources/language-dictionaries.lock.json` 换到那次发布后才进入安装包；在那之前分发的仍是 `dict-v2.0.39` 的文件。libtabe 的 `COPYING` 取自 GitHub 上的源码镜像，不是 libtabe 的原始发布包。当时 iOS 和 HarmonyOS 不带 msime 自己的 GPL-3.0 全文（Android 带 `client-LICENSE.txt`），拼音库的 rime-ice 数据也是 GPL-3.0；维护者随后决定补上，见 [iOS 与 HarmonyOS 随包带上 GPL-3.0 全文](2026-10-29-mobile-gpl-licence-text.md)。CC BY-SA 4.0、CC BY 4.0 与 GPL-3.0 数据合在一起分发的关系未经法务审阅。

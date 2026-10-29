@@ -91,6 +91,21 @@ DESKTOP_LOCK = ROOT / "resources/desktop-dictionary.lock.json"
 # 词库来源说明本身也要随每个分发桌面词库的渠道走：它是 msime-bigram.bin、msime-trigram.bin 要求的中文维基百科（CC BY-SA 4.0）署名和 msime-wubi.db 各份码表出处唯一写着的地方。六个平台都随包或经资源包分发这些词库（Android 的 assets/dictionary 与五笔、日文资源包，iOS 键盘扩展的 EngineResources，HarmonyOS 的 resfile/engine），C 库数据包带拼音库和英文词库。iOS 关于页按 md 扩展名列出它。
 ENGINE_NOTICE_CHANNELS = ("platforms/windows/Collect-Notices.ps1", "platforms/macos/CMakeLists.txt", "platforms/linux/CMakeLists.txt", "platforms/android/build-native.sh", "platforms/ios/project.yml", "platforms/ios/tests/settings/ProjectConfigurationTests.py", "platforms/ios/App/Sources/settings/AboutAndDownloadViews.swift", "platforms/harmony/stage-resources.sh", "crates/engine-capi/packaging/data-pack.py")
 ENGINE_NOTICE_MARKERS = ("### 拼音权重与万象对齐", "## msime 构建时另加的输入", "### 整句词格的上下文表", "Copyright 2000-2026 by Kevin Atkinson", "中文维基百科")
+# 水杉输入法本身以 GPL-3.0-only 发布（仓库根目录的 LICENSE），msime-pinyin.db 含 rime-ice 的 GPL-3.0 数据，输入引擎（crates/engine、crates/path-trust）是 MPL-2.0。三个移动端都把引擎编进安装包、随包分发拼音库，GPL-3.0 第 4、6 条要求随目标代码附上许可证全文，引擎的 MPL-2.0 全文也随每份引擎构建分发，所以每个移动端渠道都要带上两份全文，关于页列出它们。各渠道给 GPL-3.0 全文起的名字不同（Android 的 client-LICENSE.txt，iOS bundle 里原样的 LICENSE，HarmonyOS 的 GPL-3.0.txt），这里逐个写出要在非注释行出现的片段。MPL-2.0 全文在所有渠道里的固定由 scripts/test-engine-license.py 负责，这里只把移动端的一并写出，让三端的两份全文在同一处可查。
+PROJECT_LICENCE = "LICENSE"
+PROJECT_LICENCE_MARKERS = ("GNU GENERAL PUBLIC LICENSE", "Version 3, 29 June 2007", "END OF TERMS AND CONDITIONS")
+ENGINE_LICENCE = "resources/licenses/MPL-2.0.txt"
+ENGINE_LICENCE_MARKERS = ("Mozilla Public License Version 2.0", "Exhibit A - Source Code Form License Notice")
+MOBILE_LICENCE_CHANNELS = {
+    "platforms/android/build-apk.sh": ('cp LICENSE "$assets/client-LICENSE.txt"',),
+    "platforms/android/build-client-apk.sh": ('cp LICENSE "$assets/client-LICENSE.txt"',),
+    "platforms/android/build-native.sh": ('cp resources/licenses/MPL-2.0.txt "$notices/MPL-2.0.txt"',),
+    "platforms/android/java/app/msime/android/home/AboutPage.java": ('"client-LICENSE.txt"', 'assets.list("native-notices")'),
+    "platforms/ios/project.yml": ("- path: ../../LICENSE", "- path: ../../resources/licenses/MPL-2.0.txt"),
+    "platforms/ios/tests/settings/ProjectConfigurationTests.py": ('"../../LICENSE"', '"MPL-2.0.txt"'),
+    "platforms/ios/App/Sources/settings/AboutAndDownloadViews.swift": ('LicenseNotice(file: "LICENSE"', 'LicenseNotice(file: "MPL-2.0"'),
+    "platforms/harmony/stage-resources.sh": ('cp LICENSE "$licenses_staged/GPL-3.0.txt"', 'cp resources/licenses/MPL-2.0.txt "$licenses_staged/"'),
+}
 WEB_DATA_CHANNELS = ("scripts/web-engine-notice.sh", "resources/licenses/web-engine-NOTICE.md")
 DATA_PACK_CHANNEL = "crates/engine-capi/packaging/data-pack.py"
 PARTIAL_DATA_CHANNELS = {
@@ -187,12 +202,22 @@ def main() -> int:
     for channel in ENGINE_NOTICE_CHANNELS:
         live = [line for line in (ROOT / channel).read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
         check(any(notice_name in line or f'"{notice_stem}"' in line for line in live), f"{channel} does not ship {notice_name}")
+    for relative, markers in ((PROJECT_LICENCE, PROJECT_LICENCE_MARKERS), (ENGINE_LICENCE, ENGINE_LICENCE_MARKERS)):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        for marker in markers:
+            check(marker in text, f"{relative} no longer contains {marker!r}")
+    for channel, fragments in MOBILE_LICENCE_CHANNELS.items():
+        live = [line for line in (ROOT / channel).read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith(("#", "//"))]
+        for fragment in fragments:
+            # project.yml 的 `- path:` 条目要整行相等，`../../LICENSE` 才不会被 `../../LICENSE.md` 之类的路径冒充。
+            exact = fragment.startswith("- path: ")
+            check(any(fragment == line.strip() if exact else fragment in line for line in live), f"{channel} does not ship the GPL-3.0 or MPL-2.0 text: no live line contains {fragment!r}")
 
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}")
         return 1
-    print(f"language data notices: {len(LICENCES)} licences in {len(NOTICE_CHANNELS)} channels, {len(DATA_LICENCES)} dictionary data licences in {len(DATA_CHANNELS)} channels, the dictionary sources notice in {len(ENGINE_NOTICE_CHANNELS)} channels, vi in {len(VI_CHANNELS)} channels, ewts in {len(EWTS_CHANNELS)} channels")
+    print(f"language data notices: {len(LICENCES)} licences in {len(NOTICE_CHANNELS)} channels, {len(DATA_LICENCES)} dictionary data licences in {len(DATA_CHANNELS)} channels, the dictionary sources notice in {len(ENGINE_NOTICE_CHANNELS)} channels, the GPL-3.0 and MPL-2.0 texts in {len(MOBILE_LICENCE_CHANNELS)} mobile channels, vi in {len(VI_CHANNELS)} channels, ewts in {len(EWTS_CHANNELS)} channels")
     return 0
 
 

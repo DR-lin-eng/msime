@@ -332,13 +332,15 @@ private struct LicenseNotice: Identifiable {
   let file: String
   let title: String
   let detail: String
-  /// 声明文件的扩展名，绝大多数是 `txt`，词库来源说明是 Markdown。
+  /// 声明文件的扩展名，绝大多数是 `txt`，词库来源说明是 Markdown，本应用的 GPL-3.0 全文是仓库根目录没有扩展名的 `LICENSE`（空字符串表示没有扩展名）。
   var fileExtension = "txt"
 
   var id: String { file }
   var url: URL? { Bundle.main.url(forResource: file, withExtension: fileExtension) }
 
   private static let all = [
+    // 本应用和键盘扩展里拼音词库的 rime-ice 数据都按 GPL-3.0 分发，排在第一项。
+    LicenseNotice(file: "LICENSE", title: "水杉输入法", detail: "本应用与拼音词库 · GPL-3.0", fileExtension: ""),
     LicenseNotice(file: "MLKit-NOTICES", title: "Google ML Kit", detail: "手写识别 · 第三方声明"),
     LicenseNotice(file: "MLKit-Dependencies", title: "ML Kit 依赖组件", detail: "手写识别 · 依赖清单"),
     LicenseNotice(file: "GoogleSignIn-Dependencies", title: "Google Sign-In", detail: "Google 登录 · Apache-2.0"),
@@ -393,7 +395,7 @@ struct LicensesView: View {
             .buttonStyle(PressFillButtonStyle())
           }
         }
-        Text("水杉输入法本身以开源许可发布，源代码见关于页的 GitHub。")
+        Text("水杉输入法本身以 GPL-3.0 发布，全文见上方「水杉输入法」一项，源代码见关于页的 GitHub。")
           .designSubtext()
           .fixedSize(horizontal: false, vertical: true)
           .padding(.horizontal, 16)

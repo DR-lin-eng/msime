@@ -173,8 +173,11 @@ def main() -> int:
 
     source = ENGINE / "src"
     compiled = set()
+    # 只看编进产品的代码：测试里读的文件（例如 diagnostics.rs 的测试读它自己的源码核对常量）不随二进制分发，不需要许可证条目。去掉测试代码的规则与下面检查 crate 外读取的那段相同。
     for path in sorted(source.rglob("*.rs")):
-        for literal in re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', path.read_text(encoding="utf-8")):
+        if path.name.endswith("tests.rs") or "tests" in path.relative_to(source).parts[:-1]:
+            continue
+        for literal in re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', production_code(path.read_text(encoding="utf-8"))):
             target = (path.parent / literal).resolve()
             relative = target.relative_to(source.resolve()).as_posix() if target.is_relative_to(source.resolve()) else None
             if relative is None or any(marker in f"/{relative}" for marker in TEST_DATA):

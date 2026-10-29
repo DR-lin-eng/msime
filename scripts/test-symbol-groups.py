@@ -35,6 +35,7 @@ NOTICE_CHANNELS = {
     "platforms/ios/project.yml": "iOS: the app's bundled resources",
     "platforms/ios/tests/settings/ProjectConfigurationTests.py": "iOS: the project configuration test",
     "docs/third-party.md": "the repository's third-party index",
+    "scripts/web-engine-notice.sh": "Web engine: the licence texts the NOTICE of each web-engine release copies",
 }
 # 总览写明每份文本覆盖什么，所以还要写出符号模式的表和它取自的 UCD 版本。
 OVERVIEWS = (

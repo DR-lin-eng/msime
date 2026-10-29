@@ -88,8 +88,8 @@ jobs:
               # 网页引擎只给浏览器用，四个原生宿主都不链接它，所以这几条路径只触发 web-engine 作业，排在下面的共享路径之前。
               crates/engine-wasm/*|packages/web-engine/*|scripts/build-web-engine.sh|scripts/web-engine-notice.sh|resources/licenses/web-engine-NOTICE.md)
                 web=true ;;
-              # web-engine-NOTICE.md 逐字复制这几份许可证与来源说明（见 scripts/web-engine-notice.sh 的 repo 段），改了它们却不重新生成，NOTICE 就过期了；#6696 只改 LICENSE，没有任何作业被触发，过期的 NOTICE 进了 develop。
-              LICENSE|resources/licenses/*|resources/helpcodes/ENGINE-NOTICE.md|resources/helpcodes/NOTICE.md)
+              # web-engine-NOTICE.md 逐字复制这几份许可证与来源说明（见 scripts/web-engine-notice.sh 的 repo 段），改了它们却不重新生成，NOTICE 就过期了；#6696 只改 LICENSE，没有任何作业被触发，过期的 NOTICE 进了 develop。引擎的 crates/engine/LICENSE 也在 repo 段里，它落在下面的 crates/*，共享路径本来就带上 web 作业。
+              LICENSE|resources/licenses/*|resources/helpcodes/ENGINE-NOTICE.md|resources/helpcodes/NOTICE.md|plugins/phrase_table/LICENSE)
                 web=true ;;
               # 拆字表和符号模式的分组表编进每个平台的引擎，它们的锁变了，提交的表就过期了。
               shared/*|crates/*|packages/*|apps/*|scripts/*|.github/workflows/ci-platforms.yml|resources/chaizi.lock.json|resources/character-glosses.lock.json|resources/opencc.lock.json|resources/symbol-groups.lock.json)

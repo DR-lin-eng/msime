@@ -823,4 +823,48 @@ mod tests {
             ENTRY_CHANGED
         );
     }
+
+    #[test]
+    fn engine_level_bundled_edits_take_the_maintenance_lease() {
+        use PersonalDictionaryKind::*;
+        let fixture = Fixture::new();
+        let paths = &fixture.paths;
+        let nihao = row(&fixture.lookup(Pinyin, "nihao"), "你好")
+            .unwrap()
+            .entry
+            .clone();
+        let session = crate::DictionaryAccess::try_session(&paths.user_data, &paths.dictionaries)
+            .unwrap()
+            .unwrap();
+
+        let error =
+            edit_bundled_dictionary_entry(paths, &nihao, Some(1), "busy-bundled").unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Busy);
+        assert_eq!(
+            error.to_string(),
+            crate::diagnostics::DICTIONARY_MAINTENANCE_BUSY
+        );
+        assert_eq!(
+            row(&fixture.lookup(Pinyin, "nihao"), "你好")
+                .unwrap()
+                .entry
+                .weight,
+            500_000
+        );
+        assert!(!paths.user(assets::USER_JOURNAL).exists());
+        // 不合法的改动在取租约之前就被拒绝，报的仍是校验错误，不是 Busy。
+        let error = edit_bundled_dictionary_entry(paths, &nihao, Some(0), "").unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Failed);
+        assert_eq!(error.to_string(), WEIGHT_OUT_OF_RANGE);
+
+        drop(session);
+        edit_bundled_dictionary_entry(paths, &nihao, Some(1), "busy-bundled").unwrap();
+        assert_eq!(
+            row(&fixture.lookup(Pinyin, "nihao"), "你好")
+                .unwrap()
+                .entry
+                .weight,
+            1
+        );
+    }
 }

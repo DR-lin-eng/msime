@@ -40,18 +40,16 @@ use msime_client_providers::voice::VoiceSessionState;
 use msime_client_services::typing_statistics::{
     CommitEfficiency, TypingSource, TypingStatisticsStore, RANKS,
 };
-use msime_engine::host::{
+use msime_engine::host::{release_gloss_caches, Command, EngineOptions, Session};
+use msime_engine::{
     check_nine_key_shuangpin_table, check_shuangpin_custom_profile,
-    nine_key_shuangpin_builtin_table, nine_key_shuangpin_table_key_hints, release_gloss_caches,
+    nine_key_shuangpin_builtin_table, nine_key_shuangpin_table_key_hints,
+    release_idle_personal_models, release_japanese_dictionary_cache,
     resolve_eighteen_key_shuangpin, resolve_fourteen_key_shuangpin, resolve_nine_key_shuangpin,
     shuangpin_builtin_table, validate_nine_key_shuangpin_table, validate_shuangpin_custom_profile,
-    CandidateEdge, Command, EngineOptions, NineKeyShuangpinError, NineKeyShuangpinKeyHint,
-    NineKeyShuangpinKind, NineKeyShuangpinTable, Session, ShuangpinCustomProfileError,
-    ShuangpinCustomTable, ShuangpinCustomTablePart,
-};
-use msime_engine::{
-    release_idle_personal_models, release_japanese_dictionary_cache, SchemeSet, SchemeType,
-    ShuangpinProfileKind,
+    CandidateEdge, NineKeyShuangpinError, NineKeyShuangpinKeyHint, NineKeyShuangpinKind,
+    NineKeyShuangpinTable, SchemeSet, SchemeType, ShuangpinCustomProfileError,
+    ShuangpinCustomTable, ShuangpinCustomTablePart, ShuangpinProfileKind,
 };
 #[cfg(unix)]
 use msime_input_runtime::TranslationQuery;
@@ -451,7 +449,7 @@ fn punctuation_lock_code(lock: msime_client_core::preferences::PunctuationLock) 
 fn engine_sentence_association(
     preferences: &msime_client_core::preferences::SentenceAssociationPreferences,
     state_root: Option<&std::path::Path>,
-) -> msime_engine::host::SentenceAssociationOptions {
+) -> msime_engine::SentenceAssociationOptions {
     // 选中的语法模型装好后才有文件路径；选中但没装（或包装在别处的 state_root
     // 下没发布）时留空，引擎逐字节退回无模型基线。
     let pack = match preferences.grammar_model {
@@ -478,7 +476,7 @@ fn engine_sentence_association(
                 .and_then(|artifact| resource_packs::installed_file(root, pack, &artifact.name))
         })
         .unwrap_or_default();
-    msime_engine::host::SentenceAssociationOptions {
+    msime_engine::SentenceAssociationOptions {
         word_lattice: preferences.word_lattice,
         neural_keyboard: preferences.neural_keyboard,
         show_next_on_duplicate: preferences.show_next_on_duplicate,

@@ -61,20 +61,38 @@ pub use logging::{set_log_sink, LogSink};
 // `GramDb::shared` 缓存的内存映射，经这个窄出口暴露给 host-api。
 pub use lattice::octagram;
 pub use nine_key::KeyGrid;
-pub use nine_key_shuangpin::NineKeyShuangpin;
 pub use paths::RuntimePaths;
 pub use pinyin::glide::{GlideKeyboard, GlidePoint};
 pub use punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
 pub use types::{
     autocorrect_type, fuzzy_rule, request_autocorrect_mask, CandidateEdge, CandidateSource,
-    Command, CommandTranslationQuery, EnglishInputOptions, FirstPageRows, FrequencyAdjustmentMode,
-    FrequencyAdjustmentOptions, FuzzyPinyinOptions, KeyResult, LocalInputMode, LocalModeOptions,
-    MixedExpressiveOptions, NineKeyShuangpinKind, NineKeyShuangpinTable, OnlineInputMode,
-    OnlineQuery, PersonalDictionaryEntry, PersonalDictionaryKind, PluginCommand,
-    PluginCommandQuery, SchemeSet, SchemeType, SentenceAssociationOptions, ShuangpinCustomTable,
-    ShuangpinHelpcodeModes, ShuangpinProfileKind, SyllableHelpcode, WordItem, WubiInputOptions,
-    WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
+    Command, CommandTableEntry, CommandTranslationQuery, EnglishInputOptions, FirstPageRows,
+    FrequencyAdjustmentMode, FrequencyAdjustmentOptions, FuzzyPinyinOptions, KeyResult,
+    LocalInputMode, LocalModeOptions, MentionEntry, MixedExpressiveOptions, NineKeyShuangpinKind,
+    NineKeyShuangpinTable, OnlineInputMode, OnlineQuery, PersonalDictionaryEntry,
+    PersonalDictionaryKind, PluginCommand, PluginCommandQuery, QuickPhraseEntry, SchemeSet,
+    SchemeType, SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinHelpcodeModes,
+    ShuangpinProfileKind, SyllableHelpcode, WordItem, WubiInputOptions, WubiProfileKind,
+    DEFAULT_FIRST_PAGE_ROWS,
+};
+// 辅助码表：`SessionOptions::helpcode_table` 与 `Session::set_helpcode_table` 收的就是它，宿主自己读表（辅助码表插件、没有文件系统的网页）时用这几项。
+pub use helpcode::{load_helpcode_keymap, HelpcodeKeymap, SharedKeymap};
+// 用户自定义的 26 键双拼表（`SessionOptions::shuangpin_custom`）的校验与起点：宿主在把表交给会话之前先校验，不合法就不要传。编辑中的表用不留存的 `check_shuangpin_custom_profile`，内置方案的表是编辑的起点。
+pub use shuangpin::custom::{
+    builtin_table as shuangpin_builtin_table,
+    check_custom_profile as check_shuangpin_custom_profile,
+    validate_custom_profile as validate_shuangpin_custom_profile,
+    CustomProfileError as ShuangpinCustomProfileError, CustomTablePart as ShuangpinCustomTablePart,
+};
+// 九键、14 键、18 键双拼的表：内置方案、用户表的校验（编辑中的表用不留存的 `check_nine_key_shuangpin_table`）、按方案取表，以及键面提示。取到的 `NineKeyShuangpin` 经 `KeyGrid::NineKeyShuangpin` 交给会话。
+pub use nine_key_shuangpin::{
+    builtin_table as nine_key_shuangpin_builtin_table,
+    check_table as check_nine_key_shuangpin_table,
+    nine_key_shuangpin as validate_nine_key_shuangpin_table, resolve as resolve_nine_key_shuangpin,
+    resolve_eighteen_key_shuangpin, resolve_fourteen_key_shuangpin,
+    table_key_hints as nine_key_shuangpin_table_key_hints, NineKeyShuangpin, NineKeyShuangpinError,
+    NineKeyShuangpinKeyHint,
 };
 pub use user_dictionary::bundled::{
     dictionary_table_entries, edit_bundled_dictionary_entry, DictionaryTableEntry,

@@ -7,6 +7,10 @@ use rusqlite::Connection;
 use super::glosses::{candidate_gloss_display, candidate_gloss_key};
 use super::*;
 use crate::types::{CandidateSource, SchemeType, WordItem};
+use crate::{
+    CommandTableEntry, DictionaryStateRecord, HelpcodeKeymap, MentionEntry, QuickPhraseEntry,
+    SentenceAssociationOptions,
+};
 
 fn options(root: &Path) -> EngineOptions {
     let path = |name| {

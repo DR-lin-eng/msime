@@ -4546,7 +4546,7 @@ fn key_grid_checks_the_scheme_and_the_composition() {
 /// 九键双拼只给全拼；它的数字和九键一样是组码，引擎没有收下的数字（米旮旯 2 不用的 1 以外的键也一样）也不当选词键，而不用网格时同一个数字会选词。
 #[test]
 fn nine_key_shuangpin_grid_is_quanpin_only_and_its_digits_never_pick() {
-    use msime_engine::host::{resolve_nine_key_shuangpin, NineKeyShuangpinKind};
+    use msime_engine::{resolve_nine_key_shuangpin, NineKeyShuangpinKind};
     let table = resolve_nine_key_shuangpin(NineKeyShuangpinKind::Migala2, None).unwrap();
     let grid = Some(KeyGrid::NineKeyShuangpin(table));
     let digit = || Action::Character {
@@ -5534,7 +5534,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         quick_phrase_frequency: true,
         helpcode_table: None,
         helpcode_fallback_resources: None,
-        sentence_association: msime_engine::host::SentenceAssociationOptions {
+        sentence_association: msime_engine::SentenceAssociationOptions {
             word_lattice: true,
             neural_keyboard: false,
             show_next_on_duplicate: false,
@@ -5670,6 +5670,22 @@ fn next_word_prediction_passes_space_return_and_digits_to_the_editor() {
         assert!(!transition.handled && transition.commit.is_none());
         assert!(transition.view.candidates.is_empty());
     }
+}
+
+/// 联想候选栏上的关闭键（#10078）送 Cancel：建议清空、报已处理，宿主因此不往编辑器补任何字符，这和会多插一个空格的空格键不同。
+#[test]
+fn next_word_prediction_cancel_clears_suggestions_without_reaching_the_editor() {
+    let (_directory, mut runtime) = prediction_runtime();
+    let id = runtime.view().candidates[0].id;
+    let transition = runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    assert!(transition.handled && transition.commit.is_none());
+    assert!(transition.view.candidates.is_empty());
+    assert!(!transition.view.prediction);
+    assert!(runtime.is_idle() && !runtime.has_composition());
+    assert!(matches!(
+        runtime.dispatch(Action::Select(id)),
+        Err(RuntimeError::StaleCandidate)
+    ));
 }
 
 #[test]
@@ -5902,13 +5918,31 @@ fn bare_shortcut_rejected_capitals_stay_in_the_runtime_composition() {
     }
 }
 
+/// #10123：Shift 字母入口后只打了字母，模式不收的字母让整串留在 runtime 的组字里，驼峰英文不会中途上屏。
+#[test]
+fn camel_case_after_a_shortcut_entry_stays_in_the_runtime_composition() {
+    for text in ["TextBlock", "TxB", "UbU", "Ui", "Uq", "KaA"] {
+        let directory = tempfile::tempdir().unwrap();
+        let session =
+            msime_engine::host::Session::new(&real_engine_options(directory.path())).unwrap();
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        runtime.focus(true).unwrap();
+        type_characters(&mut runtime, text);
+        let view = runtime.view();
+        assert_eq!(view.local_mode, "none", "{text}");
+        assert_eq!(view.editing_text, text);
+        let committed = runtime
+            .dispatch(Action::Command(Command::CommitRaw))
+            .unwrap();
+        assert_eq!(committed.commit.as_deref(), Some(text));
+    }
+}
+
 #[test]
 fn rejected_local_key_commits_the_prefix_and_passes_the_current_key_to_the_host() {
     for (entry, spelling, rejected) in [
-        (b'U', "", b'i'),
         (b'U', "0", b'I'),
-        (b'K', "a", b'A'),
-        (b'T', "r", b'A'),
+        (b'U', "0", b'g'),
         (b'E', "", b'1'),
         (b'U', "", b'!'),
     ] {
@@ -6790,7 +6824,7 @@ fn generated_mode_runtime(directory: &std::path::Path) -> Runtime {
     options.local_expression = true;
     options.local_command = true;
     options.local_mention = true;
-    options.mention_entries = vec![msime_engine::host::MentionEntry {
+    options.mention_entries = vec![msime_engine::MentionEntry {
         phone: String::new(),
         text: "张三".into(),
         key: "zhang'san".into(),
@@ -7135,12 +7169,12 @@ fn wubi_literal_marks_do_not_open_table_modes() {
     options.scheme = 2;
     options.local_command = true;
     options.local_mention = true;
-    options.command_table = vec![msime_engine::host::CommandTableEntry {
+    options.command_table = vec![msime_engine::CommandTableEntry {
         trigger: "sig".into(),
         title: "签名".into(),
         template: "张三".into(),
     }];
-    options.mention_entries = vec![msime_engine::host::MentionEntry {
+    options.mention_entries = vec![msime_engine::MentionEntry {
         phone: String::new(),
         text: "张三".into(),
         key: "zhang'san".into(),
@@ -9367,6 +9401,58 @@ fn a_cantonese_partial_selection_commits_at_once_and_learns_nothing() {
     drop(runtime);
     msime_engine::flush_personal_learning();
     assert_eq!(database_rows(directory.path()), before);
+}
+
+/// #10085：粤语双拼打 `sxcr` 后点「上」，经宿主点选候选同一条 `Action::Select` 路线上屏的是「上」，不是编码 `sx`；剩下的 `cr` 继续组字并给出「傳」。「粤语」自动识别和独立「粤语双拼」两个入口都走一遍。
+#[test]
+fn cantonese_shuangpin_tap_commits_the_word_and_keeps_the_rest_composing() {
+    for force in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("msime-cantonese.db");
+        {
+            use msime_engine::language_dictionary::{
+                FORMAT_VERSION, METADATA_FORMAT_VERSION, SCHEMA,
+            };
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch(SCHEMA).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO metadata VALUES (?1, ?2)",
+                    (METADATA_FORMAT_VERSION, FORMAT_VERSION.to_string()),
+                )
+                .unwrap();
+            connection
+                .execute_batch(
+                    "INSERT INTO syllables VALUES ('soeng'),('soek'),('cyun'),('cyut'),('cuk');\
+                     INSERT INTO entries VALUES ('soeng cyun','相傳',978),('soeng','上',9000),('soeng','相',5000),('soek','削',200),('cyun','傳',3000),('cuk','速',2000);",
+                )
+                .unwrap();
+        }
+        let mut options = real_engine_options(directory.path());
+        options.scheme = CANTONESE_SCHEME;
+        options.cantonese_dictionary = path.to_str().unwrap().to_owned();
+        options.force_cantonese_shuangpin = force;
+        let session = msime_engine::host::Session::new(&options).unwrap();
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        runtime.focus(true).unwrap();
+
+        let typed = compose_cantonese(&mut runtime, "sxcr");
+        assert_eq!(typed.view.editing_text, "sx cr", "force={force}");
+        assert_eq!(
+            texts(&typed.view),
+            ["相傳", "上", "相", "削"],
+            "force={force}"
+        );
+        let id = typed.view.candidates[1].id;
+        let picked = runtime.dispatch(Action::Select(id)).unwrap();
+        assert_eq!(picked.commit.as_deref(), Some("上"), "force={force}");
+        assert_eq!(picked.view.editing_text, "cr", "force={force}");
+        assert_eq!(texts(&picked.view), ["傳", "速"], "force={force}");
+        let id = picked.view.candidates[0].id;
+        let rest = runtime.dispatch(Action::Select(id)).unwrap();
+        assert_eq!(rest.commit.as_deref(), Some("傳"), "force={force}");
+        assert_eq!(rest.view.editing_text, "", "force={force}");
+    }
 }
 
 /// The sentence model and the runner-up demotion reorder Chinese lattice readings; a Cantonese or Stroke list comes from its own dictionary in its own order, so neither touches it.

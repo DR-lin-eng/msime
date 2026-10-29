@@ -67,6 +67,14 @@ pub(super) const PAGE_READ_UNFINISHED: &str = "Cannot finish reading personal di
 /// 没有 `msime-pinyin.db` 的代次（方案集合不读它）只收英文词：拼音、五笔和快捷短语都写在 `msime-pinyin.db` 里。
 pub(super) const NO_CHINESE_DICTIONARY: &str =
     "This input method has no Chinese dictionary; only English words can be edited";
+/// 既没有 `msime-pinyin.db` 也没有 `msime-english.db` 的代次（方案集合两者都不要求，资源目录也没带英文库）什么词也存不下。
+pub(super) const NO_ENGLISH_DICTIONARY: &str =
+    "This input method has no English dictionary; no words can be edited";
+
+/// 代次里有没有 `msime-pinyin.db`。不分方案集合的入口（[`edit_personal_dictionary`]、[`personal_dictionary_entries`]、`edit_bundled_dictionary_entry`）按代次实际准备出的内容决定：方案集合不读主库时代次里没有它（`prepare_runtime_paths_for`），这时只有英文词能编辑、列出。
+pub(super) fn generation_has_main_dictionary(paths: &RuntimePaths) -> bool {
+    paths.dictionary(assets::MAIN_DICTIONARY).is_file()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PersonalDictionaryPage {
@@ -165,16 +173,29 @@ fn validate_entry(
 /// Add (`previous = None`), remove (`replacement = None`) or replace, in one attached transaction with its receipt. `previous` must still be user-inserted with the same weight. A request id (1..=128 of `[A-Za-z0-9_-]`) makes a retry of the same edit a no-op and a reuse for different content a failure.
 ///
 /// An empty request id edits without a receipt, as the reference allowed.
+///
+/// 自己取独占的维护租约（`DictionaryAccess::try_maintenance`）：还有会话或别的维护持着租约时以 `Busy`（`DICTIONARY_MAINTENANCE_BUSY`）失败，什么也不写。不合法的改动在取租约之前就报出来。代次里没有 `msime-pinyin.db`（方案集合不读它）时只能编辑英文词，规则同 `edit_personal_dictionary_with`。
 pub fn edit_personal_dictionary(
     paths: &RuntimePaths,
     previous: Option<&PersonalDictionaryEntry>,
     replacement: Option<&PersonalDictionaryEntry>,
     request_id: &str,
 ) -> Result<()> {
-    edit_personal_dictionary_with(paths, true, previous, replacement, request_id)
+    let main_dictionary = generation_has_main_dictionary(paths);
+    normalize_edit(main_dictionary, previous, replacement, request_id)?;
+    let _access = maintenance(paths)?;
+    edit_personal_dictionary_with(paths, main_dictionary, previous, replacement, request_id)
 }
 
-/// [`edit_personal_dictionary`]，`main_dictionary` 说明代次里有没有 `msime-pinyin.db`（`SchemeSet::reads_main_dictionary`）。没有时只能编辑英文词，其余种类的增删改都以 `NO_CHINESE_DICTIONARY` 失败，什么也不写。
+/// 引擎层编辑接口取维护租约；取不到之外的失败（目录打不开、锁文件不对）按本模块的说法报存储不可用。
+pub(super) fn maintenance(paths: &RuntimePaths) -> Result<crate::access::DictionaryAccess> {
+    crate::access::maintenance(paths).map_err(|error| match error {
+        EngineError::Busy(_) => error,
+        _ => failed(STORAGE_UNAVAILABLE),
+    })
+}
+
+/// [`edit_personal_dictionary`]，`main_dictionary` 说明代次里有没有 `msime-pinyin.db`（`SchemeSet::reads_main_dictionary`）。没有时只能编辑英文词，其余种类的增删改都以 `NO_CHINESE_DICTIONARY` 失败，什么也不写；代次里连 `msime-english.db` 也没有时，英文词以 `NO_ENGLISH_DICTIONARY` 失败。不取维护租约，调用方（host 门面背后的 host-api）已经持有。
 pub fn edit_personal_dictionary_with(
     paths: &RuntimePaths,
     main_dictionary: bool,
@@ -510,7 +531,13 @@ pub fn personal_dictionary_entries(
     limit: usize,
     include_learned_pinyin: bool,
 ) -> Result<PersonalDictionaryPage> {
-    personal_dictionary_entries_with(paths, true, offset, limit, include_learned_pinyin)
+    personal_dictionary_entries_with(
+        paths,
+        generation_has_main_dictionary(paths),
+        offset,
+        limit,
+        include_learned_pinyin,
+    )
 }
 
 /// [`personal_dictionary_entries`]，`main_dictionary` 为假（代次里没有 `msime-pinyin.db`）时只列英文词：别的种类的行（例如从别的版本恢复来的快照）在这里既用不上也改不了，所以不列出。
@@ -642,7 +669,7 @@ fn read_personal_dictionary_page(
     Ok(page)
 }
 
-/// The main dictionary opened for writing with the journal attached as `personal_journal` and the English dictionary as `replay_english`, both prepared first (J:1822-1836). `main_dictionary` 为假（代次里没有 `msime-pinyin.db`）时以一个内存库代替它，只有 attach 的日志和英文词库可写。
+/// The main dictionary opened for writing with the journal attached as `personal_journal` and the English dictionary as `replay_english`, both prepared first (J:1822-1836). `main_dictionary` 为假（代次里没有 `msime-pinyin.db`）时以一个内存库代替它，只有 attach 的日志和英文词库可写；这时代次里也没有 `msime-english.db` 就以 `NO_ENGLISH_DICTIONARY` 失败，不在代次里建一个空的英文库。
 ///
 /// 日志是 WAL 时（iOS 以外）编辑事务只在每个文件内原子：崩溃可能留下日志已记下、词库工作副本回滚，下一次回放补齐，见 `journal::prefer_write_ahead_log`。
 pub(super) fn open_edit_connection(
@@ -651,6 +678,9 @@ pub(super) fn open_edit_connection(
 ) -> Result<Connection> {
     let journal = paths.user(assets::USER_JOURNAL);
     let english = paths.dictionary(assets::ENGLISH_DICTIONARY);
+    if !main_dictionary && !english.is_file() {
+        return Err(failed(NO_ENGLISH_DICTIONARY));
+    }
     if ensure_user_database(&journal).is_err() || ensure_english_schema(&english).is_err() {
         return Err(failed(STORAGE_NOT_PREPARED));
     }
@@ -1079,6 +1109,41 @@ mod tests {
     }
 
     // test_personal_dictionary.cpp:61-163, probing the working tables where the reference typed into a session.
+    /// 引擎层的编辑接口自己取维护租约：还有会话持共享租约时报 `Busy`、什么也不写；不合法的改动照旧先报出来；会话结束后同一改动照常生效。
+    #[test]
+    fn engine_level_edits_take_the_maintenance_lease() {
+        use PersonalDictionaryKind::*;
+        let root = tempfile::tempdir().unwrap();
+        let paths = fixture(root.path());
+        let pinyin =
+            validate_personal_dictionary_entry(&entry(Pinyin, "NI HAO", "拟好", 12345)).unwrap();
+        let session = crate::DictionaryAccess::try_session(&paths.user_data, &paths.dictionaries)
+            .unwrap()
+            .unwrap();
+
+        let error = edit_personal_dictionary(&paths, None, Some(&pinyin), "busy-1").unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Busy);
+        assert_eq!(
+            error.to_string(),
+            crate::diagnostics::DICTIONARY_MAINTENANCE_BUSY
+        );
+        assert!(!has(&paths, &pinyin));
+        let invalid = entry(Pinyin, "nihao", "你好", 1);
+        let error = edit_personal_dictionary(&paths, None, Some(&invalid), "").unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Failed);
+        // 门面的 `_with` 版本假定调用方已持有租约，不再取锁。
+        drop(session);
+        let maintenance =
+            crate::DictionaryAccess::try_maintenance(&paths.user_data, &paths.dictionaries)
+                .unwrap()
+                .unwrap();
+        edit_personal_dictionary_with(&paths, true, None, Some(&pinyin), "busy-1").unwrap();
+        assert!(has(&paths, &pinyin));
+        drop(maintenance);
+        edit_personal_dictionary(&paths, Some(&pinyin), None, "busy-2").unwrap();
+        assert!(!has(&paths, &pinyin));
+    }
+
     #[test]
     fn edits_replace_page_refuse_stale_and_survive_an_upgrade() {
         use PersonalDictionaryKind::*;

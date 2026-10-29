@@ -233,6 +233,7 @@ char *msime_client_cloud_dictionary(const uint8_t *request, size_t length);
  * field ahead of editing_text - it is separate because caret_position is an
  * offset into editing_text in the host's own string unit. Omitted means each
  * piece is committed as it is picked, as before.
+ * Optional selection_statistics=false stops this session from recording candidate positions and commit efficiency in <preferences_directory>/typing-statistics.json. It is for a mirror session that repeats selections another session already made: the Windows TIP's in-process session follows the Server's choice, and only the Server's session records it. Omitted means the session records them.
  * The host must prepare and validate its dictionary generation before creation.
  * Creation acquires cooperative shared access to user_data and dictionaries until
  * destroy. It fails immediately while a participating maintenance writer holds
@@ -398,7 +399,8 @@ char *msime_client_touch_quick_symbols(const uint8_t *value, size_t length);
  * Creates the directory/lock file if absent, never overwrites preference contents.
  */
 char *msime_client_load_preferences(const uint8_t *directory, size_t length);
-/* Android 本机旧布局迁移：{directory:绝对路径,revision:u64,long_space:bool,number_row:bool}。
+/* Android 本机旧布局迁移：{directory:绝对路径,revision:u64,long_space:bool,number_row:bool,nine_key_symbols?:[string],nine_key_digit_symbols?:[string]}。
+ * 两张九键左侧符号表是本机旧键里不等于出厂表的自定义表，缺省或空表表示不迁；共享偏好里这一项缺键或是空数组时才写入。
  * 在偏好锁内按原始字段决定迁移并校验修订号；未知样式原样保留。返回 PreferencesSnapshot。
  * 请求最多 64 KiB，工作线程调用，结果用 msime_client_string_free 释放。 */
 char *msime_client_migrate_android_key_layout(const uint8_t *request, size_t length);
@@ -448,9 +450,8 @@ int32_t msime_client_typing_statistics_enabled(const uint8_t *directory, size_t 
  * 可选的 plugins 是插件目录的绝对路径：其中的单词本插件按 pack-<插件 id> 列在内置书之后、导入的书之前，带 pack:true；对它们的 remove 失败（在插件页卸载），卸载后复习进度保留。不传 plugins 的宿主只有内置和导入的书。
  * `day` is the caller's local day and is required by every action: the counts and
  * the queue are per-day and this layer cannot resolve the host's timezone.
- * Requests may be up to 8 MiB rather than the usual 64 KiB, because an imported
- * word list is a few hundred kilobytes of text. Takes a file lock and reads the
- * library: call on a worker, never on the input path. */
+ * 请求最多 17 MiB，为原始 8 MiB 词表的常规 JSON 转义和目录等元数据留出空间；解码后的
+ * 词表仍受共享解析器的 8 MiB 上限约束。会取文件锁并读取词书，只能在工作线程调用。 */
 char *msime_client_vocabulary_review(const uint8_t *request, size_t length);
 /* Scan an absolute UTF-8 skin root and return the catalog the settings page sees: {packages:[...],issues:[...]}. Reads the directory: use a worker. An unreadable root is an empty catalog; an invalid package becomes an issue and is never returned as renderable. Presenters must still check that a package supports the layout and theme before adopting its colors. Keys are camelCase, the same document the settings page consumes. Besides the colours (drawn through msime_client_resolve_theme, where a palette's translation becomes secondary) a package carries what a presenter draws itself: minWidthDip; cornerRadiusDip (0-32, null keeps the host radius); decorationTopDip, decorationWidthDip and decorationImage (package-relative, null unless decorated) placed by decorationAlign ("left"|"center"|"right"), with decorationMotion ("none"|"float"|"sway"|"breathe"|"bounce", an idle motion of the whole image while the window is on screen), decorationMotionPeriodMs (1200-8000) and decorationFrames (0 without a decoration image, 1 for a still image, the animation frame count of an APNG, GIF or WebP otherwise; a host that cannot play frames draws the first); background null or {image,fit:"cover"|"contain"|"stretch",opacity:0-1}, drawn over the surface and under the candidates, clipped to the card outline; toolbar {cornerRadiusDip|null, light, dark} where each mode is {background,border,handle,divider,icon,hover}, each #RRGGBB, #RRGGBBAA or null for the host's own. A package may also carry notices, non-fatal strings about manifest keys it parsed but does not apply here (canvas-only keys on a non-canvas base, or a canvas package's nine-slice panel and widgets, which no msime host draws); the key is absent when there are none and the package stays usable. Image paths are already confined to the package and are images; read them with msime_client_skin_resource. */
 char *msime_client_skin_catalog(const uint8_t *directory, size_t length);
@@ -850,7 +851,7 @@ char *msime_client_set_english_mode(uint64_t session, bool enabled);
  * View.touch_keyboard_layout 是已应用的宿主呈现偏好；日文九键宿主只用它，不开启引擎的九键模式。 */
 char *msime_client_set_nine_key_mode(uint64_t session, bool enabled);
 /* 切换引擎的组码网格：0 关闭，1 九键（同 msime_client_set_nine_key_mode），2 当前全拼、双拼或五笔方案的 14 键（QWERTY 上相邻两个字母一个键，L、M 单独一键），3 九键双拼（表按已应用的 nine_key_shuangpin_profile 取），4 十八键全拼，5 十八键双拼（Q WE RT Y U IO P / A SD FG H JK L / Z XC V BN M）。只在组字结束后调用；14 键只给全拼、双拼或五笔，九键双拼和网格 4 只给全拼，网格 5 只给双拼。对其他方案开启、在组字中切换都会被拒绝，其他取值报错，会话不变。返回值中的 View 反映结果。
- * View.key_grid 是权威状态："none"、"nine_key"、"fourteen_key"、"eighteen_key" 或 "nine_key_shuangpin"；两种十八键均为 "eighteen_key"，按 scheme 区分。View.nine_key 只在九键下为真。Android 和 iOS 双拼会话在创建和重建时按 touch_shuangpin_layout 选择 26、14 或 18 键，五笔会话按 touch_wubi_layout 选择 26 或 14 键（鸿蒙的五笔 14 键由宿主自己调用本函数开启网格 2），touch_keyboard_layout 为 eighteen_key 的全拼会话在这两个宿主上开启网格 4；其他宿主创建会话时不据这两个 18 键偏好开网格（鸿蒙的全拼 18 键由宿主自己按偏好调用本函数开启网格 4）。字母双拼网格从已应用的 shuangpin_profile 及自定义表派生，分号与 L 共键。五笔 14 键不经九宫格会话：组码由五笔方案按组展开码表，没有拼音选择、单字和笔画筛选，nine_key_spellings 为空，nine_key_reading 是首选编码的前几位（同 preedit），候选按五笔照常选择；View.key_grid 仍是 "fourteen_key"，按 scheme 区分。其余几种网格共用 View.nine_key_spellings、nine_key_reading、nine_key_single_character、nine_key_strokes，以及 msime_client_choose_nine_key_spelling 和 msime_client_set_nine_key_filter；字母网格的分词键照九键送 '\''。字母网格下数字不是输入，照常是选词键。九键双拼的数字从 msime_client_character 进来（方案用到的数字，可以有 1 和 0），和九键一样不当选词键，没有英文九键；创建和重建会话时 touch_keyboard_layout 为 nine_key_shuangpin 的全拼会话自动开启它。 */
+ * View.key_grid 是权威状态："none"、"nine_key"、"fourteen_key"、"eighteen_key" 或 "nine_key_shuangpin"；两种十八键均为 "eighteen_key"，按 scheme 区分。View.nine_key 只在九键下为真。Android 和 iOS 双拼会话在创建和重建时按 touch_shuangpin_layout 选择 26、14 或 18 键，五笔会话按 touch_wubi_layout 选择 26 或 14 键（鸿蒙的五笔 14 键由宿主自己调用本函数开启网格 2），touch_keyboard_layout 为 eighteen_key 的全拼会话在这两个宿主上开启网格 4；其他宿主创建会话时不据这两个 18 键偏好开网格（鸿蒙的全拼 18 键由宿主自己按偏好调用本函数开启网格 4）。字母双拼网格从已应用的 shuangpin_profile 及自定义表派生，分号与 L 共键。五笔 14 键不经九宫格会话：组码由五笔方案按组展开码表，没有拼音选择、单字和笔画筛选，nine_key_spellings 为空，nine_key_reading 是首选编码的前几位（同 preedit），候选按五笔照常选择；View.key_grid 仍是 "fourteen_key"，按 scheme 区分。其余几种网格共用 View.nine_key_spellings、nine_key_reading、nine_key_single_character、nine_key_strokes，以及 msime_client_choose_nine_key_spelling 和 msime_client_set_nine_key_filter；字母网格的分词键照九键送 '\''。字母网格下数字不是输入，照常是选词键。九键双拼的数字从 msime_client_character 进来（方案用到的数字，可以有 1 和 0），和九键一样不当选词键，没有英文九键；创建和重建会话时 touch_keyboard_layout 为 nine_key_shuangpin 的全拼会话自动开启它。View.grid_composing 说这次组字是不是在网格里打的（九宫格会话或五笔 14 键在组字）：网格开着时硬件键盘的字母照样走 26 键，这时它为假，没有组字时也为假。宿主要按当前组字实际走哪种退格、哪种编辑来画（例如光标隔着读音行里的显示分隔画在哪一侧）时看它，不看 View.key_grid。 */
 char *msime_client_set_key_grid(uint64_t session, uint8_t grid);
 /* 字母网格的一键：letter 是这一组里的任一小写字母，引擎归成这一组，宿主约定送当前网格各组的首字母。仅十八键双拼另接受 A-Z，表示同一网格里的精确小写字母；editing_text 保留大写标记用于编辑和恢复，它不是 Shift 或英文字母上屏。返回与 msime_client_character 相同的输入响应。不在 14 或 18 键下、方案不支持当前网格、在本地模式或专用英文里、26 键正在组字、或 letter 不在上述范围（双拼另接受分号）时 handled=false，会话不变。
  * 五笔 14 键最多四码：四码之后的一键先把首选顶上屏，再开始下一组编码，组码里没有 z，所以 z 通配、z 拼音反查和混输拼音都不作用于它；四码唯一时与 26 键一样按偏好自动上屏。

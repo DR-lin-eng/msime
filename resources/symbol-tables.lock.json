@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/metasequoiaime/msime-dictionary",
-  "commit": "6f7ff69f1ca2fafdb11d570d4173a4e604d884a7",
+  "commit": "85197da6cbd6e833f060698d6b845e2bd9a487a6",
   "files": [
     {
       "path": "sources/symbols/symbol-names.tsv",
@@ -12,14 +12,14 @@
     {
       "path": "sources/symbols/latex-symbols.tsv",
       "copy": "plugins/phrase_table/latex-symbols/symbols.tsv",
-      "size": 7284,
-      "sha256": "6a7a520a60b390e72411c8d191ccbf7af23b6f4df752febfd84ed0d006ffa688"
+      "size": 7374,
+      "sha256": "62fbce20f9f6f4b6f6c4a5a308447276fad218ea3e5bb2d411b9ae9fc71384a1"
     },
     {
       "path": "sources/symbols/latex-symbols.tsv",
       "copy": "crates/engine/src/local/latex_symbols.tsv",
-      "size": 7284,
-      "sha256": "6a7a520a60b390e72411c8d191ccbf7af23b6f4df752febfd84ed0d006ffa688"
+      "size": 7374,
+      "sha256": "62fbce20f9f6f4b6f6c4a5a308447276fad218ea3e5bb2d411b9ae9fc71384a1"
     }
   ],
   "generator": "scripts/sync_symbol_tables.py"

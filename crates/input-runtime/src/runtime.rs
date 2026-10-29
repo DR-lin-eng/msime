@@ -12,10 +12,10 @@ use msime_engine::touch::{KeyGeometry, KeyTouch};
 pub(crate) use msime_engine::ordering::{
     reorders_candidates as runtime_reorders_candidates, LATTICE_SOURCE,
 };
+use msime_engine::time::Instant;
 use msime_engine::SchemeType;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
 
 pub enum Action {
     ResetCache,
@@ -521,7 +521,7 @@ impl Runtime<Session> {
             // state.  AI suggestions intentionally do not use this guard:
             // Windows accepts them for an otherwise eligible pinyin query
             // even when the local dictionary returned no rows.
-            || (source == 0 && self.cached.candidates.is_empty())
+            || (source == 0 && self.cached.candidates.is_empty() && query.mode != msime_engine::OnlineInputMode::Prediction)
             || (source == 0 && (!cloud_candidates || !query.cloud_eligible))
             || (source == 1 && !query.ai_eligible)
         {
@@ -554,7 +554,11 @@ impl Runtime<Session> {
     ) -> Result<bool, RuntimeError> {
         let cloud_candidates = query.cloud_candidates;
         let limit = if source == 0 {
-            1
+            if query.mode == msime_engine::OnlineInputMode::Prediction {
+                8
+            } else {
+                1
+            }
         } else {
             query.ai_candidate_limit()
         };
@@ -583,7 +587,11 @@ impl Runtime<Session> {
     ) -> Result<bool, RuntimeError> {
         let cloud_candidates = query.cloud_candidates;
         let limit = if source == 0 {
-            1
+            if query.mode == msime_engine::OnlineInputMode::Prediction {
+                8
+            } else {
+                1
+            }
         } else {
             query.ai_candidate_limit()
         };
@@ -647,7 +655,9 @@ impl Runtime<Session> {
                 .iter()
                 .any(|text| text.is_empty() || !msime_client_core::is_bounded_text(text, 4096))
             || source > 1
-            || (source == 0 && self.cached.candidates.is_empty())
+            || (source == 0
+                && self.cached.candidates.is_empty()
+                && query.mode != msime_engine::OnlineInputMode::Prediction)
             || (source == 0 && (!cloud_candidates || !query.cloud_eligible))
             || (source == 1 && !query.ai_eligible)
         {

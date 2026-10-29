@@ -5,7 +5,8 @@
 //! 一条边界：只要观察到调度压力或输入动作超出一帧，就在一个很短的窗口内停掉可选
 //! 工作，基础词典路径不受影响。
 
-use std::time::{Duration, Instant};
+use msime_engine::time::Instant;
+use std::time::Duration;
 
 const INPUT_FRAME_BUDGET: Duration = Duration::from_millis(16);
 const SHED_WINDOW: Duration = Duration::from_millis(300);
@@ -66,7 +67,7 @@ impl LoadMonitor {
 /// 只把明显超过可用 CPU 容量的情况当作压力；短暂的一次高负载不会改变基础候选
 /// 语义，只会让可选模型暂缓。其他宿主没有统一的无权限系统接口，继续由输入耗时
 /// 自适应降级。
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", all(target_os = "android", not(test))))]
 fn system_pressure_probe() -> bool {
     // Docker、systemd 和 Android 的 cgroup v2 会把当前进程组的 CPU 等待写在
     // `cpu.pressure`；它比宿主机共享的 loadavg 更能反映输入法自己是否被限流。
@@ -99,13 +100,13 @@ fn system_pressure_probe() -> bool {
     load > (cpus * 0.85).max(1.5)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(all(not(test), not(any(target_os = "linux", target_os = "android"))))]
 fn system_pressure_probe() -> bool {
     false
 }
 
-// Unit tests intentionally keep the normal presentation path deterministic. The Docker
-// pressure test calls `system_pressure_probe` directly through the ignored test above.
+// 普通单测隔离外部负载，避免共享测试主机改变候选次序；
+// Docker 压力专项通过上面的测试入口直接运行真实探针。
 #[cfg(test)]
 fn system_pressure() -> bool {
     false

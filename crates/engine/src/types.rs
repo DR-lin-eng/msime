@@ -1504,6 +1504,7 @@ pub enum OnlineInputMode {
     #[default]
     Pinyin,
     English,
+    Prediction,
 }
 
 impl OnlineInputMode {

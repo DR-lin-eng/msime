@@ -336,7 +336,13 @@ public final class TypingPage extends ReloadingDetailPage {
             preferences.optBoolean(backspace.key(), backspace.enabledByDefault()),
             on -> savePreferences(values -> values.put(backspace.key(), on)));
         InputFeatureToggle cloud = InputFeatureToggle.CLOUD_CANDIDATES;
-        chinese.toggle(cloud.title(), "联网获取当前拼写的候选", preferences.optBoolean(cloud.key(), cloud.enabledByDefault()),
+        JSONObject cloudProvider = preferences.optJSONObject("cloud_candidate_provider");
+        boolean cloudPrediction = cloudProvider != null && "custom".equals(cloudProvider.optString("source"))
+            && cloudProvider.optBoolean("prediction_enabled", false);
+        String cloudDescription = cloudPrediction
+            ? "将当前拼写和另行开启的上屏后联想文本发送给 " + cloudRecipient(cloudProvider) + "；不发送词库或输入历史"
+            : "仅将当前拼写发送给 " + cloudRecipient(cloudProvider) + "；不发送已上屏内容、词库或历史";
+        chinese.toggle(cloud.title(), cloudDescription, preferences.optBoolean(cloud.key(), cloud.enabledByDefault()),
             checked -> savePreferences(values -> values.put(cloud.key(), checked)));
         cloudProviderSettings(target, preferences);
         // 临时日语读日文词典；词典没在本机时 host-api 会关掉它，键盘菜单里也置灰，这里给出下载入口。和桌面一样，不会因为它自己去下载。
@@ -617,12 +623,19 @@ public final class TypingPage extends ReloadingDetailPage {
             OptionSheet sheet = new OptionSheet(requireContext(), "云候选来源", null);
             sheet.option("Google 输入工具", "google".equals(source),
                 () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "google")));
+            sheet.option("百度输入法", "baidu".equals(provider.optString("source")),
+                () -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "baidu")));
             sheet.option("自定义 HTTP 接口", "custom".equals(source), () -> {
                 if (provider.optString("endpoint").isEmpty()) editCloudField(provider, "endpoint", "接口地址", true);
                 else savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("source", "custom"));
             });
             sheet.show();
         });
+        if ("custom".equals(source)) {
+            group.toggle("允许上屏后云预测", "另将刚上屏的最多 64 个汉字发送到此服务；需要开启「上屏后联想」",
+                provider.optBoolean("prediction_enabled", false),
+                enabled -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("prediction_enabled", enabled)));
+        }
         if (!"custom".equals(source)) {
             group.nav("自定义接口设置", null, editingCloudCustom ? "收起" : null, () -> {
                 editingCloudCustom = !editingCloudCustom;
@@ -660,7 +673,10 @@ public final class TypingPage extends ReloadingDetailPage {
             () -> editCloudField(provider, "timeout_ms", "超时（毫秒）", false));
         group.toggle("缓存云候选", "仅保存在本机内存，无结果缓存 60 秒", provider.optBoolean("cache_enabled"),
             enabled -> savePreferences(values -> KeyboardSheets.child(values, "cloud_candidate_provider").put("cache_enabled", enabled)));
-        group.footer("当前拼写发送至 " + cloudRecipient(provider) + "；不发送已上屏内容、词库或历史。");
+        group.footer("当前拼写发送至 " + cloudRecipient(provider)
+            + ("custom".equals(source) && provider.optBoolean("prediction_enabled", false)
+                ? "；另行开启的上屏后联想会发送刚上屏的最多 64 个汉字，不发送词库或输入历史。"
+                : "；不发送已上屏内容、词库或历史。"));
     }
 
     private void editCloudField(JSONObject provider, String key, String title, boolean selectCustom) {
@@ -677,11 +693,17 @@ public final class TypingPage extends ReloadingDetailPage {
     }
 
     private static String cloudSourceLabel(String source) {
-        return "custom".equals(source) ? "自定义接口" : "Google";
+        return switch (source) {
+            case "baidu" -> "百度输入法";
+            case "custom" -> "自定义接口";
+            default -> "Google";
+        };
     }
 
     private static String cloudRecipient(JSONObject provider) {
-        return "custom".equals(provider.optString("source")) ? cloudEndpointLabel(provider) : "inputtools.google.com";
+        if (provider != null && "baidu".equals(provider.optString("source"))) return "百度输入法（olimenew.baidu.com）";
+        if (provider == null || !"custom".equals(provider.optString("source"))) return "Google input-tools（inputtools.google.com）";
+        return cloudEndpointLabel(provider);
     }
 
     private static String cloudEndpointLabel(JSONObject provider) {

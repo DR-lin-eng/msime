@@ -146,6 +146,12 @@ export function InputSharedSettingsSection({
               onPreferencesChange({ verification_code_suggestions })
             }
           />
+          <SwitchRow
+            title="上屏后联想"
+            description="选词上屏后推荐后续字词；仅点选提交，空格、回车和数字仍交给编辑器"
+            checked={preferences.next_word_prediction ?? false}
+            onChange={(next_word_prediction) => onPreferencesChange({ next_word_prediction })}
+          />
         </>
       )}
     </>

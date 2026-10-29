@@ -35,3 +35,7 @@ Status: implemented
 - Docker `cargo clippy --locked -p msime-input-runtime --all-targets -- -D warnings`：通过。
 - `bash -n scripts/test-input-load-docker.sh` 与 `git diff --check`：通过。
 - 本机直接 Cargo 验证受 macOS Homebrew `libgit2` 缺少 `libllhttp.9.4.dylib` 阻塞；最终结论以 Docker 固定 Linux 工具链结果为准。
+
+共享运行时计时沿用 `msime_engine::time::Instant` 的宿主注入时钟：原生平台仍为标准时钟，wasm 不调用缺失的系统时钟。该修正不改变原生降级阈值。
+
+macOS 测试构建只编译其实际会调用的探针分支，避免普通单测隔离外部压力后留下未使用函数。对真实 load.rs 的 macOS 严格编译检查由失败转为通过，三个定向用例通过；Docker 运行时定向测试和全目标严格 Clippy 通过。

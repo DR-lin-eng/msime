@@ -166,7 +166,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
             checked -> savePreference(QuanpinSeparatorPolicy.PREFERENCE_KEY, checked));
         GroupCard dimensions = GroupCard.add(sectionColumn(target, "布局"), "尺寸");
         KeyboardPreview preview = new KeyboardPreview(requireContext());
-        preview.setKeyboard(state.skin(), current == KeyboardScheme.QUANPIN_NINE_KEY, current.title());
+        preview.setKeyboard(state.skin(), KeyboardPreview.layout(requireContext(), state.preferences()), current.title());
         preview.setGeometry(
             KeyboardSpacingPolicy.widthPercent(NumberPolicy.strictInt(preferences, "touch_keyboard_width_percent", 100)),
             KeyboardSpacingPolicy.keySpacing(NumberPolicy.strictInt(preferences, "touch_key_spacing_tenths", -1)),

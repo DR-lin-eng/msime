@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-分叉 `develop` 在固定基线 `fd4ada8bc2c6b736b4a027b00b82c30710948bf1` 保留神经排序、候选画布缓存、充电夜间学习、跨平台验证码入口、搜狗词库订阅及 Android 触点概率纠错。上游祖先最初固定在 `ac76aeca3357ad142a6803f15a8df50d1106bc80`，依次前进到 `c8c3c883c5a768f4409b75984a3cb07622f88c4a`、`a33e619f80b83d01b98d4ce4820910bd119dbe06`（2026-10-25 审计合入 431 个提交），本轮先固定到 `4618b12010`，随后追到当前上游 `2e851f3c0f`，再新增 164 个上游提交（15 项主线 PR）；总同步范围相对上一版再前进到该固定提交。同步期间分叉继续前进：触点概率纠错、键盘尺寸自定义、商业云候选与上屏后预测、输入线程负载降级（[高负载下输入线程的可选工作降级](../bug-fix/2026-10-28-input-load-shedding.md)）以独立分支叠加在本次合并之下。直接选择任一侧会丢掉另一侧的排序、原生画布或生命周期能力。
+分叉 `develop` 在固定基线 `fd4ada8bc2c6b736b4a027b00b82c30710948bf1` 保留神经排序、候选画布缓存、充电夜间学习、跨平台验证码入口、搜狗词库订阅及 Android 触点概率纠错。上游祖先最初固定在 `ac76aeca3357ad142a6803f15a8df50d1106bc80`，依次前进到 `c8c3c883c5a768f4409b75984a3cb07622f88c4a`、`a33e619f80b83d01b98d4ce4820910bd119dbe06`（2026-10-25 审计合入 431 个提交）、`4618b12010` 与 `2e851f3c0f`（2026-10-29 上半天合入 164 个提交、15 项主线 PR），本轮再前进到当前上游 `de5d51623a`，新增 193 个上游提交；总同步范围相对上一版再前进到该固定提交。同步期间分叉侧自 PR #19 合并后没有新的功能分支，本轮只做上游追赶。直接选择任一侧会丢掉另一侧的排序、原生画布或生命周期能力。
 
 ## Decision
 
@@ -17,6 +17,17 @@ Status: implemented
 - **Windows**：上游 #10012 的选词重构（所有选词回复由 Server 决定、两会话分叉时用 Server 完整文本兜底，收进 `tsf/HostServerSelection.h`）取代本机对同一函数的结构性重构，也覆盖了本仓库 PR #12 的「最终选词丢失已选词段」缺陷——**该 PR 关闭，不再单独合入**；词库页 `pump` 保留本机的阶段标注并采用上游的 30 秒预算；账号夹具沿用上游共享的 `account_provider_names`。
 - **宿主 API**：上游把派发本体拆成返回 `Result<Value>` 的 `dispatch_value` 供进程内打字复用，本机触点参数成为它的第四个入参，`dispatch_call_with_touch` 照旧委托。
 - **导出清单**：`verify-native.sh` 取上游全集后补回 `msime_client_character_with_touch` 与 `characterWithTouchRaw`。
+
+本轮（上游 `de5d51623a`，193 个提交）在既有边界上继续，23 个文件冲突全部按上述规则融合，没有新开边界：
+
+- **引擎**：`lib.rs` 同时保留本机 `adaptive` 模块与上游的 `access` 模块和 `deny(clippy::print_stderr)` 属性；`ordering.rs` 文档同时写明本机 `rerank_plan` 超集与上游新增的「产品胶水不入文档化 API」段落；`quanpin/dictionary.rs` 引入上游粗俗词与全辅音简拼整词的 `has_corrected_cut`、`lead_literal_abbreviation_phrases`，本机 `resolve_series_query` 仍是 `#[cfg(test)]` 专用（合并后正文里非触点版只出现在测试辅助函数里），`collect_typo_edges` 导入不带回（正文里只剩全限定名的 `_with_touch` 变体）；`clear_online_candidates` 同时做上游的 `candidates_may_change()` 与本机云预测的 `clear_cloud()`。
+- **「增强」只挂 runtime（上游 #10197）**：host-api 不再把 `neural_keyboard` 传给引擎（引擎内键盘模型重排从「增强」路径摘除，省九键按键 p95 6–7 ms 与约 40 MB 内存），runtime 逐键重排器照偏好挂载。与本机能力正交：本机 `adaptive` 预计算投影是模型执行的效率优化，不改变模型的开关；负载降级、商业云预测、后台次选重排都挂在 runtime 层，不受影响。按原样吸收，无需重构。
+- **统计批写（上游 #10280）**：选词位置改为进程内批次（`TypingStatisticsStore::queue_selections`，独立短锁），输入线程不再取文件锁、整份读写并 fsync；与负载降级互补（一个挪走可选模型工作，一个挪走统计 I/O），无交互冲突。
+- **键盘预览（上游 #10245）**：上游让 Android/iOS/共享设置页的键盘预览跟随 `KeyLayoutStylesPolicy`（跨行回车、九键符号栏栈、数字行按真实布局画），结构重做整文件取上游；本机预览的 `setGeometry`（宽度百分比、键距/行距、高度调整）按新结构重新叠加：Android 预览把几何量放进上游的画法（`keyWidth`/`keyLeft`、`rowGap` 分离），iOS `KeyboardSkinPreview` 同时携带本机 `widthPercent` 与上游 `keyLayout`/`nineKeyZero`。
+- **单手侧栏数字键盘（上游 #10234/#10203）**：Android `ImeFrame` 的本机宽度百分比并入上游的 `applied` 缓存串（`mode:blockDp:pad:widthPercent`），`setWeightSum` 保留——核对过与上游三个分支都兼容（大屏 pad 分支的键列与侧栏是固定像素、spacer 是唯一带权子视图）；iOS 键盘控制器保留本机 `applyCustomKeyboardWidth()`（挂进上游的 `applyOneHanded` 排布），键宽计算保留本机比例并传上游新增的 `formFactor`。偏好与测试各自取并集（本机宽度键 + 上游 `oneHandedDockedTablet` 升级标记）。
+- **九键符号栏与设置搜索（上游 #10247）**：上游把九键/数字键盘左侧符号的编辑搬进「按键布局」子页并重组关键词（旧名留作别名）；Android `PageId` 关键词表取并集——本机的「数字行」「尺寸」「按键区域宽度」「恢复默认宽度与间距」与上游的新关键词共存，主列表里上游已迁走的「九键左侧符号」不再保留。
+- **词库与许可证**：上游把跨进程词库维护锁搬进引擎（`access.rs` 大幅收缩）、同步失败后文件检查退避（#10265）、清空学习数据后丢弃过期读（#10255）、更新请求未决时等待再轮询（#10250）、时钟回拨后有界调度（#10281）随自动合并进入，搜狗订阅模块（`dictionary/sogou.rs`）不在上游改动范围。引擎以 MPL-2.0 再许可（#10193），macOS/Windows 的声明渠道清单在取上游全集的同时保留本机 `adaptive-inference-NOTICES.txt`；engine-capi（#10240 系列）是新增 crate，不触碰本机 host-api 导出。
+- **CI**：`ci-platforms.yml` 保留本机的 runner 回退表达式（fork 无 Depot runner），吸收上游更新的注释；上游 Android KVM 初始化修复（#10289）只涉上游自设环境。
 
 本轮新增边界：商业云预测沿用显式权限、最多三条后缀和生成代次校验；普通云候选仍是单条，在线结果不绕过隐私开关。共享 Rust 热路径采用上游的内存快照、WAL、文件身份与 `data_version` 失效判断，候选条沿用 `candidate_range`，没有再叠加第二套缓存或全量复制。Android 触点接线保留旧 `characterWithTouch` 兼容入口，同时使用上游 `setKeyGeometry`/`touchCharacter`；键盘空隙路由、触点清理和滑出点击恢复合并为同一生命周期。
 
@@ -34,7 +45,7 @@ Status: implemented
 
 ## Consequences
 
-两套触点纠错并存：本机宿主走概率路径，上报几何的宿主走计价 + 学习路径，两者都写同一份学习档案但互不读取对方的偏好；后续若统一，以先落地 #10135 定稿参数的那套为准。下一轮只需按台账重审仍开放的 #10084、#10048；#10135 与 #10064 已关闭差异，不再重复实现。PR #12 关闭后，QQ 复现场景的最终确认依赖 #10012 的 windows-shuangpin-paged-selection 回归与真机复测。逐键重排多同步一列元数据（每次 O(n)，与既有八列同阶）。
+两套触点纠错并存：本机宿主走概率路径，上报几何的宿主走计价 + 学习路径，两者都写同一份学习档案但互不读取对方的偏好；后续若统一，以先落地 #10135 定稿参数的那套为准。**上游 PR 差异台账（2026-10-29 重审）**：#10135（26 键双拼按下点定稿）与 #10064（共享 Rust 层去掉整份读写与 fsync）已随上游主线合入，差异关闭，不再重复实现；#10084（安卓 9/14/18 键辅助码筛选）与 #10048（崩溃采集与构建符号）经查仍为上游 open draft，本轮不合，下轮继续按台账重审。本轮范围内上游落地的性能改动（#10197 摘除引擎层键盘模型、#10280 统计批写、#10250/#10265 词库同步有界等待与退避）经审查均为纯收益或与本机能力正交，不需要在本侧重构或重设计；键盘预览一类上游结构重做按「整文件取上游、本机语义叠加」处理，不留双实现。PR #12 关闭后，QQ 复现场景的最终确认依赖 #10012 的 windows-shuangpin-paged-selection 回归与真机复测。逐键重排多同步一列元数据（每次 O(n)，与既有八列同阶）。
 
 ## Verification
 
@@ -63,3 +74,14 @@ Status: implemented
 - 源码归档补丁重建后逐文件与修改版一致。回滚脚本在独立副本恢复原始归档字节及 SHA-256，基线、修改版、回滚版相同 `load_shedding` 输入均为 2 项通过、退出 0。旧源码采用独立源码挂载路径，防止 Git 归档旧时间戳错误复用修改版 Cargo 指纹；构建缓存仍为同一个规范目录。
 
 远端 CI 与最终构建工作流绑定实际提交 SHA；归档和本地行为结果不能代替后续真机测试。构建只上传测试产物，`publish`、TestFlight、AppGallery 与 npm 发布保持关闭。
+
+
+本轮（固定上游 `de5d51623a` 与 fork `origin/develop` 合并结果）验证，全部在 Docker 内完成，宿主机 cargo 仍按[负载降级](../bug-fix/2026-10-28-input-load-shedding.md)笔记记录的 Homebrew dylib 损坏不可用：
+
+- `Dockerfile.desktop-check` 镜像：`cargo fmt --all -- --check` 通过；`cargo check --locked --workspace --all-targets --exclude msime-desktop` 退出码 0；`cargo clippy --locked --workspace --all-targets --exclude msime-desktop -- -D warnings` 无告警。
+- Docker `cargo test -p msime-input-runtime`：421 项通过、1 项按设计忽略，doc-tests 通过。Docker `cargo test -p msime-engine --lib`：2908 项通过、57 项忽略、3 项失败，均为 root 容器绕过普通权限的 symlink/只读夹具（含上一轮逐字节复现过的 `opening_a_journal_rejects_a_symlinked_parent`）；按同一 `runuser -u nobody` 行程重跑 `user_dictionary::` 全量 207 项通过，判定与上一轮相同的容器环境问题，不是本次合并引入。
+- `scripts/test-input-load-docker.sh` 通过（退出 0）：基础降级用例与真实 cgroup 系统压力探针通过。`scripts/test-commercial-prediction-docker.sh` 通过（退出 0）：云候选、预测、Host API FFI 测试通过，合成事务探针输出本地后续词「饭」与云后缀「米饭」，只提交选中的后缀。
+- UI（browser-gate 镜像）：`tsc --noEmit` 通过，`vitest run` 876 个测试文件全部通过（退出 0）。
+- Android（msime-android-docker 镜像 + 既有 gradle 缓存卷）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。首跑报 1 个错误——本机「尺寸」组的 `setKeyboard` 旧签名（九键布尔参数）在上游 #10245 的 `KeyLayoutStylesPolicy.Preview` 重做后已不存在，改用上游静态 `KeyboardPreview.layout(context, preferences)`（同一存储方案推导，涵盖旧布尔参数）后通过；ImeFrame 宽度并入上游 `applied` 缓存串的融合由该编译验证。
+- 笔记门禁（`pnpm run verify-notes` 的三个 node 脚本）通过：归档笔记封印与格式校验 ok。
+- 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；Android host 契约、设备套件与 iOS Swift 测试交给远端 CI，构建产物 workflow 不带发布开关。

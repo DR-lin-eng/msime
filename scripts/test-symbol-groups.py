@@ -48,12 +48,16 @@ SAMPLES = {
     "xld": ("希腊字母大写", ["Α", "Β", "Γ"], 24),
     "sx": ("数学符号", ["¬", "±", "×"], 197),
     "szq": ("带圈数字", ["①", "②", "③"], 112),
-    "jt": ("箭头", ["←", "↑", "→"], 148),
+    "jt": ("箭头", ["←", "↑", "→"], 151),
     "py": ("拼音字母", ["ā", "á", "ǎ"], 42),
     "kx": ("康熙部首", ["一", "丨", "丶"], 214),
+    "pp": ("偏旁", ["⺀", "厂", "乛"], 109),
+    "fj": ("非夹注符号", ["——", "……", "-"], 41),
 }
+# 部首补充区里有等价统一汉字的部首要换成那个字；EquivalentUnifiedIdeograph.txt 里成段写的几条（小、爫、艹、辶）曾经漏掉过，所以点名钉住。
+REQUIRED = {"pp": ["小", "爫", "艹", "辶"], "dn": ["⇧", "⇪", "⇥", "↩"], "bd": ["〇", "々"]}
 GROUPS = 87
-SYMBOLS = 4530
+SYMBOLS = 4585
 CODE = re.compile(r"[a-z]+\Z")
 failures: list[str] = []
 
@@ -100,6 +104,10 @@ def check_table() -> None:
         check(actual[0] == name, f"{code} 的组名是 {actual[0]!r}，应为 {name!r}")
         check(actual[1][: len(head)] == head, f"{code} 的头几个符号是 {actual[1][: len(head)]!r}，应为 {head!r}")
         check(len(actual[1]) == count, f"{code} 有 {len(actual[1])} 个符号，应为 {count}")
+    for code, symbols in REQUIRED.items():
+        items = groups.get(code, ("", []))[1]
+        missing = [symbol for symbol in symbols if symbol not in items]
+        check(not missing, f"{code} 里没有 {missing}")
 
 
 def check_lock(lock: dict) -> None:

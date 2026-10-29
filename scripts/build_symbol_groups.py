@@ -72,9 +72,10 @@ class Ucd:
             if not line:
                 continue
             source, target = (part.strip() for part in line.split(";"))
-            if ".." in source:
-                continue
-            self.equivalent[int(source, 16)] = int(target, 16)
+            # 一行可以是一段码位（`2EBE..2EC0 ; 8279`，艹的三种写法都等价于 U+8279），段里每个码位都映射到同一个字。
+            first, _, last = source.partition("..")
+            for point in range(int(first, 16), int(last or first, 16) + 1):
+                self.equivalent[point] = int(target, 16)
         # 规范组合：两个码位的规范分解 → 组合后的字。拼音一组用它把基本字母与声调符号拼成预组合字。
         self.compose: dict[tuple[int, int], int] = {}
         for point, mapping in self.decomposition.items():
@@ -112,6 +113,13 @@ class Ucd:
         parts = self.decomposition.get(point, "").split()
         if len(parts) == 2 and parts[0].startswith("<"):
             return int(parts[1], 16)
+        return None
+
+    def canonical_singleton(self, point: int) -> int | None:
+        """规范分解只有一个码位时返回它：OHM SIGN → Ω、ANGSTROM SIGN → Å。这类字只为兼容旧编码而存在，NFC 会把它们改写成目标字。"""
+        parts = self.decomposition.get(point, "").split()
+        if len(parts) == 1 and not parts[0].startswith("<"):
+            return int(parts[0], 16)
         return None
 
     def base_letter(self, point: int) -> int:
@@ -314,9 +322,9 @@ def math_style(style: str, greek: bool):
 
 
 def units(ucd: Ucd) -> list[str]:
-    # 单位：CJK 兼容区里 `<square>` 分解全是拉丁、希腊字母和数字的方块单位（㎏ ㎡ ㏄……，不收片假名和年号的方块），加上名字点明是单位或比例的几个字。
-    names = {"DEGREE SIGN", "MICRO SIGN", "PER MILLE SIGN", "PER TEN THOUSAND SIGN", "DEGREE CELSIUS", "DEGREE FAHRENHEIT", "OHM SIGN", "KELVIN SIGN", "ANGSTROM SIGN", "FULLWIDTH PERCENT SIGN"}
-    points = [point for point, name in ucd.name.items() if name in names]
+    # 单位：CJK 兼容区里 `<square>` 分解全是拉丁、希腊字母和数字的方块单位（㎏ ㎡ ㏄……，不收片假名和年号的方块），加上名字点明是单位或比例的几个字。OHM SIGN、ANGSTROM SIGN 有单码位的规范分解，NFC 会改写它们，Unicode 也建议用目标字，所以收的是 Ω（U+03A9）和 Å（U+00C5）；KELVIN SIGN 的目标字是键盘上就有的 K，不收。
+    names = {"DEGREE SIGN", "MICRO SIGN", "PER MILLE SIGN", "PER TEN THOUSAND SIGN", "DEGREE CELSIUS", "DEGREE FAHRENHEIT", "OHM SIGN", "ANGSTROM SIGN", "FULLWIDTH PERCENT SIGN"}
+    points = [ucd.canonical_singleton(point) or point for point, name in ucd.name.items() if name in names]
     for point in ucd.assigned("CJK Compatibility"):
         parts = ucd.decomposition[point].split()
         if parts[:1] == ["<square>"] and all(int(part, 16) < 0x3000 for part in parts[1:]):
@@ -343,11 +351,32 @@ def radicals_as_ideographs(block: str):
     return rule
 
 
+# 箭头区里印在键帽上的 ISO/IEC 9995-7 键盘符号：⇧ Shift、⇪ Caps Lock、⇥ ⇤ Tab、↩ ↵ 回车、⇞ ⇟ 翻页、⇱ ⇲ Home 与 End。
+KEYCAP_ARROWS = {
+    "UPWARDS WHITE ARROW",
+    "UPWARDS WHITE ARROW FROM BAR",
+    "RIGHTWARDS ARROW TO BAR",
+    "LEFTWARDS ARROW TO BAR",
+    "LEFTWARDS ARROW WITH HOOK",
+    "DOWNWARDS ARROW WITH CORNER LEFTWARDS",
+    "UPWARDS ARROW WITH DOUBLE STROKE",
+    "DOWNWARDS ARROW WITH DOUBLE STROKE",
+    "NORTH WEST ARROW TO CORNER",
+    "SOUTH EAST ARROW TO CORNER",
+}
+
+
 def keyboard(ucd: Ucd) -> list[str]:
-    # 电脑按键：杂项技术符号区里名字点明按键的字（⌘ PLACE OF INTEREST SIGN、⌥ OPTION KEY、⌫ ERASE TO THE LEFT、⏏ EJECT SYMBOL……）和 ISO/IEC 9995-7 键盘符号所在的 U+2380–U+2395 一段，再加上控制图形区（␛ ␡ ␣ 等控制字符与空格的图形）。
-    named = ucd.named(r".*\b(KEY|KEYBOARD|ERASE|EJECT|RETURN|OPTION|PLACE OF INTEREST|ARROWHEAD)\b.*", ucd.assigned("Miscellaneous Technical"))
+    # 电脑按键：杂项技术符号区里名字点明按键的字（⌘ PLACE OF INTEREST SIGN、⌥ OPTION KEY、⌫ ERASE TO THE LEFT、⌧ X IN A RECTANGLE BOX 即清除键、⏏ EJECT SYMBOL……）、媒体键（⏩ ⏪ ⏭ ⏮ ⏯ ⏸ ⏹ ⏺）和 ISO/IEC 9995-7 键盘符号所在的 U+2380–U+2395 一段，加上箭头区里同属 ISO/IEC 9995-7 的键帽箭头（KEYCAP_ARROWS），按码位排；最后是控制图形区（␛ ␡ ␣ 等控制字符与空格的图形）。
+    named = ucd.named(
+        r".*\b(KEY|KEYBOARD|ERASE|EJECT|RETURN|OPTION|PLACE OF INTEREST|ARROWHEAD)\b.*|X IN A RECTANGLE BOX|BLACK (RIGHT|LEFT|UP|DOWN)-POINTING (DOUBLE )?TRIANGLE.*|DOUBLE VERTICAL BAR|BLACK (SQUARE|CIRCLE) FOR \w+",
+        ucd.assigned("Miscellaneous Technical"),
+    )
     iso = [point for point in range(0x2380, 0x2396) if point in ucd.name]
-    return chars(sorted(set(named + iso))) + chars(ucd.assigned("Control Pictures"))
+    arrows = [point for point in ucd.assigned("Arrows") if ucd.name[point] in KEYCAP_ARROWS]
+    if len(arrows) != len(KEYCAP_ARROWS):
+        raise ValueError(f"the pinned UCD names only {len(arrows)} of the {len(KEYCAP_ARROWS)} keycap arrows")
+    return chars(sorted(set(named + iso + arrows))) + chars(ucd.assigned("Control Pictures"))
 
 
 def ungrouped_misc_symbols(ucd: Ucd) -> list[str]:
@@ -361,16 +390,20 @@ def ungrouped_misc_symbols(ucd: Ucd) -> list[str]:
 PUNCTUATION_BLOCKS = ("Basic Latin", "Latin-1 Supplement", "General Punctuation", "Supplemental Punctuation", "CJK Symbols and Punctuation", "Vertical Forms", "CJK Compatibility Forms", "Small Form Variants", "Halfwidth and Fullwidth Forms")
 
 
+# GB/T 15834—2011《标点符号用法》规定中文的破折号与省略号各占两个字的位置，写作两个 EM DASH、两个 HORIZONTAL ELLIPSIS；Unicode 没有对应的单个字符，这里按标准写成两个码位的序列，排在本组最前。
+GB_T_15834_DOUBLED = ("\u2014\u2014", "\u2026\u2026")
+
+
 def separators(ucd: Ucd) -> list[str]:
-    # 非夹注符号（连接号、破折号、省略号、间隔号、分隔号）：标点区块里通用类别为 Pd 的字，名字含 ELLIPSIS 或是 TWO DOT LEADER 的字（数学运算符区的 ⋮ ⋯ 也算），名字以 MIDDLE DOT 结尾的字（含片假名区的 ・），以及名字含 SOLIDUS 的斜线。
+    # 非夹注符号（连接号、破折号、省略号、间隔号、分隔号）：先是 GB/T 15834 的 —— 与 ……，然后按码位排标点区块里通用类别为 Pd 的字，名字含 ELLIPSIS 或是 TWO DOT LEADER 的字（数学运算符区的 ⋮ ⋯ 也算），名字以 MIDDLE DOT 结尾的字（含片假名区的 ・），名字含 SOLIDUS 的斜线，以及 GB/T 15834 列为浪纹式连接号的 ～（FULLWIDTH TILDE）。
     points = []
     for point in ucd.assigned(*PUNCTUATION_BLOCKS, "Mathematical Operators", "Katakana"):
         name, category = ucd.name[point], ucd.category[point]
         if category[0] not in "PS":
             continue
-        if category == "Pd" or "ELLIPSIS" in name or name == "TWO DOT LEADER" or name.endswith("MIDDLE DOT") or "SOLIDUS" in name:
+        if category == "Pd" or "ELLIPSIS" in name or name == "TWO DOT LEADER" or name.endswith("MIDDLE DOT") or "SOLIDUS" in name or name == "FULLWIDTH TILDE":
             points.append(point)
-    return chars(points)
+    return [*GB_T_15834_DOUBLED, *chars(points)]
 
 
 # ---- 分组表 ----
@@ -432,7 +465,7 @@ GROUPS = [
     ("rf", "日期", by_name(r"IDEOGRAPHIC TELEGRAPH SYMBOL FOR DAY .*")),
     ("sj", "时间", by_name(r"IDEOGRAPHIC TELEGRAPH SYMBOL FOR HOUR .*")),
     # 箭头与图形
-    ("jt", "箭头", union(whole_blocks("Arrows"), by_name(r".*\bARROW\b.*", "Dingbats"))),
+    ("jt", "箭头", union(whole_blocks("Arrows"), by_name(r".*\bARROW(HEAD)?\b.*", "Dingbats"))),
     ("jh", "几何图形", whole_blocks("Geometric Shapes")),
     ("fk", "方块", whole_blocks("Block Elements")),
     ("wjx", "五角星", by_name(r".*PENTAGRAM|(BLACK|WHITE)( SMALL| MEDIUM)? STAR")),
@@ -443,8 +476,9 @@ GROUPS = [
     ("dd", "点号", by_name(r".*(FULL STOP|COMMA|COLON|SEMICOLON|EXCLAMATION MARK|QUESTION MARK)", "CJK Symbols and Punctuation", "Halfwidth and Fullwidth Forms")),
     ("fj", "非夹注符号", separators),
     ("jz", "夹注符号", whole_blocks("Latin-1 Supplement", "General Punctuation", "CJK Symbols and Punctuation", "Halfwidth and Fullwidth Forms", categories="Ps Pe Pi Pf")),
-    ("hj", "行间符号", by_name(r".*(LOW LINE|SESAME DOT)", *PUNCTUATION_BLOCKS)),
-    ("bd", "常用标点", whole_blocks("CJK Symbols and Punctuation", "Halfwidth and Fullwidth Forms", categories="P")),
+    ("hj", "行间符号", by_name(r".*(LOW LINE|OVERLINE|SESAME DOT)", *PUNCTUATION_BLOCKS)),
+    # 常用标点：拉丁-1、CJK 符号和标点、半角与全角形式三个区里的标点（¡ ¿ § ¶、、 。 【 】……），加上 CJK 符号和标点区里不算标点的字：修饰字母和其他字母（々 〆 〱 〻 〼）、其他符号（〄 〒 〓 〠 〾）和中文日期里的 〇（IDEOGRAPHIC NUMBER ZERO）；同区的苏州码归在苏州码一组，〪–〭 归在声调一组。
+    ("bd", "常用标点", union(whole_blocks("Latin-1 Supplement", "CJK Symbols and Punctuation", "Halfwidth and Fullwidth Forms", categories="P"), whole_blocks("CJK Symbols and Punctuation", categories="Lm Lo So"), by_name("IDEOGRAPHIC NUMBER ZERO"))),
     ("bdz", "竖排标点", by_name(r"PRESENTATION FORM FOR VERTICAL .*")),
     ("bdzy", "中英标点", whole_blocks("General Punctuation", categories="P S")),
     # 杂项
@@ -471,8 +505,8 @@ GROUPS = [
     ("jmq", "带圈假名", by_name(r"CIRCLED KATAKANA .*")),
     ("jmbj", "半角假名", by_name(r"HALFWIDTH KATAKANA.*")),
     ("hw", "韩文字母", lambda ucd: chars(point for point in ucd.assigned("Hangul Compatibility Jamo") if ucd.name[point] != "HANGUL FILLER")),
-    ("hwq", "带圈韩文", by_name(r"CIRCLED HANGUL .*")),
-    ("hwh", "带括号韩文", by_name(r"PARENTHESIZED HANGUL .*")),
+    ("hwq", "带圈韩文", by_name(r"CIRCLED (HANGUL|KOREAN CHARACTER) .*|KOREAN STANDARD SYMBOL")),
+    ("hwh", "带括号韩文", by_name(r"PARENTHESIZED (HANGUL|KOREAN CHARACTER) .*")),
 ]
 
 
@@ -519,7 +553,8 @@ def main() -> int:
     try:
         paths = {name: fetch(artifact, arguments.cache) for name, artifact in artifacts.items()}
     except (OSError, RuntimeError) as error:
-        if arguments.check:
+        # 契约检查不联网时下载失败只算跳过；设了 MSIME_FETCH=1（CI 的逐字节核对）就必须拿到输入，与拆字表的生成器相同。
+        if arguments.check and os.environ.get("MSIME_FETCH") != "1":
             print(f"skip: could not fetch the pinned Unicode Character Database files: {error}")
             return 0
         raise

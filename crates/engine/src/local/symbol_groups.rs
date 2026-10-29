@@ -2,7 +2,7 @@
 //!
 //! 两条查法共用一张编进引擎的表，都不读磁盘：
 //!
-//! - 分组码表是本项目自定的 `symbol_groups.tsv`（`编码<TAB>中文组名<TAB>符号...`）：分组码、中文组名和每组的取字规则写在 `scripts/build_symbol_groups.py` 里，组员只按 Unicode 字符数据库 17.0.0 的区块、类别、字符名和分解映射挑选（Unicode License V3，全文在 `resources/licenses/Unicode-License-V3.txt`），组内按码位排序。
+//! - 分组码表是 `symbol_groups.tsv`（`编码<TAB>中文组名<TAB>符号...`）：分组码沿用此前那张表的界面，中文组名和每组的取字规则写在 `scripts/build_symbol_groups.py` 里，组员只按 Unicode 字符数据库 17.0.0 的区块、类别、字符名和分解映射挑选（Unicode License V3，全文在 `resources/licenses/Unicode-License-V3.txt`），组内按码位排序。
 //! - LaTeX 命令名读 `latex_symbols.tsv`（本项目自写，MIT；是 msime-dictionary `sources/symbols/latex-symbols.tsv` 的同步副本，与官方短语表「LaTeX 符号」的数据源 `plugins/phrase_table/latex-symbols/symbols.tsv` 逐字节相同，见 `scripts/sync_symbol_tables.py`；放在 crate 里是为了 `cargo package` 能带上它），编进引擎，六个平台不用启用插件也能用：`sum` 得 ∑、`leq` 得 ≤、`pi` 得 π Π、`mathbbr` 得 ℝ。命令名去掉反斜杠和花括号、转成小写，只差大小写的合成一行、小写的在前（`rightarrow` 得 → ⇒），与那个短语表的编码规则相同；`\S`、`\P` 这种只剩一个字母的不收，单个字母是分组码前缀。只在这里查，不进普通打字的混排，`pi`、`in`、`le` 这些短命令名在混排里会和拼音、英文撞上。
 //! - 符号名复用混排那半边（`symbol_candidates`）的 `symbol_candidates.tsv`：`alpha` 得 α、`infinity` 得 ∞。
 //!
@@ -203,7 +203,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(symbols, 4530, "符号总数");
+        assert_eq!(symbols, 4585, "符号总数");
     }
 
     #[test]
@@ -222,6 +222,18 @@ mod tests {
         assert!(jt.iter().any(|row| row.word == "→"), "{:?}", texts(&jt));
         let szq = query_symbol_mode("szq", SYMBOL_MODE_LIMIT);
         assert_eq!(texts(&szq)[0], "①", "{:?}", texts(&szq));
+        // 部首补充区成段等价的几个部首（艹 的三种写法、辶 的三种写法）出的是统一汉字，不是部首码位。
+        let pp = query_symbol_mode("pp", SYMBOL_MODE_LIMIT);
+        assert!(
+            ["艹", "辶"]
+                .iter()
+                .all(|radical| texts(&pp).contains(radical)),
+            "{:?}",
+            texts(&pp)
+        );
+        assert!(!texts(&pp).contains(&"\u{2EBE}"), "{:?}", texts(&pp));
+        let fj = query_symbol_mode("fj", SYMBOL_MODE_LIMIT);
+        assert_eq!(texts(&fj)[..2], ["——", "……"], "{:?}", texts(&fj));
         assert!(query_symbol_mode("", SYMBOL_MODE_LIMIT).is_empty());
         assert!(query_symbol_mode("x'1", SYMBOL_MODE_LIMIT).is_empty());
     }

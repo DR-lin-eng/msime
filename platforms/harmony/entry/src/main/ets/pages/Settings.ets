@@ -2558,7 +2558,12 @@ class SettingsBridge {
       if (!ScreenCaptureProtection.save(this.stateDirectory, saved)) throw new Error('防止截屏没有保存');
       KeyboardLog.info(`screen capture protection ${saved.enabled ? 'on' : 'off'}`);
       ScreenCaptureProtection.protectLastWindow(context, saved.enabled);
-      this.publishShared();
+      // 文件已经写好、窗口也已改过，发布失败不能让页面以为没保存而把开关退回旧值；只记日志，窗口退到后台时的 `publishShared` 会再发布一次。
+      try {
+        this.publishShared();
+      } catch (error) {
+        KeyboardLog.error(`screen capture protection not published to the keyboard: ${describeError(error)}`);
+      }
       return JSON.stringify({ ok: true, value: saved.enabled } as FlagReply);
     } finally {
       this.screenCaptureBusy = false;

@@ -1,8 +1,12 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! The input engine: composition state, input schemes, dictionary queries, ranking and learning.
 //!
 //! This crate replaces the C++ MSIME-Engine that used to be fetched from `engine-lock.json` and patched by overlay scripts. It owns the input algorithms; `msime-input-runtime` keeps orchestrating hosts and does not duplicate any of it.
 //!
 //! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
+//!
+//! 引擎在运行时读写的每个文件（词库、模型、学习日志、代次目录）的格式、版本检查、产出方与数据许可证见仓库里的 `docs/data-formats.md`；代码注释里的 `data-formats.md §N` 指它的章节。
 
 // 非测试代码的日志一律走 `logging::warn`，嵌入方才换得掉出口（`set_log_sink`）；测试和基准测量照旧可以直接打印。
 #![cfg_attr(not(test), deny(clippy::print_stderr))]

@@ -46,7 +46,7 @@ pub mod web;
 mod wubi;
 pub mod zhuyin;
 
-pub use error::{EngineError, Result};
+pub use error::{EngineError, ErrorCode, Result};
 #[cfg(not(target_os = "android"))]
 pub use handwriting::handwriting_recognize;
 pub use handwriting::order_handwriting_candidates;

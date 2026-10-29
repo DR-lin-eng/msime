@@ -1187,6 +1187,13 @@ impl KeyResult {
         self.diagnostic = diagnostic;
         self
     }
+
+    /// `diagnostic` 的稳定数字码（映射表见 `diagnostics::DIAGNOSTIC_CODES`）；没有诊断时为 None。
+    pub fn diagnostic_code(&self) -> Option<crate::diagnostics::DiagnosticCode> {
+        self.diagnostic
+            .as_deref()
+            .map(crate::diagnostics::DiagnosticCode::from_message)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

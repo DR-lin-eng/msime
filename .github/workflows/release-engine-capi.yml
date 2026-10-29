@@ -157,8 +157,8 @@ jobs:
           set -euo pipefail
           library=target/engine-capi/package/$ARCHIVE/lib/libmsime_engine.so.1.0.0
           required=$(objdump -T "$library" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -uV | tail -n 1)
-          echo "libmsime_engine.so needs glibc $required (ceiling $GLIBC_CEILING)"
-          [[ "$(printf '%s\n%s\n' "$required" "$GLIBC_CEILING" | sort -V | tail -n 1)" == "$GLIBC_CEILING" ]] || { echo "the library needs glibc $required, newer than the documented $GLIBC_CEILING" >&2; exit 1; }
+          echo "libmsime_engine.so needs glibc $required (ceiling ${GLIBC_CEILING})"
+          [[ "$(printf '%s\n%s\n' "$required" "${GLIBC_CEILING}" | sort -V | tail -n 1)" == "${GLIBC_CEILING}" ]] || { echo "the library needs glibc $required, newer than the documented ${GLIBC_CEILING}" >&2; exit 1; }
       # 验收打出来的归档本身：解到一个新目录（证明 .pc 和 install name 不依赖构建目录），核对头文件、库名、.pc 和第三方声明，按动态库、静态库编译 C 示例并在夹具词库上运行。
       - name: Test the archive
         run: |
@@ -246,13 +246,13 @@ jobs:
           data=$(printf '%s\n' msime-engine-data-quanpin-*.tar.gz | sed 's/\.tar\.gz$//')
           notes="$RUNNER_TEMP/notes.md"
           {
-            echo "msime-engine-capi $VERSION：水杉输入法输入引擎的 C 库（ABI 1），预编译好的头文件、共享库与静态库和 pkg-config 文件，源码是提交 $SHA，同一版本也在 crates.io：https://crates.io/crates/msime-engine-capi/$VERSION"
+            echo "msime-engine-capi ${VERSION}：水杉输入法输入引擎的 C 库（ABI 1），预编译好的头文件、共享库与静态库和 pkg-config 文件，源码是提交 ${SHA}，同一版本也在 crates.io：https://crates.io/crates/msime-engine-capi/${VERSION}"
             echo
-            echo "- \`msime-engine-capi-$VERSION-linux-x86_64.tar.gz\`：Linux x86_64，需要 glibc $GLIBC_CEILING 或更新。"
-            echo "- \`msime-engine-capi-$VERSION-macos-universal.tar.gz\`：macOS 11 起，arm64 与 x86_64 合一。库只有 ad-hoc 签名：用浏览器下载的先去掉隔离属性（\`xattr -dr com.apple.quarantine <解开的目录>\`）。"
-            echo "- \`msime-engine-capi-$VERSION-windows-x86_64-msvc.zip\`：Windows x86_64，MSVC，动态 CRT（需要 Visual C++ 运行库）。"
-            echo "- \`$data.tar.gz\`、\`$data.zip\`：全拼、双拼的最小数据包，取自 msime-dictionary 的词库发布，解开的目录就是引擎的 resources 目录。**这份数据不是 MPL-2.0**：主体是 GPL-3.0，n-gram 表是 CC-BY-SA-4.0，逐项见包里的 README.md。"
+            echo "- \`msime-engine-capi-${VERSION}-linux-x86_64.tar.gz\`：Linux x86_64，需要 glibc ${GLIBC_CEILING} 或更新。"
+            echo "- \`msime-engine-capi-${VERSION}-macos-universal.tar.gz\`：macOS 11 起，arm64 与 x86_64 合一。库只有 ad-hoc 签名：用浏览器下载的先去掉隔离属性（\`xattr -dr com.apple.quarantine <解开的目录>\`）。"
+            echo "- \`msime-engine-capi-${VERSION}-windows-x86_64-msvc.zip\`：Windows x86_64，MSVC，动态 CRT（需要 Visual C++ 运行库）。"
+            echo "- \`${data}.tar.gz\`、\`${data}.zip\`：全拼、双拼的最小数据包，取自 msime-dictionary 的词库发布，解开的目录就是引擎的 resources 目录。**这份数据不是 MPL-2.0**：主体是 GPL-3.0，n-gram 表是 CC-BY-SA-4.0，逐项见包里的 README.md。"
             echo
-            echo "库的代码是 MPL-2.0，链接进去的第三方 crate 和编进引擎的数据表保留各自的许可证（归档里的 LICENSE、licenses/、THIRD_PARTY_NOTICES.txt 和 SOURCE.txt）。用法从 [README 的「快速上手」](https://github.com/metasequoiaime/msime/blob/$SHA/crates/engine-capi/README.md#快速上手) 开始。校验值在 SHA256SUMS。"
+            echo "库的代码是 MPL-2.0，链接进去的第三方 crate 和编进引擎的数据表保留各自的许可证（归档里的 LICENSE、licenses/、THIRD_PARTY_NOTICES.txt 和 SOURCE.txt）。用法从 [README 的「快速上手」](https://github.com/metasequoiaime/msime/blob/${SHA}/crates/engine-capi/README.md#快速上手) 开始。校验值在 SHA256SUMS。"
           } > "$notes"
-          gh release create "msime-engine-capi-v$VERSION" "${assets[@]}" SHA256SUMS --target "$SHA" --title "msime-engine-capi $VERSION" --notes-file "$notes" --latest=false
+          gh release create "msime-engine-capi-v${VERSION}" "${assets[@]}" SHA256SUMS --target "${SHA}" --title "msime-engine-capi ${VERSION}" --notes-file "$notes" --latest=false

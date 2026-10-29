@@ -107,18 +107,19 @@ PY
 )
 read -r capi engine path_trust rink <<< "$versions"
 commit=$(git -C "$root" rev-parse HEAD)
+# 变量一律加花括号：macOS 自带的 bash 3.2 会把紧跟在变量名后的中文字节当成名字的一部分。
 cat > "$dir/SOURCE.txt" <<EOF
-msime-engine-capi $capi（C ABI 版本见 include/msime_engine.h 的 MSIME_ENGINE_ABI_MAJOR、MSIME_ENGINE_ABI_MINOR）
+msime-engine-capi ${capi}（C ABI 版本见 include/msime_engine.h 的 MSIME_ENGINE_ABI_MAJOR、MSIME_ENGINE_ABI_MINOR）
 
-这个库按 MPL-2.0 分发，对应的源码（MPL-2.0 第 3.2 条所说的 Source Code Form）是 metasequoiaime/msime 提交 $commit 的 crates/engine-capi、crates/engine 和 crates/path-trust：
-https://github.com/metasequoiaime/msime/tree/$commit
+这个库按 MPL-2.0 分发，对应的源码（MPL-2.0 第 3.2 条所说的 Source Code Form）是 metasequoiaime/msime 提交 ${commit} 的 crates/engine-capi、crates/engine 和 crates/path-trust：
+https://github.com/metasequoiaime/msime/tree/${commit}
 
 同样的源码也在 crates.io 上：
-https://crates.io/crates/msime-engine-capi/$capi
-https://crates.io/crates/msime-engine/$engine
-https://crates.io/crates/msime-path-trust/$path_trust
+https://crates.io/crates/msime-engine-capi/${capi}
+https://crates.io/crates/msime-engine/${engine}
+https://crates.io/crates/msime-path-trust/${path_trust}
 
-库里链接了未经修改的 rink-core $rink（MPL-2.0），它的源码在 https://crates.io/crates/rink-core/$rink ，上游仓库是 https://codeberg.org/tiffany/rink 。其余第三方 crate 的许可证与声明见 THIRD_PARTY_NOTICES.txt，编进引擎的数据表与改编代码的许可证见 licenses/ 和 README.md 的「许可证」一节。
+库里链接了未经修改的 rink-core ${rink}（MPL-2.0），它的源码在 https://crates.io/crates/rink-core/${rink} ，上游仓库是 https://codeberg.org/tiffany/rink 。其余第三方 crate 的许可证与声明见 THIRD_PARTY_NOTICES.txt，编进引擎的数据表与改编代码的许可证见 licenses/ 和 README.md 的「许可证」一节。
 
 词库不在这个归档里，见 README.md 的「要带的数据文件」。
 EOF

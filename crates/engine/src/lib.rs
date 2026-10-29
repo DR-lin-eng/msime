@@ -78,7 +78,7 @@ pub use types::{
 };
 // 辅助码表：`SessionOptions::helpcode_table` 与 `Session::set_helpcode_table` 收的就是它，宿主自己读表（辅助码表插件、没有文件系统的网页）时用这几项。
 pub use helpcode::{load_helpcode_keymap, HelpcodeKeymap, SharedKeymap};
-// 用户自定义的 26 键双拼表（`SessionOptions::shuangpin_custom`）的校验与起点：宿主在把表交给会话之前先校验，不合法就不要传。编辑中的表用不留存的 `check_shuangpin_custom_profile`，内置方案的表是编辑的起点。
+// 用户自定义的 26 键双拼表（`SessionOptions::shuangpin_custom_profile`）的校验与起点：宿主在把表交给会话之前先校验，不合法就不要传。编辑中的表用不留存的 `check_shuangpin_custom_profile`，内置方案的表是编辑的起点。
 pub use shuangpin::custom::{
     builtin_table as shuangpin_builtin_table,
     check_custom_profile as check_shuangpin_custom_profile,

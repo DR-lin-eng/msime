@@ -244,9 +244,9 @@ struct English {
     minimum_prefix: Option<u32>,
     /// 首页最多几个英文候选，1 到 3。
     first_page_count: Option<u32>,
-    /// 回车学英文词的总开关，缺省开：只开它时只学专用英文里打的词。
+    /// ABI 1.1 起。回车学英文词的总开关，缺省开：只开它时只学专用英文里打的词。
     learn_on_enter: Option<bool>,
-    /// 回车时专用英文之外也学：临时英文的字母、拼不成完整音节的拼音（msime 产品的策略），缺省关。要 `learn_on_enter` 也开着。
+    /// ABI 1.1 起。回车时专用英文之外也学：临时英文的字母、拼不成完整音节的拼音（msime 产品的策略），缺省关。要 `learn_on_enter` 也开着。
     learn_typed_spellings_on_enter: Option<bool>,
 }
 

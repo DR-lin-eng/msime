@@ -113,7 +113,7 @@ pub unsafe extern "C" fn msime_engine_prepare_runtime(
     })
 }
 
-/// 同 `msime_engine_prepare_runtime`，只为 `schemes` 里的方案准备：`resources` 只要有这些方案读的词库。`schemes` 的第 n 位是序号为 n 的方案（`1u << MSIME_ENGINE_SCHEME_KOREAN`），要与会话选项的 `enabled_schemes` 相同，不能是 0，不认识的位是 `MSIME_ENGINE_INVALID_ARGUMENT`。有全拼、双拼或五笔时与 `msime_engine_prepare_runtime` 相同，要 `msime-pinyin.db` 和 `msime-english.db`；没有时两者都不要求，`resources` 带了 `msime-english.db` 就照样复制进代次（专用英文的补全与回车学词用它），没带时代次里没有它。日文的 `msime-japanese.dat` 和粤语、注音、笔画的语言库不经过代次，会话从 `resources` 或选项给的路径直接读。
+/// ABI 1.1 起。同 `msime_engine_prepare_runtime`，只为 `schemes` 里的方案准备：`resources` 只要有这些方案读的词库。`schemes` 的第 n 位是序号为 n 的方案（`1u << MSIME_ENGINE_SCHEME_KOREAN`），要与会话选项的 `enabled_schemes` 相同，不能是 0，不认识的位是 `MSIME_ENGINE_INVALID_ARGUMENT`。有全拼、双拼或五笔时与 `msime_engine_prepare_runtime` 相同，要 `msime-pinyin.db` 和 `msime-english.db`；没有时两者都不要求，`resources` 带了 `msime-english.db` 就照样复制进代次（专用英文的补全与回车学词用它），没带时代次里没有它。日文的 `msime-japanese.dat` 和粤语、注音、笔画的语言库不经过代次，会话从 `resources` 或选项给的路径直接读。
 ///
 /// # Safety
 /// 同 `msime_engine_prepare_runtime`。
@@ -418,7 +418,7 @@ pub unsafe extern "C" fn msime_engine_reset_learning(paths: *const msime_engine_
     })
 }
 
-/// 同 `msime_engine_reset_learning`，只换回 `schemes` 读的词库，规则与 `msime_engine_prepare_runtime_for` 相同：没有全拼、双拼、五笔时不要求 `msime-pinyin.db`，`msime-english.db` 在 `resources` 里有才换回，都没有时只清空日志。`schemes` 的写法同 `msime_engine_prepare_runtime_for`。
+/// ABI 1.1 起。同 `msime_engine_reset_learning`，只换回 `schemes` 读的词库，规则与 `msime_engine_prepare_runtime_for` 相同：没有全拼、双拼、五笔时不要求 `msime-pinyin.db`，`msime-english.db` 在 `resources` 里有才换回，都没有时只清空日志。`schemes` 的写法同 `msime_engine_prepare_runtime_for`。
 ///
 /// # Safety
 /// `paths` 按 `struct_size` 约定可读。

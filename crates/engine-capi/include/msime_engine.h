@@ -18,7 +18,7 @@
 #define MSIME_ENGINE_ABI_MAJOR 1
 
 // ABI 次版本，每次追加加一。调用方可以按 `msime_engine_abi_version()` 判断运行时的库有没有某个后加的函数。
-#define MSIME_ENGINE_ABI_MINOR 0
+#define MSIME_ENGINE_ABI_MINOR 1
 
 // 成功。
 #define MSIME_ENGINE_OK 0
@@ -103,7 +103,7 @@
 // 整句改字的光标右移一个字；不在改字里时与 `MOVE_RIGHT` 相同。
 #define MSIME_ENGINE_COMMAND_CONVERSION_RIGHT 13
 
-// 与 `COMMIT_RAW` 上屏同样的原文，但不学英文词（例如宿主的 Shift+回车）。
+// ABI 1.1 起：与 `COMMIT_RAW` 上屏同样的原文，但不学英文词（例如宿主的 Shift+回车）。1.0 的库对它返回 `MSIME_ENGINE_UNSUPPORTED`。
 #define MSIME_ENGINE_COMMAND_COMMIT_RAW_WITHOUT_LEARNING 14
 
 #define MSIME_ENGINE_SOURCE_DATABASE 0
@@ -362,7 +362,7 @@ int32_t msime_engine_prepare_runtime(const struct msime_engine_paths *paths,
                                      size_t content_id_len,
                                      char **dictionaries);
 
-// 同 `msime_engine_prepare_runtime`，只为 `schemes` 里的方案准备：`resources` 只要有这些方案读的词库。`schemes` 的第 n 位是序号为 n 的方案（`1u << MSIME_ENGINE_SCHEME_KOREAN`），要与会话选项的 `enabled_schemes` 相同，不能是 0，不认识的位是 `MSIME_ENGINE_INVALID_ARGUMENT`。有全拼、双拼或五笔时与 `msime_engine_prepare_runtime` 相同，要 `msime-pinyin.db` 和 `msime-english.db`；没有时两者都不要求，`resources` 带了 `msime-english.db` 就照样复制进代次（专用英文的补全与回车学词用它），没带时代次里没有它。日文的 `msime-japanese.dat` 和粤语、注音、笔画的语言库不经过代次，会话从 `resources` 或选项给的路径直接读。
+// ABI 1.1 起。同 `msime_engine_prepare_runtime`，只为 `schemes` 里的方案准备：`resources` 只要有这些方案读的词库。`schemes` 的第 n 位是序号为 n 的方案（`1u << MSIME_ENGINE_SCHEME_KOREAN`），要与会话选项的 `enabled_schemes` 相同，不能是 0，不认识的位是 `MSIME_ENGINE_INVALID_ARGUMENT`。有全拼、双拼或五笔时与 `msime_engine_prepare_runtime` 相同，要 `msime-pinyin.db` 和 `msime-english.db`；没有时两者都不要求，`resources` 带了 `msime-english.db` 就照样复制进代次（专用英文的补全与回车学词用它），没带时代次里没有它。日文的 `msime-japanese.dat` 和粤语、注音、笔画的语言库不经过代次，会话从 `resources` 或选项给的路径直接读。
 //
 // # Safety
 // 同 `msime_engine_prepare_runtime`。
@@ -415,7 +415,7 @@ int32_t msime_engine_user_dict_edit(const struct msime_engine_paths *paths,
 // `paths` 按 `struct_size` 约定可读。
 int32_t msime_engine_reset_learning(const struct msime_engine_paths *paths);
 
-// 同 `msime_engine_reset_learning`，只换回 `schemes` 读的词库，规则与 `msime_engine_prepare_runtime_for` 相同：没有全拼、双拼、五笔时不要求 `msime-pinyin.db`，`msime-english.db` 在 `resources` 里有才换回，都没有时只清空日志。`schemes` 的写法同 `msime_engine_prepare_runtime_for`。
+// ABI 1.1 起。同 `msime_engine_reset_learning`，只换回 `schemes` 读的词库，规则与 `msime_engine_prepare_runtime_for` 相同：没有全拼、双拼、五笔时不要求 `msime-pinyin.db`，`msime-english.db` 在 `resources` 里有才换回，都没有时只清空日志。`schemes` 的写法同 `msime_engine_prepare_runtime_for`。
 //
 // # Safety
 // `paths` 按 `struct_size` 约定可读。

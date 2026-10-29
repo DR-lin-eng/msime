@@ -55,7 +55,7 @@ cmake --build build --config Release
 在 dict-v2.0.39 的数据包上，示例打出（库的版本号随发布）。「你好世界」本来就是词库里的词，学习只调它的词频，不往个人词典里加一条；在 `tests/fixture` 的最小词库上它是整句联想解出的句子，那里会读回一条个人词条：
 
 ```text
-msime-engine 0.1.0, ABI 1.0
+msime-engine 0.1.1, ABI 1.1
 preedit: ni'hao'shi'jie (revision 11, 192 candidates)
   1. 你好世界 [ni'hao'shi'jie] source 0
   2. 你好是饥饿 [ni'hao'shi'ji'e] source 8
@@ -83,11 +83,11 @@ cargo cinstall --locked --release -p msime-engine-capi --prefix /usr/local --lib
 | 文件 | 说明 |
 | --- | --- |
 | `include/msime_engine.h` | 头文件，`#include <msime_engine.h>` |
-| `lib/libmsime_engine.so.1.0.0`、`libmsime_engine.so.1`（Linux） | 共享库，SONAME 是 `libmsime_engine.so.1`，主版本就是 ABI 主版本 |
-| `lib/libmsime_engine.1.0.0.dylib`（macOS） | install name 是 `<libdir>/libmsime_engine.1.dylib`，compatibility version 是 ABI 主版本 |
+| `lib/libmsime_engine.so.1.1.0`、`libmsime_engine.so.1`（Linux） | 共享库，SONAME 是 `libmsime_engine.so.1`，主版本就是 ABI 主版本 |
+| `lib/libmsime_engine.1.1.0.dylib`（macOS） | install name 是 `<libdir>/libmsime_engine.1.dylib`，compatibility version 是 ABI 主版本 |
 | `bin/msime_engine.dll`、`lib/msime_engine.dll.lib`（Windows MSVC） | DLL 和导入库 |
 | `lib/libmsime_engine.a`、`lib/msime_engine.lib`（MSVC） | 静态库 |
-| `lib/pkgconfig/msime-engine.pc` | `pkg-config --cflags --libs msime-engine`；静态链接用 `--static`，`Libs.private` 列出静态库要的系统库。`Version` 是 ABI 版本（1.0.0），不是 crate 版本，可以写 `msime-engine >= 1.0` 按 ABI 做编译期开关。没有默认数据目录变量：cargo-c 生成的 `.pc` 不能加自定义变量，库也没有默认数据目录，四个根目录总由前端传入 |
+| `lib/pkgconfig/msime-engine.pc` | `pkg-config --cflags --libs msime-engine`；静态链接用 `--static`，`Libs.private` 列出静态库要的系统库。`Version` 是 ABI 版本（1.1.0），不是 crate 版本，可以写 `msime-engine >= 1.1` 按 ABI 做编译期开关。没有默认数据目录变量：cargo-c 生成的 `.pc` 不能加自定义变量，库也没有默认数据目录，四个根目录总由前端传入 |
 
 静态库要的系统库因平台而异，以 `.pc` 的 `Libs.private` 为准：macOS 是 `-liconv -lSystem -lc -lm`，Linux 是 `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` 一类，Windows 是 `kernel32`、`advapi32`、`ntdll`、`userenv`、`ws2_32` 等。
 
@@ -118,7 +118,7 @@ msime_engine_flush_learning(MSIME_ENGINE_FLUSH_STOP_THREAD);           // 退出
 msime_engine_string_free(dictionaries);
 ```
 
-- **准备运行时**：`msime_engine_prepare_runtime` 在 `user_data/dictionaries/<content_id>` 原子地准备一个代次：从 `resources` 复制工作词库，回放学习日志。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据一变就换一个（例如数据发布的版本号，点要换掉：`dict-v2.0.39` 写成 `dict-v2_0_39`）；同一个 id 再调只补回放。`paths.dictionaries` 这时还没有，不读也不用填。`msime_engine_prepare_runtime` 按全部方案准备，`resources` 里必须有 `msime-pinyin.db` 和 `msime-english.db`；只用几个方案时用 `msime_engine_prepare_runtime_for`，多传一个方案位集合（第 n 位是序号为 n 的方案，与选项的 `enabled_schemes` 相同），`resources` 只要有这些方案读的文件（见[要带的数据文件](#要带的数据文件)）。它交回的代次目录就是建会话时的 `paths.dictionaries`。三个根目录都要是绝对路径、互不重叠：`resources` 只读，`user_data` 是用户数据（学习日志 `msime_user.db` 和代次），`cache` 随时可以清空。
+- **准备运行时**：`msime_engine_prepare_runtime` 在 `user_data/dictionaries/<content_id>` 原子地准备一个代次：从 `resources` 复制工作词库，回放学习日志。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据一变就换一个（例如数据发布的版本号，点要换掉：`dict-v2.0.39` 写成 `dict-v2_0_39`）；同一个 id 再调只补回放。`paths.dictionaries` 这时还没有，不读也不用填。`msime_engine_prepare_runtime` 按全部方案准备，`resources` 里必须有 `msime-pinyin.db` 和 `msime-english.db`；只用几个方案时用 `msime_engine_prepare_runtime_for`（ABI 1.1 起），多传一个方案位集合（第 n 位是序号为 n 的方案，与选项的 `enabled_schemes` 相同），`resources` 只要有这些方案读的文件（见[要带的数据文件](#要带的数据文件)）。它交回的代次目录就是建会话时的 `paths.dictionaries`。三个根目录都要是绝对路径、互不重叠：`resources` 只读，`user_data` 是用户数据（学习日志 `msime_user.db` 和代次），`cache` 随时可以清空。
 - **会话**：`msime_engine_session_new` 建会话时取这两个目录（`user_data` 和代次）上的共享词库租约，`msime_engine_session_free` 时交还。会话结束时写下最近约 2 秒排着的上下文学习、关掉自己的日志连接。
 - **维护**：`msime_engine_user_dict_edit` 和 `msime_engine_reset_learning`（用 `_for` 准备的代次用 `msime_engine_reset_learning_for`，传同一个方案集合）要独占租约，同一份数据上还有会话开着（本进程、别的进程，包括 msime 自己的输入法）时返回 `MSIME_ENGINE_BUSY`、什么也不改：先释放会话。`msime_engine_user_dict_list` 只读，随时可以调。进行中的维护也让 `msime_engine_session_new` 返回 `MSIME_ENGINE_BUSY`。
 - **退出与卸载**：会话都释放之后调 `msime_engine_flush_learning(MSIME_ENGINE_FLUSH_STOP_THREAD)` 写完并停掉后台写线程。删除或替换数据目录之前调 `msime_engine_close_databases`。引擎还有进程级的缓存和单位换算的后台线程，没有办法全部收回，所以不要 `dlclose` 这个库后再重新加载，把它当作每个进程一份。
@@ -156,7 +156,7 @@ msime_engine_string_free(dictionaries);
 
 ## 版本与结构体
 
-- `msime_engine_abi_version()` 返回 `(major << 16) | minor`。主版本与头文件的 `MSIME_ENGINE_ABI_MAJOR` 不同就不要用这份库；次版本小于头文件的 `MSIME_ENGINE_ABI_MINOR` 时，后加的函数不可用。同一个主版本内只追加函数、常量、标志位和结构体尾部的字段，已有的编号与含义冻结；方案、命令和候选来源沿用核心层的序号（命令与 host-api 的编号不同）。
+- `msime_engine_abi_version()` 返回 `(major << 16) | minor`。主版本与头文件的 `MSIME_ENGINE_ABI_MAJOR` 不同就不要用这份库；次版本小于头文件的 `MSIME_ENGINE_ABI_MINOR` 时，后加的函数不可用。同一个主版本内只追加函数、常量、标志位和结构体尾部的字段，已有的编号与含义冻结；1.1 追加了 `msime_engine_prepare_runtime_for`、`msime_engine_reset_learning_for`、命令 `COMMIT_RAW_WITHOUT_LEARNING` 和选项 `english.learn_on_enter`、`english.learn_typed_spellings_on_enter`（1.0 的库不认识这两个键，建会话会返回 `INVALID_ARGUMENT`）；方案、命令和候选来源沿用核心层的序号（命令与 host-api 的编号不同）。
 - 每个进出的结构体都以 `uint32_t struct_size` 开头，调用前设为 `sizeof`。输出时库写 min(调用方大小, 库内大小) 个字节，把 `struct_size` 改成写入的大小，调用方多出的部分清零；输入时库只读这么多，读不到的字段按零。比 1.0 的布局还小是 `MSIME_ENGINE_INVALID_ARGUMENT`。
 - 返回码：`OK` 0、`INVALID_ARGUMENT` 1、`FAILED` 2、`STORAGE` 3、`UNSUPPORTED` 4、`STALE` 5、`BUSY` 6、`PANIC` 7、`NULL` 8。1、2、3、6 与引擎的 `ErrorCode` 共用编号。`msime_engine_result.diagnostic_code` 是引擎的诊断码（学习没能存下之类，键照样处理了），0 是没有，0xFFFF 是表外的文字。
 
@@ -194,7 +194,7 @@ msime_engine_string_free(dictionaries);
 | `next_word_prediction` | 上屏后联想，缺省关；`MSIME_ENGINE_OPTION_PREDICTION_ALLOWED` 是它的即时门禁 |
 | `fuzzy_pinyin` | 模糊音规则：`z_zh`、`c_ch`、`s_sh`、`n_l`、`f_h`、`r_l`、`an_ang`、`en_eng`、`in_ing`、`ian_iang`、`uan_uang` |
 | `autocorrect` | 全拼纠错：`transposition`、`neighbor`、`deletion`、`insertion` |
-| `english` | `mixed_candidates`（中文里混入英文单词）、`minimum_prefix`（1–8）、`first_page_count`（1–3）、`learn_on_enter`（回车学英文词的总开关，缺省 true：只学专用英文里打的词）、`learn_typed_spellings_on_enter`（缺省 false；打开后回车也把临时英文的字母和拼不成完整音节的拼音学成英文词，九宫格组字、整句改字、计算等生成文本的模式和网址不学，这是 msime 自己的策略） |
+| `english` | `mixed_candidates`（中文里混入英文单词）、`minimum_prefix`（1–8）、`first_page_count`（1–3）、1.1 起还有 `learn_on_enter`（回车学英文词的总开关，缺省 true：只学专用英文里打的词）、`learn_typed_spellings_on_enter`（缺省 false；打开后回车也把临时英文的字母和拼不成完整音节的拼音学成英文词，九宫格组字、整句改字、计算等生成文本的模式和网址不学，这是 msime 自己的策略） |
 | `first_page_rows` | 每页候选数，1–255 |
 | `language_dictionaries` | `cantonese`、`zhuyin`、`stroke`、`japanese` 各自数据库的路径；没有时对应方案激活失败（日文只出假名） |
 
@@ -242,7 +242,7 @@ CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为�
 
 ## 不在这个 ABI 里
 
-在线、云与 AI 候选；插件指令；翻译与释义；宿主喂入的表（指令表、联系人、快捷短语）；同步与备份；只为 msime 自己的基准测试公开的接口；排序内部与重排模型；实验性能力（多语言、日文混输、触点与滑行、九键与 14 键、手写、emoji 目录、英文补全与音标）。整句只给引擎认为最好的那一种读法（`sentence_alternatives` 固定为假），候选是引擎原始的顺序。引擎的警告日志写到标准错误，前缀 `msime: `；ABI 1.0 没有日志回调。
+在线、云与 AI 候选；插件指令；翻译与释义；宿主喂入的表（指令表、联系人、快捷短语）；同步与备份；只为 msime 自己的基准测试公开的接口；排序内部与重排模型；实验性能力（多语言、日文混输、触点与滑行、九键与 14 键、手写、emoji 目录、英文补全与音标）。整句只给引擎认为最好的那一种读法（`sentence_alternatives` 固定为假），候选是引擎原始的顺序。引擎的警告日志写到标准错误，前缀 `msime: `；ABI 1 还没有日志回调。
 
 ## 许可证
 

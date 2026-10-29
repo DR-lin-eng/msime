@@ -1,6 +1,6 @@
 name: Depot Android KVM probe
 
-# android-device.yml 留在 GitHub 托管的 ubuntu-24.04 上，理由是模拟器要 KVM、Depot 的 runner 不保证有，但这一条从来没在 Depot 上实测过。这个探测在两种 runner 上做同一件事：看 /dev/kvm 和 CPU 虚拟化标志，跑 emulator 自己的加速检查，再用 start-emulator.sh 起一台 API 35 的 AVD 并记下开机用了多久，结论写进 job summary。
+# android-device.yml 原先留在 GitHub 托管的 ubuntu-24.04 上，理由是模拟器要 KVM、Depot 的 runner 不保证有，这一条没实测过。2026-10-29 的第一次运行显示 depot-ubuntu-24.04-8 上 KVM 可用、API 35 开机 21 秒（ubuntu-24.04 是 45 秒），android-device.yml 随后挪到了 Depot；保留这个探测，Depot 换镜像或机型后手动触发一次就能复查。这个探测在两种 runner 上做同一件事：看 /dev/kvm 和 CPU 虚拟化标志，跑 emulator 自己的加速检查，再用 start-emulator.sh 起一台 API 35 的 AVD 并记下开机用了多久，结论写进 job summary。
 #
 # 这是探测而不是门禁：没有 KVM 或开不了机只报 warning，不让 job 变红。只在改到这个文件本身的 PR 上和手动触发时跑，不进分支保护。
 

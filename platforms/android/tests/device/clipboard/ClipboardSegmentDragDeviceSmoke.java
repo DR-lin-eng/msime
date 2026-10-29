@@ -469,8 +469,11 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
             String dump = output.toString(StandardCharsets.UTF_8.name());
             for (String line : dump.split("\n")) {
                 String value = line.trim();
-                if (value.startsWith("mCurFocusedWindow=") && !value.startsWith("mCurFocusedWindow=null"))
-                    return value.split(" softInputMode=", 2)[0];
+                // Android 15 把窗口标识移进 ImeBindingState，字段名带括号；旧系统继续使用原字段。
+                for (String prefix : new String[] {"mCurFocusedWindow=", "mFocusedWindow()="}) {
+                    if (value.startsWith(prefix) && !value.startsWith(prefix + "null"))
+                        return value.substring(prefix.length()).split(" softInputMode=", 2)[0];
+                }
             }
             throw new AssertionError("Synthetic editor input focus was unavailable");
         }

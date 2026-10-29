@@ -87,6 +87,8 @@ jobs:
 
   harmony:
     name: HarmonyOS nightly
+    # 本 fork 按维护者要求不编译鸿蒙；上游原有入口随同步保留。
+    if: ${{ github.repository == 'metasequoiaime/msime' }}
     uses: ./.github/workflows/release-harmony.yml
     with:
       prerelease: true

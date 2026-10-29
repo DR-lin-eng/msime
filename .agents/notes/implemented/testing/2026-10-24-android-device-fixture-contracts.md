@@ -22,3 +22,10 @@ Status: implemented
 ## Related notes audit
 
 [全文剪贴板浮层](../feature/2026-10-20-android-clipboard-card-preview.md)部分重叠；其刷新原节点的旧限制在本篇补充，产品不抢焦点的决定保持。[移动端触点纠错](../feature/2026-10-23-mobile-touch-correction.md)定义当前手势参数，本篇不改变触点计算。
+
+
+## Android 15 与语音回调整合
+
+Android 15 的 `ImeBindingState.dump` 输出 `mFocusedWindow()=`，旧版仍是 `mCurFocusedWindow=`。浮层验收识别两者后比较同一窗口 token，空值仍拒绝；不移除展开前后系统窗口身份和合成编辑器的字段/窗口焦点断言。字段形状已与 AOSP `android-15.0.0_r1` 的 `ImeBindingState.java` 对照。dump 仍仅在专用合成编辑器中于内存解析，不输出系统内容。
+
+语音 `ImeVoiceEntry.delivered` 增加了识别后提示 `notice` 参数，设备夹具的反射查找与两次调用补齐这个 `String` 槽位。识别直接上屏、旧代次拒绝、跨进程结果只插入一次和输入位置变更时保留结果的断言都保留。首次完整 API 35 验收只剩这两项失败，其余独立检查均执行完；补修继续在设备运行，不用 Java 编译替代 Android 验收。

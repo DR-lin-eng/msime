@@ -185,7 +185,8 @@ def main() -> int:
     copyright_text = (packaging / "debian/copyright").read_text(encoding="utf-8")
     check(re.search(r"^Files: crates/engine/\* crates/path-trust/\*\n(?:.+\n)*?License: MPL-2.0$", copyright_text, re.MULTILINE) is not None, "debian/copyright has no MPL-2.0 stanza for crates/engine and crates/path-trust")
     nix = (ROOT / "platforms/linux/nix/fcitx5.nix").read_text(encoding="utf-8")
-    for attribute in ("mpl20", "cc-by-30", "unicode-30", "bsd2", "bsd3", "wtfpl", "llvm-exception"):
+    # 后三项不是引擎的，是同一个派生编进或链接的 Wayland 协议代码与 Rust 依赖，rpm/msime.spec 的 License 也列着。
+    for attribute in ("mpl20", "cc-by-30", "unicode-30", "bsd2", "bsd3", "wtfpl", "llvm-exception", "hpnd", "isc", "zlib"):
         check(f"lib.licenses.{attribute}\n" in nix, f"platforms/linux/nix/fcitx5.nix meta.license lacks lib.licenses.{attribute}")
 
     if failures:

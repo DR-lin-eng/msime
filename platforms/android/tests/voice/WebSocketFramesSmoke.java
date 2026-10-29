@@ -146,6 +146,18 @@ public final class WebSocketFramesSmoke {
             both.length), both.length - head.consumed());
         check(tail != null && tail.fin() && tail.opcode() == WebSocketFrames.OPCODE_CONTINUATION,
             "the last fragment is a final continuation");
+
+        // 握手被拒时读出状态码，用来区分鉴权被拒、服务超时和超出限制（#9886）。
+        check(WebSocketFrames.handshakeStatus("HTTP/1.1 401 Unauthorized\r\n\r\n") == 401,
+            "被拒的握手读出 401");
+        check(WebSocketFrames.handshakeStatus("HTTP/1.1 504\r\n\r\n") == 504, "没有原因短语也能读出状态码");
+        check(WebSocketFrames.handshakeStatus("HTTP/1.1 101 Switching Protocols\r\n") == 101,
+            "成功的握手是 101");
+        check(WebSocketFrames.handshakeStatus("") == -1, "空回应没有状态码");
+        check(WebSocketFrames.handshakeStatus(null) == -1, "没有回应时没有状态码");
+        check(WebSocketFrames.handshakeStatus("HTTP/1.1 40x Bad\r\n") == -1, "状态码必须是三位数字");
+        check(WebSocketFrames.handshakeStatus("HTTP/1.1 4011 Bad\r\n") == -1, "多出的数字不当成状态码");
+        check(WebSocketFrames.handshakeStatus("SSH-2.0-OpenSSH\r\n") == -1, "不是 HTTP 的回应没有状态码");
         System.out.println("Android WebSocket frames passed");
     }
 }

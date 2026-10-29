@@ -222,6 +222,9 @@ class AndroidVoiceProjectConfigurationTests(unittest.TestCase):
         recognizer = (
             ROOT / "platforms/android/java/app/msime/android/voice/DoubaoRecognizer.java"
         ).read_text()
+        session = (
+            ROOT / "platforms/android/java/app/msime/android/voice/DoubaoStreamSession.java"
+        ).read_text()
 
         # The two protocols are chosen between, never both.
         self.assertIn("DoubaoAsrPolicy.usable(", plugin)
@@ -236,8 +239,12 @@ class AndroidVoiceProjectConfigurationTests(unittest.TestCase):
         self.assertIn("NativeClient.doubaoStartFrame(", recognizer)
         self.assertIn("NativeClient.doubaoAudioFrame(", recognizer)
         self.assertIn("NativeClient.doubaoDecodeFrame(", recognizer)
-        self.assertIn("MAX_INBOUND_FRAME_BYTES = 1_048_576 + 10", recognizer)
-        self.assertIn("if (pending == inbound.length) return null;", recognizer)
+        self.assertIn("MAX_INBOUND_FRAME_BYTES = 1_048_576 + 10", session)
+        self.assertIn("if (pending == inbound.length) {", session)
+        # 收发分开：读线程一直阻塞在 read 上。Conscrypt 的 available() 不会去网络上取数据，拿它判断有没有回包会让说话期间一帧也读不到（#9886）。
+        self.assertNotIn(".available()", session)
+        self.assertNotIn(".available()", recognizer)
+        self.assertIn('new Thread(this::receive, "msime-doubao-reader")', session)
         # Cancelling has to release both the microphone and the socket.
         self.assertIn("streaming.cancel()", activity)
         self.assertIn("socket.close()", recognizer)

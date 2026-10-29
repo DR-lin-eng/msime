@@ -81,7 +81,7 @@ public final class AndroidLocalSettings {
     public static final String CLIPBOARD_COLUMNS = "platform.android.clipboard_columns";
     /** 工具栏显示最近复制的文字或图片（{@link RecentClipboardSuggestion}，图片见 #6781），默认开；剪贴板历史关着时不生效。同步字段表里没有这个键，只在本机。 */
     public static final String CLIPBOARD_SUGGESTION = "platform.android.clipboard_suggestion";
-    /** 剪贴板多选删除后可撤销的秒数（{@link ClipboardUndoPolicy}，#10073），5 到 9 秒，默认 5 秒。同步字段表里没有这个键，只在本机。 */
+    /** 剪贴板删除记录（单条或多选）后可撤销的秒数（{@link ClipboardUndoPolicy}，#10073、#10080），5 到 9 秒，默认 5 秒。同步字段表里没有这个键，只在本机。 */
     public static final String CLIPBOARD_UNDO_SECONDS = "platform.android.clipboard_undo_seconds";
     /** 「复制后自动显示快捷键」（#10079）：最近复制那一行在预览右边多一个分词或分类快捷键，默认开，好让用户知道有这个功能；最近复制不显示时它也不显示。只在本机。 */
     public static final String CLIPBOARD_SUGGESTION_ACTION = "platform.android.clipboard_suggestion_action";

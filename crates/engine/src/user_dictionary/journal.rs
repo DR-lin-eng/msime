@@ -562,6 +562,12 @@ pub(crate) fn thread_holds_journal() -> bool {
     })
 }
 
+/// The close count `close_cached_journals` bumps before it closes every thread's idle connection. A test that expects this thread to keep a connection reads it before and after: another test may close every journal in between, which only a moved count reveals.
+#[cfg(test)]
+pub(crate) fn cache_generation() -> u64 {
+    CACHE_GENERATION.load(Ordering::Acquire)
+}
+
 /// How many threads keep an idle connection to `path`.
 #[cfg(test)]
 pub(crate) fn parked_journals(path: &Path) -> usize {

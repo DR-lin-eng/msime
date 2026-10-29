@@ -3,7 +3,7 @@
 use super::*;
 use crate::touch::TouchTuning;
 use crate::types::OnlineQuery;
-use crate::user_dictionary::journal::{parked_journals, thread_holds_journal};
+use crate::user_dictionary::journal::{cache_generation, parked_journals, thread_holds_journal};
 
 #[test]
 fn the_candidate_revision_moves_with_every_call_that_may_change_the_candidates() {
@@ -71,9 +71,11 @@ fn dropping_a_session_writes_its_queue_and_releases_the_thread_journal() {
     // Frequency learning writes the pick through this thread's journal connection.
     let mut session =
         fixture.session_with(|options| options.frequency.mode = FrequencyAdjustmentMode::Promote);
+    let generation = cache_generation();
     type_text(&mut session, "nihao");
     select_word(&mut session, "拟好");
-    assert!(thread_holds_journal());
+    // Another test closing every journal meanwhile takes the parked connection away.
+    assert!(thread_holds_journal() || cache_generation() != generation);
     drop(session);
     assert!(!thread_holds_journal());
     let written: i64 = Connection::open(fixture.journal())

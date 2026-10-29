@@ -751,11 +751,14 @@ struct FlushWorker {
 #[derive(Default)]
 struct WorkerState {
     due: HashMap<PathBuf, (Arc<PersonalNgramStore>, Instant)>,
-    /// The running thread; `None` before the first schedule, after a failed start and after `shutdown`.
+    /// The running thread; `None` before the first schedule, after a failed start and from the moment `shutdown` takes it to stop it.
     thread: Option<std::thread::JoinHandle<()>>,
-    /// Set by `shutdown`: the thread writes everything scheduled, due or not, and ends.
+    /// Set while `shutdown` runs: the thread writes everything scheduled, due or not, and ends, and no record starts another until `shutdown` is done.
     stopping: bool,
 }
+
+/// Held for the whole of `shutdown`. Without it a second caller that found no thread to join would clear `stopping` before the thread being stopped saw it; that thread would go back to waiting, and the first caller would wait for it to end forever.
+static SHUTDOWN: Mutex<()> = Mutex::new(());
 
 static FLUSH_WORKER: LazyLock<FlushWorker> = LazyLock::new(|| FlushWorker {
     state: Mutex::new(WorkerState::default()),
@@ -825,11 +828,12 @@ fn schedule_flush(store: &PersonalNgramStore, now: bool) -> Result<()> {
         .entry(store.path.clone())
         .and_modify(|(_, at)| *at = (*at).min(due))
         .or_insert((shared, due));
-    // A thread that ended (it panicked, or `shutdown` stopped it while this record raced in) is replaced.
-    if state
-        .thread
-        .as_ref()
-        .is_none_or(std::thread::JoinHandle::is_finished)
+    // While `shutdown` stops the thread none is started: the entry waits here, `shutdown`'s own flush writes the queue, and the first record after it starts a thread again. Otherwise a thread that ended (it panicked) is replaced.
+    if !state.stopping
+        && state
+            .thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
     {
         let thread = std::thread::Builder::new()
             .name("msime-personal-context".to_owned())
@@ -842,6 +846,7 @@ fn schedule_flush(store: &PersonalNgramStore, now: bool) -> Result<()> {
 
 /// Writes every queued transition and stops the background writer, waiting for it to end. Sessions keep working afterwards: the next record starts the writer again. A host calls this before it unloads the engine or exits without dropping its sessions.
 pub fn shutdown() {
+    let _serial = lock(&SHUTDOWN);
     let worker: &FlushWorker = &FLUSH_WORKER;
     let thread = {
         let mut state = lock(&worker.state);
@@ -853,7 +858,12 @@ pub fn shutdown() {
         // A panic on the writer leaves its stores' queues in place for the flush below.
         let _ = thread.join();
     }
-    lock(&worker.state).stopping = false;
+    {
+        let mut state = lock(&worker.state);
+        state.stopping = false;
+        // Records made while the thread stopped left their entries without starting one; the flush below writes their queues.
+        state.due.clear();
+    }
     flush_all();
 }
 

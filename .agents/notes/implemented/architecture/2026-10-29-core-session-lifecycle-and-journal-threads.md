@@ -37,7 +37,7 @@ Status: implemented
 
 ### 冲刷线程
 
-冲刷线程的状态（到期表、线程句柄、停止标记）放在一个 `Mutex` 里，不再 `Box::leak`。`schedule_flush` 在没有线程或线程已经结束时创建线程，创建失败返回 `Io` 错误，`record` 把它交给调用方（会话报 `PERSONAL_CONTEXT_NOT_PERSISTED`），转移留在 store 的队列里，由下一次冲刷或之后某次 `record` 起的线程写入。新增进程级的 `msime_engine::shutdown()`：置停止标记、唤醒并 join 线程（线程退出前把排着的全部写掉，不论是否到期），再 `flush_all`。之后会话照常可用，下一次 `record` 重新起线程。
+冲刷线程的状态（到期表、线程句柄、停止标记）放在一个 `Mutex` 里，不再 `Box::leak`。`schedule_flush` 在没有线程或线程已经结束时创建线程，创建失败返回 `Io` 错误，`record` 把它交给调用方（会话报 `PERSONAL_CONTEXT_NOT_PERSISTED`），转移留在 store 的队列里，由下一次冲刷或之后某次 `record` 起的线程写入。新增进程级的 `msime_engine::shutdown()`：置停止标记、唤醒并 join 线程（线程退出前把排着的全部写掉，不论是否到期），清掉停止期间新排的到期项，再 `flush_all`。之后会话照常可用，下一次 `record` 重新起线程。停止标记置着时 `schedule_flush` 只登记到期项、不起新线程，所以 `shutdown` 返回时没有它没 join 过的写线程还在跑，停止期间记下的转移由最后的 `flush_all` 写下。整个 `shutdown` 拿着一把自己的锁：宿主的几个组件可能各自在退出钩子里调它，没有这把锁时第二个调用者找不到线程可 join，会在被停的线程看到停止标记之前把标记清掉，那个线程回去等待，第一个调用者就永远 join 不完。
 
 ## Alternatives considered
 
@@ -54,7 +54,7 @@ Status: implemented
 
 ## Verification
 
-- `crates/engine/tests/session_threads.rs`：会话在一个线程上建并使用、交给另一个线程使用并销毁，建它的线程仍活着时 `reset_learned_data` 成功且学习数据被清空；`shutdown` 立即写下排着的转移，之后再学一次、再 `shutdown` 仍写下。
-- `session/tests/lifecycle.rs`：修订号随改变候选的调用递增、读和只影响之后按键的 setter 不变；核心会话销毁时写下队列并放掉本线程的连接；跨线程使用后没有任何线程停放指向该日志的连接。
+- `crates/engine/tests/session_threads.rs`：会话在一个线程上建并使用、交给另一个线程使用并销毁，建它的线程仍活着时 `reset_learned_data` 成功且学习数据被清空。这一条测的是 `close_cached_journals` 关得到别的线程的连接（重置自己会调它），不是会话收尾；Unix 允许改名开着的文件，只有 Windows 上才会失败，所以 CI 的 Windows 设置作业单独跑这个测试二进制。会话收尾不留连接由下面 `lifecycle.rs` 的停放计数证明。`shutdown` 立即写下排着的转移；之后的一次选词不靠任何冲刷、自己落盘，证明写线程重新起来了；再 `shutdown` 仍写下。几个线程同时 `shutdown`、同时还在记转移时，每次调用都返回，记下的都落盘（这条竞争靠时序，测试只是压力冒烟，不能稳定复现原来的挂起）。选词带回的诊断必须为空，起线程失败会在这里露出来。
+- `session/tests/lifecycle.rs`：修订号随改变候选的调用递增、读和只影响之后按键的 setter 不变；核心会话销毁时写下队列并放掉本线程的连接；跨线程使用后没有任何线程停放指向该日志的连接。别的测试随时会关掉所有线程停放的连接，所以「销毁前本线程还拿着连接」这类正向断言在关闭计数（`cache_generation`）变过时放行，销毁后的反向断言照常严格。
 - `user_dictionary/journal.rs` 的测试：同一线程复用同一条连接直到关闭；`close_cached_journals` 关掉别的线程空闲的连接；关闭时正被使用的连接在操作结束后关闭而不停放；两个会话共用日志时结束一个不关、结束最后一个才关。
 - `cargo test -p msime-engine`（含 golden）、`-p msime-input-runtime`、`-p msime-host-api --lib`、`-p msime-engine-wasm`，`cargo check -p msime-engine-wasm --target wasm32-unknown-unknown`。在 Studio 上经 `rbuild` 跑时 SSH 会话的描述符上限是 256，会话测试并行时 develop 上同样会因 `Too many open files` 失败，要先 `ulimit -n 4096`。

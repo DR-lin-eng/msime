@@ -500,7 +500,8 @@ mod tests {
                 .iter()
                 .flat_map(|directory| fs::read_dir(directory).unwrap())
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                .filter(|name| name.starts_with('.'))
+                // 维护租约的锁文件是稳定的协调对象，留着是对的（`access::LOCK_FILE`）。
+                .filter(|name| name.starts_with('.') && name != crate::access::LOCK_FILE)
                 .collect();
             assert!(leftovers.is_empty(), "{leftovers:?}");
         }
@@ -616,7 +617,8 @@ mod tests {
             .iter()
             .flat_map(|directory| fs::read_dir(directory).unwrap())
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with('.'))
+            // 维护租约的锁文件是稳定的协调对象，留着是对的（`access::LOCK_FILE`）。
+            .filter(|name| name.starts_with('.') && name != crate::access::LOCK_FILE)
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
@@ -716,7 +718,8 @@ mod tests {
             .iter()
             .flat_map(|directory| fs::read_dir(directory).unwrap())
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with('.'))
+            // 维护租约的锁文件是稳定的协调对象，留着是对的（`access::LOCK_FILE`）。
+            .filter(|name| name.starts_with('.') && name != crate::access::LOCK_FILE)
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }

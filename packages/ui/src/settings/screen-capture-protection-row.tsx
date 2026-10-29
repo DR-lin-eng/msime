@@ -4,7 +4,8 @@ import { useToast } from "../core/toast";
 import type { ScreenCaptureProtectionClient } from "../core/host-contracts";
 
 /** 宿主拒绝切换的错误码：设备没有可用的系统认证（没设锁屏密码），打开以后会再也关不掉，所以一律不许切换。 */
-export const SCREEN_CAPTURE_AUTHENTICATION_UNAVAILABLE = "screen_capture_authentication_unavailable";
+export const SCREEN_CAPTURE_AUTHENTICATION_UNAVAILABLE =
+  "screen_capture_authentication_unavailable";
 /** 宿主拒绝切换的错误码：系统认证被取消或没有通过。 */
 export const SCREEN_CAPTURE_AUTHENTICATION_FAILED = "screen_capture_authentication_failed";
 

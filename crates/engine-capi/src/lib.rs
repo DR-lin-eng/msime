@@ -79,7 +79,7 @@ pub const MSIME_ENGINE_SCHEME_STROKE: u32 = 9;
 pub const MSIME_ENGINE_COMMAND_BACKSPACE: u32 = 0;
 /// 上屏首选（引擎顺序的第 0 行）。宿主自己高亮了别的行时用 `msime_engine_select`。
 pub const MSIME_ENGINE_COMMAND_COMMIT_CANDIDATE: u32 = 1;
-/// 上屏按键原文（回车）。
+/// 上屏按键原文（回车）。专用英文里打的词学进英文词库；选项 `english.learn_typed_spellings_on_enter` 打开时，临时英文的字母和拼不成音节的拼音也学。
 pub const MSIME_ENGINE_COMMAND_COMMIT_RAW: u32 = 2;
 /// 丢弃组字（Esc）。越南文和藏文的第一次只把显示切回按键原文，再发一次才丢弃；开着可打开的候选列表（韩文汉字）时第一次只关列表。
 pub const MSIME_ENGINE_COMMAND_CANCEL: u32 = 3;
@@ -98,6 +98,8 @@ pub const MSIME_ENGINE_COMMAND_OPEN_CANDIDATE_LIST: u32 = 11;
 pub const MSIME_ENGINE_COMMAND_CONVERSION_LEFT: u32 = 12;
 /// 整句改字的光标右移一个字；不在改字里时与 `MOVE_RIGHT` 相同。
 pub const MSIME_ENGINE_COMMAND_CONVERSION_RIGHT: u32 = 13;
+/// 与 `COMMIT_RAW` 上屏同样的原文，但不学英文词（例如宿主的 Shift+回车）。
+pub const MSIME_ENGINE_COMMAND_COMMIT_RAW_WITHOUT_LEARNING: u32 = 14;
 
 // ---- 候选来源（`CandidateSource` 的序号，冻结） ----
 //

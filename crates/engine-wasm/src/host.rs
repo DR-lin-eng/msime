@@ -702,14 +702,18 @@ impl WebHost {
             return;
         }
         let composing = self.composing();
+        let before = self.session.candidate_revision();
         let result = self.session.character(byte, false);
         if result.commit.is_some() {
             self.apply(result, -1);
         } else if result.handled {
             // 排序留到这批按键结束或下一个要用座位的键之前（D19）；修订号已经前进，快照和排序自然过期。
             self.composing_hint = Some((self.session.candidate_revision(), true));
-        } else if !composing {
-            // 组字中引擎不收的字母什么也不做；空闲时原样打出。
+        } else if composing {
+            // 组字中引擎不收的字母什么也不做。
+            self.keep_order_after_refused_key(before);
+        } else {
+            // 空闲时原样打出。
             self.type_text(char::from(byte).to_string());
         }
     }
@@ -769,11 +773,13 @@ impl WebHost {
             return;
         }
         // 先让引擎看数字（`Runtime::dispatch`），它不收时 1-9 选前九个、0 选第十个；页里没有那一格时吞掉。
+        let before = self.session.candidate_revision();
         let result = self.session.character(byte, false);
         if result.handled || result.commit.is_some() {
             self.apply(result, -1);
             return;
         }
+        self.keep_order_after_refused_key(before);
         self.ensure_ordered();
         let slot = digit_slot(byte);
         let seat = self.page_start() + slot;
@@ -808,11 +814,13 @@ impl WebHost {
                 _ => false,
             };
         if spells {
+            let before = self.session.candidate_revision();
             let result = self.session.character(byte, false);
             if result.handled || result.commit.is_some() {
                 self.apply(result, -1);
                 return;
             }
+            self.keep_order_after_refused_key(before);
         }
         let mut finished = false;
         if composing {
@@ -1013,6 +1021,20 @@ impl WebHost {
     fn ensure_snapshot(&mut self) -> &SessionSnapshot {
         self.refresh_snapshot();
         &self.snapshot
+    }
+
+    /// 引擎没收、也没上屏的键。核心会话照样前进修订号（它只说候选“可能”变了），排序若只按修订号判断，就会为这一键重排一次（开着模型时是一次整句重排，可能上百毫秒），两次这样的键还会被当成换了一次组字，高亮回到首位、网页手里的候选身份作废。进这一键之前的快照和排序若都对得上当时的修订号，就重取快照比一比：一样时把两者挪到新的修订号上，和 `Runtime::refresh` 每个键都比对前后快照、组字和候选都没变就留住高亮一致；不一样时照常过期。快照本来就过期时没有可比的，照常走修订号。
+    fn keep_order_after_refused_key(&mut self, before: u64) {
+        let after = self.session.candidate_revision();
+        if after == before || self.snapshot_revision != Some(before) {
+            return;
+        }
+        let snapshot = self.session.snapshot();
+        if snapshot == self.snapshot && self.ordered_revision == before {
+            self.ordered_revision = after;
+        }
+        self.snapshot = snapshot;
+        self.snapshot_revision = Some(after);
     }
 
     fn ensure_ordered(&mut self) {

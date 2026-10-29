@@ -90,6 +90,7 @@ pub struct EngineSnapshot {
     pub grid_composing: bool,
     /// 当前方案是双拼，且韵母或零声母编码用 `;` 作第二键：宿主把 `;` 当作字母键送给 Engine。字段名沿用微软双拼，是宿主已经在读的契约。
     pub microsoft_shuangpin: bool,
+    /// 会话跑的双拼方案名（`xiaohe`、`custom` 等），任何时候都给出，九宫格组字时也一样：宿主拿它画键面、算键盘外观的缓存键。核心快照在九宫格组字时这一项留空（金样例按此冻结），门面不照抄它。
     pub shuangpin_profile: String,
     pub preedit: String,
     /// The kana reading in Japanese, the composed Hangul in Korean, the converted text plus the pending bopomofo in Zhuyin, the stroke glyphs (一丨丿丶乛＊) in Stroke, else empty. In Stroke each glyph stands for one ASCII letter of `editing_text`, so `caret_position` also counts glyphs.
@@ -251,7 +252,7 @@ impl Session {
             nine_key_strokes: value.nine_key_strokes,
             grid_composing: self.inner.grid_composing(),
             microsoft_shuangpin: self.microsoft_shuangpin(),
-            shuangpin_profile: value.shuangpin_profile,
+            shuangpin_profile: self.inner.shuangpin_layout().kind.name().to_owned(),
             preedit: value.preedit,
             display_reading,
             reading: if value.scheme.draws_reading() {

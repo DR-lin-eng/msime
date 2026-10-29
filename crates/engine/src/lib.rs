@@ -2,7 +2,7 @@
 //!
 //! This crate replaces the C++ MSIME-Engine that used to be fetched from `engine-lock.json` and patched by overlay scripts. It owns the input algorithms; `msime-input-runtime` keeps orchestrating hosts and does not duplicate any of it.
 //!
-//! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
+//! The documented API is the core layer at the crate root: `Session`, its options and snapshot, and the functions and types beside them (they mirror the C++ `metasequoia::` API the golden fixtures were recorded against), plus the public modules such as `assets`, `diagnostics`, `touch` and `multilingual`. `host`, `ordering`, `backend` and `web` are msime's own product glue (the session facade and settings-page helpers its hosts call, its candidate ordering, its msime-cloud protocol, its browser storage): they are not part of the library API and change with msime's hosts. msime's product crates import everything the core layer takes or returns from the root, like a third party would; the boundary is described in `docs/ARCHITECTURE.md` and `.agents/notes/implemented/architecture/2026-10-29-engine-host-dogfood.md`. The module map and who owns what is `.migration/spec/modules.md`.
 
 // 非测试代码的日志一律走 `logging::warn`，嵌入方才换得掉出口（`set_log_sink`）；测试和基准测量照旧可以直接打印。
 #![cfg_attr(not(test), deny(clippy::print_stderr))]
@@ -78,21 +78,16 @@ pub use types::{
 };
 // 辅助码表：`SessionOptions::helpcode_table` 与 `Session::set_helpcode_table` 收的就是它，宿主自己读表（辅助码表插件、没有文件系统的网页）时用这几项。
 pub use helpcode::{load_helpcode_keymap, HelpcodeKeymap, SharedKeymap};
-// 用户自定义的 26 键双拼表（`SessionOptions::shuangpin_custom_profile`）的校验与起点：宿主在把表交给会话之前先校验，不合法就不要传。编辑中的表用不留存的 `check_shuangpin_custom_profile`，内置方案的表是编辑的起点。
+// 用户自定义的 26 键双拼表（`SessionOptions::shuangpin_custom_profile`）的校验：宿主在把表交给会话之前先校验，不合法就不要传。设置页编辑表用的辅助函数（内置表作起点、不留存的校验）是产品胶水，在 `host` 里。
 pub use shuangpin::custom::{
-    builtin_table as shuangpin_builtin_table,
-    check_custom_profile as check_shuangpin_custom_profile,
     validate_custom_profile as validate_shuangpin_custom_profile,
     CustomProfileError as ShuangpinCustomProfileError, CustomTablePart as ShuangpinCustomTablePart,
 };
-// 九键、14 键、18 键双拼的表：内置方案、用户表的校验（编辑中的表用不留存的 `check_nine_key_shuangpin_table`）、按方案取表，以及键面提示。取到的 `NineKeyShuangpin` 经 `KeyGrid::NineKeyShuangpin` 交给会话。
+// 九键、14 键、18 键双拼的表：用户表的校验、按方案取表。取到的 `NineKeyShuangpin` 经 `KeyGrid::NineKeyShuangpin` 交给会话，它的 `key_hints` 给出键面提示。设置页编辑表用的辅助函数同样在 `host` 里。
 pub use nine_key_shuangpin::{
-    builtin_table as nine_key_shuangpin_builtin_table,
-    check_table as check_nine_key_shuangpin_table,
     nine_key_shuangpin as validate_nine_key_shuangpin_table, resolve as resolve_nine_key_shuangpin,
-    resolve_eighteen_key_shuangpin, resolve_fourteen_key_shuangpin,
-    table_key_hints as nine_key_shuangpin_table_key_hints, NineKeyShuangpin, NineKeyShuangpinError,
-    NineKeyShuangpinKeyHint,
+    resolve_eighteen_key_shuangpin, resolve_fourteen_key_shuangpin, NineKeyShuangpin,
+    NineKeyShuangpinError, NineKeyShuangpinKeyHint,
 };
 pub use user_dictionary::bundled::{
     dictionary_table_entries, edit_bundled_dictionary_entry, DictionaryTableEntry,

@@ -24,7 +24,7 @@ crates/engine                  同上，只经核心层 `Session`
 
 `crates/engine-capi`（`msime-engine-capi`）是给其他输入法嵌入引擎用的 C 库，与上面那条产品链路平行：它直接包核心层 `msime_engine::Session`，不经过 `host-api` 和 `input-runtime`，也不用 `host` 门面，msime 自己的宿主不走它。它的代码是 MPL-2.0，用 cargo-c 构建出共享库、静态库、生成的头文件和 pkg-config 文件，约定见 [crates/engine-capi/README.md](../crates/engine-capi/README.md)。
 
-`crates/engine` 的文档化 API 是 crate 根上的核心层；`host`（产品会话与选项、词库管理与同步、释义、文本工具）、`ordering`（msime 的候选排序）、`backend`（msime-cloud 协议）和 `web`（网页存储）是 msime 自己的产品胶水。核心层签名用到的类型和第三方用核心选项必需的函数（辅助码表、`/` `@` K 模式的表项、自定义双拼与九键双拼表）放在根上，`input-runtime`、`host-api`、`engine-wasm`、`backend-engine` 也从根上导入它们，`host` 不再重新导出；边界与理由见[产品 crate 只经文档化的引擎 API](../.agents/notes/implemented/architecture/2026-10-29-engine-host-dogfood.md)。
+`crates/engine` 的文档化 API 是 crate 根上的核心层；`host`（产品会话与选项、词库管理与同步、释义、文本工具）、`ordering`（msime 的候选排序）、`backend`（msime-cloud 协议）和 `web`（网页存储）是 msime 自己的产品胶水。核心层签名用到的类型和第三方用核心选项必需的函数（辅助码表、`/` `@` K 模式的表项、自定义双拼与九键双拼表的校验与取表）放在根上，设置页编辑这些表用的辅助函数留在 `host`，`input-runtime`、`host-api`、`engine-wasm`、`backend-engine` 也从根上导入它们，`host` 不再重新导出；边界与理由见[产品 crate 只经文档化的引擎 API](../.agents/notes/implemented/architecture/2026-10-29-engine-host-dogfood.md)。
 
 `host-api` 的词库管理接口（个人词条、固定资源的校验与编辑）直接调用 `crates/engine`，不经过 `input-runtime`；按键与会话一律走上面这条链路。
 

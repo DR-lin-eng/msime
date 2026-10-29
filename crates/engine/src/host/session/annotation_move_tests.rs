@@ -36,7 +36,7 @@ fn frozen_snapshot(session: &Session) -> Result<EngineSnapshot> {
         nine_key_strokes: value.nine_key_strokes,
         grid_composing: session.inner.grid_composing(),
         microsoft_shuangpin: session.microsoft_shuangpin(),
-        shuangpin_profile: value.shuangpin_profile,
+        shuangpin_profile: session.inner.shuangpin_layout().kind.name().to_owned(),
         preedit: value.preedit,
         display_reading,
         reading: if value.scheme.draws_reading() {

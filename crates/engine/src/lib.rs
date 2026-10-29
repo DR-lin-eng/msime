@@ -103,7 +103,12 @@ pub fn flush_personal_learning() {
     user_dictionary::ngram_store::flush_all()
 }
 
-/// Drop every cached journal, personal-context and local-mode connection. Call before deleting or replacing a data directory.
+/// Write every queued personal-context transition and stop the background thread that writes them, waiting for it to end. Call before unloading the engine or exiting the process; sessions still work afterwards, and the next transition they record starts the thread again.
+pub fn shutdown() {
+    user_dictionary::ngram_store::shutdown()
+}
+
+/// Drop every cached journal, personal-context and local-mode connection, on every thread (a connection an operation is using closes when that operation ends). Call before deleting or replacing a data directory.
 pub fn close_cached_databases() {
     user_dictionary::journal::close_cached_journals()
 }

@@ -200,12 +200,9 @@ def main() -> int:
     # 引擎编进了从 kfcd/chaizi 改编的拆字表，CC BY 3.0 要求随改编作品附上署名和改动说明。
     if not (contents / "Resources" / "Licenses" / "kfcd-chaizi-CC-BY-3.0.txt").is_file():
         failures.append("Contents/Resources/Licenses/kfcd-chaizi-CC-BY-3.0.txt is missing; the built-in component reverse lookup table ships without its attribution")
-    # 符号模式（S 模式）的分组码表来自 rime-wanxiang 的 wanxiang_symbols.yaml，CC BY 4.0 第 3(a) 条要求随改编数据附上署名、许可证地址和改动说明。
-    if not (contents / "Resources" / "Licenses" / "rime-wanxiang-CC-BY-4.0.txt").is_file():
-        failures.append("Contents/Resources/Licenses/rime-wanxiang-CC-BY-4.0.txt is missing; the built-in symbol mode table ships without its attribution")
-    # 拆字表里的读音、名次和繁体字形取自 Unihan，Unicode License V3 要求随数据附上它的声明。
+    # 拆字表里的读音、名次和繁体字形取自 Unihan，符号模式的分组表按 Unicode 字符数据库挑选组员，Unicode License V3 要求随数据附上它的声明。
     if not (contents / "Resources" / "Licenses" / "Unicode-License-V3.txt").is_file():
-        failures.append("Contents/Resources/Licenses/Unicode-License-V3.txt is missing; the Unihan readings in the built-in component reverse lookup table ship without their licence")
+        failures.append("Contents/Resources/Licenses/Unicode-License-V3.txt is missing; the Unihan readings in the built-in component reverse lookup table and the Unicode data behind the symbol mode table ship without their licence")
     if not (contents / "Resources" / "Licenses" / "OpenCC-Apache-2.0.txt").is_file():
         failures.append("缺少 OpenCC-Apache-2.0.txt，内嵌的简繁词表必须附带许可证")
     # Cantonese and Zhuyin read dictionaries built from rime-cantonese (CC BY 4.0) and libchewing-data (LGPL-2.1-or-later). The notices ship unconditionally, so a build that later gains the dictionaries is never without them.

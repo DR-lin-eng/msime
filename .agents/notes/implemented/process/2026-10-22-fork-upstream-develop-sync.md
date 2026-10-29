@@ -50,5 +50,16 @@ Status: implemented
 - 固定 Docker 桌面镜像中 `cargo fmt --all -- --check`、`cargo check --locked --workspace --all-targets --exclude msime-desktop --message-format short` 通过；共享 workspace 编译覆盖 `msime-engine`、`msime-input-runtime`、`msime-host-api`、client crates、WASM 与原生 host crates。
 - Docker `cargo test -p msime-input-runtime --no-fail-fast`：418 项通过、1 项按设计忽略，doc-tests 通过；商业云候选 `client-core cloud::candidates` 15 项通过；Host API `cloud_prediction` 3 项通过。
 - Docker `cargo test -p msime-engine --lib --no-fail-fast`：2837 项通过、57 项忽略、4 项失败；4 项均是 root 绕过普通权限的 symlink/只读夹具（包括 Wubi 副本只读索引夹具）；用 `runuser -u nobody` 重跑完整 `user_dictionary::` 200 项全部通过，证明无需改产品权限边界。并发链接曾被 Docker OOM 杀掉，随后用 `-j2` 单独重跑 Host API 并通过。
-- `scripts/test-input-load-docker.sh` 与 `scripts/test-commercial-prediction-docker.sh` 继续作为本轮 Docker 专项；完成结果以脚本原始输出和 `VERIFICATION.txt` 记录为准。
+- `scripts/test-input-load-docker.sh` 通过：基础降级 2 项、真实 cgroup 系统压力探针 1 项通过。`scripts/test-commercial-prediction-docker.sh` 通过：云候选 15 项、预测 21 项、FFI 3 项；合成事务输出本地后续词与云后缀，实际只提交选中的后缀。
 - 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；本轮把 Android host 契约、JNI 导出和设备工作流交给远端 CI，构建产物 workflow 不带发布开关。
+
+
+最终整合验证使用独立记录保存命令、输入、完整 stdout/stderr、退出状态和哈希：
+
+- 固定 Docker 的 workspace 全目标严格 Clippy 通过，覆盖 `pulldown-cmark 0.13.5`、`zip 9.0.5` 两项补丁升级。workspace 测试只有两个 Host API 相对目录夹具因 `/source` 只读且普通用户无可写祖先而失败；在 `/tmp` 中以同一普通用户重跑两项通过，未改变权限判定或测试断言。补丁升级后的 providers 与 services 库测试再次通过，services 为 1457 项通过、2 项按设计忽略。
+- 共享设置页生产构建通过；872 个文件、5654 项 UI 测试全部通过。
+- Android Docker 的 JNI C++ 编译、桌面 JVM 回调测试、Java/API 和清单资源契约通过，305 项 JVM 冒烟及 255 份设备套件源码编译通过。设备夹具复用本项目既有 PR #14 的触点数组签名和系统输入焦点修正，见[设备夹具契约](../testing/2026-10-24-android-device-fixture-contracts.md)，不重复设计。
+- Linux Docker 原生 IBus/Fcitx5 构建和 CTest 通过：111 项实际执行、1 项按环境跳过，测试套件总数 112；这不替代真实桌面输入入口验收。
+- 源码归档补丁重建后逐文件与修改版一致。回滚脚本在独立副本恢复原始归档字节及 SHA-256，基线、修改版、回滚版相同 `load_shedding` 输入均为 2 项通过、退出 0。旧源码采用独立源码挂载路径，防止 Git 归档旧时间戳错误复用修改版 Cargo 指纹；构建缓存仍为同一个规范目录。
+
+远端 CI 与最终构建工作流绑定实际提交 SHA；归档和本地行为结果不能代替后续真机测试。构建只上传测试产物，`publish`、TestFlight、AppGallery 与 npm 发布保持关闭。

@@ -44,20 +44,22 @@ TEST_DATA = ("/testdata/", "_fixture")
 
 # 手工列声明的渠道必须在非注释行写出的许可证文件。Linux 和 Windows 的 MPL-2.0 全文走 collect-notices.py 收集的 rust-crates-NOTICES.txt（见 COLLECTOR），所以那几个渠道只要求 libc++ 的文本。
 LLVM_LICENCE = "libcxx-Apache-2.0-WITH-LLVM-exception.txt"
+# 引擎编进的 LaTeX 表是 MIT，不带官方短语表包的构建也要带上它的全文；Windows 与网页引擎直接收 plugins/phrase_table/LICENSE。
+LATEX_LICENCE = "latex-symbols-MIT.txt"
 CHANNELS = {
-    "platforms/macos/CMakeLists.txt": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/macos/tests/settings/bundle_contents.py": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/linux/CMakeLists.txt": (LLVM_LICENCE,),
-    "platforms/linux/data/THIRD_PARTY_NOTICES.txt": (LLVM_LICENCE,),
-    "platforms/windows/Collect-Notices.ps1": (LLVM_LICENCE,),
+    "platforms/macos/CMakeLists.txt": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/macos/tests/settings/bundle_contents.py": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/linux/CMakeLists.txt": (LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/linux/data/THIRD_PARTY_NOTICES.txt": (LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/windows/Collect-Notices.ps1": (LLVM_LICENCE, "plugins/phrase_table/LICENSE"),
     "platforms/windows/tests/tools/collect_notices.ps1": (LLVM_LICENCE,),
     "platforms/windows/Notices.md": (LLVM_LICENCE,),
-    "platforms/android/build-native.sh": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/harmony/stage-resources.sh": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/ios/project.yml": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/ios/tests/settings/ProjectConfigurationTests.py": ("MPL-2.0.txt", LLVM_LICENCE),
-    "platforms/ios/App/Sources/settings/AboutAndDownloadViews.swift": ('"MPL-2.0"', '"libcxx-Apache-2.0-WITH-LLVM-exception"'),
+    "platforms/android/build-native.sh": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/harmony/stage-resources.sh": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/ios/project.yml": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/ios/tests/settings/ProjectConfigurationTests.py": ("MPL-2.0.txt", LLVM_LICENCE, LATEX_LICENCE),
+    "platforms/ios/App/Sources/settings/AboutAndDownloadViews.swift": ('"MPL-2.0"', '"libcxx-Apache-2.0-WITH-LLVM-exception"', '"latex-symbols-MIT"'),
     "scripts/web-engine-notice.sh": ("crates/engine/LICENSE", LLVM_LICENCE, "librime-octagram-BSD-3-Clause.txt", "Unicode-License-V3.txt", "plugins/phrase_table/LICENSE"),
     "docs/third-party.md": (LLVM_LICENCE, "crates/engine/README.md"),
 }
@@ -163,6 +165,9 @@ def main() -> int:
     check("Copyright (c) 2008-2014, Susumu Yata" in octagram and "fc45469d6a4469b2c9f337b2e153983888c7826a" in octagram, "librime-octagram-BSD-3-Clause.txt lost the darts-clone terms appended to it")
     llvm = (ROOT / "resources/licenses" / LLVM_LICENCE).read_text(encoding="utf-8")
     check("---- LLVM Exceptions to the Apache 2.0 License ----" in llvm and "llvm-project/blob/4a1b95bda0c444798a5240fe924dd127b776d12d/libcxx/LICENSE.TXT" in llvm, f"{LLVM_LICENCE} is not libc++'s LICENSE.TXT with its pinned source")
+
+    latex = (ROOT / "resources/licenses" / LATEX_LICENCE).read_text(encoding="utf-8")
+    check(latex.endswith((ROOT / "plugins/phrase_table/LICENSE").read_text(encoding="utf-8")), f"{LATEX_LICENCE} does not end with plugins/phrase_table/LICENSE verbatim")
 
     for channel, names in CHANNELS.items():
         lines = live_lines(ROOT / channel)

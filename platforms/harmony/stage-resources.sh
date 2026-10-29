@@ -46,6 +46,8 @@ cp resources/licenses/libhangul-hanja-BSD-3-Clause.txt "$licenses_staged/"
 cp resources/licenses/librime-octagram-BSD-3-Clause.txt resources/licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt "$licenses_staged/"
 # 输入引擎本身（crates/engine、crates/path-trust，源码在本仓库）和它链接的 rink-core（单位换算，源码在 crates.io）是 MPL-2.0，二进制分发要附上许可证全文。
 cp resources/licenses/MPL-2.0.txt "$licenses_staged/"
+# 符号模式按它查命令名的 LaTeX 表是本项目自写的 MIT 数据，编进了引擎，MIT 全文随引擎分发。
+cp resources/licenses/latex-symbols-MIT.txt "$licenses_staged/"
 cp resources/licenses/rime-cantonese-CC-BY-4.0.txt resources/licenses/libchewing-data-LGPL-2.1.txt resources/licenses/rime-stroke-LGPL-3.0.txt "$licenses_staged/"
 # 越南文和藏文方案编入原生库的 vi crate（MIT）和 ewts crate（MIT OR Apache-2.0，按 MIT 使用）的许可证全文。
 cp resources/licenses/vi-MIT.txt resources/licenses/ewts-MIT.txt "$licenses_staged/"

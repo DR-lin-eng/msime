@@ -59,6 +59,8 @@ Comment:
 Files: crates/engine/src/local/latex_symbols.tsv
 Copyright: 2026 Metasequoia IME contributors
 License: MIT
+Comment:
+ This project's own LaTeX command table, compiled into the input engine; the license text is resources/licenses/latex-symbols-MIT.txt, installed with the binary package whether or not it carries the latex-symbols plugin pack.
 
 Files: crates/engine/src/handwriting/model.rs crates/engine/src/handwriting/features.rs
 Copyright: 2005-2007 Taku Kudo

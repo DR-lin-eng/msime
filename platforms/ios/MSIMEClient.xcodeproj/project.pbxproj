@@ -308,6 +308,7 @@
 		45E27E20F3628F21226CCE66 /* AICandidatePreference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 999B49E42E770ED3489631D8 /* AICandidatePreference.swift */; };
 		45F9F017325AA2CA6F539470 /* KeyboardToolSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3364995828FFBEEF4F6A694 /* KeyboardToolSection.swift */; };
 		460D599617C4455A3D293C9C /* SettingsScenePhaseReload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6302B1D0D455AE9CDAE0A746 /* SettingsScenePhaseReload.swift */; };
+		4612E74635A3A4928882C6D6 /* latex-symbols-MIT.txt in Resources */ = {isa = PBXBuildFile; fileRef = 97A20F485F35F65899A8101C /* latex-symbols-MIT.txt */; };
 		4691F000DFCD86F61A178E0C /* KeyboardSkinTrial.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D7C0956C2183B09335BD442 /* KeyboardSkinTrial.swift */; };
 		46E6483445970D2AE89C2350 /* PersonalDictionaryBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 070E2130BE0A27C9B3CFD530 /* PersonalDictionaryBridge.swift */; };
 		470ACF74293BB4038BAE0959 /* BackendRustClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B520BB5EF76EE18DB6FF4CB /* BackendRustClient.swift */; };
@@ -1459,6 +1460,7 @@
 		962B4266475311E751681270 /* AIProviderCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIProviderCatalog.swift; sourceTree = "<group>"; };
 		96A045C67FE4D3D0EDE9F574 /* CloudClipboardTimePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudClipboardTimePolicy.swift; sourceTree = "<group>"; };
 		97321DEF0C025C03E6933837 /* DictionarySyncCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionarySyncCenter.swift; sourceTree = "<group>"; };
+		97A20F485F35F65899A8101C /* latex-symbols-MIT.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "latex-symbols-MIT.txt"; sourceTree = "<group>"; };
 		97E22A6161FBAC5C568F868A /* KeyGapRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyGapRouting.swift; sourceTree = "<group>"; };
 		98498F1E1231D37B96B2E7AB /* AppAppearancePreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearancePreference.swift; sourceTree = "<group>"; };
 		98B1A9D27C521DC3E8D516BD /* TauriDictionarySnapshotBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TauriDictionarySnapshotBridge.swift; sourceTree = "<group>"; };
@@ -2055,6 +2057,7 @@
 			children = (
 				38746D5530F03A00DD492FC6 /* ewts-MIT.txt */,
 				A2E1B5D96DB1F63D223B29ED /* kfcd-chaizi-CC-BY-3.0.txt */,
+				97A20F485F35F65899A8101C /* latex-symbols-MIT.txt */,
 				EE141265C7F4C263DED2938C /* libchewing-data-LGPL-2.1.txt */,
 				5E60CDA44FB8604405A2CD6E /* libcxx-Apache-2.0-WITH-LLVM-exception.txt */,
 				8C92EC1BE74542186076DE51 /* libhangul-hanja-BSD-3-Clause.txt */,
@@ -3095,6 +3098,7 @@
 				D8AD3CD0BCBBD5862EE79B3A /* VoiceRuntime-NOTICES.txt in Resources */,
 				63E5399F38340FB5BC1D80E3 /* ewts-MIT.txt in Resources */,
 				7DDFFD711FA55B45823A5C33 /* kfcd-chaizi-CC-BY-3.0.txt in Resources */,
+				4612E74635A3A4928882C6D6 /* latex-symbols-MIT.txt in Resources */,
 				A59935F2ECE3BD02A941814B /* libchewing-data-LGPL-2.1.txt in Resources */,
 				E658B35127AD65882B2D12C6 /* libcxx-Apache-2.0-WITH-LLVM-exception.txt in Resources */,
 				13A026D923B4DD8B686F9FB8 /* libhangul-hanja-BSD-3-Clause.txt in Resources */,

@@ -43,7 +43,7 @@ foreach ($notice in @(
     @('resources/licenses/world-clock-NOTICE.txt', '离线世界时钟：IANA 城市目录与 Rust 时间、时区和太阳事件依赖'),
     @('resources/licenses/OpenCC-Apache-2.0.txt', 'OpenCC dictionaries, BYVoid/OpenCC @ 26753884f1984add422f3b0249ccee8613deaff6'),
     @('plugins/script/LICENSE', 'Official script plugin uuid in server\plugin-packs, this project''s own code under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'),
-    @('plugins/phrase_table/LICENSE', 'Official phrase table latex-symbols in server\plugin-packs, this project''s own data under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'))) {
+    @('plugins/phrase_table/LICENSE', 'LaTeX command table compiled into the host library for symbol mode (S mode, crates/engine/src/local/latex_symbols.tsv), and the official phrase table latex-symbols in server\plugin-packs built from the same data, this project''s own data under MIT rather than GPL-3.0; the pack carries the same text as LICENSE.txt'))) {
     $relative = $notice[0]
     $noticePath = Join-Path $RepoRoot $relative
     if (-not (Test-Path -LiteralPath $noticePath -PathType Leaf)) {

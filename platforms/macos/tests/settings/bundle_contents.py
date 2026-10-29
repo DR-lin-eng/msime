@@ -194,6 +194,9 @@ def main() -> int:
     # 引擎的 cxx_sort.rs 逐步复现了 libc++ 的排序算法，Apache-2.0 第 4 条要求随附许可证。
     if not (contents / "Resources" / "Licenses" / "libcxx-Apache-2.0-WITH-LLVM-exception.txt").is_file():
         failures.append("Contents/Resources/Licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt is missing; the libc++ sorts the engine reproduces ship without their licence")
+    # 引擎编进了本项目自写的 MIT LaTeX 表，不带官方短语表包的构建也要附上 MIT 全文。
+    if not (contents / "Resources" / "Licenses" / "latex-symbols-MIT.txt").is_file():
+        failures.append("Contents/Resources/Licenses/latex-symbols-MIT.txt is missing; the LaTeX table compiled into the engine ships without its licence")
     # The engine embeds the place names `@` mode offers from modood/Administrative-divisions-of-China.
     if not (contents / "Resources" / "Licenses" / "Administrative-divisions-of-China-WTFPL.txt").is_file():
         failures.append("Contents/Resources/Licenses/Administrative-divisions-of-China-WTFPL.txt is missing; the built-in place names ship without their licence")

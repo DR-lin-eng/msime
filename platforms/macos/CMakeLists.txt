@@ -273,6 +273,8 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libhangul-h
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/librime-octagram-BSD-3-Clause.txt" "${MSIME_LEGAL_DIRECTORY}/librime-octagram-BSD-3-Clause.txt" COPYONLY)
 # 引擎的 cxx_sort.rs 逐步复现了 libc++ 的排序算法，源码级翻译要按 Apache-2.0 第 4 条随附许可证（LLVM 例外不覆盖）。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt" "${MSIME_LEGAL_DIRECTORY}/libcxx-Apache-2.0-WITH-LLVM-exception.txt" COPYONLY)
+# 符号模式按它查命令名的 LaTeX 表是本项目自写的 MIT 数据，编进了引擎；官方短语表包只在构建时带上才有自己的 LICENSE.txt，所以 MIT 全文随引擎单独放一份。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/latex-symbols-MIT.txt" "${MSIME_LEGAL_DIRECTORY}/latex-symbols-MIT.txt" COPYONLY)
 # 拆字反查（C 模式）的部件拼音表，从 kfcd/chaizi（開放詞典《漢語拆字字典》，CC BY 3.0）改编后编进引擎；CC BY 3.0 第 4(b) 条要求分发改编作品时附上署名和改动说明，这份文件就是。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt" "${MSIME_LEGAL_DIRECTORY}/kfcd-chaizi-CC-BY-3.0.txt" COPYONLY)
 # 同一张拆字表里每个字的读音、名次和繁体字形取自 Unicode 汉字数据库（Unihan 17.0.0），符号模式（S 模式）的分组表按 Unicode 字符数据库 17.0.0 挑选组员，Unicode License V3 要求随数据附上它的版权与许可声明。

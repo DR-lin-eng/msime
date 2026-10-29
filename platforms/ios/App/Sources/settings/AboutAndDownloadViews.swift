@@ -352,7 +352,8 @@ private struct LicenseNotice: Identifiable {
     LicenseNotice(file: "Unicode-License-V3", title: "Unicode 字符数据库", detail: "拆字读音、符号模式 · Unicode License V3"),
     LicenseNotice(file: "MPL-2.0", title: "输入引擎与 rink-core", detail: "引擎、单位换算 · MPL-2.0"),
     LicenseNotice(file: "librime-octagram-BSD-3-Clause", title: "librime-octagram 与 darts-clone", detail: "搭配模型查询 · BSD-3-Clause 与 BSD-2-Clause"),
-    LicenseNotice(file: "libcxx-Apache-2.0-WITH-LLVM-exception", title: "LLVM libc++", detail: "整句排序 · Apache-2.0 WITH LLVM-exception")
+    LicenseNotice(file: "libcxx-Apache-2.0-WITH-LLVM-exception", title: "LLVM libc++", detail: "整句排序 · Apache-2.0 WITH LLVM-exception"),
+    LicenseNotice(file: "latex-symbols-MIT", title: "LaTeX 符号表", detail: "符号模式 · MIT")
   ]
 
   /// 本次构建的 bundle 里实际存在的声明文件。

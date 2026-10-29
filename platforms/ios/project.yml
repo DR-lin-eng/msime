@@ -119,6 +119,9 @@ targets:
       # 引擎的 cxx_sort.rs 逐步复现了 libc++ 的排序算法，源码级翻译要按 Apache-2.0 第 4 条随附许可证（LLVM 例外不覆盖）。
       - path: ../../resources/licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt
         buildPhase: resources
+      # 符号模式按它查命令名的 LaTeX 表是本项目自写的 MIT 数据，编进了引擎，MIT 全文随引擎分发。
+      - path: ../../resources/licenses/latex-symbols-MIT.txt
+        buildPhase: resources
       # 输入引擎本身（crates/engine、crates/path-trust，源码在本仓库）和它链接的 rink-core（单位换算，源码在 crates.io）是 MPL-2.0，二进制分发要附上许可证全文。
       - path: ../../resources/licenses/MPL-2.0.txt
         buildPhase: resources

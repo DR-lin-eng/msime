@@ -167,7 +167,7 @@ class ProjectConfigurationTests(unittest.TestCase):
         self.assertIn('LicenseNotice(file: "Unicode-License-V3"', about)
 
     def test_app_ships_the_licences_of_the_engine_code(self):
-        # 链接进 App 和键盘扩展的引擎本身（crates/engine、crates/path-trust）和它链接的 rink-core 是 MPL-2.0，cxx_sort.rs 逐步复现了 libc++ 的排序算法（Apache-2.0 WITH LLVM-exception），octagram.rs 移植自 librime-octagram 并按 darts-clone 的布局读双数组；二进制分发都要附上许可证全文，关于页逐个列出。
+        # 链接进 App 和键盘扩展的引擎本身（crates/engine、crates/path-trust）和它链接的 rink-core 是 MPL-2.0，cxx_sort.rs 逐步复现了 libc++ 的排序算法（Apache-2.0 WITH LLVM-exception），octagram.rs 移植自 librime-octagram 并按 darts-clone 的布局读双数组，符号模式的 LaTeX 表是本项目自写的 MIT 数据；二进制分发都要附上许可证全文，关于页逐个列出。
         project = (IOS_ROOT / "project.yml").read_text()
         app = dict(target_blocks(project))["MSIMEApp"]
         generated = (IOS_ROOT / "MSIMEClient.xcodeproj/project.pbxproj").read_text()
@@ -176,6 +176,7 @@ class ProjectConfigurationTests(unittest.TestCase):
             ("MPL-2.0.txt", "Mozilla Public License Version 2.0"),
             ("libcxx-Apache-2.0-WITH-LLVM-exception.txt", "LLVM Exceptions to the Apache 2.0 License"),
             ("librime-octagram-BSD-3-Clause.txt", "Copyright (c) 2008-2014, Susumu Yata"),
+            ("latex-symbols-MIT.txt", "Copyright (c) 2026 Metasequoia IME contributors"),
         ):
             path = f"../../resources/licenses/{licence}"
             blocks = source_path_blocks(app, path)

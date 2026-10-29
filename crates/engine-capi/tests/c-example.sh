@@ -28,11 +28,16 @@ native() {
   fi
 }
 
-python=${PYTHON:-$(command -v python3 || command -v python)}
 windows=false
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) windows=true ;;
 esac
+# Windows 上的 python3 可能只是应用商店的占位程序，那里先用 python。
+if [[ "$windows" == true ]]; then
+  python=${PYTHON:-$(command -v python || command -v python3)}
+else
+  python=${PYTHON:-$(command -v python3 || command -v python)}
+fi
 
 rm -rf "$stage" "$work"/build-* "$work"/run-*
 mkdir -p "$work"

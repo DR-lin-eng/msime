@@ -337,6 +337,7 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         byte[] before = Files.readAllBytes(history.toPath());
         Bitmap beforePreview = automation.takeScreenshot();
         Rect editorBounds = awaitFocusedField("msime-test-plain");
+        String focusedWindow = inputFocusIdentity();
         Rect card = openFloatingPreview();
         // 这一段有五处等待，失败时只报总阶段名看不出卡在哪一处，所以每处各标一句。
         stage = step + ": preview scroll area settles";
@@ -354,6 +355,9 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         stage = step + ": editor keeps focus";
         // API 28 遮挡期间连系统焦点查询也可能返回空；从合成编辑器主线程读取真实状态。
         Rect editorAfter = awaitFocusedField("msime-test-plain");
+        // 系统输入焦点在浮层展开前后必须一致；焦点身份从 dumpsys 读取，不记录窗口内容。
+        if (!focusedWindow.equals(inputFocusIdentity()))
+            throw new AssertionError("Floating preview changed editor focus: same_input_window=false");
         stage = step + ": clipboard card stays in the panel";
         Rect cardAfter = new Rect();
         await(node -> node.isLongClickable() && node.getText() != null
@@ -448,6 +452,28 @@ public final class ClipboardSegmentDragDeviceSmoke extends DeviceSmoke {
         throw new AssertionError("Synthetic editor did not retain input focus (field="
             + snapshot.getBoolean("focused") + ", window=" + snapshot.getBoolean("window_focused")
             + ", focus loss=" + snapshot.getString("focus_loss") + ")");
+    }
+
+    /** 仅在合成编辑器中比较系统输入窗口的标识，不记录 dump 或正文。 */
+    private String inputFocusIdentity() throws Exception {
+        try (var input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                automation.executeShellCommand("dumpsys input_method"))) {
+            var output = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int length;
+            while ((length = input.read(buffer)) != -1) {
+                if (output.size() + length > 1024 * 1024)
+                    throw new AssertionError("Synthetic input-method dump exceeded its bound");
+                output.write(buffer, 0, length);
+            }
+            String dump = output.toString(StandardCharsets.UTF_8.name());
+            for (String line : dump.split("\n")) {
+                String value = line.trim();
+                if (value.startsWith("mCurFocusedWindow=") && !value.startsWith("mCurFocusedWindow=null"))
+                    return value.split(" softInputMode=", 2)[0];
+            }
+            throw new AssertionError("Synthetic editor input focus was unavailable");
+        }
     }
 
     private Rect openFloatingPreview() {

@@ -12,7 +12,7 @@ Status: implemented
 
 `android-device.yml` 的 job 跑在 `depot-ubuntu-24.04-8`。打开 KVM 权限的 udev 步骤保留：Depot 上 `/dev/kvm` 本来就是 0666，这一步不改变什么，GitHub 托管 runner 上则必须有，以后要临时退回时不用再加。
 
-依据是新增的 `depot-android-kvm-probe.yml`，在两种 runner 上做同一件事，2026-10-29 第一次运行的结果：
+依据是 #10190 里的一次性探测（`depot-android-kvm-probe.yml`，在两种 runner 上做同一件事，结论记下后在同一个 PR 里删掉），2026-10-29 的结果：
 
 | | `ubuntu-24.04` | `depot-ubuntu-24.04-8` |
 | --- | --- | --- |
@@ -22,7 +22,9 @@ Status: implemented
 | `emulator -accel-check` | KVM (version 12) is installed and usable | 同左 |
 | API 35 AVD 开机 | 45 秒 | 21 秒 |
 
-两边镜像里都有 `sdkmanager` 和 `adb`，都没有预装 emulator，由 workflow 自己装，和原来一样。探测保留为手动触发，Depot 换镜像或机型后跑一次复查。
+两边镜像里都有 `sdkmanager` 和 `adb`，都没有预装 emulator，由 workflow 自己装，和原来一样。
+
+探测不保留：`android-device.yml` 自己在每次 PR、推送和 nightly 上起模拟器，Depot 哪天没了 KVM，它会在开机这一步超时报红，比手动触发的探测更早发现。
 
 ## Alternatives considered
 

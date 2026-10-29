@@ -2,7 +2,7 @@
 //!
 //! 两条查法共用一张编进引擎的表，都不读磁盘：
 //!
-//! - 分组码表是本项目自定的 `symbol_groups.tsv`（`编码<TAB>中文组名<TAB>符号...`），分组码与码位来自 rime-wanxiang 的 `wanxiang_symbols.yaml`（CC BY 4.0，署名与改动说明在 `resources/licenses/rime-wanxiang-CC-BY-4.0.txt`），中文组名与排序由本项目自定。
+//! - 分组码表是本项目自定的 `symbol_groups.tsv`（`编码<TAB>中文组名<TAB>符号...`）：分组码、中文组名和每组的取字规则写在 `scripts/build_symbol_groups.py` 里，组员只按 Unicode 字符数据库 17.0.0 的区块、类别、字符名和分解映射挑选（Unicode License V3，全文在 `resources/licenses/Unicode-License-V3.txt`），组内按码位排序。
 //! - LaTeX 命令名读 `latex_symbols.tsv`（本项目自写，MIT；是 msime-dictionary `sources/symbols/latex-symbols.tsv` 的同步副本，与官方短语表「LaTeX 符号」的数据源 `plugins/phrase_table/latex-symbols/symbols.tsv` 逐字节相同，见 `scripts/sync_symbol_tables.py`；放在 crate 里是为了 `cargo package` 能带上它），编进引擎，六个平台不用启用插件也能用：`sum` 得 ∑、`leq` 得 ≤、`pi` 得 π Π、`mathbbr` 得 ℝ。命令名去掉反斜杠和花括号、转成小写，只差大小写的合成一行、小写的在前（`rightarrow` 得 → ⇒），与那个短语表的编码规则相同；`\S`、`\P` 这种只剩一个字母的不收，单个字母是分组码前缀。只在这里查，不进普通打字的混排，`pi`、`in`、`le` 这些短命令名在混排里会和拼音、英文撞上。
 //! - 符号名复用混排那半边（`symbol_candidates`）的 `symbol_candidates.tsv`：`alpha` 得 α、`infinity` 得 ∞。
 //!
@@ -12,8 +12,7 @@
 
 use crate::types::{CandidateSource, WordItem};
 
-/// 一次最多给出几行符号，分组码与符号名合计。与 Windows 正式版的 `query_symbols` 默认上限 200 一致：
-/// 一个分组最多几百个符号（`kx` 康熙部首 214 个、`jt` 箭头 148 个），整组放进列表靠翻页看全。
+/// 一次最多给出几行符号，分组码与符号名合计。与 Windows 正式版的 `query_symbols` 默认上限 200 一致：一个分组最多几百个符号（`kx` 康熙部首 214 个、`sx` 数学符号 197 个），整组放进列表靠翻页看全；生成器让除康熙部首以外的组都不超过这个数。
 pub const SYMBOL_MODE_LIMIT: usize = 200;
 
 const TABLE: &str = include_str!("symbol_groups.tsv");
@@ -185,6 +184,12 @@ mod tests {
             );
             let count = group.symbols().count();
             assert!(count > 0, "组里至少一个符号：{}", group.code);
+            // 整串分组码一次最多出 SYMBOL_MODE_LIMIT 行，超出的符号打不出来；康熙部首是 214 个部首的完整集合，是唯一的例外。
+            assert!(
+                count <= SYMBOL_MODE_LIMIT || group.code == "kx",
+                "组里的符号不超过一次能给出的行数：{} {count}",
+                group.code
+            );
             for symbol in group.symbols() {
                 symbols += 1;
                 assert!(
@@ -198,7 +203,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(symbols, 3929, "符号总数");
+        assert_eq!(symbols, 4530, "符号总数");
     }
 
     #[test]
@@ -216,7 +221,7 @@ mod tests {
         let jt = query_symbol_mode("jt", SYMBOL_MODE_LIMIT);
         assert!(jt.iter().any(|row| row.word == "→"), "{:?}", texts(&jt));
         let szq = query_symbol_mode("szq", SYMBOL_MODE_LIMIT);
-        assert_eq!(texts(&szq)[0], "⓪", "{:?}", texts(&szq));
+        assert_eq!(texts(&szq)[0], "①", "{:?}", texts(&szq));
         assert!(query_symbol_mode("", SYMBOL_MODE_LIMIT).is_empty());
         assert!(query_symbol_mode("x'1", SYMBOL_MODE_LIMIT).is_empty());
     }

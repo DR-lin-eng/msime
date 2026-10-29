@@ -164,6 +164,24 @@ class ProjectConfigurationTests(unittest.TestCase):
             self.assertEqual(generated.count(f"{licence} in Resources"), 2, licence)
             self.assertIn(f'LicenseNotice(file: "{licence.removesuffix(".txt")}"', about)
 
+    def test_app_ships_the_dictionary_sources_notice(self):
+        # 键盘扩展的 EngineResources 带着 msime-bigram.bin、msime-trigram.bin 和 msime-wubi.db 等桌面词库：n-gram 表统计自中文维基百科，CC BY-SA 4.0 要求再分发时署名，五笔码表混着几份不同许可的来源，这些都只写在词库来源说明里。说明是 Markdown，关于页按 md 扩展名找它。
+        project = (IOS_ROOT / "project.yml").read_text()
+        app = dict(target_blocks(project))["MSIMEApp"]
+        generated = (IOS_ROOT / "MSIMEClient.xcodeproj/project.pbxproj").read_text()
+        about = (IOS_ROOT / "App/Sources/settings/AboutAndDownloadViews.swift").read_text()
+        notice = "msime-engine-dictionary-NOTICE.md"
+        path = f"../../resources/licenses/{notice}"
+        blocks = source_path_blocks(app, path)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("buildPhase: resources", blocks[0])
+        text = (IOS_ROOT / path).read_text()
+        for phrase in ("中文维基百科", "CC-BY-SA 4.0", "### 拼音权重与万象对齐"):
+            self.assertIn(phrase, text)
+        self.assertEqual(generated.count(f"{notice} in Resources"), 2)
+        self.assertIn('LicenseNotice(file: "msime-engine-dictionary-NOTICE"', about)
+        self.assertIn('fileExtension: "md")', about)
+
     def test_app_ships_the_licence_of_the_component_lookup_table(self):
         # 链接进 App 和键盘扩展的 Engine 编入了拆字反查的部件拼音表，它改编自開放詞典的漢語拆字字典（CC BY 3.0），署名、固定提交和改动说明都在这份许可证文件里。
         project = (IOS_ROOT / "project.yml").read_text()

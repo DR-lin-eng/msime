@@ -875,7 +875,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
   }
 
   /**
-   * 「防止截屏」落到键盘的每一块面板上：软键盘（2in1 上是候选窗）、浮动工具条和输入模式提示。每次编辑框获得焦点、`attach` 导入了设置应用的镜像之后调用，所以在设置应用里切换后，下一次弹出键盘就生效；面板新建时也各自设一次（`openToolbar`、`openModeBadge`、`onCreate`）。
+   * 「防止截屏」落到键盘的每一块面板上：软键盘（2in1 上是候选窗）、浮动工具条和输入模式提示。每次编辑框获得焦点、`attach` 导入了设置应用的镜像之后调用，所以在设置应用里切换后，下一次弹出键盘就生效；面板新建时也各自设一次（`openToolbar`、`openModeBadge`、`onCreate`）。值没变的面板不再调用窗口管理（`ScreenCaptureProtection.protectPanel` 记着每块面板上次设的值），焦点路径上通常一次 IPC 也没有。
    */
   private applyScreenCaptureProtection(): void {
     const enabled: boolean = this.screenCaptureProtected();

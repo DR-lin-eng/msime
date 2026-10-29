@@ -19,6 +19,10 @@ import {
  * 只用同步文件操作：文件只有几十个字节，调用方都在生命周期时刻或一次用户操作里调用。
  */
 export class ScreenCaptureProtection {
+  /** 每块面板上次设成功的隐私模式；键是面板对象，面板销毁后随之回收。 */
+  private static readonly panelModes: WeakMap<inputMethodEngine.Panel, boolean> =
+    new WeakMap<inputMethodEngine.Panel, boolean>();
+
   static load(stateDirectory: string): ScreenCaptureProtectionState {
     return ScreenCaptureProtectionPolicy.parse(
       ScreenCaptureProtection.readText(`${stateDirectory}/${SCREEN_CAPTURE_PROTECTION_FILE}`));
@@ -30,10 +34,14 @@ export class ScreenCaptureProtection {
       ScreenCaptureProtectionPolicy.serialize(state));
   }
 
-  /** 给输入法面板（软键盘、候选窗、浮动工具条、输入模式提示）设或取消隐私模式。 */
+  /**
+   * 给输入法面板（软键盘、候选窗、浮动工具条、输入模式提示）设或取消隐私模式。每次编辑框获得焦点都会调用，而 `setPrivacyMode` 是一次同步的窗口管理 IPC、正好在 `panel.show()` 之前；所以记下每块面板上次设成功的值，没变就不再设。面板重建后是新对象，不在表里，照常设一次；设失败不记，下一次再试。
+   */
   static protectPanel(panel: inputMethodEngine.Panel, enabled: boolean, name: string): void {
+    if (ScreenCaptureProtection.panelModes.get(panel) === enabled) return;
     try {
       panel.setPrivacyMode(enabled);
+      ScreenCaptureProtection.panelModes.set(panel, enabled);
     } catch (error) {
       KeyboardLog.error(`${name} privacy mode not applied: ${describeError(error)}`);
     }

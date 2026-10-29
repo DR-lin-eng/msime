@@ -15,6 +15,7 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -244,18 +245,34 @@ public final class DoubaoRecognizer {
             if (!JsonPolicy.strictTrue(response.opt("ok"))) return null;
             JSONObject value = JsonPolicy.objectValue(response);
             if (value == null) return null;
-            // An error frame ends the session; the code is the provider's and is not shown.
-            if (value.has("error_code")) return null;
+            // 错误帧结束会话。错误码不显示给用户，只用来区分空音频、服务端超时、服务过载和拒绝请求。
+            if (value.has("error_code")) {
+                return DoubaoStreamSession.Update.failed(
+                    VoiceFailurePolicy.doubaoError(JsonPolicy.strictInteger(value.opt("error_code"))));
+            }
             String payloadText = JsonPolicy.strictString(value.opt("payload"));
             if (payloadText == null) return null;
-            JSONObject document = new JSONObject(payloadText);
-            JSONObject result = document.optJSONObject("result");
-            String text = result == null ? "" : HttpAsrPolicy.strictText(result.opt("text"));
+            String text = resultText(new JSONObject(payloadText));
             Boolean last = JsonPolicy.strictBoolean(value.opt("last"));
             return last == null ? null : new DoubaoStreamSession.Update(text, last);
         } catch (JSONException error) {
             return null;
         }
+    }
+
+    /**
+     * 回包里的识别文字。双向流式（{@code bigmodel_async}）的 {@code result} 是一个对象；整句流式（{@code bigmodel_nostream}）的文档把它写成分句列表，iOS 和 Windows 两种都读，这里也按顺序拼起分句。以前只读对象，服务按列表回时读出来是空的，现在会被当成「没有听到内容」。
+     */
+    private static String resultText(JSONObject document) {
+        Object result = document.opt("result");
+        if (result instanceof JSONObject object) return HttpAsrPolicy.strictText(object.opt("text"));
+        if (!(result instanceof JSONArray segments)) return "";
+        StringBuilder joined = new StringBuilder();
+        for (int index = 0; index < segments.length(); index++) {
+            JSONObject segment = segments.optJSONObject(index);
+            if (segment != null) joined.append(HttpAsrPolicy.strictText(segment.opt("text")));
+        }
+        return HttpAsrPolicy.strictText(joined.toString());
     }
 
     private SSLSocket connect(Endpoint endpoint, String[] headers)

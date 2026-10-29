@@ -138,6 +138,14 @@ public final class WebSocketFrames {
         return status;
     }
 
+    /**
+     * 关闭帧载荷开头的两字节状态码（RFC 6455 第 5.5.1 节，大端），载荷不足两字节（关闭帧没带状态码）时返回 -1。豆包在最终结果之前关闭连接时据此区分服务结束会话、服务端故障和超出限制。
+     */
+    public static int closeStatus(byte[] payload) {
+        if (payload == null || payload.length < 2) return -1;
+        return ((payload[0] & 0xff) << 8) | (payload[1] & 0xff);
+    }
+
     /** HTTP list fields match a comma-separated token, not an arbitrary substring. */
     private static boolean containsToken(String value, String expected) {
         for (String token : value.split(",")) {

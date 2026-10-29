@@ -245,6 +245,10 @@ class AndroidVoiceProjectConfigurationTests(unittest.TestCase):
         self.assertNotIn(".available()", session)
         self.assertNotIn(".available()", recognizer)
         self.assertIn('new Thread(this::receive, "msime-doubao-reader")', session)
+        # 整句流式的文档把 result 写成分句列表，iOS 和 Windows 两种形状都读；只读对象时 Android 上读出来是空的。
+        self.assertIn("result instanceof JSONArray segments", recognizer)
+        # 错误帧的错误码要交给失败分类，不能一律当拒绝请求。
+        self.assertIn("VoiceFailurePolicy.doubaoError(", recognizer)
         # Cancelling has to release both the microphone and the socket.
         self.assertIn("streaming.cancel()", activity)
         self.assertIn("socket.close()", recognizer)

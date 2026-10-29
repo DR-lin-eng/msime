@@ -65,6 +65,39 @@ public final class VoiceFailurePolicySmoke {
         check(VoiceFailurePolicy.handshake("") == HttpAsrRecognizer.Failure.NETWORK, "握手中途断开");
         check(VoiceFailurePolicy.status(408) == HttpAsrRecognizer.Failure.SERVICE_TIMEOUT, "408 是服务超时");
         check(VoiceFailurePolicy.status(500) == HttpAsrRecognizer.Failure.SERVICE, "其余按拒绝");
+
+        // 豆包错误帧按错误码归类：服务过载、等包超时和空音频不能提示用户去检查配置。
+        check(VoiceFailurePolicy.doubaoError(55_000_031) == HttpAsrRecognizer.Failure.BUSY, "服务过载");
+        check(VoiceFailurePolicy.doubaoError(55_000_000) == HttpAsrRecognizer.Failure.BUSY, "服务内部错误的下界");
+        check(VoiceFailurePolicy.doubaoError(55_099_999) == HttpAsrRecognizer.Failure.BUSY, "服务内部错误的上界");
+        check(VoiceFailurePolicy.doubaoError(45_000_081) == HttpAsrRecognizer.Failure.SERVICE_TIMEOUT, "等包超时");
+        check(VoiceFailurePolicy.doubaoError(45_000_002) == HttpAsrRecognizer.Failure.EMPTY, "空音频");
+        check(VoiceFailurePolicy.doubaoError(45_000_001) == HttpAsrRecognizer.Failure.SERVICE, "请求参数无效");
+        check(VoiceFailurePolicy.doubaoError(45_000_151) == HttpAsrRecognizer.Failure.SERVICE, "音频格式不对");
+        check(VoiceFailurePolicy.doubaoError(null) == HttpAsrRecognizer.Failure.SERVICE, "读不出错误码");
+
+        // 最终结果之前的关闭帧按状态码归类：没报错的正常关闭是服务结束了会话（时长或空闲限制）。
+        check(VoiceFailurePolicy.closed(-1) == HttpAsrRecognizer.Failure.ENDED, "没带状态码");
+        check(VoiceFailurePolicy.closed(1000) == HttpAsrRecognizer.Failure.ENDED, "正常关闭");
+        check(VoiceFailurePolicy.closed(1001) == HttpAsrRecognizer.Failure.ENDED, "服务端离开");
+        check(VoiceFailurePolicy.closed(1009) == HttpAsrRecognizer.Failure.LIMIT, "消息超出限制");
+        for (int status : new int[] {1011, 1012, 1013, 1014}) {
+            check(VoiceFailurePolicy.closed(status) == HttpAsrRecognizer.Failure.BUSY, "服务端故障 " + status);
+        }
+        check(VoiceFailurePolicy.closed(1008) == HttpAsrRecognizer.Failure.SERVICE, "策略拒绝");
+        check(VoiceFailurePolicy.closed(1002) == HttpAsrRecognizer.Failure.SERVICE, "协议错误");
+
+        // 没有文字时，断网、超时、服务结束会话、服务故障、拒绝请求和空回复的提示各不相同（#9886 的验收）。
+        java.util.Set<String> distinct = new java.util.HashSet<>();
+        for (HttpAsrRecognizer.Failure failure : new HttpAsrRecognizer.Failure[] {
+                HttpAsrRecognizer.Failure.NETWORK, HttpAsrRecognizer.Failure.TIMEOUT,
+                HttpAsrRecognizer.Failure.ENDED, HttpAsrRecognizer.Failure.BUSY,
+                HttpAsrRecognizer.Failure.SERVICE, HttpAsrRecognizer.Failure.EMPTY}) {
+            check(distinct.add(VoiceFailurePolicy.message(failure)), "提示重复：" + failure);
+        }
+        check(VoiceFailurePolicy.message(HttpAsrRecognizer.Failure.ENDED).contains("时长"), "服务结束会话时说出时长限制");
+        check(VoiceFailurePolicy.interrupted(HttpAsrRecognizer.Failure.ENDED) != null
+            && VoiceFailurePolicy.interrupted(HttpAsrRecognizer.Failure.BUSY) != null, "途中结束也有提示");
         System.out.println("VoiceFailurePolicySmoke passed");
     }
 

@@ -35,7 +35,7 @@ final class DoubaoStreamSession {
     interface Codec {
         byte[] audioFrame(int sequence, byte[] pcm, int length, boolean last);
 
-        /** 一条完整的服务端二进制消息；错误帧或读不懂时返回 null。 */
+        /** 一条完整的服务端二进制消息；错误帧返回 {@link Update#failed}，读不懂时返回 null。 */
         Update decode(byte[] payload);
     }
 
@@ -53,8 +53,17 @@ final class DoubaoStreamSession {
         void onUpdate(String text, boolean finalResult);
     }
 
-    /** 一条服务端消息：识别文字和它是不是最终结果。 */
-    record Update(String text, boolean last) {}
+    /** 一条服务端消息：识别文字和它是不是最终结果；{@code failure} 不为 null 时是错误帧，服务端不会再给结果。 */
+    record Update(String text, boolean last, HttpAsrRecognizer.Failure failure) {
+        Update(String text, boolean last) {
+            this(text, last, null);
+        }
+
+        /** 错误帧，原因由 {@link VoiceFailurePolicy#doubaoError} 按错误码归类。 */
+        static Update failed(HttpAsrRecognizer.Failure failure) {
+            return new Update(null, true, failure);
+        }
+    }
 
     /**
      * 会话结果。{@code text} 是最后一次非空的识别文字，失败时也可能有（识别到一半连接断了）；{@code failure} 为 null 表示正常收到了最终结果，最终结果没有任何文字时是 {@code EMPTY}；{@code capped} 表示录音到了上限、由会话自己结束。
@@ -73,6 +82,8 @@ final class DoubaoStreamSession {
     private final long finalTimeoutMillis;
 
     private final CountDownLatch done = new CountDownLatch(1);
+    /** 读线程上解码（共享层 JNI）或回调抛出的意外异常；会话结束后在调用线程上重新抛出。 */
+    private volatile Throwable crash;
     private final Object lock = new Object();
     /** 以下两项由 {@link #lock} 保护；{@link #done} 一旦放行，failure 不再改变。 */
     private String transcript;
@@ -97,18 +108,27 @@ final class DoubaoStreamSession {
         this.finalTimeoutMillis = finalTimeoutMillis;
     }
 
-    /** 在调用线程上采集并发送，直到收到最终结果、失败或取消。阻塞，不能在主线程调用。 */
+    /**
+     * 在调用线程上采集并发送，直到收到最终结果、失败或取消。阻塞，不能在主线程调用。
+     *
+     * <p>读线程上解码或回调抛出的 {@link RuntimeException} 与 {@link LinkageError} 在这里原样重新抛出：以前解码在调用线程上做，调用方为共享 JNI 的意外失败写的兜底（提示「语音识别服务无法启动」）照样生效；留在读线程上会走到进程的未捕获异常处理，整个输入法进程退出。
+     */
     Outcome run() {
         Thread reader = new Thread(this::receive, "msime-doubao-reader");
         reader.setDaemon(true);
         reader.start();
+        Outcome outcome;
         try {
-            return send();
+            outcome = send();
         } finally {
             microphone.stop();
             // 读线程可能还阻塞在 read 上（失败、超时或取消时），关掉连接让它退出。
             connection.abort();
         }
+        Throwable error = crash;
+        if (error instanceof RuntimeException runtime) throw runtime;
+        if (error instanceof LinkageError linkage) throw linkage;
+        return outcome;
     }
 
     private Outcome send() {
@@ -177,9 +197,9 @@ final class DoubaoStreamSession {
                     System.arraycopy(inbound, decoded.consumed(), inbound, 0, pending - decoded.consumed());
                     pending -= decoded.consumed();
                     int opcode = decoded.opcode();
-                    // 服务端在给出最终结果之前主动关闭：多半是它那一侧的时长、配额或参数限制。
+                    // 服务端在给出最终结果之前主动关闭：按关闭帧的状态码区分服务结束会话（多半是时长或空闲限制）、服务端故障和超出限制。
                     if (opcode == WebSocketFrames.OPCODE_CLOSE) {
-                        fail(HttpAsrRecognizer.Failure.SERVICE);
+                        fail(VoiceFailurePolicy.closed(WebSocketFrames.closeStatus(decoded.payload())));
                         return;
                     }
                     if (opcode == WebSocketFrames.OPCODE_PING) {
@@ -217,9 +237,14 @@ final class DoubaoStreamSession {
                         fragmented = null;
                     }
                     Update update = codec.decode(payload);
-                    // 错误帧（带 error_code）或读不懂的回包：服务端不会再给结果。
+                    // 读不懂的回包：服务端不会再给结果。
                     if (update == null) {
                         fail(HttpAsrRecognizer.Failure.SERVICE);
+                        return;
+                    }
+                    // 错误帧：原因按错误码归类，服务过载或超时不再提示用户去检查配置。
+                    if (update.failure() != null) {
+                        fail(update.failure());
                         return;
                     }
                     if (update.text() != null && !update.text().isEmpty()) {
@@ -236,6 +261,10 @@ final class DoubaoStreamSession {
             }
         } catch (IOException error) {
             fail(cancelled.get() ? HttpAsrRecognizer.Failure.CANCELLED : HttpAsrRecognizer.Failure.NETWORK);
+        } catch (RuntimeException | LinkageError error) {
+            // 记下来交给 run() 在调用线程上重新抛出，并立即结束会话，不让采集线程等到用户停下再等满最终结果的时限。
+            crash = error;
+            fail(HttpAsrRecognizer.Failure.SERVICE);
         }
     }
 

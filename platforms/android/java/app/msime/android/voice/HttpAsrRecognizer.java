@@ -33,9 +33,13 @@ public final class HttpAsrRecognizer {
     private static final int READ_TIMEOUT_MILLIS = 60_000;
     private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
 
-    /** Why a recognition did not produce text. The caller maps these onto its own outcomes. */
+    /**
+     * Why a recognition did not produce text. The caller maps these onto its own outcomes.
+     *
+     * <p>{@code BUSY} 和 {@code ENDED} 只由豆包流式给出：{@code BUSY} 是服务端自己的故障或过载（豆包错误码 550xxxxx、关闭帧 1011–1014），改配置没有用；{@code ENDED} 是服务端在最终结果之前没有报错就正常关闭了会话，多半是它那一侧的会话时长或空闲限制（#9886）。
+     */
     public enum Failure {
-        PERMISSION, UNAVAILABLE, CANCELLED, NETWORK, TIMEOUT, SERVICE_TIMEOUT, LIMIT, SERVICE, EMPTY
+        PERMISSION, UNAVAILABLE, CANCELLED, NETWORK, TIMEOUT, SERVICE_TIMEOUT, LIMIT, SERVICE, BUSY, ENDED, EMPTY
     }
 
     /** Thrown rather than returning null so a caller cannot mistake a failure for silence. */

@@ -158,6 +158,14 @@ public final class WebSocketFramesSmoke {
         check(WebSocketFrames.handshakeStatus("HTTP/1.1 40x Bad\r\n") == -1, "状态码必须是三位数字");
         check(WebSocketFrames.handshakeStatus("HTTP/1.1 4011 Bad\r\n") == -1, "多出的数字不当成状态码");
         check(WebSocketFrames.handshakeStatus("SSH-2.0-OpenSSH\r\n") == -1, "不是 HTTP 的回应没有状态码");
+
+        // 关闭帧的状态码是载荷开头的两字节大端整数，后面可以跟原因文字。
+        check(WebSocketFrames.closeStatus(new byte[] {0x03, (byte) 0xe8}) == 1000, "正常关闭是 1000");
+        check(WebSocketFrames.closeStatus(new byte[] {0x03, (byte) 0xf3, 'b', 'u', 's', 'y'}) == 1011,
+            "带原因文字的 1011");
+        check(WebSocketFrames.closeStatus(new byte[0]) == -1, "没带状态码的关闭帧");
+        check(WebSocketFrames.closeStatus(new byte[] {0x03}) == -1, "只有一个字节读不出状态码");
+        check(WebSocketFrames.closeStatus(null) == -1, "没有载荷");
         System.out.println("Android WebSocket frames passed");
     }
 }

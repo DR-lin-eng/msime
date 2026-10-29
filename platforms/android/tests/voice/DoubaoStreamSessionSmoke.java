@@ -24,7 +24,7 @@ public final class DoubaoStreamSessionSmoke {
 
     public static void main(String[] args) throws Exception {
         interimArrivesWhileRecording();
-        serverCloseWithoutTextIsService();
+        serverCloseIsClassifiedByStatus();
         serverCloseAfterTextKeepsTheText();
         droppedConnectionIsNetwork();
         silentServerAfterLastFrameTimesOut();
@@ -32,7 +32,8 @@ public final class DoubaoStreamSessionSmoke {
         limitEndsTheRecordingAndSaysSo();
         cancelEndsWithoutText();
         pingIsAnsweredWhileRecording();
-        errorFrameIsService();
+        errorFrameIsClassifiedByCode();
+        decoderCrashReachesTheCaller();
         failedWriteWithoutServerReasonIsNetwork();
         fragmentedFinalIsReassembled();
         earlyFinalStopsTheMicrophone();
@@ -63,17 +64,29 @@ public final class DoubaoStreamSessionSmoke {
         check(harness.connection.lastAudioFrames.get() == 1, "最后一帧只发一次");
     }
 
-    /** 服务端在最终结果之前发关闭帧：服务中止，录音随即结束，不会一直录到上限。 */
-    private static void serverCloseWithoutTextIsService() throws Exception {
+    /**
+     * 服务端在最终结果之前发关闭帧：录音随即结束，不会一直录到上限；原因按状态码分。没报错就正常关闭（没带状态码、1000）是服务结束了会话，多半是它的时长或空闲限制，不能再提示用户去检查配置；1011 是服务端故障；1008 这类才是拒绝请求。
+     */
+    private static void serverCloseIsClassifiedByStatus() throws Exception {
+        closesWith(new byte[0], HttpAsrRecognizer.Failure.ENDED, "没带状态码的关闭帧算服务结束会话");
+        closesWith(new byte[] {0x03, (byte) 0xe8}, HttpAsrRecognizer.Failure.ENDED, "1000 正常关闭算服务结束会话");
+        closesWith(new byte[] {0x03, (byte) 0xf3}, HttpAsrRecognizer.Failure.BUSY, "1011 算服务端故障");
+        closesWith(new byte[] {0x03, (byte) 0xf0}, HttpAsrRecognizer.Failure.SERVICE, "1008 算拒绝请求");
+    }
+
+    private static void closesWith(byte[] payload, HttpAsrRecognizer.Failure expected, String message)
+            throws Exception {
         Harness harness = new Harness();
         harness.limit = 100_000;
         harness.onRead = index -> {
-            if (index == 2) harness.server.push(frame(WebSocketFrames.OPCODE_CLOSE, new byte[0], true));
+            if (index == 2) harness.server.push(frame(WebSocketFrames.OPCODE_CLOSE, payload, true));
         };
         DoubaoStreamSession.Outcome outcome = harness.run();
-        check(outcome.text() == null && outcome.failure() == HttpAsrRecognizer.Failure.SERVICE, "关闭帧算服务中止");
+        check(outcome.text() == null && outcome.failure() == expected, message);
         check(harness.microphone.reads.get() < 1_000, "服务端断开后不再继续录音");
         check(harness.microphone.stopped, "放开麦克风");
+        check(!"语音服务拒绝请求，请检查服务配置".equals(VoiceFailurePolicy.message(outcome.failure()))
+            || expected == HttpAsrRecognizer.Failure.SERVICE, "只有真被拒绝时才提示检查配置");
     }
 
     /** 已经识别出文字之后服务端断开：文字保留，原因一并给出。 */
@@ -91,7 +104,7 @@ public final class DoubaoStreamSessionSmoke {
         };
         DoubaoStreamSession.Outcome outcome = harness.run();
         check("说到一半".equals(outcome.text()), "已识别的文字保留");
-        check(outcome.failure() == HttpAsrRecognizer.Failure.SERVICE, "原因是服务中止");
+        check(outcome.failure() == HttpAsrRecognizer.Failure.ENDED, "原因是服务结束了会话");
     }
 
     /** 连接没发关闭帧就断了：网络问题。 */
@@ -186,15 +199,47 @@ public final class DoubaoStreamSessionSmoke {
         check("在".equals(outcome.text()), "保活不影响结果");
     }
 
-    /** 错误帧或读不懂的回包：服务中止。 */
-    private static void errorFrameIsService() throws Exception {
+    /** 错误帧按错误码归类：服务过载、服务端等包超时和拒绝请求各不相同；读不懂的回包按拒绝请求。 */
+    private static void errorFrameIsClassifiedByCode() throws Exception {
+        errorsWith("ERR:55000031", HttpAsrRecognizer.Failure.BUSY, "服务过载");
+        errorsWith("ERR:55000002", HttpAsrRecognizer.Failure.BUSY, "服务内部错误");
+        errorsWith("ERR:45000081", HttpAsrRecognizer.Failure.SERVICE_TIMEOUT, "服务端等包超时");
+        errorsWith("ERR:45000001", HttpAsrRecognizer.Failure.SERVICE, "请求参数无效");
+        errorsWith("ERR", HttpAsrRecognizer.Failure.SERVICE, "读不懂的回包");
+    }
+
+    private static void errorsWith(String payload, HttpAsrRecognizer.Failure expected, String message)
+            throws Exception {
         Harness harness = new Harness();
         harness.limit = 100_000;
         harness.onRead = index -> {
-            if (index == 2) harness.server.push(binary("ERR"));
+            if (index == 2) harness.server.push(binary(payload));
         };
         DoubaoStreamSession.Outcome outcome = harness.run();
-        check(outcome.failure() == HttpAsrRecognizer.Failure.SERVICE, "错误帧算服务中止");
+        check(outcome.text() == null && outcome.failure() == expected, message);
+        check(harness.microphone.reads.get() < 1_000, "错误帧之后不再继续录音");
+    }
+
+    /**
+     * 读线程上解码（真机上是共享层 JNI）抛出意外异常：会话立即结束，异常回到调用线程，由调用方的兜底提示「语音识别服务无法启动」。留在读线程上会走到进程的未捕获异常处理，整个输入法退出；会话也不会结束，要等用户停下再等满最终结果的时限。
+     */
+    private static void decoderCrashReachesTheCaller() throws Exception {
+        Harness harness = new Harness();
+        harness.limit = 100_000;
+        harness.onRead = index -> {
+            if (index == 2) harness.server.push(binary("BOOM"));
+        };
+        AtomicReference<Throwable> uncaught = new AtomicReference<>();
+        Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> uncaught.set(error));
+        try {
+            Throwable thrown = harness.runExpectingThrow();
+            check(thrown instanceof IllegalStateException, "解码的意外异常在调用线程上抛出");
+            check(harness.microphone.reads.get() < 1_000, "解码失败后不再继续录音");
+            check(uncaught.get() == null, "异常不能走到未捕获异常处理");
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous);
+        }
     }
 
     /** 发送失败、服务端也没留下关闭帧：网络问题。 */
@@ -264,9 +309,29 @@ public final class DoubaoStreamSessionSmoke {
             check(result.get() != null, "会话给出结果");
             return result.get();
         }
+
+        /** 跑一次会话，返回 run() 抛出的异常；没有抛出时失败。 */
+        Throwable runExpectingThrow() throws InterruptedException {
+            microphone.harness = this;
+            DoubaoStreamSession session = new DoubaoStreamSession(server, connection, microphone, CODEC,
+                listener, stopped, cancelled, limit, CHUNK, finalTimeoutMillis);
+            AtomicReference<Throwable> thrown = new AtomicReference<>();
+            Thread runner = new Thread(() -> {
+                try {
+                    session.run();
+                } catch (RuntimeException | LinkageError error) {
+                    thrown.set(error);
+                }
+            }, "smoke-doubao-session");
+            runner.setDaemon(true);
+            runner.start();
+            runner.join(15_000);
+            check(!runner.isAlive(), "会话必须结束，不能挂住");
+            return thrown.get();
+        }
     }
 
-    /** 帧编解码：音频帧只带序号和是否最后一帧；回包是「文字|是否最终」，ERR 当作错误帧。 */
+    /** 帧编解码：音频帧只带序号和是否最后一帧；回包是「文字|是否最终」，「ERR:错误码」是错误帧，ERR 是读不懂的回包，BOOM 让解码抛出意外异常。 */
     private static final DoubaoStreamSession.Codec CODEC = new DoubaoStreamSession.Codec() {
         @Override public byte[] audioFrame(int sequence, byte[] pcm, int length, boolean last) {
             return new byte[] {(byte) sequence, (byte) (last ? 1 : 0)};
@@ -274,6 +339,11 @@ public final class DoubaoStreamSessionSmoke {
 
         @Override public DoubaoStreamSession.Update decode(byte[] payload) {
             String value = new String(payload, StandardCharsets.UTF_8);
+            if (value.equals("BOOM")) throw new IllegalStateException("synthetic decoder failure");
+            if (value.startsWith("ERR:")) {
+                return DoubaoStreamSession.Update.failed(
+                    VoiceFailurePolicy.doubaoError(Integer.valueOf(value.substring(4))));
+            }
             int separator = value.lastIndexOf('|');
             if (separator < 0) return null;
             return new DoubaoStreamSession.Update(value.substring(0, separator),

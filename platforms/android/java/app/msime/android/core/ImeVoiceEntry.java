@@ -206,7 +206,7 @@ final class ImeVoiceEntry {
                         text = runningLocal.recognize(model, files == null ? null : files.toPath(),
                             language, options, null, null, new LocalAsrRecognizer.Listener() {
                                 @Override public void onPartial(String partial) {
-                                    s.main.post(() -> heard(session, partial));
+                                    s.main.post(() -> heard(session, partial, true));
                                 }
 
                                 @Override public void onSpeech(boolean value) {
@@ -225,7 +225,7 @@ final class ImeVoiceEntry {
                     } else if (runningStream != null && stream != null) {
                         text = runningStream.recognize(stream.endpoint(), stream.headers(), stream.itn(),
                             stream.punctuation(), stream.ddc(), stream.boostingTableId(),
-                            (update, last) -> s.main.post(() -> heard(session, update)));
+                            (update, last) -> s.main.post(() -> heard(session, update, false)));
                         pcm = runningStream.retainedAudio();
                         HttpAsrRecognizer.Failure interrupted = runningStream.interruption();
                         if (interrupted != null) {
@@ -279,12 +279,15 @@ final class ImeVoiceEntry {
         return true;
     }
 
-    /** 识别中途的文字：聆听中显示在聆听面板的标题位，并在停顿后自动结束录音。 */
-    private void heard(long session, String partial) {
+    /**
+     * 识别中途的文字：聆听中显示在聆听面板的标题位；{@code pauseEnds} 为 true 时，从这一刻起停顿一个 {@link #SILENCE_STOP_MILLIS} 就自动结束录音。
+     *
+     * <p>只有本机模型这样结束：它的 VAD 会报「还在说话」（{@link #spoke}），停顿计时据此推迟。系统识别服务自己判断说完了没有，这里再按停顿掐断会切掉还没说完的话。豆包流式也不按停顿结束：它不报是否在说话，整句流式（{@code bigmodel_nostream}）说话期间要到音频超过 15 秒才回第一段结果，按出字后停顿计时，口述到 16 秒多就会在用户还在说时被掐断（#9886）；豆包由用户点「说完了」或松开空格结束，和以前一样。
+     */
+    private void heard(long session, String partial, boolean pauseEnds) {
         if (session != generation || listening == null || partial == null || partial.isEmpty()) return;
         listening.setPartial(partial);
-        // 系统识别服务自己判断说完了没有，这里再按停顿掐断会切掉还没说完的话。
-        if (platform != null) return;
+        if (!pauseEnds) return;
         armSilenceStop(session);
     }
 
@@ -441,7 +444,7 @@ final class ImeVoiceEntry {
                 platformRecognized(session, startedAt, firstResult(results), language, polish);
             }
             @Override public void onPartialResults(Bundle partialResults) {
-                heard(session, firstResult(partialResults));
+                heard(session, firstResult(partialResults), false);
             }
             @Override public void onEvent(int eventType, Bundle params) { }
         });
@@ -556,8 +559,10 @@ final class ImeVoiceEntry {
         // 聆听可能长达一分钟（豆包流式可到五分钟）：这期间用户点到了别处、应用改写了输入框，或者开始了组字，结果就不能盲目插在现在的光标处。与识别窗口那条路一样，先存进语音结果，由用户在结果面板里显式插入。
         if (!s.voiceInsertionReady() || !s.voiceTargetMatches()) {
             boolean kept = s.stashVoiceResult(text);
-            s.notice(kept ? "输入位置已变化，结果已保留，可在语音结果中插入"
-                : "输入位置已变化；结果已安全清除");
+            // 保留下来的文字可能不完整（到了上限或识别途中断开），这句说明不能丢；提示只显示最后一句，所以并成一句，语音结果面板随后打开。
+            s.notice(!kept ? "输入位置已变化；结果已安全清除"
+                : notice != null ? notice + "，已存入语音结果"
+                : "输入位置已变化，结果已保留，可在语音结果中插入");
             dismiss();
             if (kept) s.showVoiceResult();
             return;

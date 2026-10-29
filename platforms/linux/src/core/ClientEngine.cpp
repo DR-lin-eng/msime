@@ -2153,7 +2153,8 @@ bool try_skip_paired_closing(IBusEngine *engine, guint key, guint flags) {
     paired_modifiers |= static_cast<std::uint32_t>(
         msime::linux_host::PairedPunctuationModifier::Mod5);
   const auto closing = msime::linux_host::paired_closing_for_key(
-      static_cast<char>(key), s.fullwidth, s.paired_tracker);
+      static_cast<char>(key), s.fullwidth, s.paired_tracker,
+      view_punctuation_marks(s.view).corner_quotes);
   if (!closing) return false;
   const auto following = surrounding_following_character(s);
   const bool modifiers_allowed =
@@ -7977,16 +7978,15 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
         (key == '(' || key == '[' || key == '<' || key == '{')) {
       const auto pair_mode = key == '{' ? PunctuationPairMode::Brace
                                         : PunctuationPairMode::Bracket;
+      // `{` 和其他成对键一样交给引擎的中文标点表：中文标点下出「（契约第 5 版），由 Brace 模式补」。
       const bool engine_handled = apply(
-          engine,
-          key == '{'
-              ? msime_client_punctuation_ascii(s.session, static_cast<uint8_t>(key))
-              : msime_client_punctuation(s.session, static_cast<uint8_t>(key)),
+          engine, msime_client_punctuation(s.session, static_cast<uint8_t>(key)),
           pair_mode);
       handled = engine_handled;
       if (engine_handled && key == '<')
         (void)response(msime_client_balance_paired_punctuation_after_auto_close(
             s.session, static_cast<uint8_t>(key)));
+      // 引擎没有处理（专用英文空闲时写 ASCII 标点、交回宿主）时保留原来的花括号成对补全。
       if (!handled && key == '{') {
         auto text = std::string("{}");
         if (s.fullwidth)

@@ -17,12 +17,12 @@ Status: implemented
 
 认证在 `ScreenCaptureAuthentication.ets`：与打字统计相同的锁屏密码加可用的指纹、人脸，ATL1，挑战值用系统随机数；不带冷却，每次切换都弹；超时 115 秒按失败处理。与 `StatisticsAuthentication` 不同，没有锁屏密码时不放行。认证类单独写一份而没有和统计页的抽公共部分：统计页那份带冷却、没有锁屏密码时放行，`tests/run.sh` 还逐行钉着它的写法，合并会让两种相反的规则挤在一个类里。
 
-设置页走 `startRequest` 的 `screen_capture_protection_settings`（`load` / `save`），原生 `SettingsBridge.screenCaptureProtectionSettings` 读当前值、按规则决定、需要时认证、写文件，写成后当场改设置窗口的隐私模式并立即 `publishShared` 给键盘。拒绝时回答错误码 `screen_capture_authentication_unavailable`、`screen_capture_authentication_failed` 或 `screen_capture_busy`，共享页据此提示并让开关保持原值。这个请求不联网，没有隐私政策授权时也照常处理。
+设置页走 `startRequest` 的 `screen_capture_protection_settings`（`load` / `save`），原生 `SettingsBridge.screenCaptureProtectionSettings` 读当前值、按规则决定、需要时认证、写文件，写成后当场改设置窗口的隐私模式并立即 `publishShared` 给键盘。发布失败（镜像读写出错）只记日志、仍回答已保存：文件和窗口都已经改了，若照 `failed` 回答，页面会提示「没有保存」、把开关退回旧值，另一处开关也收不到变化；窗口退到后台时的 `publishShared` 会再发布一次。拒绝时回答错误码 `screen_capture_authentication_unavailable`、`screen_capture_authentication_failed` 或 `screen_capture_busy`，共享页据此提示并让开关保持原值。这个请求不联网，没有隐私政策授权时也照常处理。
 
 窗口效果：
 
 - 设置应用只有一个主窗口（没有子窗口；`CustomDialog` 画在同一个窗口里）。`EntryAbility.onWindowStageCreate` 在载入页面之前，开关开着时用 `getMainWindowSync().setWindowPrivacyMode(true)` 设好，第一帧就截不到；之后由设置页写入时经 `window.getLastWindow` 当场更新。
-- 键盘三块面板：软键盘（2in1 上是候选窗）、浮动工具条、输入模式提示，各在 `createPanel` 之后、显示之前调 `Panel.setPrivacyMode`。每次 `inputStart`（含面板建好前就来的那一个），`KeyboardSession.attach` 导入镜像之后，`applyScreenCaptureProtection` 重读开关、给现有面板重设，所以在设置应用里切换后，下一次弹出键盘就生效。没有放进 `preferencesReloaded`：开关不是偏好，偏好修订号不随它变，那个钩子不会因为它触发。
+- 键盘三块面板：软键盘（2in1 上是候选窗）、浮动工具条、输入模式提示，各在 `createPanel` 之后、显示之前调 `Panel.setPrivacyMode`。每次 `inputStart`（含面板建好前就来的那一个），`KeyboardSession.attach` 导入镜像之后，`applyScreenCaptureProtection` 重读开关、给现有面板重设，所以在设置应用里切换后，下一次弹出键盘就生效。`setPrivacyMode` 是一次同步的窗口管理 IPC，正好在 `panel.show()` 之前，2in1 上每次焦点变化最多三次；所以 `ScreenCaptureProtection.protectPanel` 用以面板对象为键的 `WeakMap` 记下每块面板上次设成功的值，没变就不调用。面板重建后是新对象，照常设一次；设失败不记，下一次再试。读开关的文件只有几十个字节，每次照读。没有放进 `preferencesReloaded`：开关不是偏好，偏好修订号不随它变，那个钩子不会因为它触发。
 - 设隐私模式失败（权限不在、窗口已销毁）只记日志，不中断面板创建或页面载入。
 - `ohos.permission.PRIVACY_WINDOW` 在 SDK 里是 normal 级、system_grant，在 `module.json5` 里声明即授予，不弹授权框。
 
@@ -51,4 +51,4 @@ Status: implemented
 
 代价：打开后用户自己也无法截屏反馈问题，需要先关掉（要认证）。键盘那一侧要等下一次编辑框获得焦点才跟上设置应用里的切换。没有共享沙箱的包（侧载调试签名、模拟器）里键盘面板不受保护。
 
-验证：`platforms/harmony/tests/run.sh`（含新的 `screen-capture-protection.test.ts` 和接线检查）通过，删掉一处面板接线后接线检查失败；`hvigorw assembleHap` 的 ArkTS 编译通过（原生库和资源借用较早暂存的一份，新文件没有 ArkTS 警告）；`apps/desktop` 的 `privacy-page.test.tsx` 新增 4 项（手机上经宿主切换、被拒时保持原值并提示、2in1 在「关于」里能搜到「录屏」、没有这项能力的宿主不出现）通过。没有在真机上验证截屏和录屏是否变黑、认证弹窗与取消后的原值、没有锁屏密码时的拒绝，也没有验证 `Panel.setPrivacyMode` 在浮动工具条、输入模式提示这类 STATUS_BAR 面板上的效果。
+验证：`platforms/harmony/tests/run.sh`（含新的 `screen-capture-protection.test.ts` 和接线检查）通过，删掉一处面板接线后接线检查失败；`hvigorw assembleHap` 的 ArkTS 编译通过（原生库和资源借用较早暂存的一份，新文件没有 ArkTS 警告）；`apps/desktop` 的 `privacy-page.test.tsx` 新增 6 项（手机上经宿主切换、被拒时保持原值并提示、2in1 在「关于」里能搜到「录屏」、没有这项能力的宿主不出现、手机上「隐私」和「关于」两处开关在任一处切换后一致、`screen_capture_busy` 时保持原值并提示重试）通过；去掉切换成功后的窗口事件，两处一致的那一项失败。没有在真机上验证截屏和录屏是否变黑、认证弹窗与取消后的原值、没有锁屏密码时的拒绝，也没有验证 `Panel.setPrivacyMode` 在浮动工具条、输入模式提示这类 STATUS_BAR 面板上的效果。

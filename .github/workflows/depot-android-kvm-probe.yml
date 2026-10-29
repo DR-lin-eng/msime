@@ -1,0 +1,91 @@
+name: Depot Android KVM probe
+
+# android-device.yml 留在 GitHub 托管的 ubuntu-24.04 上，理由是模拟器要 KVM、Depot 的 runner 不保证有，但这一条从来没在 Depot 上实测过。这个探测在两种 runner 上做同一件事：看 /dev/kvm 和 CPU 虚拟化标志，跑 emulator 自己的加速检查，再用 start-emulator.sh 起一台 API 35 的 AVD 并记下开机用了多久，结论写进 job summary。
+#
+# 这是探测而不是门禁：没有 KVM 或开不了机只报 warning，不让 job 变红。只在改到这个文件本身的 PR 上和手动触发时跑，不进分支保护。
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/depot-android-kvm-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Inspect ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-24.04 是对照组：android-device.yml 现在就跑在它上面，开机时间拿它当基准。
+        runner: [ubuntu-24.04, depot-ubuntu-24.04-8]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      API: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Machine
+        run: |
+          uname -a
+          echo "logical cpus: $(nproc)"
+          free -g
+          df -h /
+          echo "virtualization flags: $(grep -cE 'vmx|svm' /proc/cpuinfo) of $(grep -c ^processor /proc/cpuinfo) cpus"
+          ls -l /dev/kvm || echo "/dev/kvm: missing"
+          lsmod | grep -E '^kvm' || echo "kvm modules: none loaded"
+      - name: Android SDK on the image
+        run: |
+          for path in "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_SDK_ROOT/emulator/emulator" "$ANDROID_SDK_ROOT/platform-tools/adb"; do
+            if [[ -x "$path" ]]; then echo "present: $path"; else echo "missing: $path"; fi
+          done
+      - name: Enable KVM the same way android-device.yml does
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || true
+      - name: Install the emulator and the API 35 image
+        run: |
+          set -euo pipefail
+          { yes || true; } | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
+            emulator platform-tools "system-images;android-$API;default;x86_64" >/dev/null
+          test -f "$ANDROID_SDK_ROOT/system-images/android-$API/default/x86_64/package.xml"
+      - name: Emulator acceleration check
+        id: accel
+        run: |
+          set -uo pipefail
+          out="$("$ANDROID_SDK_ROOT/emulator/emulator" -accel-check 2>&1)"; code=$?
+          echo "$out"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${{ matrix.runner }}"
+            echo ""
+            echo "- /dev/kvm: $(if [[ -e /dev/kvm ]]; then echo present; else echo missing; fi)"
+            echo "- emulator -accel-check exit $code: $(echo "$out" | tail -1)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Boot the dedicated AVD
+        run: |
+          set -uo pipefail
+          mkdir -p target/android
+          nohup bash platforms/android/tests/device/start-emulator.sh "$API" > target/android/emulator.log 2>&1 &
+          serial="emulator-5580"
+          adb="$ANDROID_SDK_ROOT/platform-tools/adb"
+          start=$(date +%s)
+          if timeout 900 bash -c "\"$adb\" -s $serial wait-for-device && until [ \"\$(\"$adb\" -s $serial shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')\" = 1 ]; do sleep 5; done"; then
+            took=$(( $(date +%s) - start ))
+            echo "booted in ${took}s"
+            echo "- API $API AVD booted in ${took}s" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::API $API AVD did not boot within 900s on ${{ matrix.runner }}"
+            echo "- API $API AVD did not boot within 900s" >> "$GITHUB_STEP_SUMMARY"
+            tail -40 target/android/emulator.log
+          fi
+          "$adb" -s "$serial" emu kill || true

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Check that msime-engine and msime-path-trust stay MPL-2.0 and that what that licence and the data inside the engine require travels through every notice channel.
+
+The two crates are licensed under MPL-2.0 without Exhibit B while the rest of the repository is GPL-3.0-only (crates/engine/README.md, the 许可证 section). So:
+
+- each crate's LICENSE is the Exhibit A notice followed by resources/licenses/MPL-2.0.txt verbatim, says Exhibit B is not attached, and its src/lib.rs opens with the same notice;
+- the license field of crates/path-trust/Cargo.toml is MPL-2.0, and that of crates/engine/Cargo.toml is the SPDX expression of every licence inside the package: MPL-2.0 for the code plus the licences of the data files and adapted code listed in EMBEDDED and ADAPTED below, no more and no fewer, and no GPL or LGPL;
+- every data file the engine compiles in with include_str! or include_bytes! from inside its own directory is either in EMBEDDED or is test data, every EMBEDDED and ADAPTED file is named in the crate README's table, and nothing compiled in reaches outside the crate (cargo package cannot carry such a file);
+- the licence texts those files need ship in every channel that lists notices by hand, and the inbound "GPL-3.0-only OR MPL-2.0" rule is stated where contributors read it;
+- the distribution metadata lists the engine's licences.
+"""
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+ENGINE = ROOT / "crates/engine"
+MPL_TEXT = ROOT / "resources/licenses/MPL-2.0.txt"
+EXHIBIT_A = "This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/."
+INBOUND = "GPL-3.0-only OR MPL-2.0"
+
+# 编进引擎、保留各自许可证的数据文件（相对 crates/engine/src）→ 它们带进包的 SPDX 标识。
+EMBEDDED = {
+    "korean/hanja.tsv": {"BSD-3-Clause"},
+    "local/places.tsv": {"WTFPL"},
+    "local/chaizi.tsv": {"CC-BY-3.0", "Unicode-3.0", "Apache-2.0"},
+    "local/chaizi-chars.tsv": {"CC-BY-3.0", "Unicode-3.0", "Apache-2.0"},
+    "local/symbol_groups.tsv": {"Unicode-3.0"},
+    "local/latex_symbols.tsv": {"MIT"},
+    # 本项目自写，与代码同为 MPL-2.0。
+    "local/symbol_candidates.tsv": {"MPL-2.0"},
+    # 聚合统计事实，不带许可证（维护者 2026-10-29 裁定，见 docs/third-party.md）。
+    "nine_key/syllable_frequency.tsv": set(),
+}
+# 改编自第三方代码的源文件 → 它们带进包的 SPDX 标识（本项目的改动是 MPL-2.0）。
+ADAPTED = {
+    "handwriting/model.rs": {"BSD-3-Clause"},
+    "handwriting/features.rs": {"BSD-3-Clause"},
+    "lattice/octagram.rs": {"BSD-3-Clause", "BSD-2-Clause"},
+    "lattice/cxx_sort.rs": {"Apache-2.0 WITH LLVM-exception"},
+}
+# 只给测试读的数据：目录名或文件名带这些片段的不算编进产品。
+TEST_DATA = ("/testdata/", "_fixture")
+
+# 手工列声明的渠道必须在非注释行写出的许可证文件。Linux 和 Windows 的 MPL-2.0 全文走 collect-notices.py 收集的 rust-crates-NOTICES.txt（见 COLLECTOR），所以那几个渠道只要求 libc++ 的文本。
+LLVM_LICENCE = "libcxx-Apache-2.0-WITH-LLVM-exception.txt"
+CHANNELS = {
+    "platforms/macos/CMakeLists.txt": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/macos/tests/settings/bundle_contents.py": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/linux/CMakeLists.txt": (LLVM_LICENCE,),
+    "platforms/linux/data/THIRD_PARTY_NOTICES.txt": (LLVM_LICENCE,),
+    "platforms/windows/Collect-Notices.ps1": (LLVM_LICENCE,),
+    "platforms/windows/tests/tools/collect_notices.ps1": (LLVM_LICENCE,),
+    "platforms/windows/Notices.md": (LLVM_LICENCE,),
+    "platforms/android/build-native.sh": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/harmony/stage-resources.sh": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/ios/project.yml": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/ios/tests/settings/ProjectConfigurationTests.py": ("MPL-2.0.txt", LLVM_LICENCE),
+    "platforms/ios/App/Sources/settings/AboutAndDownloadViews.swift": ('"MPL-2.0"', '"libcxx-Apache-2.0-WITH-LLVM-exception"'),
+    "scripts/web-engine-notice.sh": ("crates/engine/LICENSE", LLVM_LICENCE, "librime-octagram-BSD-3-Clause.txt", "Unicode-License-V3.txt", "plugins/phrase_table/LICENSE"),
+    "docs/third-party.md": (LLVM_LICENCE, "crates/engine/README.md"),
+}
+COLLECTOR = "platforms/linux/collect-notices.py"
+INBOUND_DOCS = ("crates/engine/README.md", "crates/path-trust/README.md", ".github/CONTRIBUTING.md", ".github/pull_request_template.md", "README.md")
+failures = []
+
+
+def check(condition: bool, message: str) -> None:
+    if not condition:
+        failures.append(message)
+
+
+def live_lines(path: Path) -> list[str]:
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith(("#", "//"))]
+
+
+def spdx_ids(expression: str) -> set[str]:
+    return {term.strip() for term in expression.split(" AND ")}
+
+
+def crate_license(name: str) -> str:
+    manifest = (ROOT / "crates" / name / "Cargo.toml").read_text(encoding="utf-8")
+    check("license.workspace" not in manifest, f"crates/{name}/Cargo.toml inherits the workspace's GPL-3.0-only licence")
+    match = re.search(r'^license = "([^"]+)"$', manifest, re.MULTILINE)
+    check(match is not None, f"crates/{name}/Cargo.toml has no license field of its own")
+    return match.group(1) if match else ""
+
+
+def main() -> int:
+    mpl = MPL_TEXT.read_text(encoding="utf-8")
+    for name in ("engine", "path-trust"):
+        licence = (ROOT / "crates" / name / "LICENSE").read_text(encoding="utf-8")
+        check(licence.endswith(mpl), f"crates/{name}/LICENSE does not end with resources/licenses/MPL-2.0.txt verbatim")
+        preamble = licence[: len(licence) - len(mpl)] if licence.endswith(mpl) else licence
+        check(" ".join(EXHIBIT_A.split()) in " ".join(preamble.split()), f"crates/{name}/LICENSE does not open with the Exhibit A notice")
+        check("Exhibit B is not attached" in preamble and "This Source Code Form is \"Incompatible With Secondary Licenses\"" not in preamble, f"crates/{name}/LICENSE must say Exhibit B is not attached, and must not attach it")
+        first = (ROOT / "crates" / name / "src/lib.rs").read_text(encoding="utf-8").splitlines()[0]
+        check(first == f"// {EXHIBIT_A}", f"crates/{name}/src/lib.rs does not open with the Exhibit A notice")
+
+    check(crate_license("path-trust") == "MPL-2.0", "crates/path-trust/Cargo.toml must declare MPL-2.0")
+    declared = spdx_ids(crate_license("engine"))
+    expected = {"MPL-2.0"}.union(*EMBEDDED.values(), *ADAPTED.values())
+    check(declared == expected, f"crates/engine/Cargo.toml declares {sorted(declared)}, the files inside the crate need {sorted(expected)}")
+    check(not any("GPL" in term for term in declared), f"crates/engine/Cargo.toml declares a GPL or LGPL licence: {sorted(declared)}")
+
+    source = ENGINE / "src"
+    compiled = set()
+    for path in sorted(source.rglob("*.rs")):
+        for literal in re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', path.read_text(encoding="utf-8")):
+            target = (path.parent / literal).resolve()
+            relative = target.relative_to(source.resolve()).as_posix() if target.is_relative_to(source.resolve()) else None
+            if relative is None or any(marker in f"/{relative}" for marker in TEST_DATA):
+                continue
+            compiled.add(relative)
+    unlisted = sorted(compiled - EMBEDDED.keys())
+    check(not unlisted, f"crates/engine compiles in {unlisted}, which have no licence entry here and in crates/engine/README.md")
+    readme = (ENGINE / "README.md").read_text(encoding="utf-8")
+    for relative in [*EMBEDDED, *ADAPTED]:
+        check((source / relative).is_file(), f"crates/engine/src/{relative} is listed but missing")
+        check(f"src/{relative}" in readme or f"`{relative.rsplit('/', 1)[-1]}`" in readme, f"crates/engine/README.md does not name src/{relative}")
+    # 非测试代码不许 include 到 crate 目录之外：tests 模块和 *tests.rs 里的读取由 cargo test 在仓库里跑，不进产品。
+    for path in sorted(source.rglob("*.rs")):
+        if path.name.endswith("tests.rs") or "tests" in path.relative_to(source).parts[:-1]:
+            continue
+        text = path.read_text(encoding="utf-8")
+        body = text.split("#[cfg(test)]", 1)[0]
+        for literal in re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', body):
+            target = (path.parent / literal).resolve()
+            check(target.is_relative_to(ENGINE.resolve()), f"{path.relative_to(ROOT)} compiles in {literal} from outside crates/engine")
+
+    octagram = (ROOT / "resources/licenses/librime-octagram-BSD-3-Clause.txt").read_text(encoding="utf-8")
+    check("Copyright (c) 2008-2014, Susumu Yata" in octagram and "fc45469d6a4469b2c9f337b2e153983888c7826a" in octagram, "librime-octagram-BSD-3-Clause.txt lost the darts-clone terms appended to it")
+    llvm = (ROOT / "resources/licenses" / LLVM_LICENCE).read_text(encoding="utf-8")
+    check("---- LLVM Exceptions to the Apache 2.0 License ----" in llvm and "llvm-project/blob/4a1b95bda0c444798a5240fe924dd127b776d12d/libcxx/LICENSE.TXT" in llvm, f"{LLVM_LICENCE} is not libc++'s LICENSE.TXT with its pinned source")
+
+    for channel, names in CHANNELS.items():
+        lines = live_lines(ROOT / channel)
+        for name in names:
+            check(any(name in line for line in lines), f"{channel} does not ship {name}")
+    collector = (ROOT / COLLECTOR).read_text(encoding="utf-8")
+    check('PROJECT_LICENSE = "GPL-3.0-only"' in collector and 'p.get("license") != PROJECT_LICENSE' in collector, f"{COLLECTOR} no longer collects the workspace members that are not GPL-3.0-only, so the engine's LICENSE drops out of rust-crates-NOTICES.txt")
+    for document in INBOUND_DOCS:
+        check(INBOUND in (ROOT / document).read_text(encoding="utf-8"), f"{document} does not state that contributions to the engine are licensed {INBOUND}")
+
+    packaging = ROOT / "platforms/linux/packaging"
+    spec = re.search(r"^License:\s*(.+)$", (packaging / "rpm/msime.spec").read_text(encoding="utf-8"), re.MULTILINE).group(1)
+    missing = sorted(expected - spdx_ids(spec))
+    check(not missing, f"rpm/msime.spec License lacks {missing}, which the engine compiles in")
+    gentoo_names = {"MPL-2.0", "BSD", "BSD-2", "CC-BY-3.0", "Unicode-3.0", "Apache-2.0", "Apache-2.0-with-LLVM-exceptions", "MIT", "WTFPL-2"}
+    for ebuild in ("gentoo/app-i18n/msime/msime.ebuild.in", "gentoo/app-i18n/msime/msime-9999.ebuild"):
+        line = re.search(r'^LICENSE="([^"]*)"$', (packaging / ebuild).read_text(encoding="utf-8"), re.MULTILINE)
+        listed = set(line.group(1).split()) if line else set()
+        check(gentoo_names <= listed, f"{ebuild} LICENSE lacks {sorted(gentoo_names - listed)}")
+    copyright_text = (packaging / "debian/copyright").read_text(encoding="utf-8")
+    check(re.search(r"^Files: crates/engine/\* crates/path-trust/\*\n(?:.+\n)*?License: MPL-2.0$", copyright_text, re.MULTILINE) is not None, "debian/copyright has no MPL-2.0 stanza for crates/engine and crates/path-trust")
+    nix = (ROOT / "platforms/linux/nix/fcitx5.nix").read_text(encoding="utf-8")
+    for attribute in ("mpl20", "cc-by-30", "unicode-30", "bsd2", "bsd3", "wtfpl", "llvm-exception"):
+        check(f"lib.licenses.{attribute}\n" in nix, f"platforms/linux/nix/fcitx5.nix meta.license lacks lib.licenses.{attribute}")
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL: {failure}")
+        return 1
+    print(f"engine license: MPL-2.0 with {len(declared) - 1} embedded licences, {len(compiled)} compiled-in data files, {len(CHANNELS)} notice channels")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

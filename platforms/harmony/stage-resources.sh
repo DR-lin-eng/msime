@@ -42,7 +42,10 @@ licenses_staged="$repo_root/platforms/harmony/entry/src/main/resources/resfile/l
 rm -rf "$licenses_staged"
 mkdir -p "$licenses_staged"
 cp resources/licenses/libhangul-hanja-BSD-3-Clause.txt "$licenses_staged/"
-cp resources/licenses/librime-octagram-BSD-3-Clause.txt "$licenses_staged/"
+# 语法模型查询逻辑的移植声明，文件末尾附着双数组读取所依的 darts-clone（BSD-2-Clause）条款；引擎的 cxx_sort.rs 逐步复现了 libc++ 的排序算法，源码级翻译要按 Apache-2.0 第 4 条随附许可证。
+cp resources/licenses/librime-octagram-BSD-3-Clause.txt resources/licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt "$licenses_staged/"
+# 输入引擎本身（crates/engine、crates/path-trust，源码在本仓库）和它链接的 rink-core（单位换算，源码在 crates.io）是 MPL-2.0，二进制分发要附上许可证全文。
+cp resources/licenses/MPL-2.0.txt "$licenses_staged/"
 cp resources/licenses/rime-cantonese-CC-BY-4.0.txt resources/licenses/libchewing-data-LGPL-2.1.txt resources/licenses/rime-stroke-LGPL-3.0.txt "$licenses_staged/"
 # 越南文和藏文方案编入原生库的 vi crate（MIT）和 ewts crate（MIT OR Apache-2.0，按 MIT 使用）的许可证全文。
 cp resources/licenses/vi-MIT.txt resources/licenses/ewts-MIT.txt "$licenses_staged/"

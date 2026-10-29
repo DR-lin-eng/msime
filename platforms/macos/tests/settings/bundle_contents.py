@@ -188,9 +188,12 @@ def main() -> int:
     # 百炼请求的 Base64 编码用的 cppcodec 编进了输入法，MIT 要求随副本附带它的许可声明。
     if not (contents / "Resources" / "Licenses" / "cppcodec-MIT.txt").is_file():
         failures.append("Contents/Resources/Licenses/cppcodec-MIT.txt is missing; cppcodec, compiled into the input method, ships without its licence")
-    # The sound player links MPL-2.0 crates (symphonia, triple_buffer) into the input method, and the engine links rink-core.
+    # The input engine is MPL-2.0 itself, the sound player links MPL-2.0 crates (symphonia, triple_buffer) into the input method, and the engine links rink-core.
     if not (contents / "Resources" / "Licenses" / "MPL-2.0.txt").is_file():
-        failures.append("Contents/Resources/Licenses/MPL-2.0.txt is missing; the MPL-2.0 crates of the sound player and unit conversion ship without their licence")
+        failures.append("Contents/Resources/Licenses/MPL-2.0.txt is missing; the input engine and the MPL-2.0 crates of the sound player and unit conversion ship without their licence")
+    # 引擎的 cxx_sort.rs 逐步复现了 libc++ 的排序算法，Apache-2.0 第 4 条要求随附许可证。
+    if not (contents / "Resources" / "Licenses" / "libcxx-Apache-2.0-WITH-LLVM-exception.txt").is_file():
+        failures.append("Contents/Resources/Licenses/libcxx-Apache-2.0-WITH-LLVM-exception.txt is missing; the libc++ sorts the engine reproduces ship without their licence")
     # The engine embeds the place names `@` mode offers from modood/Administrative-divisions-of-China.
     if not (contents / "Resources" / "Licenses" / "Administrative-divisions-of-China-WTFPL.txt").is_file():
         failures.append("Contents/Resources/Licenses/Administrative-divisions-of-China-WTFPL.txt is missing; the built-in place names ship without their licence")

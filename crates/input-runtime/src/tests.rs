@@ -4812,6 +4812,107 @@ fn key_geometry_survives_an_engine_replacement() {
     assert!(!type_mwgfxi(&mut runtime));
 }
 
+/// 首选规则（#10018 PR3）经 runtime 到视图：引擎把落点支持、明显更优的双拼纠错整句放在第一位时，重排器不把它换下去（模型偏爱字面整句也一样），字面整句留在前三，视图只给第一位那一行标 `confident_correction`，序列化成 JSON 时也只有它带这个字段。默认参数（m_sp 无穷大）下一行都不标，JSON 与没有这个字段时相同。
+#[test]
+fn a_confident_shuangpin_correction_leads_the_view_and_only_it_is_marked() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.scheme = 1;
+    options.autocorrect_transposition = true;
+    options.autocorrect_neighbor = true;
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(
+        "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_m VALUES('mei','m','没',1000);\
+         CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_g VALUES('gen','g','跟',1000),('guan','g','关',500);\
+         CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_x VALUES('xi','x','系',1000);\
+         CREATE TABLE tbl_2_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);",
+    )
+    .unwrap();
+    let mut keys = [[0.0f32; 4]; 26];
+    for (letters, left, y) in [
+        ("qwertyuiop", 5.0, 7.0),
+        ("asdfghjkl", 10.0, 21.0),
+        ("zxcvbnm", 20.0, 35.0),
+    ] {
+        for (column, letter) in letters.bytes().enumerate() {
+            keys[usize::from(letter - b'a')] = [left + 10.0 * column as f32, y, 10.0, 14.0];
+        }
+    }
+    let typed = |tuning: Option<msime_engine::touch::TouchTuning>| {
+        let mut session = msime_engine::host::Session::new(&options).unwrap();
+        if let Some(tuning) = tuning {
+            session.set_touch_tuning(tuning);
+        }
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        // 模型偏爱字面整句「没跟系」的字：它若能重排，就会把字面整句提到第一位。
+        let model = favouring_model(&['没', '跟', '关', '系'], &['跟']);
+        runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
+        runtime.focus(true).unwrap();
+        runtime.set_key_geometry(Some(
+            msime_engine::touch::KeyGeometry::new(9, &keys, None, &[]).unwrap(),
+        ));
+        for byte in *b"mwgfxi" {
+            let [x, y, _, _] = keys[usize::from(byte - b'a')];
+            // f 那一键落在 r 的键心上。
+            let (x, y) = if byte == b'f' {
+                (x - 5.0, y - 14.0)
+            } else {
+                (x, y)
+            };
+            let touch = runtime.key_touch(byte, 9, x, y);
+            assert!(touch.is_some());
+            runtime.set_key_touch(touch);
+            runtime
+                .dispatch(Action::Character {
+                    value: byte,
+                    shift: false,
+                })
+                .unwrap();
+            runtime.set_key_touch(None);
+        }
+        runtime.view()
+    };
+    let marks = |view: &View| {
+        view.candidates
+            .iter()
+            .map(|candidate| {
+                let json = serde_json::to_value(candidate).unwrap();
+                assert_eq!(
+                    json.get("confident_correction").is_some(),
+                    candidate.confident_correction
+                );
+                candidate.confident_correction
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let tuning = msime_engine::touch::TouchTuning {
+        lead_margin: 0.0,
+        lead_penalty: 10.0,
+        ..msime_engine::touch::TouchTuning::default()
+    };
+    let view = typed(Some(tuning));
+    let words = texts(&view);
+    assert_eq!(words[0], "没关系", "{words:?}");
+    assert!(view.candidates[0].corrected);
+    assert_eq!(view.candidates[0].annotation, "mwgfxi");
+    assert!(words[..3].contains(&"没跟系".to_owned()), "{words:?}");
+    let marked = marks(&view);
+    assert!(marked[0] && marked[1..].iter().all(|marked| !marked));
+
+    let view = typed(None);
+    let words = texts(&view);
+    assert_ne!(words[0], "没关系", "{words:?}");
+    assert!(marks(&view).iter().all(|marked| !marked));
+}
+
 #[test]
 fn dedicated_english_caret_does_not_turn_rejected_keys_into_candidate_picks() {
     for value in *b"1! " {
@@ -7882,6 +7983,63 @@ fn releasing_the_held_tail_publishes_a_new_generation() {
     assert_eq!(full.candidates.len(), 20);
     assert!(full.generation > before);
     assert_eq!(runtime.view().generation, full.generation);
+}
+
+#[test]
+fn candidate_range_copies_one_batch_without_releasing_the_held_tail() {
+    // 候选条每键只取一批：放出来的 12 行之内不向引擎要暂扣的 8 行，也不换代，首字母不必把整张声母表查出来。
+    let mut runtime = withholding_runtime(12, 8, 5);
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    let view = runtime.view();
+    let first = runtime.candidate_range(0, 48);
+    assert_eq!(first.generation, view.generation);
+    assert_eq!(first.total, 12);
+    assert_eq!(first.candidates.len(), 12);
+    let middle = runtime.candidate_range(3, 4);
+    assert_eq!(middle.generation, view.generation);
+    assert_eq!(
+        middle
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.index)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5, 6]
+    );
+    assert_eq!(runtime.view().generation, view.generation);
+    assert!(runtime.candidate_range(5, 0).candidates.is_empty());
+    assert_eq!(runtime.view().generation, view.generation);
+
+    // 和视图里同一座位的那一行是同一个身份、同一个候选。
+    assert_eq!(view.candidates.len(), 5);
+    for (ranged, shown) in first.candidates.iter().zip(&view.candidates) {
+        assert_eq!(ranged.id, shown.id);
+        assert_eq!(ranged.text, shown.text);
+    }
+}
+
+#[test]
+fn candidate_range_past_the_released_rows_releases_the_tail_in_a_new_generation() {
+    // 宿主把放出来的都建完了还要更多，才放出暂扣的尾部；座位可能重排，所以换一代，宿主据此从头取。
+    let mut runtime = withholding_runtime(12, 8, 5);
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    let before = runtime.view().generation;
+    let more = runtime.candidate_range(12, 48);
+    assert!(more.generation > before);
+    assert_eq!(more.total, 20);
+    assert_eq!(more.candidates.len(), 8);
+    assert_eq!(more.candidates[0].id.index, 12);
+    assert_eq!(runtime.view().generation, more.generation);
+    // 没有可放的了：同一代、一行不给，宿主据此停止追加。
+    let exhausted = runtime.candidate_range(20, 48);
+    assert_eq!(exhausted.generation, more.generation);
+    assert_eq!(exhausted.total, 20);
+    assert!(exhausted.candidates.is_empty());
+    assert_eq!(
+        runtime.candidate_range(0, 48).candidates.len(),
+        runtime.all_candidates().candidates.len()
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@
 pub const TOUCH_STEPS_PER_KEY: f32 = 20.0;
 /// 偏移钳到 ±1.5 键：更远的落点宿主不会归给这个键。
 pub const TOUCH_OFFSET_LIMIT: i8 = 30;
-/// 平面表里的 QWERTY 邻键离被按的键超过这么远（键为单位）时不算邻键。分离键盘上 T 和 Y、G 和 H 分在两半，平面表却把它们当邻键，参考的 iPad 分离布局里它们相距 8 个键以上；普通布局里平面表邻键的键心最远相距 2.25 个键（iPhone 微软双拼那份的 J 和 M：第二行多了 `;`，键距变宽）。
+/// 平面表里的 QWERTY 邻键离被按的键超过这么远（键为单位）时不算邻键。分离键盘上 T 和 Y、G 和 H 分在两半，平面表却把它们当邻键，宿主导出的 iPad 分离布局里分在两半的平面表邻键相距 4.6 个键以上；普通布局里平面表邻键的键心最远相距 2.37 个键（iPhone 微软双拼那份的 J 和 M：第二行多了 `;`，键距变宽）。
 const FLAT_NEIGHBOR_REACH: f32 = 3.0;
 /// 归一后的坐标（键心和落点）离原点最多这么多个键。宿主的坐标原点和单位任意，真实键盘用屏幕坐标也只有几百个键宽；超过它的几何（键宽极小、坐标极大）在算距离平方时会溢出成无穷，两个无穷相减得 NaN，罚分和邻键判断随之失效，所以整份拒绝。
 const COORDINATE_LIMIT: f32 = 10_000.0;
@@ -258,7 +258,7 @@ impl KeyGeometry {
     }
 }
 
-/// 计价参数，单位是词网格的自然对数分。`sigma_*`、`bias_y` 以键为单位。默认值在参考布局上扫参得到，宿主接入真机几何后重扫（见模块注释里的笔记）。
+/// 计价参数，单位是词网格的自然对数分。`sigma_*`、`bias_y` 以键为单位。默认值在三端宿主导出的几何上扫参得到（见模块注释里的笔记）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TouchTuning {
     /// B：落点在两键正中间时的罚分。
@@ -279,10 +279,14 @@ pub struct TouchTuning {
     pub show_margin: f64,
     /// 同时要求纠错整句改动的每一键在落点下的价都不超过它，落点才算支持这次改正。打对的输入里，按在键心附近的那一键改过去的价高，挡在这条线外；只看分数差时，字面整句本来就排得很靠后的那些用例常有一条分数接近的纠错整句，它坐到整句块之后，把金标准往后挤一位。
     pub show_penalty: f64,
+    /// m_sp（方案里的 `shuangpin_touch_lead_margin`）：纠错整句坐首选要求它的分数（已扣罚分）比字面整句高出这么多乘以纠错边数（`TypoSentence::leads`）。双拼触点专用，不复用全拼值为无穷大的 `typo_lead_margin`；只在 Rust 侧可调，宿主经 FFI 设不了。无穷大时首选规则整个不起作用。
+    pub lead_margin: f64,
+    /// P_LEAD：坐首选还要求改动的每一键在落点下改过去的价（不打学习折扣）都不超过它。按在键心的字母改到邻键的价接近 B + s，挡在这条线外，所以打在键心的字母永远不会被首选改掉。
+    pub lead_penalty: f64,
 }
 
 impl Default for TouchTuning {
-    /// 在参考布局（`resources/eval/key-geometry/android-portrait*.json`）上扫参得到，暂定；扫参表见模块注释里的笔记。
+    /// 在 Android 模拟器导出的几何（`resources/eval/key-geometry/android-portrait*.json`）上扫参得到；扫参表见模块注释里的笔记。
     fn default() -> Self {
         Self {
             base: 8.0,
@@ -293,8 +297,10 @@ impl Default for TouchTuning {
             min_penalty: 4.0,
             max_penalty: 28.0,
             cut: 16.0,
-            show_margin: 4.0,
+            show_margin: 6.0,
             show_penalty: 14.0,
+            lead_margin: f64::INFINITY,
+            lead_penalty: 10.0,
         }
     }
 }

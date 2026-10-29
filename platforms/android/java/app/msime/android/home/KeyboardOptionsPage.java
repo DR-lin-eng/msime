@@ -75,7 +75,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
 
     @Override protected void onContentDestroyed() { clipboardExport.destroyed(); }
     @Override protected java.util.List<String> sectionTitles() {
-        return java.util.List.of("布局", "尺寸", "反馈", "手势", "工具栏", "剪贴板");
+        return java.util.List.of("布局", "反馈", "手势", "工具栏");
     }
 
     private static final String[] ANIMATIONS = {"bounce", "ripple", "glow", "lift", "none"};
@@ -181,7 +181,7 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
         layout.toggle("组字时保留 Shift", "全拼 26 键组字时左下角保留 ⇧，点一下再输字母即辅助码；默认关闭，组字时这一键是「分词」，用来断开音节",
             preferences.optBoolean(QuanpinSeparatorPolicy.PREFERENCE_KEY, false),
             checked -> savePreference(QuanpinSeparatorPolicy.PREFERENCE_KEY, checked));
-        GroupCard dimensions = GroupCard.add(sectionColumn(target, "尺寸"), "尺寸");
+        GroupCard dimensions = GroupCard.add(sectionColumn(target, "布局"), "尺寸");
         KeyboardPreview preview = new KeyboardPreview(requireContext());
         preview.setKeyboard(state.skin(), current == KeyboardScheme.QUANPIN_NINE_KEY, current.title());
         preview.setGeometry(
@@ -216,8 +216,8 @@ public class KeyboardOptionsPage extends ReloadingDetailPage {
             values.remove("touch_row_spacing_tenths");
         }));
         layout.toggle("数字行", "26 键和韩文键盘的字母上方多一行 1–0，键盘整体高出一行；手机横屏时放不下，不显示",
-            settings.bool(AndroidLocalSettings.NUMBER_ROW),
-            checked -> saveLocalSetting(AndroidLocalSettings.NUMBER_ROW, checked));
+            preferences.optBoolean(TouchKeyStyle.NUMBER_ROW_PREFERENCE, false),
+            checked -> savePreference(TouchKeyStyle.NUMBER_ROW_PREFERENCE, checked));
         boolean showLargeScreenOptions = KeyboardFormFactorPolicy.showLargeScreenOptions(
             requireContext().getResources().getConfiguration().smallestScreenWidthDp);
         if (showLargeScreenOptions) {

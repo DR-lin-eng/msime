@@ -27,7 +27,7 @@ jobs:
     name: Android APK size watch
     needs: android
     if: ${{ !cancelled() && github.ref == 'refs/heads/develop' && github.repository == 'metasequoiaime/msime' }}
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     permissions:
       actions: read

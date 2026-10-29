@@ -15,6 +15,12 @@ private func msimeClientFocusRaw(_ session: UInt64, _ focused: Bool) -> UnsafeMu
 private func msimeClientStringFree(_ value: UnsafeMutablePointer<CChar>?)
 @_silgen_name("msime_client_character")
 private func msimeClientCharacterRaw(_ session: UInt64, _ value: MSIMEByte, _ shift: Bool) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_set_key_geometry")
+private func msimeClientSetKeyGeometryRaw(_ session: UInt64, _ json: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_touch_character")
+private func msimeClientTouchCharacterRaw(
+  _ session: UInt64, _ value: MSIMEByte, _ shift: Bool, _ geometryID: UInt32, _ x: Float, _ y: Float
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_glide")
 private func msimeClientGlideRaw(_ session: UInt64, _ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_punctuation")
@@ -213,6 +219,16 @@ private func msimeClientCharacter(_ session: UInt64, _ value: MSIMEByte, _ shift
   MSIMEInputThread.shared.sync { msimeClientCharacterRaw(session, value, shift) }
 }
 
+private func msimeClientSetKeyGeometry(_ session: UInt64, _ json: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>? {
+  MSIMEInputThread.shared.sync { msimeClientSetKeyGeometryRaw(session, json, length) }
+}
+
+private func msimeClientTouchCharacter(
+  _ session: UInt64, _ value: MSIMEByte, _ shift: Bool, _ geometryID: UInt32, _ x: Float, _ y: Float
+) -> UnsafeMutablePointer<CChar>? {
+  MSIMEInputThread.shared.sync { msimeClientTouchCharacterRaw(session, value, shift, geometryID, x, y) }
+}
+
 private func msimeClientGlide(_ session: UInt64, _ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>? {
   MSIMEInputThread.shared.sync { msimeClientGlideRaw(session, request, length) }
 }
@@ -401,6 +417,8 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
   let candidateFixedPositions: [Int]
   /// 引擎当前页的高亮状态，跟随候选一起过滤与换页。
   let candidateHighlighted: [Bool]
+  /// 引擎按双拼触点首选规则让这一行纠错坐了首选（View 的 `confident_correction`，只在为真时出现），与 `candidates` 对齐。候选条和展开网格据此用强调色画它，读屏念「已纠正」；纠错前的拼写照旧在 `candidateAnnotations` 里。
+  let candidateConfidentCorrections: [Bool]
   let candidatePageCount: Int
   let answeredByPinyinFallback: Bool
   let diagnosticText: String?
@@ -442,7 +460,8 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
        candidateIdentities: [MetasequoiaCandidateIdentity?] = [], generation: UInt64? = nil,
        candidateGlosses: [String] = [],
        candidateAnnotations: [String] = [], candidateSources: [Int] = [], candidateFixedPositions: [Int] = [],
-       candidateHighlighted: [Bool] = [], candidatePageCount: Int = 0, answeredByPinyinFallback: Bool = false,
+       candidateHighlighted: [Bool] = [], candidateConfidentCorrections: [Bool] = [],
+       candidatePageCount: Int = 0, answeredByPinyinFallback: Bool = false,
        diagnosticText: String? = nil, localMode: String = "none",
        nineKeySpellings: [String] = [], nineKeyReading: String = "", nineKeySingleCharacter: Bool = false,
        nineKeyStrokes: String = "", editingText: String = "", caretPosition: Int = 0,
@@ -463,6 +482,7 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
     self.candidateSources = candidateSources
     self.candidateFixedPositions = candidateFixedPositions
     self.candidateHighlighted = candidateHighlighted
+    self.candidateConfidentCorrections = candidateConfidentCorrections
     self.candidatePageCount = candidatePageCount
     self.answeredByPinyinFallback = answeredByPinyinFallback
     self.diagnosticText = diagnosticText
@@ -597,6 +617,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   private var aiCredential: String?
   /// 隐私会话标记和九键一样是会话状态，选项里不带，重建的会话要再告诉一次。
   private var privateSession = false
+  /// 运行时已确认带着 `privateSession` 的那个会话句柄；0 表示当前会话还没确认过。键盘每次空闲渲染都会再设一次隐私标记，值没变、会话也没重建时就不再跨到输入线程。
+  private var privateSessionHandle: UInt64 = 0
+  /// 当前会话最后一次接受并已经生效（没被组字推迟）的偏好，即交给它的 `engineBound` 文档；nil 表示不确定，下一次偏好更新照常发送。
+  ///
+  /// 键盘每次空闲渲染（每次上屏、每个中文标点、中文模式下按住删除键时每秒十几次）都会把学习和调频设置再推一遍，以前每次都要把整份偏好文档编成 JSON、同步跨到输入线程、在 Rust 里解析校验比较，再把整个 view 编回来解析，值却一次也没变。会话的偏好只经这个桥的 `msime_client_update_preferences` 改动，所以与这份完全相同的请求不会改变会话的任何状态，可以不发。被推迟的那次不记：组字结束后同样的请求还要再发一次，才能如实报告已经生效。
+  private var appliedPreferences: [String: Any]?
 
   init(resources: URL? = nil, stateRoot: URL? = nil) {
     options = [:]
@@ -741,8 +767,13 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     for key in Self.appEditedKeys { next[key] = reloaded[key] }
     guard handle != 0, !NSDictionary(dictionary: next).isEqual(to: applied) else { return }
     revision &+= 1
-    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": next]
-    _ = try? Self.callUpdate(msimeClientUpdatePreferences, handle, snapshot)
+    let sent = Self.engineBound(next)
+    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": sent]
+    appliedPreferences = nil
+    if let response = try? Self.callUpdate(msimeClientUpdatePreferences, handle, snapshot),
+       (try? Self.preferencesUpdateSucceeded(response)) == true {
+      appliedPreferences = sent
+    }
   }
 
   var fuzzyPinyinRulesApplied: UInt32? { appliedFuzzyPinyinRules }
@@ -1058,6 +1089,35 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     dispatch { pointer(for: character, shift: shifted) }
   }
 
+  /// 会话里注册着的键位几何代次（#10018）；还没注册、注册被拒，或会话重建后句柄换了时为 nil，键盘要先重新注册再带落点打字。
+  var keyGeometryID: UInt32? {
+    guard let keyGeometry, keyGeometry.handle == handle, handle != 0 else { return nil }
+    return keyGeometry.id
+  }
+  private var keyGeometry: (handle: UInt64, id: UInt32)?
+
+  /// 注册 26 键的字母键几何（`TouchPointPolicy.request` 拼出的 JSON，代次是 `id`），只在布局变化后调用。引擎拒绝时返回 false，`keyGeometryID` 随之为 nil：引擎里原来那份几何虽然还在，键盘不再按任何代次带落点，下一键重新注册。
+  @discardableResult
+  func setKeyGeometry(_ request: Data, id: UInt32) -> Bool {
+    flushPendingCharacters()
+    keyGeometry = nil
+    guard handle != 0, id != 0, !request.isEmpty, request.count <= 16_384 else { return false }
+    let accepted = request.withUnsafeBytes { bytes in
+      (try? Self.decode(msimeClientSetKeyGeometry(
+        handle, bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(request.count)))) != nil
+    }
+    if accepted { keyGeometry = (handle, id) }
+    return accepted
+  }
+
+  /// 26 键双拼的一键带上按下点 (x, y)（键区坐标，与 `geometryID` 那份几何同一个坐标系）。代次不符、坐标不是有限数或当前不是 26 键双拼时，引擎的回应与 `handleCharacter(character)` 逐字节相同。
+  func handleTouchCharacter(_ character: String, geometryID: UInt32, x: Float, y: Float) -> MetasequoiaInputSnapshot {
+    dispatch {
+      guard let byte = Self.ascii(character) else { return nil }
+      return msimeClientTouchCharacter(handle, byte, false, geometryID, x, y)
+    }
+  }
+
   /// 滑行输入：抬手时把一笔滑行的请求（`GlideTyping.request`）交给 Engine，回应与 `handleCharacter` 的一样。方案不是全拼、处于本地模式或这一笔解不出音节时 Engine 不处理（`isHandled` 为 false），宿主丢掉这一笔。
   func glide(_ request: Data) -> MetasequoiaInputSnapshot {
     guard !request.isEmpty, request.count <= 65_536 else { return diagnostic("滑行输入无效") }
@@ -1218,24 +1278,120 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     }
   }
 
-  /// 从共享引擎读取原文和唯一纠错；查询不改变键盘组字，也不学习当前词。空格和标点边界只用这一查询。
+  /// 英文纠错在输入线程上的状态。Engine 把纠错词典放在调用线程的线程局部变量里，所以查询一律在 `MSIMEInputThread` 这一条常驻线程上做：主线程不再另开一份词典连接，也不在每个字母上跑整段纠错搜索。
+  private final class EnglishCorrectionWork: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latestRequest: UInt64 = 0
+    /// 只在输入线程上读写：最近一次算出的结果。打完一个词按空格或标点时，同一个词刚在最后一个字母上算过，这里直接取用，不再算第二遍。
+    var memo: (resources: String, prefix: String, items: [String])?
+    var suggestionMemo: (resources: String, prefix: String, items: [String], corrected: Bool)?
+
+    func begin() -> UInt64 {
+      lock.lock()
+      defer { lock.unlock() }
+      latestRequest &+= 1
+      return latestRequest
+    }
+
+    func isLatest(_ request: UInt64) -> Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return request == latestRequest
+    }
+  }
+  private let englishCorrectionWork = EnglishCorrectionWork()
+
+  /// 从共享引擎读取原文和唯一纠错；查询不改变键盘组字，也不学习当前词。同步版本，在输入线程上算完再返回，空格、标点自动纠错要在上屏前拿到结果。
   func englishCorrections(forPrefix prefix: String) -> [String] {
-    englishSuggestionRequest(prefix: prefix, completions: false)?.items ?? []
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else { return [] }
+    let work = englishCorrectionWork
+    return MSIMEInputThread.shared.sync { Self.englishCorrections(prefix: prefix, resources: resources, work: work) }
+  }
+
+  /// 异步版本：在输入线程上算，结果回到主线程交给 `completion`。快速连打时排在队里、已被更新请求取代的查询直接跳过、不回调，只有最后一次请求的结果会送回；调用方仍要在回调里核对当前的词。
+  func englishCorrections(forPrefix prefix: String, completion: @escaping ([String]) -> Void) {
+    precondition(Thread.isMainThread)
+    let work = englishCorrectionWork
+    let request = work.begin()
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else {
+      completion([])
+      return
+    }
+    MSIMEInputThread.shared.async {
+      guard work.isLatest(request) else { return }
+      let items = Self.englishCorrections(prefix: prefix, resources: resources, work: work)
+      DispatchQueue.main.async {
+        guard work.isLatest(request) else { return }
+        completion(items)
+      }
+    }
+  }
+
+  private func englishCorrectionResources(forPrefix prefix: String) -> String? {
+    guard handle != 0, !prefix.isEmpty, prefix.utf8.count <= 128,
+          let resources = options["resources"] as? String,
+          NSString(string: resources).isAbsolutePath else { return nil }
+    return resources
+  }
+
+  /// 只在输入线程上调用。
+  private static func englishCorrections(prefix: String, resources: String,
+                                         work: EnglishCorrectionWork) -> [String] {
+    if let memo = work.memo, memo.resources == resources, memo.prefix == prefix { return memo.items }
+    let items = englishCorrections(prefix: prefix, resources: resources)
+    work.memo = (resources, prefix, items)
+    return items
+  }
+
+  private static func englishCorrections(prefix: String, resources: String) -> [String] {
+    englishSuggestionRequest(prefix: prefix, resources: resources, completions: false)?.items ?? []
   }
 
   /// 候选栏的合并展示上限：原文加至多十一个前缀补全，与 Android、HarmonyOS 相同。
   static let englishSuggestionDisplayLimit = 12
 
-  /// 候选栏的合并展示：有纠错时为原文与纠错（corrected 为真），原文已是完整的词时只有原文，否则原文后接前缀补全。
+  /// 完整展示仍在同一输入线程上计算，保持共享引擎的纠错与补全规则。
   func englishSuggestions(forPrefix prefix: String) -> (items: [String], corrected: Bool) {
-    englishSuggestionRequest(prefix: prefix, completions: true) ?? ([], false)
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else { return ([], false) }
+    let work = englishCorrectionWork
+    return MSIMEInputThread.shared.sync { Self.englishSuggestions(prefix: prefix, resources: resources, work: work) }
   }
 
-  private func englishSuggestionRequest(prefix: String, completions: Bool) -> (items: [String], corrected: Bool)? {
-    guard handle != 0, !prefix.isEmpty, prefix.utf8.count <= 128,
-          let resources = options["resources"] as? String,
-          NSString(string: resources).isAbsolutePath else { return nil }
-    let limit = completions ? Self.englishSuggestionDisplayLimit : 2
+  /// 异步候选展示保留纠错标记；过期请求在计算前和回主线程后均丢弃。
+  func englishSuggestions(forPrefix prefix: String,
+                          completion: @escaping ((items: [String], corrected: Bool)) -> Void) {
+    precondition(Thread.isMainThread)
+    let work = englishCorrectionWork
+    let request = work.begin()
+    guard let resources = englishCorrectionResources(forPrefix: prefix) else {
+      completion(([], false))
+      return
+    }
+    MSIMEInputThread.shared.async {
+      guard work.isLatest(request) else { return }
+      let result = Self.englishSuggestions(prefix: prefix, resources: resources, work: work)
+      DispatchQueue.main.async {
+        guard work.isLatest(request) else { return }
+        completion(result)
+      }
+    }
+  }
+
+  /// 仅输入线程访问缓存；候选展示的唯一纠错也供随后的空格、标点边界复用。
+  private static func englishSuggestions(prefix: String, resources: String,
+                                        work: EnglishCorrectionWork) -> (items: [String], corrected: Bool) {
+    if let memo = work.suggestionMemo, memo.resources == resources, memo.prefix == prefix {
+      return (memo.items, memo.corrected)
+    }
+    let result = englishSuggestionRequest(prefix: prefix, resources: resources, completions: true) ?? ([], false)
+    work.suggestionMemo = (resources, prefix, result.0, result.1)
+    work.memo = (resources, prefix, result.0.isEmpty ? [] : (result.1 ? result.0 : [prefix]))
+    return result
+  }
+
+  private static func englishSuggestionRequest(prefix: String, resources: String,
+                                              completions: Bool) -> (items: [String], corrected: Bool)? {
+    let limit = completions ? englishSuggestionDisplayLimit : 2
     var fields: [String: Any] = ["prefix": prefix, "limit": limit, "correction": true]
     if completions { fields["completions"] = true }
     do {
@@ -1565,9 +1721,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   /// 把隐私模式告诉运行时（与 Android 的 `markPrivateSession` 相同）：隐私会话不记选词位置和上屏效率。学习本身仍由偏好里的 `learning` 决定。返回运行时是否接受。
   @discardableResult func setPrivateSession(_ enabled: Bool) -> Bool {
     flushPendingCharacters()
+    if handle != 0, privateSessionHandle == handle, enabled == privateSession { return true }
     privateSession = enabled
     guard handle != 0 else { return false }
-    return (try? Self.decode(msimeClientSetPrivateSession(handle, enabled))) != nil
+    let accepted = (try? Self.decode(msimeClientSetPrivateSession(handle, enabled))) != nil
+    privateSessionHandle = accepted ? handle : 0
+    return accepted
   }
   /// Chinese or ASCII marks for this session, on top of the document's `chinese_punctuation`; `punctuation_lock` still wins.
   @discardableResult func setChinesePunctuation(_ enabled: Bool) -> MetasequoiaInputSnapshot {
@@ -1705,6 +1864,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     return true
   }
 
+  /// 会话在收起时销毁、还没在下一次出现时重建：这时 `resumeDictionarySession` 要同步建一整个会话。
+  var dictionarySessionSuspended: Bool { suspended }
+
   // Recreated from the options prepared when this process started. Preparation streams every pinned
   // resource through SHA-256, so repeating it for each presentation would cost far more than the
   // session itself; the options stay valid for the life of the process.
@@ -1722,14 +1884,22 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     // 选中只吃掉部分输入的候选时，让运行时把已选的那一段留在组字里而不是立刻上屏：用户还在打后
     // 半截，前半截已经进了文档的话，搜索框会拿半个词去搜，编辑器为它记一次撤销。键盘把它画在候选
     // 条的读音前面，两件事必须一起做（scripts/test-phrase-preedit-hosts.py 守的就是这一半状态）。
-    var requested = options
+    var requested = engineOptions
     requested["phrase_preedit"] = true
+    // 新会话的偏好来自建会话的选项，不是上一个会话最后接受的那份；隐私标记也要重新确认。
+    appliedPreferences = nil
+    privateSessionHandle = 0
     handle = try Self.callCreateFocused(requested)
     if keyGrid != .none { _ = dispatch { msimeClientSetKeyGrid(handle, keyGrid.rawValue) } }
     if fullwidth { _ = dispatch { msimeClientSetCharacterWidth(handle, true) } }
     if let chinesePunctuation { _ = dispatch { msimeClientSetChinesePunctuation(handle, chinesePunctuation) } }
     if aiCredential != nil { _ = applyAICredential() }
-    if privateSession { _ = try? Self.decode(msimeClientSetPrivateSession(handle, true)) }
+    if privateSession {
+      if (try? Self.decode(msimeClientSetPrivateSession(handle, true))) != nil { privateSessionHandle = handle }
+    } else {
+      // 新会话本来就不是隐私会话。
+      privateSessionHandle = handle
+    }
   }
 
   /// 主线程复制选项；后台版本读取不访问可变会话，也不占用按键线程。
@@ -1738,7 +1908,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     if let initializationDiagnostic, options["user_data"] == nil {
       throw InputBridgeFailure.response(initializationDiagnostic)
     }
-    return try JSONSerialization.data(withJSONObject: options)
+    return try JSONSerialization.data(withJSONObject: engineOptions)
   }
 
   func localDictionaryStateVersion() throws -> String {
@@ -1761,7 +1931,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
           let dictionaries = options["dictionaries"] as? String else { throw InputBridgeFailure.invalidResponse }
     return ["resources": URL(fileURLWithPath: resources), "user": URL(fileURLWithPath: user),
             "contentIdentifier": dictionaries,
-            "preparedOptions": try JSONSerialization.data(withJSONObject: options)]
+            "preparedOptions": try JSONSerialization.data(withJSONObject: engineOptions)]
   }
 
   func activateDictionarySnapshot(_ snapshot: MSIMEPreparedDictionarySnapshot,
@@ -1805,7 +1975,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     var action: [String: Any] = ["operation": "edit", "request_id": requestID]
     action["previous"] = previous ?? NSNull()
     action["replacement"] = replacement ?? NSNull()
-    let request: [String: Any] = ["options": options, "action": action]
+    let request: [String: Any] = ["options": engineOptions, "action": action]
     let result = try withDictionaryMaintenance {
       try Self.callOptions(msimeClientDictionary, request)
     }
@@ -1887,7 +2057,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   ///
   /// 列表不经 `withDictionaryMaintenance`，活着的会话原样保留：host-api 的 `list` 只取共享租约（`DictionaryAccess::try_session`），和会话自己持有的共享租约并存，只有维护者在场时才报 `dictionary maintenance busy`；它读的个人词条行由会话在上屏时直接写进日志，不在会话的延迟写队列里，销毁会话也不会让列表多出什么。键盘每次出现都强制刷新一次这个列表，原来每次都要为它销毁、重建并聚焦一遍刚在 `viewWillAppear` 建好的会话。
   func personalEntries(atOffset offset: UInt, kind: PersonalWordKind? = nil, query: String = "") throws -> [String: Any] {
-    try Self.personalEntries(options: options, offset: offset, kind: kind, query: query)
+    try Self.personalEntries(options: engineOptions, offset: offset, kind: kind, query: query)
   }
 
   /// 同上，但用调用方给的 HostOptions、不经会话：设置 App 用 `preparedHostOptions` 的那一份，在词库同步把改动写进 Engine 之后重读「我的词条」（`PersonalDictionaryStore.refreshPage`）。`list` 只取共享租约，键盘的会话开着也能读，只有维护者在场时报 `dictionary maintenance busy`。读文件，调用方放到主线程之外。
@@ -1909,7 +2079,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       for page in 0..<maximumPages {
         let action: [String: Any] = ["operation": "export", "kind": kind.bridgeName, "format": format,
                                      "offset": page * 1000, "limit": 1000]
-        let result = try Self.callOptions(msimeClientDictionary, ["options": options, "action": action])
+        let result = try Self.callOptions(msimeClientDictionary, ["options": engineOptions, "action": action])
         guard let chunk = result["text"] as? String, let hasMore = result["has_more"] as? Bool else {
           throw InputBridgeFailure.invalidResponse
         }
@@ -2007,16 +2177,44 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     var prefs = previous
     mutate(&prefs)
     options["preferences"] = prefs
+    let sent = Self.engineBound(prefs)
+    // 会话已经接受并应用了完全相同的偏好：再发一次不改变任何状态，见 `appliedPreferences`。
+    if let appliedPreferences, NSDictionary(dictionary: appliedPreferences).isEqual(to: sent) { return true }
     revision &+= 1
-    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": prefs]
+    let snapshot: [String: Any] = ["format_version": 1, "revision": revision, "preferences": sent]
+    appliedPreferences = nil
     do {
       let response = try Self.callUpdate(msimeClientUpdatePreferences, handle, snapshot)
-      return try Self.preferencesUpdateSucceeded(response)
+      let applied = try Self.preferencesUpdateSucceeded(response)
+      if applied { appliedPreferences = sent }
+      return applied
     } catch {
       options["preferences"] = previous
       revision &-= 1
       return false
     }
+  }
+
+  /// 交给 Rust 会话和词库调用的偏好：去掉 `custom_theme.keyboard.photo`。
+  ///
+  /// 照片皮肤的照片按 base64 内联在共享文档里，最大约 680 KB。会话和词库都不画键盘皮肤（主题由 `ResolvedTheme` 另外解析），带着它的话每次建会话、改偏好、列个人词库、查词库版本都要在主线程把它整段编一遍 JSON，Rust 再解析一遍、按 base64 解一遍做校验。所有交给会话的偏好都经过这里，会话里的偏好因此始终一致，换照片也不会让会话以为偏好变了而重建 Engine。`options["preferences"]` 仍是完整文档，`sharedPreferences` 的读者（键盘皮肤、候选配色）照旧读得到照片；写回共享文档的路径都先从磁盘重新读文档（`persistSharedPreferences`），不从这里写回，所以文档里的照片不会因此丢失。
+  static func engineBound(_ preferences: [String: Any]) -> [String: Any] {
+    guard var custom = preferences["custom_theme"] as? [String: Any],
+          var keyboard = custom["keyboard"] as? [String: Any],
+          keyboard["photo"] is String else { return preferences }
+    keyboard.removeValue(forKey: "photo")
+    custom["keyboard"] = keyboard
+    var stripped = preferences
+    stripped["custom_theme"] = custom
+    return stripped
+  }
+
+  /// `options` with its preferences passed through `engineBound`, for every call that hands the prepared options to Rust.
+  private var engineOptions: [String: Any] {
+    guard let preferences = options["preferences"] as? [String: Any] else { return options }
+    var engine = options
+    engine["preferences"] = Self.engineBound(preferences)
+    return engine
   }
 
   /// The keyboard host's own contract, laid over whatever the shared document holds.
@@ -2115,6 +2313,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       candidateSources: candidateSources,
       candidateFixedPositions: candidateFixedPositions,
       candidateHighlighted: try rows.map { try strictBool($0["highlighted"], fallback: false) },
+      candidateConfidentCorrections: try rows.map { try strictBool($0["confident_correction"], fallback: false) },
       candidatePageCount: pageCount,
       answeredByPinyinFallback: try strictBool(view["answered_by_pinyin_fallback"], fallback: false),
       diagnosticText: value["diagnostic"] as? String,

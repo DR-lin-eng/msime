@@ -27,7 +27,7 @@ permissions:
 jobs:
   label:
     name: Label conflicting pull requests
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}

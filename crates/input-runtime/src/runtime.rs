@@ -734,6 +734,9 @@ impl<E: InputEngine> Runtime<E> {
             if snapshot.candidate_touch_supported.len() == order.len() {
                 snapshot.candidate_touch_supported.swap(left, right);
             }
+            if snapshot.candidate_confident_correction.len() == order.len() {
+                snapshot.candidate_confident_correction.swap(left, right);
+            }
             engine_order.swap(left, right);
         });
     }
@@ -1651,13 +1654,47 @@ impl<E: InputEngine> Runtime<E> {
     /// quietly showing the first tranche. Release them here too: this call is the request for all of
     /// them. A refusal is not fatal; the caller still gets whatever the generation already holds.
     pub fn all_candidates(&mut self) -> CandidateSnapshot {
+        self.release_held_candidates();
+        self.all_candidates_cached()
+    }
+
+    /// 座位 `start` 起最多 `count` 行候选，给每键都要重画的横向候选条用：只序列化这一批，不像 [`Self::all_candidates`] 那样整代复制。
+    ///
+    /// 引擎暂扣的尾部只在 `start` 已经走到放出来的末尾（宿主把已有的都建完了还要更多）时才放，和翻页宿主翻到最后一页时一样；放出来会重排座位并换一代，宿主看到 `generation` 变了就要按新的一代从头取。首字母打下去时因此不必把整张声母表查出来。
+    pub fn candidate_range(&mut self, start: usize, count: usize) -> CandidateRange {
+        if count > 0 && start >= self.visible_len() {
+            self.release_held_candidates();
+        }
+        let total = self.visible_len();
+        let end = start.saturating_add(count).min(total);
+        let candidates = self
+            .cached
+            .candidates
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(start)
+            .map(|(index, text)| self.candidate(index, text))
+            .collect();
+        CandidateRange {
+            session: self.session,
+            generation: self.generation,
+            preedit: self.cached.preedit.clone(),
+            reading: self.cached.reading.clone(),
+            total,
+            candidates,
+        }
+    }
+
+    /// 让引擎放出暂扣的候选尾部；放出来了就换一代。
+    fn release_held_candidates(&mut self) {
         // Candidate IDs are tied to the generation.  Once that identity space is
         // exhausted we cannot publish a reordered snapshot safely: advancing would
         // fail and retaining the old generation would let an ID from the previous
         // seat select a different candidate.  Keep the currently published view
         // stable; callers can still inspect the candidates already released.
         if self.generation == u64::MAX {
-            return self.all_candidates_cached();
+            return;
         }
         // The released tail reorders the list, so the page's IDs must not keep selecting by seat.
         if self.expand_cached_candidates().unwrap_or(false) {
@@ -1665,7 +1702,6 @@ impl<E: InputEngine> Runtime<E> {
             let advanced = self.advance();
             debug_assert!(advanced.is_ok());
         }
-        self.all_candidates_cached()
     }
 
     /// The generation as it stands, without asking the engine for more.
@@ -1761,6 +1797,14 @@ impl<E: InputEngine> Runtime<E> {
                 .get(index)
                 .copied()
                 .unwrap_or(false),
+            // 只标真正坐在第一位的那一行：插件或固定位置把它挪开以后，它只是一条普通的纠错行。
+            confident_correction: index == 0
+                && self
+                    .cached
+                    .candidate_confident_correction
+                    .first()
+                    .copied()
+                    .unwrap_or(false),
             fixed_position: self
                 .cached
                 .candidate_positions
@@ -2835,6 +2879,9 @@ impl<E: InputEngine> Runtime<E> {
         if snapshot.candidate_touch_supported.len() == count {
             plan.apply(&mut snapshot.candidate_touch_supported);
         }
+        if snapshot.candidate_confident_correction.len() == count {
+            plan.apply(&mut snapshot.candidate_confident_correction);
+        }
         plan.apply(&mut self.engine_order);
         true
     }
@@ -2956,6 +3003,7 @@ impl<E: InputEngine> Runtime<E> {
                     candidate_answers_key: Vec::new(),
                     candidate_static_evidence: Vec::new(),
                     candidate_touch_supported: Vec::new(),
+                    candidate_confident_correction: Vec::new(),
                     candidate_list_open: false,
                     microsoft_shuangpin: false,
                     shuangpin_profile: String::new(),
@@ -3008,7 +3056,9 @@ impl<E: InputEngine> Runtime<E> {
                 && self.cached.candidate_corrected == previous.candidate_corrected
                 && self.cached.candidate_answers_key == previous.candidate_answers_key
                 && self.cached.candidate_static_evidence == previous.candidate_static_evidence
-                && self.cached.candidate_touch_supported == previous.candidate_touch_supported;
+                && self.cached.candidate_touch_supported == previous.candidate_touch_supported
+                && self.cached.candidate_confident_correction
+                    == previous.candidate_confident_correction;
             if candidates_held {
                 self.highlighted = previous_highlight.min(self.visible_len().saturating_sub(1));
             } else if previous_highlight > 0 {
@@ -3046,6 +3096,7 @@ impl<E: InputEngine> Runtime<E> {
             || cached.multilingual_conversion != previous.multilingual_conversion
             || cached.candidate_positions != previous.candidate_positions
             || cached.candidate_corrected != previous.candidate_corrected
+            || cached.candidate_confident_correction != previous.candidate_confident_correction
             || cached.candidate_list_open != previous.candidate_list_open
             || cached.prediction != previous.prediction
         {

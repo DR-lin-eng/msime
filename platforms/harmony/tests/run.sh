@@ -247,6 +247,111 @@ if grep -qF 'FunctionPanelPolicy.items()' "$ets/keyboard/KeyboardView.ets"; then
   echo "KeyboardView must list function tiles through FunctionPanelPolicy.items(AiGenerationGate.enabled())" >&2
   exit 1
 fi
+# 词库快照队列只在键盘显示时查、没有待处理请求就停，重建会话的重试按 `IdleDictionaryRetryPolicy` 退避（规则由 keyboard-logic.test.ts 覆盖）。会话是 ArkTS，这里钉住接线：失焦和系统收起键盘（keyboardHide）时取消检查、停下没有进展的个人词库重试，显示时排一次检查并接着排个人词库，键盘没显示时不排、查到没有请求时不再自己续排，两个重试都按退避取间隔而不是固定两秒。
+session_ets="$ets/keyboard/KeyboardSession.ets"
+detach_body=$(sed -n '/^  detach(): void {$/,/^  }$/p' "$session_ets")
+attach_body=$(sed -n '/^  attach(inputClient: inputMethodEngine.InputClient): void {$/,/^  }$/p' "$session_ets")
+poll_body=$(sed -n '/^  private scheduleDictionarySnapshotPoll(): void {$/,/^  }$/p' "$session_ets")
+drain_body=$(sed -n '/^  private schedulePersonalDictionaryDrain(): void {$/,/^  }$/p' "$session_ets")
+hidden_body=$(sed -n '/^  keyboardHidden(): void {$/,/^  }$/p' "$session_ets")
+pause_body=$(sed -n '/^  private pauseIdleDictionaryWork(): void {$/,/^  }$/p' "$session_ets")
+if ! grep -qF 'this.pauseIdleDictionaryWork();' <<< "$detach_body" \
+  || ! grep -qF 'this.pauseIdleDictionaryWork();' <<< "$hidden_body" \
+  || ! grep -qF 'this.cancelDictionarySnapshotPoll();' <<< "$pause_body" \
+  || ! grep -qF 'this.idleDictionaryVisible = false;' <<< "$pause_body" \
+  || ! grep -qF 'this.idleDictionaryVisible = true;' <<< "$attach_body" \
+  || ! grep -qF 'this.personalDictionaryStalls > 0' <<< "$pause_body" \
+  || ! grep -qF 'clearTimeout(this.personalDictionaryTimer);' <<< "$pause_body" \
+  || ! grep -qF 'this.scheduleDictionarySnapshotPoll();' <<< "$attach_body" \
+  || ! grep -qF 'this.schedulePersonalDictionaryDrain();' <<< "$attach_body" \
+  || ! grep -qF 'this.inputClient === undefined) return;' <<< "$poll_body" \
+  || ! grep -qF '!this.idleDictionaryVisible' <<< "$poll_body" \
+  || [[ $(grep -cF 'this.scheduleDictionarySnapshotPoll();' <<< "$poll_body") -ne 1 ]] \
+  || ! grep -qF 'IdleDictionaryRetryPolicy.delay(this.snapshotQueueStalls)' <<< "$poll_body" \
+  || ! grep -qF 'IdleDictionaryRetryPolicy.delay(this.personalDictionaryStalls)' <<< "$drain_body"; then
+  echo "KeyboardSession must poll the dictionary snapshot queue only while shown and until it is empty, and back off both idle rebuild retries" >&2
+  exit 1
+fi
+# 候选释义的词库连接和自定义译文按文件身份缓存在 UI 线程上（engine 的 `release_gloss_caches` 由 Rust 测试覆盖）。会话是 ArkTS，这里钉住接线：失焦和系统收起键盘时释放，隐藏的键盘不留着它们。
+if ! grep -qF 'client.releaseGlossCaches();' <<< "$detach_body" \
+  || ! grep -qF 'client.releaseGlossCaches();' <<< "$hidden_body"; then
+  echo "KeyboardSession must release the UI thread's candidate gloss caches on focus loss and keyboardHide" >&2
+  exit 1
+fi
+# 打字统计的提交和语音时长不在 UI 线程上写：都排进同一个 SequenceRunner（`writeTypingStatistics`）在 TaskPool 线程上调用原生库，原生层攒着的计数在键盘收起（dismiss 与系统的 keyboardHide）、编辑框失去焦点（detach）和扩展销毁（shutdown）时 flush；detach 等 flush 写完再把统计文件发布给设置应用。会话是 ArkTS，这里钉住接线。
+record_body=$(sed -n '/^  private recordTypingStatistics(text: string, source: string): void {$/,/^  }$/p' "$session_ets")
+voice_body=$(sed -n '/^  insertVoiceResult(text: string): void {$/,/^  }$/p' "$session_ets")
+dismiss_body=$(sed -n '/^  dismiss(): void {$/,/^  }$/p' "$session_ets")
+shutdown_body=$(sed -n '/^  shutdown(): void {$/,/^  }$/p' "$session_ets")
+ability_ets="$ets/inputmethodextability/KeyboardExtensionAbility.ets"
+if ! grep -qF 'this.typingStatisticsWrites.execute(new taskpool.Task(writeTypingStatistics, request))' <<< "$record_body" \
+  || grep -qF 'client.typingStatistics(' <<< "$record_body" \
+  || ! grep -qF 'this.typingStatisticsWrites.execute(new taskpool.Task(writeTypingStatistics, request))' <<< "$voice_body" \
+  || grep -qF 'client.typingStatistics(' <<< "$voice_body" \
+  || ! grep -qF 'this.flushTypingStatistics().then((): void => {' <<< "$detach_body" \
+  || ! grep -qF 'SharedStateSync.keyboardPublish(mirror);' <<< "$detach_body" \
+  || ! grep -qF 'this.flushTypingStatistics();' <<< "$dismiss_body" \
+  || ! grep -qF 'this.flushTypingStatistics();' <<< "$shutdown_body" \
+  || ! grep -qF "engine.on('keyboardHide', this.keyboardHidden);" "$ability_ets" \
+  || ! grep -qF "engine.off('keyboardHide', this.keyboardHidden);" "$ability_ets"; then
+  echo "KeyboardSession must write typing statistics on its TaskPool SequenceRunner and flush them on hide, focus loss and teardown" >&2
+  exit 1
+fi
+# 完整体验模式下键盘失焦、获得焦点各发布一次共享状态，文件身份没变时不读文件、不再算指纹（缓存规则由 shared-state-mirror-policy.test.ts 的 `FingerprintCache` 覆盖）；每次获得焦点比偏好修订号时，文档身份没变就不经 NAPI 读整份文档；构建会话时处理词库快照队列、显示后查一次队列状态，队列空着都不扫词库算本机版本。这些都是 ArkTS，这里钉住接线。
+mirror_ets="$ets/keyboard/SharedStateMirror.ets"
+fingerprint_body=$(sed -n '/^  private static fingerprintOf(entry: MirrorEntry, path: string): string {$/,/^  }$/p' "$mirror_ets")
+reload_body=$(sed -n '/^  reloadChangedPreferences(): void {$/,/^  }$/p' "$session_ets")
+snapshot_body=$(sed -n '/^  private processDictionarySnapshot(options: Object, stateRoot: string): void {$/,/^  }$/p' "$session_ets")
+needs_work_body=$(sed -n '/^  private dictionarySnapshotNeedsWork(): boolean {$/,/^  }$/p' "$session_ets")
+if ! grep -qF 'SharedStateMirror.localFingerprints.fingerprint(' <<< "$fingerprint_body" \
+  || ! grep -qF 'stat.mtimeNs' <<< "$fingerprint_body" \
+  || ! grep -qF 'this.storedRevisionIfMoved(this.stateDirectory)' <<< "$reload_body" \
+  || grep -qF 'this.storedRevision(' <<< "$reload_body" \
+  || ! grep -qF 'skip_when_idle: true' <<< "$snapshot_body" \
+  || ! grep -qF 'skip_when_idle: true' <<< "$needs_work_body"; then
+  echo "Shared state fingerprints, the focus-time preference revision check and the snapshot queue pass and poll must skip work when nothing changed" >&2
+  exit 1
+fi
+# 候选皮肤位图在候选条放手后停放一份，同一套皮肤不再每个词重新解码；停放规则由 candidate-canvas-lease.test.ts 覆盖。解码器和扩展能力是 ArkTS，这里钉住接线：解码器经 CandidateCanvasLeaseCache 取用和放手，键盘收起、停止输入和销毁时 trim。
+frame_ets="$ets/keyboard/candidate/CandidateCanvasFrame.ets"
+hidden_body=$(sed -n '/^  private readonly keyboardHidden: () => void = (): void => {$/,/^  };$/p' "$ability_ets")
+stopped_body=$(sed -n '/^  private readonly stopped: () => void = (): void => {$/,/^  };$/p' "$ability_ets")
+teardown_body=$(sed -n '/^  private teardown(): void {$/,/^  }$/p' "$ability_ets")
+if ! grep -qF 'new CandidateCanvasLeaseCache<CanvasDecodeLease>(' "$frame_ets" \
+  || grep -qF 'Map<string, CanvasDecodeLease>' "$frame_ets" \
+  || ! grep -qF 'CandidateCanvasDecoder.trim();' <<< "$hidden_body" \
+  || ! grep -qF 'CandidateCanvasDecoder.trim();' <<< "$stopped_body" \
+  || ! grep -qF 'CandidateCanvasDecoder.trim();' <<< "$teardown_body"; then
+  echo "Candidate canvas decodes must park in CandidateCanvasLeaseCache and be trimmed on keyboard hide, input stop and teardown" >&2
+  exit 1
+fi
+# 键盘收起时停掉键盘内的语音识别（取舍规则由 kb-view.test.ts 的 `VoiceRecognitionPolicy.cancelsOnHide` 覆盖）。面板收起时视图不会销毁，会话和视图是 ArkTS，这里钉住接线：会话在系统的 keyboardHide 和 inputStop（detach）时都通知视图，视图按 cancelsOnHide 取消录音、取消还在走的空格长按计时，销毁时清掉回调。
+view_ets="$ets/keyboard/KeyboardView.ets"
+session_hidden_body=$(sed -n '/^  keyboardHidden(): void {$/,/^  }$/p' "$session_ets")
+detach_body=$(sed -n '/^  detach(): void {$/,/^  }$/p' "$session_ets")
+panel_hidden_body=$(sed -n '/^    KeyboardSession.shared.onPanelHidden = (): void => {$/,/^    };$/p' "$view_ets")
+if ! grep -qF 'this.onPanelHidden();' <<< "$session_hidden_body" \
+  || ! grep -qF 'this.onPanelHidden();' <<< "$detach_body" \
+  || ! grep -qF 'VoiceRecognitionPolicy.cancelsOnHide(' <<< "$panel_hidden_body" \
+  || ! grep -qF 'this.cancelVoice();' <<< "$panel_hidden_body" \
+  || ! grep -qF 'this.cancelSpaceLongPress();' <<< "$panel_hidden_body" \
+  || ! grep -qF 'KeyboardSession.shared.onPanelHidden = undefined;' "$view_ets"; then
+  echo "Hiding the keyboard must cancel in-keyboard voice recognition on touch devices" >&2
+  exit 1
+fi
+# 书写中每个移动事件只补画最后一段，不清屏重画整个字（墨色是否可补画由 keyboard-logic.test.ts 的 `HandwritingStrokePolicy.opaqueInk` 覆盖）。视图是 ArkTS，这里钉住接线：移动事件走 drawHandwritingSegment，补画不清屏、半透明墨色退回整幅重画，抬笔仍整幅重画让定稿画面与逐点重画一致。
+touch_body=$(sed -n '/^  private handwritingTouch(event: TouchEvent): void {$/,/^  }$/p' "$view_ets")
+segment_body=$(sed -n '/^  private drawHandwritingSegment(): void {$/,/^  }$/p' "$view_ets")
+move_branch=$(sed -n '/^    if (event.type === TouchType.Move) {$/,/^    }$/p' <<< "$touch_body")
+up_branch=$(sed -n '/^    if (event.type === TouchType.Up) {$/,/^    }$/p' <<< "$touch_body")
+if ! grep -qF 'this.drawHandwritingSegment();' <<< "$move_branch" \
+  || grep -qF 'this.redrawHandwriting();' <<< "$move_branch" \
+  || ! grep -qF 'HandwritingStrokePolicy.opaqueInk(' <<< "$segment_body" \
+  || grep -qF 'clearRect' <<< "$segment_body" \
+  || ! grep -qF 'this.redrawHandwriting();' <<< "$up_branch"; then
+  echo "Handwriting moves must draw only the new segment, and lifting the pen must redraw the whole pad" >&2
+  exit 1
+fi
 # 登录面板和首次启动弹窗的协议链接都经 `SettingsBridge.openExternalUrl` 交给系统浏览器，桥接是同步的，页面拿不到失败。提示文字由 privacy-consent.test.ts 覆盖；桥接是 ArkTS，这里钉住接线：打开失败时弹出带地址的提示，而不是只写日志、看起来点了没反应。
 open_url_body=$(sed -n '/^  openExternalUrl(url: string): void {$/,/^  }$/p' "$ets/pages/Settings.ets")
 if ! grep -qF 'showToast({ message: TextPolicy.unopenedLinkNotice(url)' <<< "$open_url_body"; then
@@ -290,7 +395,92 @@ if ! grep -qF 'this.refreshEnglishSuggestions();' <<< "$selection_body" \
   echo "editorSelectionChanged must re-validate English suggestions against the current word instead of clearing them" >&2
   exit 1
 fi
+# 双拼触点（#10018）：带按下点的入口（`pressTouch` → `msime_client_touch_character`）只给触屏键盘上 26 键双拼的字母和 `;`。何时带由 keyboard-logic.test.ts 的 `TouchPointPolicy.usesTouch` 覆盖；视图是 ArkTS，node 下编不了，这里钉住接线：视图只在 tapLetter 里经 touchKey 调 pressTouch，touchKey 问 usesTouch 并带上 touchDesign()，按下点只在 touchDesign() 时记；press 本身永远不带按下点（硬件键盘经 HardwareKeyDispatch 调它）；触点入口和几何注册只出现在这两个文件里。
+view="$ets/keyboard/KeyboardView.ets"
+session="$ets/keyboard/KeyboardSession.ets"
+tap_letter_body=$(sed -n '/^  private tapLetter(letter: string, touch: TouchPoint | null): void {$/,/^  }$/p' "$view")
+touch_key_body=$(sed -n '/^  private touchKey(touch: TouchPoint | null, shifted: boolean): TouchKey | null {$/,/^  }$/p' "$view")
+record_touch_body=$(sed -n '/^  private recordLetterTouch(letter: string | undefined, event: TouchEvent): void {$/,/^  }$/p' "$view")
+press_body=$(sed -n '/^  press(ascii: number, shift: boolean): boolean {$/,/^  }$/p' "$session")
+touch_callers=$(grep -rlF 'pressTouch(' "$ets" | sed "s|^$ets/||" | sort | tr '\n' ' ')
+touch_natives=$(grep -rlE 'client\.(touchCharacter|setKeyGeometry)\(' "$ets" | sed "s|^$ets/||" | sort | tr '\n' ' ')
+if [[ $(grep -cF 'KeyboardSession.shared.pressTouch(' "$view") -ne 1 ]] \
+  || ! grep -qF 'KeyboardSession.shared.pressTouch(' <<< "$tap_letter_body" \
+  || ! grep -qF 'this.touchKey(touch, shifted)' <<< "$tap_letter_body" \
+  || ! grep -qF 'TouchPointPolicy.usesTouch(' <<< "$touch_key_body" \
+  || ! grep -qF 'touchDesign: this.touchDesign(),' <<< "$touch_key_body" \
+  || ! grep -qF '!this.touchDesign()' <<< "$record_touch_body" \
+  || ! grep -qF 'return this.pressKey(ascii, shift, null);' <<< "$press_body" \
+  || [[ "$touch_callers" != "keyboard/KeyboardSession.ets keyboard/KeyboardView.ets " ]] \
+  || [[ "$touch_natives" != "keyboard/KeyboardSession.ets " ]]; then
+  echo "Only the touch keyboard's 26-key shuangpin letters may reach pressTouch / msime_client_touch_character, through KeyboardView.tapLetter and touchKey (TouchPointPolicy.usesTouch with touchDesign()); press() must stay pointless" >&2
+  exit 1
+fi
+# 双拼触点的按下点和几何要来自同一帧的布局（#10018 评审）。换算和几何本身由 keyboard-logic.test.ts 覆盖（`PendingTouches` 按键的当前位置重建按下点、`geometryLayout` 每键现算），这里钉住视图那一侧不能丢的接线：每个字母键的触摸都经 recordLetterTouch，按下时按被按的键（`event.target.area`）记、取消时丢掉、键面替换时清空；`;` 的位置由 recordGlideKey 记下；两处字母键的点击都经 takeTouch 按这个键现在的位置取按下点；touchLayout 每键现算，带上 `;` 是否画着，不缓存（缓存要靠作废标记，漏一处就一直报旧的几何代次）。
+glide_key_body=$(sed -n '/^  private recordGlideKey(letter: string | undefined, area: Area): void {$/,/^  }$/p' "$view")
+take_touch_body=$(sed -n '/^  private takeTouch(letter: string): TouchPoint | null {$/,/^  }$/p' "$view")
+touch_layout_body=$(sed -n '/^  private touchLayout(): string | null {$/,/^  }$/p' "$view")
+drop_gestures_body=$(sed -n '/^  private dropLetterGestures(): void {$/,/^  }$/p' "$view")
+if ! grep -qF 'this.recordLetterTouch($$.letter, event);' "$view" \
+  || ! grep -qF 'event.target.area.globalPosition.x' <<< "$record_touch_body" \
+  || ! grep -qF 'this.pendingTouches.down(letter, touch.windowX, touch.windowY, key, Date.now());' <<< "$record_touch_body" \
+  || ! grep -qF 'this.pendingTouches.cancel(letter);' <<< "$(grep -A1 -F 'event.type === TouchType.Cancel' <<< "$record_touch_body")" \
+  || ! grep -qF 'this.pendingTouches.clear();' <<< "$drop_gestures_body" \
+  || ! grep -qF "letter !== ';'" <<< "$glide_key_body" \
+  || ! grep -qF 'this.semicolonKey = rect;' <<< "$glide_key_body" \
+  || ! grep -qF 'TouchPointPolicy.keyRect(this.glideKeys, this.semicolonKey, letter), this.glideOriginX, this.glideOriginY);' <<< "$take_touch_body" \
+  || [[ $(grep -cF 'action: () => this.tapLetter(letter, this.takeTouch(letter))' "$view") -ne 2 ]] \
+  || [[ $(grep -cF 'this.pendingTouches.take(' "$view") -ne 1 ]] \
+  || ! grep -qF 'return TouchPointPolicy.geometryLayout(this.glideKeys, this.secondRowSemicolon(), this.semicolonKey,' <<< "$touch_layout_body" \
+  || [[ $(grep -cF 'TouchPointPolicy.geometryLayout(' "$view") -ne 1 ]] \
+  || grep -qE 'touchLayout(Cache|Dirty)' "$view"; then
+  echo "KeyboardView must record each letter's touch-down against the key it pressed, drop it on Cancel and when the face is replaced, record the semicolon key, take it through takeTouch at the key's current rect, and compute touchLayout on every key without a cache" >&2
+  exit 1
+fi
+# 硬件键盘快捷键 LOCK 锁定录音后，松开按键不再结束录音，会话按点按开始对待：面板给「说完了」「取消」，流式识别停顿自动结束。按钮文字由 voice-listening-policy.test.ts 的 `VoiceListeningPolicy.primaryLabel`、`cancelLabel` 覆盖；视图是 ArkTS，这里钉住接线：LOCK 分支清掉 `voiceHeldByKey`，面板按钮从策略取。
+lock_branch=$(sed -n '/^      if (action === VoiceHotkeyAction.LOCK) {$/,/^      }$/p' "$view")
+if ! grep -qF 'this.voiceHeldByKey = false;' <<< "$lock_branch" \
+  || ! grep -qF 'primaryLabel: VoiceListeningPolicy.primaryLabel(this.voiceListeningSession()),' "$view" \
+  || ! grep -qF 'cancelLabel: VoiceListeningPolicy.cancelLabel(this.voiceListeningSession()),' "$view"; then
+  echo "A hotkey LOCK must turn the held session into a tap session (clear voiceHeldByKey), and the listening panel must take its button labels from VoiceListeningPolicy" >&2
+  exit 1
+fi
+# 双拼纠错坐上首选的显式标记（#10018）：引擎只在那一行带 `confident_correction: true`。读法、读屏后缀、标记色以及展开面板选哪套令牌由 keyboard-logic.test.ts 的 `CorrectionMarkPolicy` 覆盖；会话和视图是 ArkTS，这里钉住接线和每处传进去的令牌：会话把引擎行变成候选栏、展开面板的三处都经 `CorrectionMarkPolicy.confident` 读这个键，翻译页的行一律不标；视图在候选窗、触屏胶囊上的候选字经 `candidateWordColor`、注释释义经 `candidateDetailTint` 换成标记色（两处里不再有没经过它的次要色），展开面板格子经 `CorrectionMarkPolicy.cellTextColor` 用 `expandedSurfaceColors`；两套令牌逐项钉住，交换高亮字色与强调色、换掉画布判断都会失败；两处读屏朗读都接上「已纠正」后缀。去掉空白和换行后比较整段调用，参数换行不影响。
+view_body() { sed -n "/^  $1\$/,/^  }\$/p" "$view" | tr -d ' \n'; }
+label_body=$(sed -n '/^  private candidateLabel(candidate: CandidateEntry, index: number): string {$/,/^  }$/p' "$view")
+expanded_label_body=$(sed -n '/^  private expandedLabel(index: number): string {$/,/^  }$/p' "$view")
+primary_body=$(view_body 'candidatePrimaryLine(candidate: CandidateEntry) {')
+cell_body=$(view_body 'candidateCell(candidate: CandidateEntry, index: number) {')
+chip_body=$(view_body 'candidateChip(candidate: CandidateEntry, index: number) {')
+grid_body=$(view_body 'expandedGrid() {')
+surface_body=$(view_body 'private candidateSurfaceColors(): CorrectionSurfaceColors {')
+word_body=$(view_body 'private candidateWordColor(candidate: CandidateEntry): string {')
+detail_body=$(view_body 'private candidateDetailTint(candidate: CandidateEntry, base: string): string {')
+expanded_surface_body=$(view_body 'private expandedSurfaceColors(): CorrectionSurfaceColors {')
+if [[ $(grep -cF 'confidentCorrection: CorrectionMarkPolicy.confident(candidate.confident_correction)' "$session") -ne 3 ]] \
+  || ! grep -qF 'fixedPosition: 0, source: 0, translation: null, confidentCorrection: false' "$session" \
+  || [[ $(grep -oF '.fontColor(this.candidateWordColor(candidate))' <<< "$primary_body" | wc -l) -ne 1 ]] \
+  || [[ $(grep -oF '.fontColor(this.candidateDetailTint(candidate,this.candidateDetailColor()))' <<< "$primary_body" | wc -l) -ne 5 ]] \
+  || grep -qF '.fontColor(this.candidateDetailColor())' <<< "$primary_body" \
+  || ! grep -qF '.fontColor(this.candidateDetailTint(candidate,this.candidateDetailColor()))' <<< "$cell_body" \
+  || grep -qF '.fontColor(this.candidateDetailColor())' <<< "$cell_body" \
+  || [[ $(grep -oF '.fontColor(this.candidateWordColor(candidate))' <<< "$chip_body" | wc -l) -ne 1 ]] \
+  || [[ $(grep -oF '.fontColor(this.candidateDetailTint(candidate,this.skin.secondary))' <<< "$chip_body" | wc -l) -ne 3 ]] \
+  || grep -qF '.fontColor(this.skin.secondary)' <<< "$chip_body" \
+  || ! grep -qF '.fontColor(CorrectionMarkPolicy.cellTextColor(this.expanded[cell.index].confidentCorrection,this.expandedHighlighted(cell.index),this.expandedSurfaceColors()))' <<< "$grid_body" \
+  || ! grep -qF 'text:this.candidateTextColor(),highlightedText:this.candidateSelectedTextColor(),accent:this.candidateAccentColor()' <<< "$surface_body" \
+  || ! grep -qF 'if(CandidatePresentationPolicy.aiPlaceholder(candidate.source))returnthis.candidateDetailColor();returnCorrectionMarkPolicy.tint(candidate.confidentCorrection,candidate.highlighted,CandidateSkinPolicy.rowTextColor(candidate.highlighted,candidate.fixedPosition>0,this.candidateTextColor(),this.candidateSelectedTextColor()),this.candidateSurfaceColors());' <<< "$word_body" \
+  || ! grep -qF 'returnCorrectionMarkPolicy.tint(candidate.confidentCorrection,candidate.highlighted,base,this.candidateSurfaceColors());' <<< "$detail_body" \
+  || ! grep -qF 'text:this.skin.keyForeground,highlightedText:this.skin.toggleForeground,accent:this.skin.accent' <<< "$expanded_surface_body" \
+  || ! grep -qF 'returnCorrectionMarkPolicy.expandedSurface(this.settings.candidateCanvas!==null,this.candidateSurfaceColors(),keyboard);' <<< "$expanded_surface_body" \
+  || grep -qF 'correctionDecoration' "$view" \
+  || ! grep -qF 'CorrectionMarkPolicy.accessibilitySuffix(candidate.confidentCorrection)' <<< "$label_body" \
+  || ! grep -qF 'CorrectionMarkPolicy.accessibilitySuffix(this.expanded[index].confidentCorrection)' <<< "$expanded_label_body"; then
+  echo "KeyboardSession must read confident_correction through CorrectionMarkPolicy for the strip and the expanded panel, and KeyboardView must draw those rows' word and every detail text in the mark colour from the right surface tokens in the candidate window, the touch chip and the expanded grid, and append the screen reader suffix to both labels" >&2
+  exit 1
+fi
 "$tsc" --project "$here/tsconfig.json"
+node "$here/idle-dictionary-lifecycle.test.cjs"
 # 上面已编译所有 tests/*.test.ts；逐个运行它们的输出。遍历源文件而不是输出目录，可以避免已删除测试遗留的旧 .js 被运行。
 for source in "$here"/*.test.ts; do
   node "$repo_root/target/harmony-tests/tests/$(basename "${source%.ts}").js"

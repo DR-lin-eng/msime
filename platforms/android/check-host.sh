@@ -78,6 +78,27 @@ if ! rg -q 'ShuangpinKeyHintPolicy\.profileWithoutView\(' \
   echo "Double-pinyin key hints must keep the remembered profile while the view is briefly missing" >&2
   exit 1
 fi
+# 26 键双拼的按下点（#10018）只经 type(char, View) 的最后一步送给引擎：辅助码的 Shift、英文直出、标点、字母网格和实体键盘都照常走 msime_client_character。哪一键带按下点由 TouchPointPolicySmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：NativeClient.touchCharacter 全宿主只有一处调用，在 touchCharacter 里，而它只由 type(char, View) 在 ImeTouchPoints.geometryFor 给出代次时调用。
+android_java="$repo_root/platforms/android/java/app/msime/android"
+touch_calls=$({ rg -c 'NativeClient\.touchCharacter\(' "$android_java" || true; } | awk -F: '{ total += $2 } END { print total + 0 }')
+type_body=$(sed -n '/^    void type(char key, View source) {$/,/^    }$/p' "$android_java/core/MSIMEInputService.java")
+touch_body=$(sed -n '/^    private boolean touchCharacter(int ascii, int geometryId, float x, float y) {$/,/^    }$/p' \
+  "$android_java/core/MSIMEInputService.java")
+if [[ "$touch_calls" != 1 ]] || ! rg -q 'NativeClient\.touchCharacter\(' <<< "$touch_body" \
+  || ! rg -q 'imeTouchPoints\.geometryFor\(' <<< "$type_body" \
+  || [[ $(rg -c 'touchCharacter\(output' "$android_java/core/MSIMEInputService.java") != 1 ]] \
+  || ! rg -q 'touchCharacter\(output' <<< "$type_body"; then
+  echo "Double-pinyin touch-downs must reach msime_client_touch_character only from type(char, View)" >&2
+  exit 1
+fi
+# 按键区只给点击时会取走按下点的键（shuangpinLetterKey 造的 ShuangpinHintButton：26 个字母和微软双拼的 `;`）记按下点。数字行、Shift、退格的按下从不被取走，记下来只会占着槽位；槽满时让出哪一个由 TouchPointPolicySmoke 覆盖，这里钉住接线。
+if [[ $(rg -c 'setTouchPoints\(' "$android_java/core/MSIMEInputService.java") != 1 ]] \
+  || ! rg -q 'setTouchPoints\(imeTouchPoints\.pending, key -> key instanceof ShuangpinHintButton\);' \
+    "$android_java/core/MSIMEInputService.java" \
+  || ! rg -q 'pressed != null && touchKey\.test\(pressed\)' "$android_java/keyboard/KeyboardKeyArea.java"; then
+  echo "Only double-pinyin letter keys may record touch-downs in the key area" >&2
+  exit 1
+fi
 # 功能面板「手写」磁贴再点一次要回到进入手写前的入口和中英状态（#9703）。0.5.0 取的是启用列表里第一个非手写入口，默认全拼 9 键、英文 26 键或小鹤双拼的用户关掉手写后都落到全拼 26 键。入口怎么选由 KeyboardSchemeSmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：离开手写经 handwritingReturn 取入口，并把记下的英文状态交给方案保存，保存成功后再进英文。
 toggle_body=$(sed -n '/^    void toggleHandwritingScheme() {$/,/^    }$/p' \
   "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java")
@@ -94,6 +115,75 @@ style_body=$(sed -n '/^    void styleCandidateButton(Button button) {$/,/^    }$
 if ! rg -q 'CandidateAppearance\.STRIP_CHIP_MIN_WIDTH_DP' <<< "$style_body" \
   || rg -q '\.itemMinWidth' <<< "$style_body"; then
   echo "Candidate strip buttons must keep only the touch minimum width, not the skin's desktop itemMinWidth" >&2
+  exit 1
+fi
+# 双拼触点纠错坐上首选的显式标记（#10018）：字段怎么读、读屏补什么、候选字和注释取什么颜色、不带标记的行颜色和改动前一样，都由 CandidateCorrectionMarkPolicySmoke 覆盖；接线在 InputMethodService 和 ImeCandidates 里，JVM 冒烟碰不到，这里钉住：候选条（含固定槽位）的 updateCandidateButton 和展开面板的 expandedCandidateButton 都经 CandidateCorrectionMarkPolicy 读 View JSON 候选上的字段，把结果交给 candidateLabel，并把「，已纠正」接进读屏描述；candidateLabel 是否建 span、候选字和注释的颜色都经这个策略决定，候选字的标记色只在策略给出时盖上，并且同一段加且只加一道下划线（首选 chip 上候选字本来就是强调色，只换颜色看不出来）；不带 corrected 的四参数重载传 false，翻译义项等其他调用方不会被标记。
+service_source="$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"
+update_body=$(sed -n '/^    void updateCandidateButton(Button button, JSONObject candidate, int slot, int visibleSlot) {$/,/^    }$/p' "$service_source")
+expanded_body=$(sed -n '/^    Button expandedCandidateButton(JSONObject candidate) {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidates.java")
+label_body=$(sed -n '/^                                        boolean highlighted, boolean corrected) {$/,/^    }$/p' "$service_source")
+for body in "$update_body" "$expanded_body"; do
+  if ! rg -q 'CandidateCorrectionMarkPolicy\.confident\(candidate\.opt\(CandidateCorrectionMarkPolicy\.FIELD\)\)' <<< "$body" \
+    || ! rg -q 'candidateLabel\([^;]*, corrected\)\)' <<< "$body" \
+    || ! rg -q 'CandidateCorrectionMarkPolicy\.accessibilitySuffix\(corrected\)' <<< "$body"; then
+    echo "Candidate strip and expanded panel must mark a confident shuangpin correction in colour and in the spoken description" >&2
+    exit 1
+  fi
+done
+plain_label_body=$(sed -n '/^                                        boolean highlighted) {$/,/^    }$/p' "$service_source")
+if ! rg -q 'CandidateCorrectionMarkPolicy\.plainLabel\(prefix, annotation, corrected\)' <<< "$label_body" \
+  || ! rg -q 'Integer mark = CandidateCorrectionMarkPolicy\.wordMark\(candidateAppearance, highlighted, corrected\);' <<< "$label_body" \
+  || ! rg -qU 'if \(mark != null\) \{\n\s*label\.setSpan\(new ForegroundColorSpan\(mark\), prefix\.length\(\), primary\.length\(\),\n\s*Spanned\.SPAN_EXCLUSIVE_EXCLUSIVE\);\n\s*\}' <<< "$label_body" \
+  || rg -q 'UnderlineSpan' <<< "$label_body" \
+  || ! rg -q 'int secondary = CandidateCorrectionMarkPolicy\.annotationColour\(candidateAppearance, highlighted, corrected\);' <<< "$label_body" \
+  || ! rg -q 'new ForegroundColorSpan\(secondary\), annotationStart' <<< "$label_body" \
+  || ! rg -q 'return candidateLabel\(prefix, text, annotation, highlighted, false\);' <<< "$plain_label_body"; then
+  echo "candidateLabel must take its spans and colours from CandidateCorrectionMarkPolicy and mark a confident correction in colour only, like iOS and HarmonyOS" >&2
+  exit 1
+fi
+# 每次按键的 render 末尾都会把候选重新上色一遍：外观和密度没变、按钮的底也还是上次装上的那块时，不能再给每个候选新建五块 GradientDrawable 和一个 StateListDrawable，文字配色也共用一份 ColorStateList。低端机上每键几十个候选、几百个短命 Drawable，是打字发热和卡顿的来源之一。
+if ! rg -q 'if \(!keepsChipFace\(button\)\) \{' <<< "$style_body" \
+  || rg -q 'ColorPolicy\.stateList' <<< "$style_body"; then
+  echo "Candidate chip styling must keep the installed chip face when appearance and density are unchanged" >&2
+  exit 1
+fi
+# 触屏候选条按位置复用按钮（ImeCandidateStrip.pool），每次 render 只重新绑定内容和点击目标；改回每次新建按钮，每键就要整排重建几十个 Button 再量一遍字宽。
+strip_add_body=$(sed -n '/^    private void add(int target, boolean style) {$/,/^    }$/p' \
+  "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidateStrip.java")
+if ! rg -q 'pool\.get\(visible\)' <<< "$strip_add_body" \
+  || ! rg -q 'bindStripCandidateButton\(' <<< "$strip_add_body"; then
+  echo "The touch candidate strip must reuse its pooled buttons instead of creating new ones on every render" >&2
+  exit 1
+fi
+# 触屏候选条每键只取它建得出来的一批（NativeClient.candidateRange），滚近尾部再取下一批。改回每键取整代候选（allCandidates / currentCandidateSnapshot），每键都要在主线程上解析几百到几千行的候选 JSON，首字母还会逼引擎把暂扣的整张声母表查出来；Rust 侧的分段语义由 input-runtime 和 host-api 的 candidate_range 测试覆盖。
+strip_source="$repo_root/platforms/android/java/app/msime/android/core/ImeCandidateStrip.java"
+if rg -q 'currentCandidateSnapshot\(|allCandidates\(' "$strip_source" \
+  || ! rg -q 's\.candidateRangeSnapshot\(0, wanted\)' "$strip_source" \
+  || ! rg -q 's\.candidateRangeSnapshot\(loaded, CandidateGridBatchPolicy\.BATCH\)' "$strip_source"; then
+  echo "The touch candidate strip must fetch one batch per render through candidateRange, not the whole candidate generation" >&2
+  exit 1
+fi
+# 英文释义和音标也在 render 里每键跑：只显示候选条时它们取引擎已放出的那一段（displayedCandidateSnapshot），整代只留给展开面板。直接调 currentCandidateSnapshot 会让开了释义或音标的用户首字母仍逼引擎查出整张声母表、主线程仍解析整代 JSON。
+service_source="$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"
+if awk '/private void scheduleCandidateGlosses\(\)/ || /private void scheduleCandidatePronunciations\(\)/ { inside = 1 } inside && /currentCandidateSnapshot\(\)/ { bad = 1 } inside && /^    }$/ { inside = 0 } END { exit !bad }' "$service_source" \
+  || ! awk '/private JSONObject displayedCandidateSnapshot\(\)/ { inside = 1 } inside && /candidateRangeSnapshot\(0, CandidateGlossModel\.MAX_CANDIDATES\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_source"; then
+  echo "Android candidate glosses and pronunciations must not fetch the whole candidate generation while only the strip is showing" >&2
+  exit 1
+fi
+# applySkin 每次 render 都走整棵键盘树，收着的面板（表情、符号网格可有几百格）不能每键跟着上一遍色：只在 applySkin 自己那几遍里跳过 GONE 子树并记下来，被直接显示出来时由画帧前的兜底补一次换肤。
+if ! rg -q 'skipHidden = true;' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
+  || ! rg -q 'skippedHidden\.add\(child\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
+  || ! rg -q 'addOnPreDrawListener\(restyleShown\)' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java"; then
+  echo "applySkin must skip hidden subtrees and restyle them when they are shown" >&2
+  exit 1
+fi
+# APNG 候选皮肤只在换帧那一刻重画（CandidateApngFrames.millisUntilNextFrame，CandidateCanvasDeviceSmoke 覆盖它的帧边界）。改回每次绘制都 postInvalidateOnAnimation，候选在屏上时整列按屏幕刷新率空转重画，而 APNG 一般 100 毫秒左右才换一帧。
+renderer_source="$repo_root/platforms/android/java/app/msime/android/candidate/CandidateCanvasRenderer.java"
+if rg -q 'postInvalidateOnAnimation' "$renderer_source" \
+  || ! rg -q 'millisUntilNextFrame\(elapsed, motion\)' "$renderer_source" \
+  || ! rg -q 'host\.postDelayed\(tick, nextFrame\)' "$renderer_source"; then
+  echo "The candidate canvas must schedule APNG redraws at the next frame boundary, not on every vsync" >&2
   exit 1
 fi
 # Hangul composition is Engine state. Android labels the Dubeolsik keys and sends their ASCII letters; a syllable table here would be a second automaton that can drift from the Engine's.
@@ -1120,14 +1210,15 @@ for manifest in \
     exit 1
   fi
 done
-# 键区里的系统识别服务是 SpeechRecognizer 回调接线，JVM 冒烟只能覆盖 PlatformSpeechPolicy 和 ImeVoiceEntry.choose 这些纯逻辑，这里守住回调里不能被悄悄改回去的几处（#5553）：两条入口都按错误码提示、空结果不冒用错误码，权限拒绝或聆听前启动失败时转交识别窗口，系统识别服务不被 1.5 s 停顿截断，说完后收回音量光圈。
+# 键区里的系统识别服务是 SpeechRecognizer 回调接线，JVM 冒烟只能覆盖 PlatformSpeechPolicy 和 ImeVoiceEntry.choose 这些纯逻辑，这里守住回调里不能被悄悄改回去的几处（#5553）：两条入口都按错误码提示、空结果不冒用错误码，权限拒绝或聆听前启动失败时转交识别窗口，系统识别服务和豆包流式不被 1.5 s 停顿截断（豆包整句流式说到 15 秒才回第一段结果，#9886），说完后收回音量光圈。
 voice_entry="$repo_root/platforms/android/java/app/msime/android/core/ImeVoiceEntry.java"
 if ! rg -qF 'fail(PlatformSpeechPolicy.message(error))' "$voice_activity" \
   || ! rg -qF 'fail(PlatformSpeechPolicy.emptyResult())' "$voice_activity" \
   || ! rg -qF 'PlatformSpeechPolicy.message(error)' "$voice_entry" \
   || ! rg -qF 'PlatformSpeechPolicy.emptyResult()' "$voice_entry" \
   || ! rg -qF 's.launchVoiceActivity();' "$voice_entry" \
-  || ! rg -qF 'if (platform != null) return;' "$voice_entry" \
+  || ! rg -qF 'heard(session, firstResult(partialResults), false);' "$voice_entry" \
+  || ! rg -qF 'heard(session, update, false)' "$voice_entry" \
   || ! rg -qF 'listening.resetLevel();' "$voice_entry"; then
   echo "Android platform speech callbacks must keep coded errors, the activity hand-off, the uncut pause and the level reset" >&2
   exit 1
@@ -1265,6 +1356,34 @@ if ! rg -q '"import_android_v1"' "$repo_root/platforms/android/java/app/msime/an
   echo "Android must convert the old snapshot queue before importing the old cloud sync progress" >&2
   exit 1
 fi
+# 离开输入框后的快照处理每次都要扫一遍整份用户词库算版本，必须像空闲同步一样延后排队、并在下一个要建会话的输入框开始时取消；改回失焦即排进工作线程，换输入框时新会话又要排在这次扫描后面。被取消的那一轮要记在 DictionarySnapshotBacklog 里：欠满一分钟就不再延后，服务销毁时还欠着的要补上，否则一直在几个输入框之间切换的用户永远等不到快照激活和输入记录合并。
+if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /scheduleDictionarySnapshotProcessing\(false\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/public void onStartInput\(EditorInfo info, boolean restarting\)/ { inside = 1 } inside && /cancelDictionarySnapshotProcessing\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'if \(generation != dictionarySnapshotGeneration\) return;' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/private void scheduleDictionarySnapshotProcessing\(boolean immediate\)/ { inside = 1 } inside && /dictionarySnapshotBacklog\.owe\(SystemClock\.uptimeMillis\(\)\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /if \(dictionarySnapshotBacklog\.owed\(\)\) scheduleDictionarySnapshotProcessing\(true\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' \
+      "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
+  echo "Android must defer dictionary snapshot processing after a blur and cancel it when the next field starts a session" >&2
+  exit 1
+fi
+# 上屏统计在 native 里按目录攒着，最多每半分钟写一次，最后一段要靠宿主在失焦、收起键盘和销毁时叫一次 flush；销毁时的那次必须排在统计工作线程 shutdown 之前，否则排不进去，进程一退这段统计就丢了。
+if ! awk '/public void onFinishInput\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! awk '/public void onWindowHidden\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /flushTypingStatistics\(\);/ { flush = NR } inside && /typingStatisticsWorker\.shutdown\(\);/ { shutdown = NR } inside && /^    }$/ { exit } END { exit !(flush && shutdown && flush < shutdown) }' "$service_java" \
+  || ! rg -q '"operation", "flush"' "$service_java"; then
+  echo "Android must flush pending typing statistics when the field loses focus, the keyboard hides, and before the statistics worker shuts down" >&2
+  exit 1
+fi
+# 同一输入框重启连接时留着会话，跳过了 startInputRuntime 里按资源包重算方案列表和音标可用的那一步；资源包装好或删掉之后必须走重建，否则切换器和音标要等换了输入框才跟上。
+if ! awk '/private boolean keepsSessionAcrossRestart\(/ { inside = 1 } inside && /ResourcePacks\.installedIds\(this\)\.equals\(installedResourcePackIds\)/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$service_java" \
+  || ! rg -q 'installedResourcePackIds = installedPacks;' "$service_java"; then
+  echo "Android must rebuild the engine session on a same-field restart when the installed resource packs changed" >&2
+  exit 1
+fi
 # The host compiles against AndroidX and Material now, and those are AARs that only Gradle resolves,
 # so this script no longer compiles the whole source set -- `platforms/android/gradle-app` does, and
 # build-apk.sh drives it. What stays here is the part that is worth having without a Gradle daemon:
@@ -1309,6 +1428,21 @@ if ! rg -q 'installed\.headerAction\(manageButton\(context\)\)' "$lexicon_page" 
   || ! rg -q 'menu\.getMenu\(\)\.add\("导出词库"\)' "$lexicon_page" \
   || rg -q 'GroupCard manage =|manage\.addView\(KeyboardSheets\.actionRow' "$lexicon_page"; then
   echo "Android lexicon page must expose its four management actions from the installed header menu" >&2
+  exit 1
+fi
+# 登录前的明示同意（.agents/notes/implemented/bug-fix/2026-10-27-login-privacy-consent.md）：勾选规则由 LoginConsentPolicySmoke 覆盖，接线在 LoginSheet 里，JVM 冒烟碰不到，这里钉住：面板上不再有「登录即表示同意」；每一个发请求的登录操作（经 begin 进入忙碌状态的 Apple、Google、发送验证码和验证码登录）都在同一行先过 confirmConsent；Google、Apple 和邮箱验证码的登录流程只从 LoginSheet 发起，新入口不能绕过面板；文字与提示和共享设置页 login-consent.tsx 的一字不差。
+login_sheet="$repo_root/platforms/android/java/app/msime/android/home/LoginSheet.java"
+login_consent="$repo_root/platforms/android/java/app/msime/android/home/LoginConsentPolicy.java"
+shared_login_consent="$repo_root/packages/ui/src/account/login-consent.tsx"
+if rg -q '登录即' "$login_sheet" \
+  || ! awk '/[^a-zA-Z]begin\("/ { calls++; if ($0 !~ /!confirmConsent\(\) \|\|/) bad = 1 } END { exit (bad || calls != 4) }' "$login_sheet" \
+  || rg -l 'SignIn\.(startGoogle|startApple|requestEmailCode|verifyEmailCode)\(' "$repo_root/platforms/android/java" \
+    | rg -v '/home/LoginSheet\.java$' >/dev/null \
+  || ! rg -qF 'export const LOGIN_CONSENT_PROMPT = "请先阅读并勾选同意《用户协议》和《隐私政策》";' "$shared_login_consent" \
+  || ! rg -qF 'aria-label="我已阅读并同意《用户协议》和《隐私政策》"' "$shared_login_consent" \
+  || ! rg -qF 'TEXT = "我已阅读并同意" + TERMS_TITLE + "和" + PRIVACY_TITLE;' "$login_consent" \
+  || ! rg -qF 'PROMPT = "请先阅读并勾选同意" + TERMS_TITLE + "和" + PRIVACY_TITLE;' "$login_consent"; then
+  echo "Every Android sign-in request must first pass LoginSheet's explicit consent checkbox, worded as the shared login-consent.tsx" >&2
   exit 1
 fi
 #
@@ -1372,6 +1506,7 @@ fi
 javac --release 17 -Xlint:all -Werror -cp "$android_jar" -d "$output_dir" \
   "${client_sources[@]}" \
   "$repo_root/platforms/android/java/app/msime/android/home/SignInAttemptPolicy.java" \
+  "$repo_root/platforms/android/java/app/msime/android/home/LoginConsentPolicy.java" \
   "$repo_root/platforms/android/java/app/msime/android/home/OnboardingChoicePolicy.java" \
   "$repo_root/platforms/android/java/app/msime/android/home/HelpcodeChoicePolicy.java" \
   "$repo_root/platforms/android/gradle-app/ocr-module/src/main/java/app/msime/ocr/module/OcrPipeline.java" \

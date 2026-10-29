@@ -81,7 +81,7 @@ public final class ms_w2_kb_ViewLogicSmoke {
             800, KeyboardSpacingPolicy.DEFAULT_ROW_SPACING_TENTHS);
         float minimumKeyArea = KeyboardHeightPolicy.keyAreaHeightDp(KeyboardHeightPolicy.MIN_DESIGN_HEIGHT_ADJUSTMENT_DP,
             800, KeyboardSpacingPolicy.MIN_ROW_SPACING_TENTHS);
-        check(near(minimumKeyArea, 178f) && near(defaultKeyArea, 236f), "key area spans 178–236 dp from 75% / 4 dp to default");
+        check(near(minimumKeyArea, 162f) && near(defaultKeyArea, 236f), "key area spans 162–236 dp from 75% / 0 dp to default");
         check(near(KeyboardHeightPolicy.keyAreaHeightDp(0, 360, -1), defaultKeyArea), "landscape key area matches portrait");
         checkPicker(PagedTileGrid.pickerGrid(false, defaultKeyArea - chrome, row), 3, 1f, "100% is full size");
         float eighty = KeyboardHeightPolicy.keyAreaHeightDp(KeyboardHeightPolicy.heightPercentToAdjustment(80), 800,

@@ -27,6 +27,8 @@ public final class NativeClient {
     private static final int NINE_KEY_SHUANGPIN_REQUEST_LIMIT = 16 * 1024;
     private static final int SMART_PUNCTUATION_REQUEST_LIMIT = 4_096;
     private static final int GLIDE_REQUEST_LIMIT = 65_536;
+    /** 与 `msime_client_set_key_geometry` 的上限一致。 */
+    private static final int KEY_GEOMETRY_LIMIT = 16_384;
     /** An imported word list is the one request here that carries a whole file. */
     private static final int VOCABULARY_REQUEST_LIMIT = 8 * 1024 * 1024;
     static { System.loadLibrary("msime_android"); }
@@ -857,6 +859,18 @@ public final class NativeClient {
             throw new IllegalArgumentException("Touch input requires a letter and 52 center coordinates");
         return TextPolicy.utf8(characterWithTouchRaw(session, ascii, shift, x, y, centers));
     }
+    /** 26 键双拼的字母键几何（`msime_client_set_key_geometry`）：`json` 由 {@link TouchPointPolicy#geometryJson} 生成，空串清除。只在布局变化时调用。返回 View。 */
+    public static String setKeyGeometry(long session, String json) {
+        if (json == null) throw new IllegalArgumentException("Missing key geometry");
+        byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+        if (payload.length > KEY_GEOMETRY_LIMIT) throw new IllegalArgumentException("Key geometry is too large");
+        return TextPolicy.utf8(setKeyGeometryRaw(session, payload));
+    }
+    /** 带按下点的一键（`msime_client_touch_character`）：`x`、`y` 与注册的几何同一个坐标系，`geometryId` 是那份几何的代次。代次不符、坐标不是有限数或不是 26 键双拼时，结果与 {@link #character} 逐字节相同。返回与 {@link #character} 相同的输入响应。 */
+    public static String touchCharacter(long session, int ascii, boolean shift, int geometryId, float x, float y) {
+        if (ascii < 0 || ascii > 127) throw new IllegalArgumentException("Engine character must be ASCII");
+        return TextPolicy.utf8(touchCharacterRaw(session, ascii, shift, geometryId, x, y));
+    }
     public static String punctuationWithContext(long session, int ascii, int precedingCodePoint) {
         if (ascii < 0 || ascii > 127 || !SmartPunctuationContext.isAsciiPunctuation((char) ascii))
             throw new IllegalArgumentException("Engine punctuation must be ASCII punctuation");
@@ -944,6 +958,11 @@ public final class NativeClient {
         return TextPolicy.utf8(setNineKeyFilterRaw(session, singleCharacter, payload));
     }
     public static String allCandidates(long session) { return TextPolicy.utf8(allCandidatesRaw(session)); }
+    /** 座位 {@code start} 起最多 {@code count} 行候选（{@code msime_client_candidate_range}）：横向候选条每键只取它建得出来的一批，不整代复制。 */
+    public static String candidateRange(long session, int start, int count) {
+        if (start < 0 || count < 0) throw new IllegalArgumentException("Invalid candidate range");
+        return TextPolicy.utf8(candidateRangeRaw(session, start, count));
+    }
     public static String applyTranslations(long session, long generation, String translations) {
         if (generation < 0) throw new IllegalArgumentException("Invalid candidate generation");
         byte[] payload = translations.getBytes(StandardCharsets.UTF_8);
@@ -1113,6 +1132,9 @@ public final class NativeClient {
     private static native byte[] characterRaw(long session, int ascii, boolean shift);
     private static native byte[] characterWithTouchRaw(long session, int ascii, boolean shift,
         float x, float y, float[] centers);
+    private static native byte[] setKeyGeometryRaw(long session, byte[] json);
+    private static native byte[] touchCharacterRaw(long session, int ascii, boolean shift, int geometryId,
+        float x, float y);
     private static native byte[] balancePairedPunctuationAfterAutoCloseRaw(long session, int opening);
     private static native byte[] punctuationWithContextRaw(long session, int ascii,
         int precedingCodePoint);
@@ -1132,6 +1154,7 @@ public final class NativeClient {
     private static native byte[] setNineKeyFilterRaw(long session, boolean singleCharacter,
         byte[] strokes);
     private static native byte[] allCandidatesRaw(long session);
+    private static native byte[] candidateRangeRaw(long session, int start, int count);
     private static native byte[] applyTranslationsRaw(long session, long generation,
         byte[] translations);
     private static native byte[] onlineQueryRaw(long session);

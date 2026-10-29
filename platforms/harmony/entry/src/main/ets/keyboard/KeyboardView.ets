@@ -17,6 +17,7 @@ import { LetterKeyFacePolicy } from './input/LetterKeyFacePolicy';
 import { ChineseHelpcodePolicy } from './input/ChineseHelpcodePolicy';
 import { KeyAccessibilityPolicy } from './input/KeyAccessibilityPolicy';
 import { CandidateGlossPolicy } from './candidate/CandidateGlossPolicy';
+import { CorrectionMarkPolicy, CorrectionSurfaceColors } from './candidate/CorrectionMarkPolicy';
 import { CandidatePresentationPolicy } from './candidate/CandidatePresentationPolicy';
 import { KeyboardLayoutDragPolicy } from './input/KeyboardLayoutDragPolicy';
 import { ExpandedCandidateCell, ExpandedCandidateLayout } from './candidate/ExpandedCandidateLayout';
@@ -77,6 +78,7 @@ import {
   SpaceVoiceGesture
 } from './input/SpaceVoiceGesture';
 import { GlideArming, GlideKeyRect, GlidePoint, GlideTypingPolicy } from './input/GlideTypingPolicy';
+import { PendingTouches, TouchKey, TouchPoint, TouchPointPolicy } from './input/TouchPointPolicy';
 import { LetterHintTable } from './input/LetterHintTable';
 import { HintKeyRect, LetterHintGesture } from './input/LetterHintGesture';
 import { KeyPreviewFrame, KeyPreviewLayout } from './KeyPreviewLayout';
@@ -136,6 +138,7 @@ import { PrivacyGate } from './PrivacyGate';
 import { AiGenerationGate } from './AiGenerationGate';
 import { PhraseList, PHRASE_LIST_ERROR, PHRASE_LIST_LOADING, PHRASE_LIST_READY } from './faces/PhraseList';
 import { VoiceListening } from './faces/VoiceListening';
+import { VoiceListeningPolicy, VoiceListeningSession } from './faces/VoiceListeningPolicy';
 
 import { TextPolicy } from './TextPolicy';
 import { ToolbarTools, TouchToolbarPolicy } from './TouchToolbarPolicy';
@@ -804,6 +807,10 @@ struct KeyboardView {
   private keyPreviewFinger: number = -1;
   /** 字母键上可能输入角标提示而不是字母的触摸。 */
   private letterHints: LetterHintGesture = new LetterHintGesture();
+  /** 26 键字母键和 `;` 的按下点，等这一键的点击取走（#10018，`TouchPointPolicy`）。 */
+  private pendingTouches: PendingTouches = new PendingTouches();
+  /** 微软双拼第二行末尾 `;` 键的位置（窗口坐标），同 `glideKeys`；没量到时为 null。 */
+  private semicolonKey: GlideKeyRect | null = null;
   /** 每个被跟踪手指的长按计时器。 */
   private hintHoldTimers: Map<number, number> = new Map<number, number>();
   /** 双拼 18 键两个字母的键上的横滑。 */
@@ -896,6 +903,8 @@ struct KeyboardView {
       }
       if (action === VoiceHotkeyAction.LOCK) {
         this.voiceNotice = '已锁定录音，松开按键不会结束。';
+        // 锁定后松开按键不再结束录音，会话从此按点按开始对待：面板给「说完了」和「取消」，流式识别停顿后自动结束。快捷键的 STOP、CANCEL 不看这个标志，照常生效。
+        this.voiceHeldByKey = false;
       }
     };
     KeyboardSession.shared.onPanelKey = (key: EmojiPanelKey): boolean => this.panelKey(key);
@@ -956,6 +965,17 @@ struct KeyboardView {
       if (this.surface === SURFACE_REPLY) {
         this.replyNotice = '输入位置已变化，请重新选择回复方式';
       }
+    };
+    KeyboardSession.shared.onPanelHidden = (): void => {
+      // 面板收起时视图不会销毁（aboutToDisappear 不会执行）。还在走的空格长按计时要取消，否则收起后它照样到点开始录音。
+      this.cancelSpaceLongPress();
+      if (!VoiceRecognitionPolicy.cancelsOnHide(this.touchDesign(), this.voiceBusy, this.voiceFinishing)) {
+        return;
+      }
+      // 按住空格说话时收起：松手事件可能再也收不到，空格键上的「松开结束」不能留到下次显示。
+      this.spaceVoiceHeld = false;
+      this.spaceVoiceHint = '';
+      this.cancelVoice();
     };
     KeyboardSession.shared.onChanged = (state: KeyboardState): void => {
       const wasHandwriting: boolean = KeyboardScheme.usesHandwritingFace(
@@ -1062,6 +1082,7 @@ struct KeyboardView {
     KeyboardSession.shared.onEditorChanged = undefined;
     KeyboardSession.shared.onViewPreferencesReloaded = undefined;
     KeyboardSession.shared.onReplyContextChanged = undefined;
+    KeyboardSession.shared.onPanelHidden = undefined;
     KeyboardSession.shared.onPanelKey = undefined;
     KeyboardSession.shared.invalidateReplyContext(false);
     this.cancelHoverTip();
@@ -1335,7 +1356,8 @@ struct KeyboardView {
         || this.tibetanFace() || this.zhuyinFace());
   }
 
-  private tapLetter(letter: string): void {
+  /** `touch` 是这一键的按下点（键盘根区域坐标），没有时为 null：无障碍点击、没有被记下的触摸。 */
+  private tapLetter(letter: string, touch: TouchPoint | null): void {
     if (this.glideSwallowsTap) {
       // The stroke already typed what it meant; see glideSwallowsTap.
       return;
@@ -1378,13 +1400,72 @@ struct KeyboardView {
       || (this.english && held);
     // 英文组合按实际字符保留大小写，Shift 标志本身不会把小写 ASCII 改为大写。
     const input: string = this.english && held ? letter.toUpperCase() : letter;
-    KeyboardSession.shared.press(input.charCodeAt(0), shifted);
+    const touchKey: TouchKey | null = this.touchKey(touch, shifted);
+    if (touchKey !== null) {
+      KeyboardSession.shared.pressTouch(input.charCodeAt(0), shifted, touchKey);
+    } else {
+      KeyboardSession.shared.press(input.charCodeAt(0), shifted);
+    }
     // A one-shot Shift is spent by the letter that follows it; Caps Lock is not. Neither is an
     // automatic Shift: it is not spent but recomputed from the text, which the change this press
     // just caused has already done. Clearing it here would give a capitals-only field one capital.
     if (this.caseMode === LetterCaseMode.SHIFTED && !automatic) {
       this.letterCase.reset();
       this.caseMode = this.letterCase.mode();
+    }
+  }
+
+  /** 这一键要不要带按下点交给引擎：只有触屏键盘上 26 键双拼的字母和 `;`，不是辅助码大写，键位都已量到（`TouchPointPolicy.usesTouch`）。 */
+  private touchKey(touch: TouchPoint | null, shifted: boolean): TouchKey | null {
+    if (touch === null || !TouchPointPolicy.usesTouch({
+      touchDesign: this.touchDesign(),
+      lettersLayer: this.qwertyLettersShowing(),
+      engineScheme: this.engineScheme,
+      english: this.english,
+      localMode: this.localMode,
+      shifted: shifted
+    })) {
+      return null;
+    }
+    const layout: string | null = this.touchLayout();
+    if (layout === null) {
+      return null;
+    }
+    const key: TouchKey = { point: touch, layout: layout };
+    return key;
+  }
+
+  /** 当前 26 键的键位布局，相对键盘根区域；有键还没量到时为 null。微软双拼画着 `;` 时它也得量到。每键按当前键位现算，见 `TouchPointPolicy.geometryLayout`。 */
+  private touchLayout(): string | null {
+    return TouchPointPolicy.geometryLayout(this.glideKeys, this.secondRowSemicolon(), this.semicolonKey,
+      this.glideOriginX, this.glideOriginY);
+  }
+
+  /** 点击时取走这一键的按下点，按这个键现在的位置换成键盘根区域坐标，与 `touchLayout` 同一帧的布局（`PendingTouches.take`）。 */
+  private takeTouch(letter: string): TouchPoint | null {
+    return this.pendingTouches.take(letter, Date.now(),
+      TouchPointPolicy.keyRect(this.glideKeys, this.semicolonKey, letter), this.glideOriginX, this.glideOriginY);
+  }
+
+  /** 字母键和 `;` 的按下点，只在触屏键盘上记；取不取用到点击时再按 `touchKey` 定。一律取按下点，不取抬起点。按下时只记相对被按的键的位置，点击时由 `takeTouch` 按键当时的位置换回坐标，按下和点击之间重新排版也不会错位。 */
+  private recordLetterTouch(letter: string | undefined, event: TouchEvent): void {
+    if (letter === undefined || !this.touchDesign() || !TouchPointPolicy.tracksKey(letter)) {
+      return;
+    }
+    if (event.type === TouchType.Down) {
+      if (event.changedTouches.length === 0) {
+        return;
+      }
+      const touch: TouchObject = event.changedTouches[0];
+      const key: GlideKeyRect = {
+        left: Number(event.target.area.globalPosition.x ?? 0),
+        top: Number(event.target.area.globalPosition.y ?? 0),
+        width: Number(event.target.area.width),
+        height: Number(event.target.area.height)
+      };
+      this.pendingTouches.down(letter, touch.windowX, touch.windowY, key, Date.now());
+    } else if (event.type === TouchType.Cancel) {
+      this.pendingTouches.cancel(letter);
     }
   }
 
@@ -1416,7 +1497,7 @@ struct KeyboardView {
       return;
     }
     const index: number = GlideTypingPolicy.letterIndex(letter);
-    if (index < 0) {
+    if (index < 0 && letter !== ';') {
       return;
     }
     const rect: GlideKeyRect = {
@@ -1425,6 +1506,11 @@ struct KeyboardView {
       width: Number(area.width),
       height: Number(area.height)
     };
+    // `;` 不是滑行键，只给按下点的几何用（`touchLayout`、`takeTouch`）。
+    if (index < 0) {
+      this.semicolonKey = rect;
+      return;
+    }
     this.glideKeys[index] = rect;
   }
 
@@ -1607,6 +1693,7 @@ struct KeyboardView {
     this.hintHoldTimers.forEach((timer: number): void => clearTimeout(timer));
     this.hintHoldTimers.clear();
     this.letterHints.clear();
+    this.pendingTouches.clear();
     this.eighteenSwipes.clear();
     this.eighteenSwipeKey = '';
     this.eighteenSwipeLetter = '';
@@ -1869,7 +1956,10 @@ struct KeyboardView {
     .animation({ duration: KEY_PRESS_MS })
     .responseRegion(this.keyHitRegion())
     .onAreaChange((_old: Area, now: Area): void => this.recordGlideKey($$.letter, now))
-    .onTouch((event: TouchEvent): void => this.letterHintTouch($$.letter, $$.cornerHint, event))
+    .onTouch((event: TouchEvent): void => {
+      this.recordLetterTouch($$.letter, event);
+      this.letterHintTouch($$.letter, $$.cornerHint, event);
+    })
     .onClick($$.action)
   }
 
@@ -3331,7 +3421,7 @@ struct KeyboardView {
         size: this.letterFontSize(),
         emphasized: false,
         width: 0,
-        action: () => this.tapLetter(letter)
+        action: () => this.tapLetter(letter, this.takeTouch(letter))
       };
     }
     return {
@@ -3343,7 +3433,7 @@ struct KeyboardView {
       size: this.letterFontSize(),
       emphasized: false,
       width: 0,
-      action: () => this.tapLetter(letter)
+      action: () => this.tapLetter(letter, this.takeTouch(letter))
     };
   }
 
@@ -4006,38 +4096,36 @@ struct KeyboardView {
     Row() {
       Text(candidate.text).fontSize(this.settings.candidateFontSize)
         .fontWeight(this.candidateWeight(candidate))
-        .fontColor(CandidatePresentationPolicy.aiPlaceholder(candidate.source) ? this.candidateDetailColor()
-          : CandidateSkinPolicy.rowTextColor(candidate.highlighted,
-          candidate.fixedPosition > 0, this.candidateTextColor(), this.candidateSelectedTextColor()))
+        .fontColor(this.candidateWordColor(candidate))
       if (candidate.badge.length > 0) {
         Text(candidate.badge).fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
           .fontColor(this.candidateAccentColor()).opacity(0.8).padding({ left: 2 })
       }
       if (candidate.hint.length > 0) {
         Text(candidate.hint).fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-          .fontColor(this.candidateDetailColor()).padding({ left: 2 })
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 2 })
       }
       // Only where there is no gloss line, the vertical 2in1 list; everywhere else the 훈음 is on the line under the Hanja.
       if (candidate.hunEum.length > 0 && !this.candidateUsesGlossLine()) {
         Text(candidate.hunEum)
           .fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-          .fontColor(this.candidateDetailColor()).padding({ left: 4 })
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 4 })
       }
       if (candidate.annotation.length > 0 && !this.candidateUsesGlossLine()) {
         if (candidate.annotationIsTranslation) {
           Text(candidate.annotation)
             .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
-            .fontColor(this.candidateDetailColor())
+            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor()))
             .padding({ left: CandidateTranslationStyle.gap(this.settings.candidateFontSize) })
         } else {
           Text(candidate.annotation)
             .fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-            .fontColor(this.candidateDetailColor()).padding({ left: 4 })
+            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 4 })
         }
       } else if (candidate.annotation.length > 0 && !candidate.annotationIsTranslation) {
         Text(candidate.annotation)
           .fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-          .fontColor(this.candidateDetailColor()).padding({ left: 4 })
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 4 })
       }
     }
     .alignItems(VerticalAlign.Center)
@@ -4057,8 +4145,45 @@ struct KeyboardView {
     const suffix: string = CandidateGlossPolicy.hunEumAccessibilitySuffix(candidate.hunEum)
       + CandidateGlossPolicy.accessibilitySuffix(
         candidate.annotationIsTranslation ? null : annotation,
-        candidate.annotationIsTranslation ? annotation : null, true);
+        candidate.annotationIsTranslation ? annotation : null, true)
+      + CorrectionMarkPolicy.accessibilitySuffix(candidate.confidentCorrection);
     return KeyAccessibilityPolicy.candidate(index + 1, candidate.text, candidate.hint, suffix);
+  }
+
+  /** 候选窗与触屏胶囊画字所用的令牌，首选纠错行（`confidentCorrection`）的标记色由它经 `CorrectionMarkPolicy.markColor` 算出。 */
+  private candidateSurfaceColors(): CorrectionSurfaceColors {
+    const colors: CorrectionSurfaceColors = {
+      text: this.candidateTextColor(),
+      highlightedText: this.candidateSelectedTextColor(),
+      accent: this.candidateAccentColor()
+    };
+    return colors;
+  }
+
+  /** 候选窗与触屏胶囊上候选字的颜色：在线占位行画次要色，首选纠错行画标记色，其余按固定词与高亮的规则。 */
+  private candidateWordColor(candidate: CandidateEntry): string {
+    if (CandidatePresentationPolicy.aiPlaceholder(candidate.source)) return this.candidateDetailColor();
+    return CorrectionMarkPolicy.tint(candidate.confidentCorrection, candidate.highlighted,
+      CandidateSkinPolicy.rowTextColor(candidate.highlighted, candidate.fixedPosition > 0,
+        this.candidateTextColor(), this.candidateSelectedTextColor()),
+      this.candidateSurfaceColors());
+  }
+
+  /** 这一行注释、释义、编码提示的颜色：`base` 是这一处原来的次要色，首选纠错行换成标记色，原始按键注释因此在高亮的首选上也看得出标记。 */
+  private candidateDetailTint(candidate: CandidateEntry, base: string): string {
+    return CorrectionMarkPolicy.tint(candidate.confidentCorrection, candidate.highlighted, base,
+      this.candidateSurfaceColors());
+  }
+
+  /** 展开面板格子的令牌：有候选包画布时用候选区配色，没有时格子是按键，高亮格用 `toggleForeground`，与格子的底色同源。 */
+  private expandedSurfaceColors(): CorrectionSurfaceColors {
+    const keyboard: CorrectionSurfaceColors = {
+      text: this.skin.keyForeground,
+      highlightedText: this.skin.toggleForeground,
+      accent: this.skin.accent
+    };
+    return CorrectionMarkPolicy.expandedSurface(this.settings.candidateCanvas !== null,
+      this.candidateSurfaceColors(), keyboard);
   }
 
   /** The line under a candidate: a Korean Hanja's 훈음 and then the translation. An Engine annotation is not on it; that stays beside the word. */
@@ -4084,7 +4209,7 @@ struct KeyboardView {
           this.candidatePrimaryLine(candidate)
           Text(this.candidateGlossLine(candidate).length > 0 ? this.candidateGlossLine(candidate) : ' ')
             .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
-            .fontColor(this.candidateDetailColor())
+            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor()))
             // The line is reserved whether or not this candidate has a gloss, so the row heights stay level.
             .opacity(this.candidateGlossLine(candidate).length > 0 ? 1 : 0)
             .maxLines(1)
@@ -4524,9 +4649,7 @@ struct KeyboardView {
           .fontSize(this.chipFontSize())
           .lineHeight(this.chipFontSize() * CHIP_WORD_LINE_HEIGHT)
           .fontWeight(this.candidateWeight(candidate))
-          .fontColor(CandidatePresentationPolicy.aiPlaceholder(candidate.source) ? this.candidateDetailColor()
-            : CandidateSkinPolicy.rowTextColor(candidate.highlighted, candidate.fixedPosition > 0,
-            this.candidateTextColor(), this.candidateSelectedTextColor()))
+          .fontColor(this.candidateWordColor(candidate))
           .fontFamily(this.candidateFontFamily())
           .maxLines(1)
         if (candidate.badge.length > 0) {
@@ -4540,14 +4663,14 @@ struct KeyboardView {
         if (candidate.hint.length > 0) {
           Text(candidate.hint)
             .fontSize(CHIP_GLOSS_FONT_SIZE)
-            .fontColor(this.skin.secondary)
+            .fontColor(this.candidateDetailTint(candidate, this.skin.secondary))
             .padding({ left: 2 })
             .maxLines(1)
         }
         if (this.chipAnnotationBeside(candidate)) {
           Text(candidate.annotation)
             .fontSize(CHIP_GLOSS_FONT_SIZE)
-            .fontColor(this.skin.secondary)
+            .fontColor(this.candidateDetailTint(candidate, this.skin.secondary))
             .padding({ left: 3 })
             .maxLines(1)
         }
@@ -4558,7 +4681,7 @@ struct KeyboardView {
         Text(this.candidateGlossLine(candidate).length > 0 ? this.candidateGlossLine(candidate) : ' ')
           .fontSize(CHIP_GLOSS_FONT_SIZE)
           .lineHeight(CHIP_GLOSS_LINE_VP)
-          .fontColor(this.skin.secondary)
+          .fontColor(this.candidateDetailTint(candidate, this.skin.secondary))
           .fontFamily(this.candidateFontFamily())
           .opacity(this.candidateGlossLine(candidate).length > 0 ? 1 : 0)
           .maxLines(1)
@@ -7308,37 +7431,61 @@ struct KeyboardView {
     this.clipboardNotice = result.failure;
   }
 
-  private redrawHandwriting(): void {
-    const context: CanvasRenderingContext2D = this.handwritingContext;
+  /** 设置笔迹的颜色、粗细和圆头圆角，返回这次用的墨色。整幅重画和书写中补画新的一段共用，两者画出的笔迹一致。 */
+  private applyHandwritingInk(context: CanvasRenderingContext2D): string {
     const pad: FeedbackSettings = KeyboardSession.shared.feedbackSettings();
-    // 书写区铺满键盘宽度，平板和折叠屏上会比 420vp 宽：按画布实际大小清，免得右侧留下上一笔。
-    context.clearRect(0, 0, Math.max(context.width, HANDWRITING_CANVAS_SIZE),
-      Math.max(context.height, HANDWRITING_CANVAS_SIZE));
     // 「笔迹颜色」：「跟随皮肤」取手写板皮肤的文字颜色，这样笔迹在任何底色上都看得清；其余是 `KeyboardFeedback` 的固定墨色。
-    context.strokeStyle = KeyboardFeedback.strokeInk(pad.handwritingStrokeColor, this.handwritingSkin.keyForeground);
+    const ink: string = KeyboardFeedback.strokeInk(pad.handwritingStrokeColor, this.handwritingSkin.keyForeground);
+    context.strokeStyle = ink;
     // 「笔迹粗细」以 vp 为单位，这块画布也是：笔画按触摸的 vp 坐标记录，限制在画布自己的宽高之内（`HandwritingStrokePolicy.pointInCanvas`），绘制上下文用的也是同一单位，所以线宽无需缩放就与设置显示的一致。
     context.lineWidth = KeyboardFeedback.handwritingStrokeWidth(pad.handwritingStrokeWidth);
     context.lineCap = 'round';
     context.lineJoin = 'round';
+    return ink;
+  }
+
+  private redrawHandwriting(): void {
+    const context: CanvasRenderingContext2D = this.handwritingContext;
+    // 书写区铺满键盘宽度，平板和折叠屏上会比 420vp 宽：按画布实际大小清，免得右侧留下上一笔。
+    context.clearRect(0, 0, Math.max(context.width, HANDWRITING_CANVAS_SIZE),
+      Math.max(context.height, HANDWRITING_CANVAS_SIZE));
+    this.applyHandwritingInk(context);
     for (const stroke of this.handwritingStrokes) {
-      if (stroke.points.length === 0) {
-        continue;
-      }
-      context.beginPath();
-      context.moveTo(stroke.points[0].x, stroke.points[0].y);
-      for (const point of stroke.points.slice(1)) {
-        context.lineTo(point.x, point.y);
-      }
-      context.stroke();
+      this.strokeHandwritingPoints(context, stroke.points);
     }
-    if (this.handwritingCurrent.length > 0) {
-      context.beginPath();
-      context.moveTo(this.handwritingCurrent[0].x, this.handwritingCurrent[0].y);
-      for (const point of this.handwritingCurrent.slice(1)) {
-        context.lineTo(point.x, point.y);
-      }
-      context.stroke();
+    this.strokeHandwritingPoints(context, this.handwritingCurrent);
+  }
+
+  /** 一笔画成一条连续路径。按下标取点，不为每一笔复制一份点数组。 */
+  private strokeHandwritingPoints(context: CanvasRenderingContext2D, points: HandwritingPoint[]): void {
+    if (points.length === 0) {
+      return;
     }
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    for (let index: number = 1; index < points.length; index++) {
+      context.lineTo(points[index].x, points[index].y);
+    }
+    context.stroke();
+  }
+
+  /**
+   * 书写中每来一个触摸点，只在已有画面上补画最后一段，不清屏重画整个字：已画好的笔画在这期间不会变，整幅重画让每个移动事件的开销随已写的点数增长，写一个字是平方级。抬笔、取消、撤销、重做、清除和画布重建仍整幅重画，所以笔画定稿后的画面与原来逐点重画完全相同。半透明墨色的圆头线段在接点处会叠深，这时退回整幅重画。
+   */
+  private drawHandwritingSegment(): void {
+    const context: CanvasRenderingContext2D = this.handwritingContext;
+    const ink: string = this.applyHandwritingInk(context);
+    const count: number = this.handwritingCurrent.length;
+    if (count < 2 || !HandwritingStrokePolicy.opaqueInk(ink)) {
+      this.redrawHandwriting();
+      return;
+    }
+    const from: HandwritingPoint = this.handwritingCurrent[count - 2];
+    const to: HandwritingPoint = this.handwritingCurrent[count - 1];
+    context.beginPath();
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+    context.stroke();
   }
 
   private handwritingPoint(event: TouchEvent): HandwritingPoint {
@@ -7368,7 +7515,7 @@ struct KeyboardView {
       if (this.handwritingCurrent.length > 0
         && this.handwritingCurrent.length < HANDWRITING_MAX_POINTS) {
         this.handwritingCurrent.push(this.handwritingPoint(event));
-        this.redrawHandwriting();
+        this.drawHandwritingSegment();
       }
       return;
     }
@@ -7798,20 +7945,17 @@ struct KeyboardView {
     return this.voiceDone.length > 0 ? '已识别：' : '';
   }
 
-  /** 手机面板的主操作只结束采集；识别回调负责自动上屏，位置变化的结果才需显式插入。 */
-  private voicePrimaryLabel(): string {
-    if (this.voiceDone.length > 0 || (this.voiceHeldByKey && this.voiceBusy)) return '';
-    if (this.voiceFinishing) return '正在识别…';
-    if (this.voiceBusy) return '说完了';
-    return this.voiceText.length > 0 ? '插入文字' : '重新录音';
-  }
-
   /**
-   * 按住说话（空格长按或快捷键按住）的会话在忙时不给任何按钮：松手就是结束，整块高度都留给圆盘和文字。空格长按的面板在松手收尾时才出现；快捷键一按下就打开面板（`onVoiceHotkey` 的 START），按住期间同样没有按钮，结束和取消走快捷键自己的 STOP、CANCEL。点按开始的会话可以取消；不忙时（提示、出错、识别完成）一律留「返回键盘」，否则没有路离开面板。
+   * 聆听面板按钮要看的会话状态，按钮文字由 `VoiceListeningPolicy.primaryLabel`、`cancelLabel` 决定。手机面板的主操作只结束采集；识别回调负责自动上屏，位置变化的结果才需显式插入。空格长按的面板在松手收尾时才出现；快捷键一按下就打开面板（`onVoiceHotkey` 的 START），按住期间没有按钮，结束和取消走快捷键自己的 STOP、CANCEL，LOCK 之后按点按开始对待。
    */
-  private voiceCancelLabel(): string {
-    if (!this.voiceBusy) return '返回键盘';
-    return this.voiceHeldByKey ? '' : '取消';
+  private voiceListeningSession(): VoiceListeningSession {
+    return {
+      busy: this.voiceBusy,
+      finishing: this.voiceFinishing,
+      heldByKey: this.voiceHeldByKey,
+      done: this.voiceDone.length > 0,
+      hasText: this.voiceText.length > 0
+    };
   }
 
   private voicePrimaryAction(): void {
@@ -7847,9 +7991,9 @@ struct KeyboardView {
           hintTail: this.voiceListeningHintTail(),
           hintPrefix: this.voiceListeningHintPrefix(),
           level: this.voiceLevel,
-          primaryLabel: this.voicePrimaryLabel(),
+          primaryLabel: VoiceListeningPolicy.primaryLabel(this.voiceListeningSession()),
           primaryEnabled: !this.voiceFinishing,
-          cancelLabel: this.voiceCancelLabel(),
+          cancelLabel: VoiceListeningPolicy.cancelLabel(this.voiceListeningSession()),
           onPrimary: (): void => this.voicePrimaryAction(),
           onCancel: (): void => this.cancelListening()
         })
@@ -8709,9 +8853,9 @@ struct KeyboardView {
     return ExpandedCandidateLayout.rows(indices, spans, this.expandedColumns());
   }
 
-  /** 供 `ForEach` 标识一个展开格的内容：它的位置、文字、是否高亮以及占几列（行尾那格的宽度会随后面的候选变）。 */
+  /** 供 `ForEach` 标识一个展开格的内容：它的位置、文字、是否高亮、是否标成首选纠错以及占几列（行尾那格的宽度会随后面的候选变）。 */
   private expandedCellKey(cell: ExpandedCandidateCell): string {
-    return `${cell.index}:${this.expanded[cell.index].text}:${this.expandedHighlighted(cell.index)}:${cell.span}`;
+    return `${cell.index}:${this.expanded[cell.index].text}:${this.expandedHighlighted(cell.index)}:${this.expanded[cell.index].confidentCorrection}:${cell.span}`;
   }
 
   /** 当工具条显示的是网格所列列表的开头时，网格标出工具条高亮的那个候选。 */
@@ -8724,7 +8868,8 @@ struct KeyboardView {
   private expandedLabel(index: number): string {
     const gloss: string = this.expandedGlossLine(index);
     return KeyAccessibilityPolicy.candidate(index + 1, this.expanded[index].text, '',
-      gloss.length > 0 ? `，${gloss}` : '');
+      (gloss.length > 0 ? `，${gloss}` : '')
+        + CorrectionMarkPolicy.accessibilitySuffix(this.expanded[index].confidentCorrection));
   }
 
   /**
@@ -8790,9 +8935,8 @@ struct KeyboardView {
                   : this.expandedHighlighted(cell.index) ? this.skin.toggleBackground : this.skin.keyBackground)
                 .fontSize(EXPANDED_FONT_SIZE)
                 .fontWeight(this.expandedHighlighted(cell.index) ? 600 : 400)
-                .fontColor(this.settings.candidateCanvas !== null
-                  ? (this.expandedHighlighted(cell.index) ? this.candidateColors().selectedText : this.candidateColors().text)
-                  : this.expandedHighlighted(cell.index) ? this.skin.toggleForeground : this.skin.keyForeground)
+                .fontColor(CorrectionMarkPolicy.cellTextColor(this.expanded[cell.index].confidentCorrection,
+                  this.expandedHighlighted(cell.index), this.expandedSurfaceColors()))
                 .fontFamily(this.candidateFontFamily())
                 .textAlign(TextAlign.Center)
                 .maxLines(1)

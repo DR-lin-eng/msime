@@ -57,6 +57,7 @@ impl Session {
     /// Validates the paths and every option (`INVALID_SESSION_OPTIONS`, `UNKNOWN_HELPCODE_SCHEMA`), loads the helpcode table and applies the options in the reference order (session.cpp:11-30, 57-66).
     pub fn new(options: SessionOptions) -> Result<Session> {
         options.paths.validate()?;
+        crate::user_dictionary::generation::check_read_only_layout(&options.paths)?;
         let input = InputSession::new(&options)?;
         let mut nine_key = NineKeySession::new(
             &options.paths,
@@ -535,11 +536,12 @@ impl Session {
         self.input.engine.wubi_input_options().mixed_pinyin
     }
 
-    /// 宿主的清缓存动作（维护快捷键、iOS 键盘扩展的内存告警）：清掉本会话各方案的候选缓存，并放掉进程级缓存里的日文模型，让不再用它的进程能交还前缀索引和映射；本会话若正持有模型，照常用到会话结束。
+    /// 宿主的清缓存动作（维护快捷键、iOS 键盘扩展的内存告警）：清掉本会话各方案的候选缓存，并放掉进程级缓存里的日文模型和没有会话在用的个人学习模型，让不再用它们的进程能交还内存；本会话若正持有模型，照常用到会话结束。
     pub fn reset_cache(&mut self) {
         self.prediction.clear();
         self.input.reset_cache();
         crate::japanese::decoder::JapaneseDictionary::release_shared();
+        crate::release_idle_personal_models();
     }
 
     /// Replace the `/` mode's command table; rows it cannot use are dropped. A diagnostic only if the open command list could not be refreshed.

@@ -207,7 +207,7 @@ jobs:
   linux-fedora:
     needs: changes
     name: Linux native host (Fedora)
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -698,7 +698,7 @@ jobs:
     needs: changes
     name: Windows release script tests
     # The release scripts are PowerShell run on Windows, and the cross-build container above has no pwsh, so their probe tests run on a Windows runner. None of them compiles anything.
-    runs-on: depot-windows-2025-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

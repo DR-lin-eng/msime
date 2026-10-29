@@ -20,8 +20,10 @@ start = text.index("HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(")
 end = text.index("\n}\n", start) + 3
 method = text[start:end]
 support = r'''
+#define MSIME_EDITION_FULL
 #include "EngineSessionAdapter.h"
 #include "CandidateSources.h"
+#include "HostServerSelection.h"
 #include <codecvt>
 #include <cstdio>
 #include <cstring>
@@ -32,6 +34,7 @@ using Json = nlohmann::json;
 using HRESULT = int;
 using TfEditCookie = int;
 using WCHAR = wchar_t;
+using UINT = unsigned;
 struct ITfContext {};
 #define _In_
 #define _In_opt_
@@ -39,7 +42,6 @@ struct ITfContext {};
 constexpr HRESULT S_OK = 0, S_FALSE = 1;
 constexpr unsigned CP_UTF8 = 65001, WC_ERR_INVALID_CHARS = 1, MB_ERR_INVALID_CHARS = 1;
 constexpr bool FALSE = false;
-constexpr uint64_t FANY_IME_NO_REQUEST_ID = std::numeric_limits<uint64_t>::max();
 std::string narrow(const std::wstring &text) { return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.to_bytes(text); }
 std::wstring wide(const std::string &text) { return std::wstring_convert<std::codecvt_utf8<wchar_t>>{}.from_bytes(text); }
 int WideCharToMultiByte(unsigned, unsigned, const wchar_t *input, int length, char *output, int capacity, const char *, bool *) {
@@ -98,7 +100,7 @@ struct CMetasequoiaIME {
     int completed = 0, refreshed = 0;
     wchar_t _smartPunctuationShadowChar = 0;
     bool _smartPunctuationShadowValid = false;
-    HRESULT _SelectHighlightedHostCandidate(TfEditCookie, ITfContext *, const std::wstring *);
+    HRESULT _SelectHighlightedHostCandidate(TfEditCookie, ITfContext *, UINT, const std::wstring *);
     wchar_t _CandidateCommitPairedClosing(const std::wstring &) { return 0; }
     HRESULT _AddCharAndFinalize(TfEditCookie, ITfContext *, const CStringRange *text) { committed = text->text; return S_OK; }
     void _DeleteCandidateList(bool, ITfContext *) {}
@@ -113,7 +115,8 @@ int main() {
     const auto check = [&](const char *name, Host host, const std::wstring &choice, HRESULT expected,
                            const std::wstring &commit, int any_calls, int refresh = 0) {
         Engine engine{&host}; Presenter presenter; CMetasequoiaIME ime{&engine, &presenter, {}}; ITfContext context;
-        const auto status = ime._SelectHighlightedHostCandidate(0, &context, &choice);
+        const auto status = ime._SelectHighlightedHostCandidate(0, &context, choice.find(L'\t') == std::wstring::npos
+            ? FanyImeReplyType::Normal : FanyImeReplyType::NeedToCreateWord, &choice);
         const bool ok = status == expected && ime.committed == commit && host.any_selects == any_calls && ime.refreshed == refresh;
         std::printf("%s status=%d expected=%d commit_matches=%d any_calls=%d match=%d\n", name, status, expected, ime.committed == commit, host.any_selects, ok);
         failed += !ok;

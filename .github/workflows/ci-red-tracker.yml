@@ -28,7 +28,7 @@ jobs:
     concurrency:
       group: ci-red-tracker-${{ github.event.workflow_run.workflow_id }}
       cancel-in-progress: false
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -31,6 +31,9 @@ pub struct Candidate {
     /// True when Engine corrected the typed spelling for this candidate.
     /// Presentation layers may mark it without changing committed text.
     pub corrected: bool,
+    /// 这一行是 26 键双拼按首选规则坐上第一位的触点纠错（#10018）：宿主给它画平台已有的强调色，读屏标签后面接「，已纠正」；`annotation` 里的原始按键照旧显示。只会出现在第一位，为假时不出现在 JSON 里，没有触点的宿主（桌面、实体键盘）永远看不到它。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub confident_correction: bool,
     /// Engine fixed-position slot, or zero when dynamically ranked.
     pub fixed_position: u8,
     pub highlighted: bool,
@@ -81,6 +84,22 @@ pub struct CandidateSnapshot {
     pub preedit: String,
     /// Engine-owned kana reading for Japanese, the composing Hangul for Korean; empty for other schemes.
     pub reading: String,
+    pub candidates: Vec<Candidate>,
+}
+
+/// 一代候选里按需取的一段（[`Runtime::candidate_range`]），身份与 [`CandidateSnapshot`] 里同一座位的那一行相同。
+///
+/// 触屏宿主的横向候选条每键都要重画，只取它这次建得出来的那一批，不必每键把整代候选（单个声母可有几千行）序列化一遍再在宿主主线程上解析。
+#[derive(Clone, Debug, Serialize)]
+pub struct CandidateRange {
+    pub session: u64,
+    pub generation: u64,
+    pub preedit: String,
+    /// Engine-owned kana reading for Japanese, the composing Hangul for Korean; empty for other schemes.
+    pub reading: String,
+    /// 这一代已经放出来的候选总数。引擎可能还扣着一段尾部（首字母只先给 24 行），从这个位置往后再取时才放出来。
+    pub total: usize,
+    /// 座位 `start` 起的候选，最多 `count` 行，到 `total` 为止。
     pub candidates: Vec<Candidate>,
 }
 

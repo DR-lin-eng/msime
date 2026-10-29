@@ -11,7 +11,7 @@ permissions: {contents: read}
 concurrency: {group: package-definitions-windows, cancel-in-progress: false}
 jobs:
   render:
-    runs-on: depot-windows-2025-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
     timeout-minutes: 20
     env:
       PYTHONUTF8: '1'

@@ -253,7 +253,8 @@ final class ImeLetterRows {
         key.setOnTouchListener((view, event) -> {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN -> {
-                    touch[0] = input == null ? null : KeyTouchSample.capture(key, event,
+                    if (touch != null) touch[0] = input == null || s.view != null && InputViewValuePolicy.scheme(s.view, -1) == InputSchemeTraits.SHUANGPIN
+                        ? null : KeyTouchSample.capture(key, event,
                         s.shuangpinKeyButtons, s.shuangpinKeyInputs);
                     downY[0] = DimensionPolicy.fromPixels(s, event.getY());
                     triggered[0] = false;
@@ -318,6 +319,10 @@ final class ImeLetterRows {
                             || (!s.dedicatedEnglish && !s.letterCaseSchemeActive()
                                 && ViewPolicy.isVisible(s.candidateViewport));
                         if (candidateVisible) {
+                            // 抬起时离键太远、Button 自己不会点击，这里补的那次点击不带按下点。
+                            if (!TouchPointPolicy.releasedOnKey(event.getX(), event.getY(), key.getWidth(),
+                                    key.getHeight(), ViewConfiguration.get(s).getScaledTouchSlop()))
+                                s.imeTouchPoints.pending.forget(key);
                             key.performClick();
                             key.setPressed(false);
                             return true;
@@ -334,7 +339,9 @@ final class ImeLetterRows {
                         key.performClick();
                         return true;
                     }
-                    touch[0] = null;
+                    // 滑出符号或长按选项吞掉了这一下，它的按下点不再属于任何一次点击。
+                    s.imeTouchPoints.pending.forget(key);
+                    if (touch != null) touch[0] = null;
                     if (optionsShown[0] && s.imeLayoutRows.finishLetterOptions(key, event)) return true;
                     s.imeKeyFeedback.playFeedback(key);
                     s.countKey(key);
@@ -342,9 +349,10 @@ final class ImeLetterRows {
                     return true;
                 }
                 case MotionEvent.ACTION_CANCEL -> {
-                    touch[0] = null;
+                    if (touch != null) touch[0] = null;
                     key.removeCallbacks(hold);
                     hideKeyPreview(key);
+                    s.imeTouchPoints.pending.forget(key);
                     s.imeLayoutRows.cancelLetterOptions(key);
                     return false;
                 }
@@ -731,8 +739,43 @@ final class ImeLetterRows {
         return builtLanguageNumberSwap != s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS);
     }
 
+    /** 最近一次 {@link #rebuildKeyRows} 建在哪个容器上；onCreateInputView 换了新容器后旧的记录不能再拿来判断键行是否可留。 */
+    private LinearLayout builtKeyRows;
+
+    /**
+     * 换输入框时更新键行。原来每次 onStartInput 都整组重建，低端机上每换一个输入框（连同切到桌面、设置页这类不打字的窗口）都要摘掉再新建几十个键和它们的底图。只有通用分支在字母层建的键行（26 键、韩文、大千注音）能留：布局、分离式键盘、数字行、中英/数字键互换和数字页状态都和建的时候一样时，键的个数和位置不变，只做重建时顺带做的逐框复位，键面经 {@link #relabelLetterCase} 就地换。其余布局（九键、14 键、笔画、手写、符号层）键行里带着各自的状态，照旧整组重建。
+     */
+    void refreshKeyRowsForEditor() {
+        if (!letterRowsReusable()) {
+            rebuildKeyRows();
+            return;
+        }
+        ensureIconKeys();
+        s.imeBottomRow.ensureFaces();
+        hideKeyPreview();
+        // 与 rebuildKeyRows 相同：字母层上不留上一个输入框的 #+= 页。
+        moreSymbols = false;
+        s.imeLayoutRows.hideJapaneseFlickPreview();
+        s.deactivateHandwriting();
+        if (!relabelLetterCase()) {
+            rebuildKeyRows();
+            return;
+        }
+        s.imeStyler.applyKeyboardGeometry();
+    }
+
+    private boolean letterRowsReusable() {
+        return s.keyRows != null && s.keyRows == builtKeyRows && s.keyRows.getChildCount() > 0
+            && builtLetterLayout >= 0
+            && s.keyboardLayer == KeyboardLayout.Layer.LETTERS
+            && s.displayedTouchLayout(s.view) == builtLetterLayout
+            && !splitStale() && !numberRowStale() && !languageNumberSwapStale() && !numberPadStale()
+            && !(builtSplit && microsoftTenKeys() != builtMicrosoftTenKeys);
+    }
+
     void rebuildKeyRows() {
         if (s.keyRows == null) return;
+        builtKeyRows = s.keyRows;
         drawnTouchLayout = s.displayedTouchLayout(s.view);
         builtLanguageNumberSwap = s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS);
         builtLayerPunctuation = null;
@@ -768,6 +811,7 @@ final class ImeLetterRows {
         s.symbolKeyInputs.clear();
         s.shuangpinKeyButtons.clear();
         s.shuangpinKeyInputs.clear();
+        s.imeTouchPoints.forgetKeys();
         s.microsoftFinalKey = null;
         s.nineKeySidebar = null;
         s.nineKeySymbolKey = null;
@@ -890,12 +934,7 @@ final class ImeLetterRows {
                 koreanKeyInputs.add(input);
             } else if (s.keyboardLayer == KeyboardLayout.Layer.LETTERS) {
                 KeyTouchSample[] touch = new KeyTouchSample[1];
-                ShuangpinHintButton hintButton = s.shuangpinKeyboardKey(
-                    face, face, () -> {
-                        KeyTouchSample sample = touch[0];
-                        touch[0] = null;
-                        s.typeWithTouch(input.charAt(0), sample);
-                    });
+                ShuangpinHintButton hintButton = s.shuangpinLetterKey(face, face, input.charAt(0), touch);
                 keyButton = hintButton;
                 s.shuangpinKeyButtons.add(hintButton);
                 s.shuangpinKeyInputs.add(input);
@@ -950,8 +989,7 @@ final class ImeLetterRows {
             }
             // The Dachen rows carry their own ; key (ㄤ), and no double-pinyin final.
             if (s.keyboardLayer == KeyboardLayout.Layer.LETTERS && rowIndex == 1 && !zhuyinKeycaps) {
-                s.microsoftFinalKey = s.keyId(s.shuangpinKeyboardKey(";", "微软双拼 ing", () -> s.type(';')),
-                    "Semicolon");
+                s.microsoftFinalKey = s.keyId(s.shuangpinLetterKey(";", "微软双拼 ing", ';'), "Semicolon");
                 s.shuangpinKeyButtons.add((ShuangpinHintButton) s.microsoftFinalKey);
                 s.shuangpinKeyInputs.add(";");
                 KeyboardTypographyPolicy.setKeyTextSize(s.microsoftFinalKey, 22);

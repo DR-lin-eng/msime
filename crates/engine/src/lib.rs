@@ -4,6 +4,9 @@
 //!
 //! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
 
+// 非测试代码的日志一律走 `logging::warn`，嵌入方才换得掉出口（`set_log_sink`）；测试和基准测量照旧可以直接打印。
+#![cfg_attr(not(test), deny(clippy::print_stderr))]
+
 pub mod assets;
 pub mod backend;
 mod cache;
@@ -22,6 +25,7 @@ pub use korean::KoreanLayout;
 pub mod language_dictionary;
 mod lattice;
 mod local;
+pub mod logging;
 pub mod multilingual;
 mod nine_key;
 mod nine_key_shuangpin;
@@ -50,6 +54,7 @@ pub use error::{EngineError, ErrorCode, Result};
 #[cfg(not(target_os = "android"))]
 pub use handwriting::handwriting_recognize;
 pub use handwriting::order_handwriting_candidates;
+pub use logging::{set_log_sink, LogSink};
 // 按需下载的 `.gram` 语法模型由宿主侧资源包管理，删除包时需要释放
 // `GramDb::shared` 缓存的内存映射，经这个窄出口暴露给 host-api。
 pub use lattice::octagram;

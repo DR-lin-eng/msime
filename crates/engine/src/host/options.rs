@@ -313,7 +313,9 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         if let Err(error) =
             merge_downloaded_wubi(&runtime_paths(options), Path::new(&options.wubi_dictionary))
         {
-            eprintln!("msime: downloaded wubi tables not merged into the generation: {error}");
+            crate::logging::warn(format_args!(
+                "downloaded wubi tables not merged into the generation: {error}"
+            ));
         }
     }
     let scheme = SchemeType::from_u8(options.scheme)

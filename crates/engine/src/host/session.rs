@@ -483,10 +483,10 @@ impl Session {
                         .map(Path::new),
                 )
                 .unwrap_or_else(|error| {
-                    eprintln!(
-                        "msime: helpcode schema {} unavailable, using an empty table: {error}",
+                    crate::logging::warn(format_args!(
+                        "helpcode schema {} unavailable, using an empty table: {error}",
                         self.options.helpcode_schema
-                    );
+                    ));
                     HelpcodeKeymap::default()
                 }),
             ),

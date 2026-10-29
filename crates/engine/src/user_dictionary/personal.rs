@@ -1091,6 +1091,41 @@ mod tests {
     }
 
     // test_personal_dictionary.cpp:61-163, probing the working tables where the reference typed into a session.
+    /// 引擎层的编辑接口自己取维护租约：还有会话持共享租约时报 `Busy`、什么也不写；不合法的改动照旧先报出来；会话结束后同一改动照常生效。
+    #[test]
+    fn engine_level_edits_take_the_maintenance_lease() {
+        use PersonalDictionaryKind::*;
+        let root = tempfile::tempdir().unwrap();
+        let paths = fixture(root.path());
+        let pinyin =
+            validate_personal_dictionary_entry(&entry(Pinyin, "NI HAO", "拟好", 12345)).unwrap();
+        let session = crate::DictionaryAccess::try_session(&paths.user_data, &paths.dictionaries)
+            .unwrap()
+            .unwrap();
+
+        let error = edit_personal_dictionary(&paths, None, Some(&pinyin), "busy-1").unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Busy);
+        assert_eq!(
+            error.to_string(),
+            crate::diagnostics::DICTIONARY_MAINTENANCE_BUSY
+        );
+        assert!(!has(&paths, &pinyin));
+        let invalid = entry(Pinyin, "nihao", "你好", 1);
+        let error = edit_personal_dictionary(&paths, None, Some(&invalid), "").unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Failed);
+        // 门面的 `_with` 版本假定调用方已持有租约，不再取锁。
+        drop(session);
+        let maintenance =
+            crate::DictionaryAccess::try_maintenance(&paths.user_data, &paths.dictionaries)
+                .unwrap()
+                .unwrap();
+        edit_personal_dictionary_with(&paths, true, None, Some(&pinyin), "busy-1").unwrap();
+        assert!(has(&paths, &pinyin));
+        drop(maintenance);
+        edit_personal_dictionary(&paths, Some(&pinyin), None, "busy-2").unwrap();
+        assert!(!has(&paths, &pinyin));
+    }
+
     #[test]
     fn edits_replace_page_refuse_stale_and_survive_an_upgrade() {
         use PersonalDictionaryKind::*;

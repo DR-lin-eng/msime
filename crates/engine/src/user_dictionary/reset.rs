@@ -392,6 +392,39 @@ mod tests {
         }
     }
 
+    /// 引擎层的重置自己取维护租约：还有会话持共享租约时报 `Busy`，词库和日志原样不动；会话结束后照常重置。
+    #[test]
+    fn reset_takes_the_maintenance_lease() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = paths(temporary.path());
+        sql(
+            &paths.resource(assets::MAIN_DICTIONARY),
+            "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);",
+        );
+        sql(
+            &paths.resource(assets::ENGLISH_DICTIONARY),
+            "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);",
+        );
+        fs::create_dir_all(&paths.user_data).unwrap();
+        fs::create_dir_all(&paths.dictionaries).unwrap();
+        let journal = paths.user(assets::USER_JOURNAL);
+        sql(&journal, "CREATE TABLE marker(value INTEGER);");
+        let session = crate::DictionaryAccess::try_session(&paths.user_data, &paths.dictionaries)
+            .unwrap()
+            .unwrap();
+
+        let error = reset_learned_data(&paths).unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::Busy);
+        let marker = "SELECT count(*) FROM sqlite_master WHERE name='marker'";
+        assert_eq!(weight(&journal, marker), Some(1));
+        assert!(!paths.dictionary(assets::MAIN_DICTIONARY).exists());
+
+        drop(session);
+        reset_learned_data(&paths).unwrap();
+        assert!(paths.dictionary(assets::MAIN_DICTIONARY).exists());
+        assert_eq!(weight(&journal, marker), Some(0));
+    }
+
     /// 拆分发布布局：`msime-pinyin.db` 没有五笔表，重置后的工作主词库要把 `msime-wubi.db` 的码表并回来，五笔学习与删词才有表可写。
     #[test]
     fn reset_merges_the_split_wubi_tables_into_the_fresh_working_copy() {

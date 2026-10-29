@@ -137,12 +137,14 @@ pub enum DiagnosticCode {
     KaomojiQueryFailed = 22,
     SuperJianpinUnavailable = 23,
     SuperJianpinQueryFailed = 24,
+    /// 九键笔画筛选拿不到笔画词库（`LANGUAGE_DICTIONARY_UNAVAILABLE`）。这条常量放在宿主门面错误那段，因为它同时是查语言词库接口的错误文字。
+    LanguageDictionaryUnavailable = 25,
     /// 不在映射表里的说明文字：注音的选字与按键把底层错误原文（`EngineError` 的 `Display`）放进诊断，这类文字没有自己的码。
     Other = 0xFFFF,
 }
 
-/// 诊断码与说明文字的映射表，KeyResult 诊断常量各占一行。
-pub const DIAGNOSTIC_CODES: [(DiagnosticCode, &str); 24] = [
+/// 诊断码与说明文字的映射表，KeyResult 诊断常量各占一行，按编号排。
+pub const DIAGNOSTIC_CODES: [(DiagnosticCode, &str); 25] = [
     (
         DiagnosticCode::EnglishWordNotLearned,
         ENGLISH_WORD_NOT_LEARNED,
@@ -206,6 +208,10 @@ pub const DIAGNOSTIC_CODES: [(DiagnosticCode, &str); 24] = [
         DiagnosticCode::SuperJianpinQueryFailed,
         SUPER_JIANPIN_QUERY_FAILED,
     ),
+    (
+        DiagnosticCode::LanguageDictionaryUnavailable,
+        LANGUAGE_DICTIONARY_UNAVAILABLE,
+    ),
 ];
 
 impl DiagnosticCode {
@@ -256,18 +262,125 @@ mod tests {
             DiagnosticCode::from_message(SUPER_JIANPIN_QUERY_FAILED).value(),
             24
         );
+        assert_eq!(
+            DiagnosticCode::from_message(LANGUAGE_DICTIONARY_UNAVAILABLE).value(),
+            25
+        );
     }
 
-    /// 本文件「KeyResult diagnostics」和「Local mode query diagnostics」两段的每个常量都在映射表里：新加的诊断忘了给码，这里会少一行。
+    /// 本文件里 `pub const` 字符串常量的名字和值，值可能换到下一行。
+    fn constants() -> Vec<(&'static str, &'static str)> {
+        let source = include_str!("diagnostics.rs");
+        let production = &source[..source.find("// ---- 诊断码").unwrap()];
+        production
+            .split("pub const ")
+            .skip(1)
+            .map(|item| {
+                let name = &item[..item.find(':').unwrap()];
+                let literal = &item[item.find('"').unwrap() + 1..];
+                (name, &literal[..literal.find('"').unwrap()])
+            })
+            .collect()
+    }
+
+    /// 「KeyResult diagnostics」和「Local mode query diagnostics」两段的每个常量都有码：新加的诊断忘了给码，这里会报出它的名字。
     #[test]
-    fn every_key_result_diagnostic_has_a_code() {
+    fn every_key_result_diagnostic_constant_has_a_code() {
         let source = include_str!("diagnostics.rs");
         let start = source.find("// ---- KeyResult diagnostics").unwrap();
         let end = source.find("// ---- Engine errors").unwrap();
-        let constants = source[start..end]
-            .lines()
-            .filter(|line| line.starts_with("pub const "))
-            .count();
-        assert_eq!(constants, DIAGNOSTIC_CODES.len());
+        let section = &source[start..end];
+        let mut checked = 0;
+        for (name, message) in constants() {
+            if section.contains(&format!("pub const {name}:")) {
+                assert_ne!(
+                    DiagnosticCode::from_message(message),
+                    DiagnosticCode::Other,
+                    "{name}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 24);
+    }
+
+    /// 直接交给 `KeyResult::with_diagnostic` 的固定常量也都有码，不管它定义在本文件哪一段：九键笔画筛选给的 `LANGUAGE_DICTIONARY_UNAVAILABLE` 在宿主门面错误那段，按分段数漏掉过它。扫的是引擎源码里每个 `with_diagnostic(...)` 的实参（测试模块除外）。
+    #[test]
+    fn every_constant_passed_to_with_diagnostic_has_a_code() {
+        fn sources(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        /// 从左括号之后到与它配对的右括号之前，跳过字符串字面量里的括号。
+        fn argument(text: &str) -> &str {
+            let (mut depth, mut quoted, mut escaped) = (1, false, false);
+            for (index, character) in text.char_indices() {
+                match character {
+                    _ if escaped => escaped = false,
+                    '\\' if quoted => escaped = true,
+                    '"' => quoted = !quoted,
+                    '(' if !quoted => depth += 1,
+                    ')' if !quoted => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &text[..index];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unbalanced with_diagnostic call");
+        }
+
+        let constants = constants();
+        let mut files = Vec::new();
+        sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut passed = std::collections::BTreeSet::new();
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+            for (start, call) in production.match_indices("with_diagnostic(") {
+                let argument = argument(&production[start + call.len()..]);
+                for reference in argument.split("diagnostics::").skip(1) {
+                    let name: String = reference
+                        .chars()
+                        .take_while(|character| {
+                            character.is_ascii_uppercase()
+                                || character.is_ascii_digit()
+                                || *character == '_'
+                        })
+                        .collect();
+                    if name.len() < 2 {
+                        continue;
+                    }
+                    let message = constants
+                        .iter()
+                        .find(|(constant, _)| *constant == name)
+                        .unwrap_or_else(|| panic!("{} uses unknown {name}", path.display()))
+                        .1;
+                    assert_ne!(
+                        DiagnosticCode::from_message(message),
+                        DiagnosticCode::Other,
+                        "{} passes {name} to with_diagnostic without a code",
+                        path.display()
+                    );
+                    passed.insert(name);
+                }
+            }
+        }
+        assert!(
+            passed.contains("LANGUAGE_DICTIONARY_UNAVAILABLE")
+                && passed.contains("NINE_KEY_DIGIT_LIMIT"),
+            "{passed:?}"
+        );
     }
 }

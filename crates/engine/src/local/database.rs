@@ -77,7 +77,11 @@ pub fn open_local_database(path: &Path) -> Option<Arc<Mutex<Connection>>> {
         }
     }
     // A missing or unreadable file is an answer, not an error: the queries turn it into their "unavailable" diagnostic (local_database.cpp:20-28).
-    let connection = Arc::new(Mutex::new(open_read_only(path).ok()?));
+    let connection = open_read_only(path).ok()?;
+    // 比引擎新的词库格式（`format::check_format_version`）同样按读不了处理；按键路径上没有报告别的错误的出口，建会话和准备代次时已经报过。
+    let name = path.file_name()?.to_str()?;
+    crate::format::check_format_version(&connection, name).ok()?;
+    let connection = Arc::new(Mutex::new(connection));
     cache.insert(
         name,
         CachedConnection {

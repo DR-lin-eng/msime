@@ -191,6 +191,8 @@ public final class MSIMEInputService extends InputMethodService {
     private long candidateScrollGeneration = -1;
     private int candidateScrollPage = -1;
     Button expandCandidates;
+    /** 上屏后联想时展开键左边的关闭键（#10078），显示与否由 {@link PredictionButtonsPolicy} 和 {@link #predictionButtons} 决定。 */
+    Button closePrediction;
     boolean candidatePanelOpen;
     JSONObject candidatePanelSnapshot;
     final ImeCandidateStrip imeCandidateStrip = new ImeCandidateStrip(this);
@@ -331,6 +333,8 @@ public final class MSIMEInputService extends InputMethodService {
 
     /** 全拼 26 键组字时 ⇧ 保留（臂辅助码）而不换成「分词」，来自共享偏好 `touch_quanpin_shift`，缺省为关。 */
     private boolean quanpinShiftEnabled = false;
+    /** 上屏后联想时候选栏右端的按键样式，来自共享偏好 `next_word_prediction_buttons`，缺省为现有的只有展开键。 */
+    private PredictionButtonsPolicy.Style predictionButtons = PredictionButtonsPolicy.Style.EXPAND_ONLY;
     /** 26 键、14/18 键与九键各自的底行样式，来自共享偏好 `touch_*_key_style`，缺省都是标准底行。 */
     TouchKeyStyle.Styles touchKeyStyles = TouchKeyStyle.Styles.DEFAULT;
     /** 日语九键连点同键时是否循环假名，旧设置和新装默认都开启。 */
@@ -3437,6 +3441,7 @@ public final class MSIMEInputService extends InputMethodService {
         boolean previousWubiMixedPinyin = wubiMixedPinyin;
         String previousWubiProfile = wubiProfile;
         KeyboardScheme previousScheme = selectedScheme;
+        PredictionButtonsPolicy.Style previousPredictionButtons = predictionButtons;
         try {
             if (response == null) throw new JSONException("Preferences unavailable");
             JSONObject snapshot = value(response);
@@ -3473,6 +3478,7 @@ public final class MSIMEInputService extends InputMethodService {
                 || previousWubiMixedPinyin != wubiMixedPinyin
                 || !previousWubiProfile.equals(wubiProfile)
                 || previousScheme != selectedScheme
+                || previousPredictionButtons != predictionButtons
                 || !previousView.equals(view == null ? "" : view.toString())) render();
     }
 
@@ -3535,6 +3541,8 @@ public final class MSIMEInputService extends InputMethodService {
         boolean nextVoiceShortcut = preferences.optBoolean("touch_voice_shortcut", false);
         boolean nextShuangpinKeyHints = shuangpinKeyHintsFrom(preferences);
         boolean nextQuanpinShift = quanpinShiftFrom(preferences);
+        PredictionButtonsPolicy.Style nextPredictionButtons = PredictionButtonsPolicy.Style.parse(
+            JsonPolicy.strictString(preferences.opt(PredictionButtonsPolicy.PREFERENCE_KEY)));
         TouchKeyStyle.Styles nextTouchKeyStyles = touchKeyStylesFrom(preferences);
         boolean nextNumberRow = numberRowFrom(preferences);
         boolean nextJapaneseToggleInput = japaneseToggleInputFrom(preferences);
@@ -3626,6 +3634,8 @@ public final class MSIMEInputService extends InputMethodService {
         shuangpinKeyHintsEnabled = nextShuangpinKeyHints;
         // 分词键的键面和点击都按它分支（usesQuanpinSeparator），变了立刻重画。
         quanpinShiftEnabled = nextQuanpinShift;
+        // 联想候选栏的关闭键与展开键在 render 里按它显示，变了经 reloadPreferences 的比较重画。
+        predictionButtons = nextPredictionButtons;
         // 底行样式和数字行进了 touchGeometryKey，变了就 render()：底行按新样式重排（updateActionRow 的签名带着样式），数字行与样式相关的数字层由 render 里的 numberRowStale、numberPadStale、layerPunctuationStale 重建；只换键的排布，不碰组字。
         touchKeyStyles = nextTouchKeyStyles;
         numberRowEnabled = nextNumberRow;
@@ -3916,6 +3926,18 @@ public final class MSIMEInputService extends InputMethodService {
         } finally {
             editorReads.close();
         }
+    }
+
+    /**
+     * 联想候选栏上的关闭键（#10078）：送 Cancel 清掉上屏后联想。引擎对联想的 Cancel 报已处理，不上屏、不往输入框插空格（按空格关闭会多一个空格），已上屏的词序照旧保留；候选清空后 render 换回工具栏和「收起键盘」。展开面板开着时先收起，再取消。
+     */
+    void dismissPrediction() {
+        if (session == 0 || view == null || !view.optBoolean("prediction", false)) {
+            render();
+            return;
+        }
+        closeCandidatePanel();
+        command(3);
     }
 
     /** 复用本地模式的取消入口；英文直输必须核对编辑器，再删当前词。 */
@@ -11663,6 +11685,7 @@ public final class MSIMEInputService extends InputMethodService {
         candidates.removeAllViews();
         if (verticalCandidates != null) verticalCandidates.removeAllViews();
         if (expandCandidates != null) ViewPolicy.hide(expandCandidates);
+        if (closePrediction != null) ViewPolicy.hide(closePrediction);
         if (view == null) {
             closeCandidatePanel();
             renderEnglishSuggestions(activeCandidates);
@@ -11672,6 +11695,11 @@ public final class MSIMEInputService extends InputMethodService {
             return;
         }
         JSONArray entries = view.optJSONArray("candidates");
+        // 上屏后联想时候选栏右端的按键按用户选的样式（#10078）；只有引擎候选占着这一行时才放，手写、义项、标点、邮箱后缀和英文建议照旧。
+        boolean prediction = view.optBoolean("prediction", false);
+        boolean expandAllowed = PredictionButtonsPolicy.allowsExpand(predictionButtons, prediction);
+        boolean closeShown = closePrediction != null && !hasDiagnostic
+            && PredictionButtonsPolicy.showsClose(predictionButtons, prediction);
         if (handwriting) {
             renderSharedHandwritingCandidates(activeCandidates);
         } else if (imeTranslationSenses.active()) {
@@ -11688,9 +11716,10 @@ public final class MSIMEInputService extends InputMethodService {
             renderEnglishSuggestions(activeCandidates);
         } else if (stripSnapshot != null) {
             imeCandidateStrip.render(stripSnapshot, candidates, horizontalCandidateScroll);
-            if (expandCandidates != null
+            if (expandCandidates != null && expandAllowed
                     && (strictCandidatePage(view, "page_count") > 1 || imeNineKeyPanel.eligible()))
                 ViewPolicy.show(expandCandidates);
+            if (closeShown) ViewPolicy.show(closePrediction);
         } else if (entries != null) {
             int visibleSlot = 0;
             for (int slot = 0; slot < entries.length(); slot++) {
@@ -11711,9 +11740,10 @@ public final class MSIMEInputService extends InputMethodService {
                         : LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT));
             }
-            if (!hasDiagnostic && expandCandidates != null
+            if (!hasDiagnostic && expandCandidates != null && expandAllowed
                     && (strictCandidatePage(view, "page_count") > 1 || imeNineKeyPanel.eligible()))
                 ViewPolicy.show(expandCandidates);
+            if (closeShown) ViewPolicy.show(closePrediction);
         }
         int visibleSlots = entries == null ? 0 : entries.length();
         for (int slot = visibleSlots; slot < candidateButtons.size(); slot++)

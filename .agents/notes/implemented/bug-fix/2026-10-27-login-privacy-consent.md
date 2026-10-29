@@ -20,13 +20,17 @@ HarmonyOS 设置应用（`app.msime.hmos`）在 AppGallery 审核中因账号登
 - 鸿蒙上两个文档名经设置桥接的 `SettingsBridge.openExternalUrl`（`pages/Settings.ets`）用 `startAbility` 交给系统浏览器，首次启动授权弹窗里的两条链接走同一个方法。桥接方法是同步的，页面拿不到 `startAbility` 的失败，`useExternalUrl` 的「无法打开外部链接」提示因此永远不会出现；设备上没有能打开网页的应用时，点协议看起来又是「点击无响应」。所以失败时由原生侧弹出 `TextPolicy.unopenedLinkNotice` 的提示「没能打开浏览器，请在浏览器中访问 msime.app/terms/」，带上去掉协议头的地址，用户可以自己去浏览器里打开。
 - 从登录面板点开的 msime.app 用户协议正文同样不能写成默认同意：msime-web 的 `src/content/terms.md` 原来写「确认登录，或者开始使用本服务，即表示你已阅读并同意本协议」和「修改生效后你继续使用本服务的，视为接受修改后的协议」，审核员点开就能看到与应用内勾选流程矛盾的条款。msime-web 分支 `fix/terms-explicit-consent` 把它改成以勾选同意后登录、或在隐私授权弹窗中选择「同意」为前提，重要变更改为在 App 内重新征得同意；写这一条时那个分支还没有开 PR 合并，条款措辞要等维护者审定，上线前点开的仍是旧正文。
 
-## 其他平台的现状（这次没有改）
+## Android 与 iOS 原生登录
 
-- Android 原生 `LoginSheet.java` 的 `agreement()`：「登录即表示同意《用户协议》和《隐私政策》」，只有隐私政策可点，没有勾选框，和鸿蒙改之前一样。
-- iOS `AppNavigation.swift`：「登录即表示同意《隐私政策》」，隐私政策是链接，没有勾选框。
-- Windows（WinUI `platforms/windows/settings/main.cpp` 与 Win7 `settings/win7/AccountForm.h`）：登录区没有任何同意文字或勾选框。
+移动端的键盘界面三端同步改，登录也一样：Android 发布包和 iOS App 的登录是各自的原生界面，不含共享 React 设置页，规则照搬上面这一套，文字、提示和两个网址一字不差。
 
-这些是各平台的原生代码，要在国内商店过同样的审核时需要各自补上，规则与本篇相同。
+- 规则各有一份纯逻辑的小类：Android `home/LoginConsentPolicy.java`、iOS `App/Sources/account/LoginConsentPolicy.swift`，与 `useLoginConsent` 一样只有 `agreed`、`prompting`、`confirm()`。状态是登录界面自己的字段（Android 每次 `LoginSheet.show` 新建面板，iOS 是 `AccountLoginOptions` 的 `@State`），不落盘，每次打开登录都要重新勾。
+- Android 的唯一登录入口是 `LoginSheet`：「我的」页、新手引导、插件和社区页都经 `SignIn.start` 打开它，「添加登录方式」（`link`）也是同一个面板。按钮下方一行是 Material 勾选框加「我已阅读并同意《用户协议》和《隐私政策》」，点勾选框或这行字都能勾上；两个文档名是 `ClickableSpan`，经 `LinkActions.open` 打开网页。TextView 的整行点击和链接点击在同一次抬手里都会触发，链接的 `onClick` 先同步执行、整行点击随后被 post，所以链接先记一个标志再 post 复位，整行点击看到标志就不改勾选。Apple、Google、发送验证码和验证码登录四处都以 `if (!confirmConsent() || !begin(...)) return;` 开头；没勾时提示（`colorError`、polite live region）显示在勾选框下，收起键盘、把提示滚进可见区，并把读屏焦点移到勾选框。面板打开即展开（`STATE_EXPANDED`），小屏和大字号下底部的勾选不会停在折叠高度之外。
+- iOS 的登录按钮在 `AccountLoginOptions` 里，登录面板 `AccountLoginSheet` 和发布皮肤时 Form 里的 `AppleAccountSection` 共用它，勾选也放在这里，两处一起生效。勾选框是带「已勾选／未勾选」值的按钮，读屏标签是整句同意文字，提示状态下把提示作为 hint；两个文档名是独立的 `Link`，原来缺的《用户协议》补上了。一行放不下时（小屏、大字号，字体用随动态字号缩放的 `.caption`）由 `ViewThatFits` 把文档名换到第二行。
+- iOS 有两处和共享页不同。系统的 `SignInWithAppleButton` 一按就弹出 Apple 授权，没有在请求前拦下的机会，所以没勾时在它上面盖一层透明按钮，点它只显示提示，读屏也只看到这一层；`onCompletion` 里再检查一次，授权结果在没勾时不发给后端。手机号登录在自己的 `CodeLoginView` 面板里进行，那个面板盖住了勾选框，所以「手机号登录」在打开面板前就要求勾选，共享页的「使用手机号登录」只展开表单、不拦。
+- Android 的 `check-host.sh` 钉住接线：`LoginSheet` 里没有「登录即」，每个 `begin("…")` 都在同一行先过 `confirmConsent()`，`SignIn.startGoogle`、`startApple`、`requestEmailCode`、`verifyEmailCode` 只从 `LoginSheet` 调用，文字和提示与 `login-consent.tsx` 的相同。
+
+Windows（WinUI `platforms/windows/settings/main.cpp` 与 Win7 `settings/win7/AccountForm.h`）的登录区仍然没有任何同意文字或勾选框，要在国内商店过同样的审核时需要补上，规则与本篇相同。
 
 ## Alternatives considered
 
@@ -37,8 +41,8 @@ HarmonyOS 设置应用（`app.msime.hmos`）在 AppGallery 审核中因账号登
 
 ## Consequences
 
-- **收益**：鸿蒙手机、平板和 2in1 的登录都要先明确勾选同意隐私政策，不再出现「登录即代表同意」和无法打开的文档名；macOS 和 Linux 的共享账号页同时获得同样的明示同意。
-- **代价与已知上限**：用户协议和隐私政策都在官网，离线时点开会失败。Android、iOS、Windows 的原生登录仍是「登录即表示同意」或没有同意文字。鸿蒙应用首次启动的隐私政策弹窗见 [首次启动的隐私授权](../feature/2026-10-27-harmony-privacy-first-launch.md)。
+- **收益**：鸿蒙手机、平板和 2in1 的登录都要先明确勾选同意隐私政策，不再出现「登录即代表同意」和无法打开的文档名；macOS 和 Linux 的共享账号页同时获得同样的明示同意；Android 和 iOS 的原生登录也换成了同一行勾选和同一句提示。
+- **代价与已知上限**：用户协议和隐私政策都在官网，离线时点开会失败。Windows 的原生登录仍没有同意文字。鸿蒙应用首次启动的隐私政策弹窗见 [首次启动的隐私授权](../feature/2026-10-27-harmony-privacy-first-launch.md)。
 
 ## Verification
 
@@ -47,3 +51,5 @@ HarmonyOS 设置应用（`app.msime.hmos`）在 AppGallery 审核中因账号登
 - `pnpm exec vitest run`（`apps/desktop`）、`apps/desktop` 与 `apps/harmony` 的 `tsc --noEmit`、`pnpm run lint` 通过。
 - 打开失败的提示：`platforms/harmony/tests/privacy-consent.test.ts` 核对提示文字带上去掉协议头的协议地址，`tests/run.sh` 钉住 `openExternalUrl` 失败时调用 `showToast` 的接线。
 - 2026-10-28 在 HarmonyOS 6.0.2(22) 手机模拟器上装了从 develop 打出的 HAP（干净安装）：首次启动弹出授权弹窗，「不同意」「同意」并列；弹窗和登录面板里点《用户协议》都拉起了系统浏览器（`com.huawei.hmos.browser` 到前台，模拟器里的页面没有渲染出内容，正文是否加载没能确认）；登录面板勾选框默认不勾，没勾就点「发送验证码」出现「请先阅读并勾选同意《用户协议》和《隐私政策》」，从浏览器回来勾选框仍未勾，勾上后提示消失。打开失败时的提示没能在设备上触发：模拟器的浏览器是系统应用，`bm` 不能停用它。最早那次（10-27）只在浏览器里用临时页面渲染过账号页。
+- Android（2026-10-29）：`tests/home/LoginConsentPolicySmoke.java` 覆盖默认不勾、没勾时挡下并提示、勾上后放行、取消勾选后再次挡下，以及文字和两个网址；`check-host.sh` 的接线检查在删掉「发送验证码」那一处 `confirmConsent()` 后失败，恢复后通过，整套 `check-host.sh` 退出码 0（299 个冒烟）。在 API 35 模拟器上装了这个分支打出的 APK：勾选框默认不勾；没勾就点「通过 Google 登录」只出现提示、没有拉起 Google；填好邮箱点「发送验证码」时提示出现、键盘收起、没有换成验证码输入；点《用户协议》《隐私政策》分别用浏览器打开 `https://msime.app/terms/` 和 `/privacy/`，回来后勾选框仍未勾；点「我已阅读并同意」几个字能勾上，提示随之消失。深色模式、720×1280 屏幕加 1.3 倍字号下同意行和提示都折行显示、没有被挤出面板。读屏（TalkBack）没有在设备上试。
+- iOS（2026-10-29）：`tests/core/LoginConsentPolicyTests.swift` 两个用例通过；`UITests/OnboardingUITests.swift` 的 `testLoginRequiresExplicitConsent` 在 iPhone SE（第 3 代，iOS 27.0）模拟器上通过：勾选框默认「未勾选」，两个文档名是链接，不再有「登录即」；没勾就点「发送验证码」出现提示且停在填邮箱这一步；勾上后提示消失；关掉面板再打开又是「未勾选」。同一台模拟器换成深色和 `accessibility-medium` 字号后，文档名换到第二行；没勾就点「通过 Apple 登录」只出现提示、没有弹出 Apple 授权；点《用户协议》由 Safari 打开 msime.app，回来勾选框仍未勾。`testGoogleSignInOpensGoogleAndCancelReturnsToSheet` 改为先勾选再点 Google，这次没有重跑（模拟器构建不带 GoogleSignIn 时它本来就跳过）。手机号登录和 Form 里的 `AppleAccountSection` 没有在模拟器上点过。

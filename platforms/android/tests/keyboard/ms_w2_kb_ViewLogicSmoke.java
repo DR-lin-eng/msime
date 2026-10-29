@@ -95,8 +95,8 @@ public final class ms_w2_kb_ViewLogicSmoke {
         float schemeChrome = 42f;
         checkPicker(PagedTileGrid.pickerGrid(false, defaultKeyArea - schemeChrome, KeyboardSchemeCard.HEIGHT_DP), 3, 1f,
             "the scheme picker is full size at 100%");
-        checkPicker(PagedTileGrid.pickerGrid(false, minimumKeyArea - schemeChrome, KeyboardSchemeCard.HEIGHT_DP), 2, 1f,
-            "the scheme picker fits two rows at the minimum height");
+        checkPicker(PagedTileGrid.pickerGrid(false, minimumKeyArea - schemeChrome, KeyboardSchemeCard.HEIGHT_DP), 2, .9375f,
+            "the scheme picker scales two rows at the zero-spacing minimum height");
         check(PagedTileGrid.pageCount(23, PagedTileGrid.perPage(4, 3)) == 2
             && PagedTileGrid.pageCount(23, PagedTileGrid.perPage(4, 2)) == 3, "function tools paginate by rows");
 

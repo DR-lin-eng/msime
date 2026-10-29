@@ -272,3 +272,60 @@ test("hosts without screen capture protection show no such switch", async () => 
   expect(screen.queryByText("防止截屏")).toBeNull();
   expect(screen.queryByText("截屏与录屏")).toBeNull();
 });
+
+// 鸿蒙手机上「我的 › 隐私」和常驻的「关于 › 许可与隐私」同时挂着一个开关：在任一处切换成功后，另一处也跟着变，不能停在旧值上。
+test("both copies of the switch on a HarmonyOS phone follow a toggle in either one", async () => {
+  const save = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+  render(
+    <SettingsPage
+      initialPage="privacy"
+      client={{
+        load: async () => initial,
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: true, panel_windows: false }),
+        screenCaptureProtection: { load: vi.fn().mockResolvedValue(false), save },
+      }}
+    />,
+  );
+  await settingsFormReady();
+  const page = screen.getByRole("group", { name: "隐私" });
+  const privacyToggle = within(page).getByRole("switch", { name: /防止截屏/ }) as HTMLInputElement;
+  const toggles = screen.getAllByRole("switch", { name: /防止截屏/, hidden: true });
+  expect(toggles).toHaveLength(2);
+  const aboutToggle = toggles.find((toggle) => toggle !== privacyToggle) as HTMLInputElement;
+  await waitFor(() => expect(privacyToggle.disabled).toBe(false));
+  await waitFor(() => expect(aboutToggle.disabled).toBe(false));
+  fireEvent.click(privacyToggle);
+  await waitFor(() => expect(aboutToggle.checked).toBe(true));
+  expect(privacyToggle.checked).toBe(true);
+  fireEvent.click(aboutToggle);
+  await waitFor(() => expect(privacyToggle.checked).toBe(false));
+  expect(aboutToggle.checked).toBe(false);
+  expect(save.mock.calls).toEqual([[true], [false]]);
+});
+
+// 上一次切换还没完成时宿主回答 `screen_capture_busy`：开关保持原值，提示重试。
+test("a switch refused while the last change is still running keeps its value", async () => {
+  const save = vi.fn().mockRejectedValueOnce({ code: "screen_capture_busy" });
+  render(
+    <SettingsPage
+      initialPage="privacy"
+      client={{
+        load: async () => initial,
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: true, panel_windows: false }),
+        screenCaptureProtection: { load: vi.fn().mockResolvedValue(true), save },
+      }}
+    />,
+  );
+  await settingsFormReady();
+  const page = screen.getByRole("group", { name: "隐私" });
+  const toggle = within(page).getByRole("switch", { name: /防止截屏/ }) as HTMLInputElement;
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+  expect(toggle.checked).toBe(true);
+  fireEvent.click(toggle);
+  expect(await screen.findByText("没有保存，请重试")).toBeTruthy();
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+  expect(toggle.checked).toBe(true);
+  expect(save).toHaveBeenCalledWith(false);
+});

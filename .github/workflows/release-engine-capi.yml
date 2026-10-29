@@ -23,7 +23,7 @@ concurrency:
 jobs:
   # 先定下版本号；勾了 publish 时拒绝别的分支和已经存在的 tag，几秒内就失败，不用等构建跑完。
   version:
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -56,10 +56,20 @@ jobs:
       matrix:
         include:
           # Ubuntu 22.04 的 glibc 是 2.35：在它上面构建，库要求的 glibc 不会比这更新；打包后的检查再按 GLIBC_CEILING 卡一次。
-          - {name: Linux, runner: depot-ubuntu-22.04-8, targets: x86_64-unknown-linux-gnu, archive: linux-x86_64}
+          # Depot 标签只在 metasequoiaime 组织存在，fork 在同一表达式里回退到同架构的 GitHub 托管 runner（与其他 workflow 的写法一致）。
+          - name: Linux
+            runner: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-22.04-8' || 'ubuntu-22.04' }}
+            targets: x86_64-unknown-linux-gnu
+            archive: linux-x86_64
           # Depot 的 macOS runner 都是 Apple 芯片：x86_64 交叉编译，验收时经 Rosetta 运行（release-pack-tool.yml 在同一种 runner 上也这样做）。
-          - {name: macOS, runner: depot-macos-15, targets: aarch64-apple-darwin x86_64-apple-darwin, archive: macos-universal}
-          - {name: Windows, runner: depot-windows-2025-8, targets: x86_64-pc-windows-msvc, archive: windows-x86_64-msvc}
+          - name: macOS
+            runner: ${{ github.repository_owner == 'metasequoiaime' && 'depot-macos-15' || 'macos-15' }}
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+            archive: macos-universal
+          - name: Windows
+            runner: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
+            targets: x86_64-pc-windows-msvc
+            archive: windows-x86_64-msvc
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -181,7 +191,7 @@ jobs:
   data:
     needs: version
     name: Data pack
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -197,7 +207,7 @@ jobs:
   # 照 crates/engine-capi/README.md 的「快速上手」做一遍：下载的 Linux 归档加数据包，用 pkg-config 和 cc 编译归档里的 C 示例，在真实词库上打字、选词、上屏、读回学到的句子。
   smoke:
     needs: [version, build, data]
-    runs-on: depot-ubuntu-22.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-22.04' || 'ubuntu-22.04' }}
     timeout-minutes: 15
     env:
       ARCHIVE: msime-engine-capi-${{ needs.version.outputs.version }}-linux-x86_64
@@ -223,7 +233,7 @@ jobs:
   release:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
     needs: [version, build, data, smoke]
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 15
     permissions: {contents: write}
     steps:

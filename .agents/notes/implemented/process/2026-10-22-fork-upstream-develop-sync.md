@@ -27,7 +27,7 @@ Status: implemented
 - **单手侧栏数字键盘（上游 #10234/#10203）**：Android `ImeFrame` 的本机宽度百分比并入上游的 `applied` 缓存串（`mode:blockDp:pad:widthPercent`），`setWeightSum` 保留——核对过与上游三个分支都兼容（大屏 pad 分支的键列与侧栏是固定像素、spacer 是唯一带权子视图）；iOS 键盘控制器保留本机 `applyCustomKeyboardWidth()`（挂进上游的 `applyOneHanded` 排布），键宽计算保留本机比例并传上游新增的 `formFactor`。偏好与测试各自取并集（本机宽度键 + 上游 `oneHandedDockedTablet` 升级标记）。
 - **九键符号栏与设置搜索（上游 #10247）**：上游把九键/数字键盘左侧符号的编辑搬进「按键布局」子页并重组关键词（旧名留作别名）；Android `PageId` 关键词表取并集——本机的「数字行」「尺寸」「按键区域宽度」「恢复默认宽度与间距」与上游的新关键词共存，主列表里上游已迁走的「九键左侧符号」不再保留。
 - **词库与许可证**：上游把跨进程词库维护锁搬进引擎（`access.rs` 大幅收缩）、同步失败后文件检查退避（#10265）、清空学习数据后丢弃过期读（#10255）、更新请求未决时等待再轮询（#10250）、时钟回拨后有界调度（#10281）随自动合并进入，搜狗订阅模块（`dictionary/sogou.rs`）不在上游改动范围。引擎以 MPL-2.0 再许可（#10193），macOS/Windows 的声明渠道清单在取上游全集的同时保留本机 `adaptive-inference-NOTICES.txt`；engine-capi（#10240 系列）是新增 crate，不触碰本机 host-api 导出。
-- **CI**：`ci-platforms.yml` 保留本机的 runner 回退表达式（fork 无 Depot runner），吸收上游更新的注释；上游 Android KVM 初始化修复（#10289）只涉上游自设环境。
+- **CI**：`ci-platforms.yml` 保留本机的 runner 回退表达式（fork 无 Depot runner），吸收上游更新的注释；上游 Android KVM 初始化修复（#10289）只涉上游自设环境。上游新增的 `release-engine-capi.yml`（#10240 系列）四处裸 `runs-on` 与矩阵三处 Depot 标签按同一规范补上 `${{ github.repository_owner == 'metasequoiaime' && 'depot-…' || '同架构 GitHub 托管' }}` 回退——不加的后果在本轮 CI 上实际发生了：`version` 与三个 Engine C ABI 作业在 fork 上永远排队（Depot 标签无对应 runner）。矩阵项改块式写法，因为流式映射 `{...}` 里内嵌 `${{ }}` 不是合法 YAML。
 
 本轮新增边界：商业云预测沿用显式权限、最多三条后缀和生成代次校验；普通云候选仍是单条，在线结果不绕过隐私开关。共享 Rust 热路径采用上游的内存快照、WAL、文件身份与 `data_version` 失效判断，候选条沿用 `candidate_range`，没有再叠加第二套缓存或全量复制。Android 触点接线保留旧 `characterWithTouch` 兼容入口，同时使用上游 `setKeyGeometry`/`touchCharacter`；键盘空隙路由、触点清理和滑出点击恢复合并为同一生命周期。
 

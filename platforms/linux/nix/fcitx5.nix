@@ -284,8 +284,18 @@ stdenv.mkDerivation (finalAttrs: {
     description =
       if enableFcitx5 then "水杉输入法的 Fcitx5 插件与 Linux 原生宿主" else "水杉输入法的 IBus engine 与 Linux 原生宿主";
     homepage = "https://github.com/metasequoiaime/msime";
+    # 本项目 GPL-3.0-only，输入引擎（crates/engine、crates/path-trust）是 MPL-2.0；其余是编进引擎的第三方数据与改编代码（拆字表 CC-BY-3.0、拆字读音与符号分组的 Unicode 数据、OpenCC 与 libc++ 的 Apache-2.0、libhangul 汉字表与 Zinnia、librime-octagram 的 BSD-3-Clause、darts-clone 的 BSD-2-Clause、行政区划 WTFPL、LaTeX 表 MIT）。手写模型与语音运行库的许可证由下面两行按是否随包加上。
     license = [
       lib.licenses.gpl3Only
+      lib.licenses.mpl20
+      lib.licenses.asl20
+      lib.licenses.llvm-exception
+      lib.licenses.bsd3
+      lib.licenses.bsd2
+      lib.licenses.cc-by-30
+      lib.licenses.mit
+      lib.licenses.unicode-30
+      lib.licenses.wtfpl
     ]
     ++ lib.optional (handwritingModel != null) handwritingModel.meta.license
     ++ lib.optionals (voiceRuntime != null) voiceRuntime.meta.license;

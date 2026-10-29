@@ -69,7 +69,8 @@ esac
 
 # 二进制归档要带的第三方声明：按 msime-engine-capi 的依赖图收集（README 的「二进制归档与第三方声明」）。核对它生成得出来，并且收进了带 bundled SQLite 的 libsqlite3-sys。
 notices="$work/THIRD_PARTY_NOTICES.txt"
-(cd "$root" && "$python" platforms/linux/collect-notices.py cargo "$(native "$notices")" msime-engine-capi)
+# `-X utf8`：Windows 上 Python 默认按 cp1252 读 cargo 的输出，crate 元数据里的非 ASCII 字符会让它失败，与 release-windows.yml 的做法相同。
+(cd "$root" && "$python" -X utf8 platforms/linux/collect-notices.py cargo "$(native "$notices")" msime-engine-capi)
 grep -q '^libsqlite3-sys ' "$notices" || { echo "$notices does not list libsqlite3-sys" >&2; exit 1; }
 
 "$python" "$crate/tests/fixture/make_fixture.py" "$(native "$work/resources")"

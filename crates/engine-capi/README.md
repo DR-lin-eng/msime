@@ -160,10 +160,10 @@ msime_engine_string_free(dictionaries);
 C 库的二进制静态链接了整张 Rust 依赖图和 bundled SQLite，每个二进制归档都要带上这些依赖的声明。用 Linux 打包同一个收集脚本，只走 `msime-engine-capi` 的依赖图：
 
 ```sh
-python3 platforms/linux/collect-notices.py cargo dist/THIRD_PARTY_NOTICES.txt msime-engine-capi
+python3 -X utf8 platforms/linux/collect-notices.py cargo dist/THIRD_PARTY_NOTICES.txt msime-engine-capi
 ```
 
-在要打包的那个平台上运行，Cargo 按该平台解析依赖图。它逐字复制每个 crate 自带的许可证、NOTICE 和版权文件（包括带 SQLite 的 `libsqlite3-sys`），本仓库自己的 crate 不列。归档里另外要放：这个目录的 `LICENSE`（MPL-2.0 全文），rink-core 的源码位置（MPL-2.0 §3.2，crates.io 上的 `rink-core` 0.9），以及引擎内嵌数据表的许可证与署名（`resources/licenses/` 下的 `libhangul-hanja-BSD-3-Clause.txt`、`kfcd-chaizi-CC-BY-3.0.txt`、`Unicode-License-V3.txt`、`OpenCC-Apache-2.0.txt`、`rime-wanxiang-CC-BY-4.0.txt`、`Administrative-divisions-of-China-WTFPL.txt`、`Zinnia-LICENSE.txt`、`librime-octagram-BSD-3-Clause.txt`，清单以 `docs/third-party.md` 的「输入引擎」一节为准）。CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为这张依赖图生成声明。
+在要打包的那个平台上运行，Cargo 按该平台解析依赖图；`-X utf8` 是给 Windows 的，那里 Python 默认按 cp1252 读 cargo 的输出。它逐字复制每个 crate 自带的许可证、NOTICE 和版权文件（包括带 SQLite 的 `libsqlite3-sys`），本仓库自己的 crate 不列。归档里另外要放：这个目录的 `LICENSE`（MPL-2.0 全文），rink-core 的源码位置（MPL-2.0 §3.2，crates.io 上的 `rink-core` 0.9），以及引擎内嵌数据表的许可证与署名（`resources/licenses/` 下的 `libhangul-hanja-BSD-3-Clause.txt`、`kfcd-chaizi-CC-BY-3.0.txt`、`Unicode-License-V3.txt`、`OpenCC-Apache-2.0.txt`、`rime-wanxiang-CC-BY-4.0.txt`、`Administrative-divisions-of-China-WTFPL.txt`、`Zinnia-LICENSE.txt`、`librime-octagram-BSD-3-Clause.txt`，清单以 `docs/third-party.md` 的「输入引擎」一节为准）。CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为这张依赖图生成声明。
 
 ## 不在这个 ABI 里
 

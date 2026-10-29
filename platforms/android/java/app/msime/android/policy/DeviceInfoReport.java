@@ -127,7 +127,8 @@ public final class DeviceInfoReport {
         String label = item.field().label(language) + language.colon();
         String value = item.value(language);
         boolean group = item.field() == Field.DISPLAY && !value.equals(language.unknown());
-        return group ? label + '\n' + value : label + value;
+        // 组名后直接换行，英文冒号后的空格不留在行尾。
+        return group ? label.stripTrailing() + '\n' + value : label + value;
     }
 
     /** 从读到的全部字段里取一项；没读到就当读不到。 */

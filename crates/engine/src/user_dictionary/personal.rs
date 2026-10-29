@@ -165,16 +165,28 @@ fn validate_entry(
 /// Add (`previous = None`), remove (`replacement = None`) or replace, in one attached transaction with its receipt. `previous` must still be user-inserted with the same weight. A request id (1..=128 of `[A-Za-z0-9_-]`) makes a retry of the same edit a no-op and a reuse for different content a failure.
 ///
 /// An empty request id edits without a receipt, as the reference allowed.
+///
+/// 自己取独占的维护租约（`DictionaryAccess::try_maintenance`）：还有会话或别的维护持着租约时以 `Busy`（`DICTIONARY_MAINTENANCE_BUSY`）失败，什么也不写。不合法的改动在取租约之前就报出来。
 pub fn edit_personal_dictionary(
     paths: &RuntimePaths,
     previous: Option<&PersonalDictionaryEntry>,
     replacement: Option<&PersonalDictionaryEntry>,
     request_id: &str,
 ) -> Result<()> {
+    normalize_edit(true, previous, replacement, request_id)?;
+    let _access = maintenance(paths)?;
     edit_personal_dictionary_with(paths, true, previous, replacement, request_id)
 }
 
-/// [`edit_personal_dictionary`]，`main_dictionary` 说明代次里有没有 `msime-pinyin.db`（`SchemeSet::reads_main_dictionary`）。没有时只能编辑英文词，其余种类的增删改都以 `NO_CHINESE_DICTIONARY` 失败，什么也不写。
+/// 引擎层编辑接口取维护租约；取不到之外的失败（目录打不开、锁文件不对）按本模块的说法报存储不可用。
+pub(super) fn maintenance(paths: &RuntimePaths) -> Result<crate::access::DictionaryAccess> {
+    crate::access::maintenance(paths).map_err(|error| match error {
+        EngineError::Busy(_) => error,
+        _ => failed(STORAGE_UNAVAILABLE),
+    })
+}
+
+/// [`edit_personal_dictionary`]，`main_dictionary` 说明代次里有没有 `msime-pinyin.db`（`SchemeSet::reads_main_dictionary`）。没有时只能编辑英文词，其余种类的增删改都以 `NO_CHINESE_DICTIONARY` 失败，什么也不写。不取维护租约，调用方（host 门面背后的 host-api）已经持有。
 pub fn edit_personal_dictionary_with(
     paths: &RuntimePaths,
     main_dictionary: bool,

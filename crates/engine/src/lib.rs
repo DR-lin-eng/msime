@@ -7,6 +7,7 @@
 // 非测试代码的日志一律走 `logging::warn`，嵌入方才换得掉出口（`set_log_sink`）；测试和基准测量照旧可以直接打印。
 #![cfg_attr(not(test), deny(clippy::print_stderr))]
 
+pub mod access;
 pub mod assets;
 pub mod backend;
 mod cache;
@@ -50,6 +51,7 @@ pub mod web;
 mod wubi;
 pub mod zhuyin;
 
+pub use access::DictionaryAccess;
 pub use error::{EngineError, ErrorCode, Result};
 #[cfg(not(target_os = "android"))]
 pub use handwriting::handwriting_recognize;

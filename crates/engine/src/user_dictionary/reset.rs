@@ -30,12 +30,19 @@ struct Replacement {
 }
 
 /// The caller must have quiesced every session on these paths.
+///
+/// 自己取独占的维护租约（`DictionaryAccess::try_maintenance`），在建好两个目录之后、动任何文件之前：还有会话或别的维护持着租约时以 `Busy`（`DICTIONARY_MAINTENANCE_BUSY`）失败，什么也不换。
 pub fn reset_learned_data(paths: &RuntimePaths) -> Result<()> {
-    reset_learned_data_with(paths, true)
+    reset(paths, true, true)
 }
 
-/// [`reset_learned_data`]，`main_dictionary` 为假（代次里没有 `msime-pinyin.db`，见 `SchemeSet::reads_main_dictionary`）时只换回 `msime-english.db` 和清空日志，不要求也不复制 `msime-pinyin.db`。
+/// [`reset_learned_data`]，`main_dictionary` 为假（代次里没有 `msime-pinyin.db`，见 `SchemeSet::reads_main_dictionary`）时只换回 `msime-english.db` 和清空日志，不要求也不复制 `msime-pinyin.db`。不取维护租约，调用方（host 门面背后的 host-api）已经持有。
 pub fn reset_learned_data_with(paths: &RuntimePaths, main_dictionary: bool) -> Result<()> {
+    reset(paths, main_dictionary, false)
+}
+
+/// `take_lease` 为真时自己取维护租约，持到换完为止。
+fn reset(paths: &RuntimePaths, main_dictionary: bool, take_lease: bool) -> Result<()> {
     paths.validate()?;
     if weakly_canonical(&paths.resources)? == weakly_canonical(&paths.dictionaries)? {
         return Err(EngineError::invalid(diagnostics::RESET_IN_PLACE));
@@ -57,6 +64,11 @@ pub fn reset_learned_data_with(paths: &RuntimePaths, main_dictionary: bool) -> R
     fs::create_dir_all(&paths.dictionaries)?;
     reject_redirected_directory(&paths.user_data)?;
     reject_redirected_directory(&paths.dictionaries)?;
+    let _access = if take_lease {
+        Some(crate::access::maintenance(paths)?)
+    } else {
+        None
+    };
     // Every cached handle on the files about to be replaced goes first; on Windows an open handle blocks the rename.
     close_cached_journals();
 

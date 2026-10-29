@@ -177,6 +177,11 @@ fn open_ready_generation(
     }
     // 拆分五笔码表之后准备的代次也要有五笔表；表已在时这一步只读不写。没有工作主词库的代次没有地方放五笔表。
     if main_dictionary {
+        // 代次里的主库副本带着来源文件的 `metadata`。就绪的代次可能是更新的引擎用更新格式的词库准备的（宿主降级后仍选着那份下载的词库更新），这里不查，会话就会照旧格式去读它。
+        check_dictionary_format(
+            &result.dictionary(assets::MAIN_DICTIONARY),
+            assets::MAIN_DICTIONARY,
+        )?;
         merge_split_wubi(resources, &result.dictionary(assets::MAIN_DICTIONARY))?;
     }
     // A host can switch back to a previously prepared generation. Replay the current journal again so changes learned on a newer generation survive that switch (RP:143-144).
@@ -2027,6 +2032,28 @@ mod tests {
         assert_unsupported(&error, assets::MAIN_DICTIONARY);
         assert!(!user.join("dictionaries").join("newer").exists());
         assert!(stages(&user).is_empty());
+    }
+
+    /// 已经就绪的代次再次打开时也查主库副本：更新的引擎用更新格式准备好的代次，降级后的引擎不能照旧格式去读。
+    #[test]
+    fn reopening_a_ready_generation_checks_the_main_dictionary_format_version() {
+        let root = tempfile::tempdir().unwrap();
+        let resources = resources(root.path());
+        let user = root.path().join("user");
+        let cache = root.path().join("cache");
+        let prepared = prepare_runtime_paths(&resources, &user, &cache, "current").unwrap();
+        let copy = prepared.dictionary(assets::MAIN_DICTIONARY);
+        assert!(prepared
+            .dictionaries
+            .join(assets::GENERATION_READY)
+            .is_file());
+
+        stamp(&copy, crate::format::FORMAT_VERSION);
+        prepare_runtime_paths(&resources, &user, &cache, "current").unwrap();
+
+        stamp(&copy, crate::format::FORMAT_VERSION + 1);
+        let error = prepare_runtime_paths(&resources, &user, &cache, "current").unwrap_err();
+        assert_unsupported(&error, assets::MAIN_DICTIONARY);
     }
 
     /// 单独发布的五笔库同样检查：比引擎新的 `msime-wubi.db` 不会并进代次。

@@ -54,7 +54,7 @@ pub fn build_table_name(segments: &[String]) -> Option<String> {
     quanpin_table(segments.len(), *first)
 }
 
-/// 读 `connection` 所在文件的格式版本并检查引擎读不读得懂；`file` 是写进错误信息的文件名（只给名字，不带路径）。没有 `metadata` 表时是 [`LEGACY_FORMAT_VERSION`]。有表却读不出 `format_version`、值不是非负整数、或比 [`FORMAT_VERSION`] 新时报 `DICTIONARY_FORMAT_UNSUPPORTED`（`EngineError::Failed`），调用方不能把这样的文件当作已知格式去读：新版本的表可能换了列或换了语义，照旧读只会悄悄出错。连 `sqlite_master` 都读不出（不是数据库、被锁住）时原样返回 `EngineError::Sqlite`，由调用方按它原来对读不了的文件的处理来办。
+/// 读 `connection` 所在文件的格式版本并检查引擎读不读得懂；`file` 是写进错误信息的文件名（只给名字，不带路径）。没有 `metadata` 表时是 [`LEGACY_FORMAT_VERSION`]。有表却读不出 `format_version`（没有这一行，或表的列不对）、值不是非负整数、或比 [`FORMAT_VERSION`] 新时报 `DICTIONARY_FORMAT_UNSUPPORTED`（`EngineError::Failed`），调用方不能把这样的文件当作已知格式去读：新版本的表可能换了列或换了语义，照旧读只会悄悄出错。连 `sqlite_master` 都读不出（不是数据库、被锁住），或读 `metadata` 时遇到被锁、读写出错、文件损坏这类与格式无关的错误时，原样返回 `EngineError::Sqlite`，由调用方按它原来对读不了的文件的处理来办。
 pub fn check_format_version(connection: &Connection, file: &str) -> Result<i32> {
     let unsupported = |detail: String| {
         EngineError::failed(format!(
@@ -77,12 +77,23 @@ pub fn check_format_version(connection: &Connection, file: &str) -> Result<i32> 
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|error| unsupported(format!("has an unreadable metadata table ({error})")))?
+        .map_err(|error| {
+            if is_environmental(&error) {
+                EngineError::Sqlite(error)
+            } else {
+                unsupported(format!("has an unreadable metadata table ({error})"))
+            }
+        })?
         .ok_or_else(|| unsupported("has a metadata table without format_version".to_owned()))?;
     match value.parse::<i32>() {
         Ok(version) if (LEGACY_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) => Ok(version),
         _ => Err(unsupported(format!("has format_version {value:?}"))),
     }
+}
+
+/// 读 `metadata` 时的错误里，只有 SQL 层面的形状问题（没有 `value` 列之类，SQLite 报的是笼统的 `SQLITE_ERROR`）和列值转换失败说明这张表不是认得的格式。被锁、读写出错、文件损坏这类错误与格式无关，像读 `sqlite_master` 失败一样原样交给调用方，不能说成格式不受支持。
+fn is_environmental(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(failure, _) if failure.code != rusqlite::ErrorCode::Unknown)
 }
 
 #[cfg(test)]
@@ -135,6 +146,28 @@ mod tests {
             check_format_version(&connection, "msime-pinyin.db"),
             Err(EngineError::Sqlite(_))
         ));
+    }
+
+    #[test]
+    fn only_shape_errors_on_the_metadata_table_mean_an_unknown_format() {
+        let failure = |code| {
+            rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), Some(String::new()))
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_LOCKED,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_CORRUPT,
+            rusqlite::ffi::SQLITE_NOTADB,
+        ] {
+            assert!(is_environmental(&failure(code)), "{code}");
+        }
+        assert!(!is_environmental(&failure(rusqlite::ffi::SQLITE_ERROR)));
+        assert!(!is_environmental(&rusqlite::Error::InvalidColumnType(
+            0,
+            "value".to_owned(),
+            rusqlite::types::Type::Blob
+        )));
     }
 
     #[test]

@@ -20,6 +20,6 @@ Status: implemented
 
 ## Consequences
 
-- 改符号数据只改词库仓。符号页的 PiliApp 表在许可确认或换来源之前不再加内容，词库仓 `AGENTS.md` 与 `NOTICE.md` 写明了这一点。
+- 改符号数据只改词库仓。这条管的是第三方符号表和本项目自写的名称表；符号模式的分组表改按 Unicode 字符数据库重建后，输入按锁直接从 unicode.org 取，不进词库仓，见[符号模式分组表改由 Unicode 字符数据库重建](../feature/2026-10-29-symbol-groups-from-unicode.md)的「数据放在哪」，那里的放法还要维护者确认。符号页的 PiliApp 表在许可确认或换来源之前不再加内容，词库仓 `AGENTS.md` 与 `NOTICE.md` 写明了这一点。
 - 合并顺序：先合词库仓加入 `piliapp-symbols.txt` 的 PR，再合 msime 的 dict-builder 改动；反过来，下一次 `dict-v` 发布会因为 `--dictionary` 检出里没有这个文件而在 Symbols 阶段失败。
 - 验证：`cargo test -p msime-dict-builder` 通过；用词库仓 PR 分支的检出跑 `msime-dict-build --only symbols --dictionary <检出>`，构建出 2323 个符号，和移动前的源文件逐字节一致。没有重跑整套 `dict-v` 发布。

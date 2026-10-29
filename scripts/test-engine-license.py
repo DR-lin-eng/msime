@@ -75,6 +75,35 @@ def live_lines(path: Path) -> list[str]:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith(("#", "//"))]
 
 
+def production_code(text: str) -> str:
+    """Drop the items marked #[cfg(test)] from rustfmt-formatted Rust source: a block item (a tests module, a test-only fixture module, helper fn or impl) up to the closing brace at the attribute's indent, any other item up to the line that ends it. Everything else, including production code that follows a test-only helper, stays."""
+    lines = text.splitlines()
+    kept = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() != "#[cfg(test)]":
+            kept.append(line)
+            index += 1
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        header = index + 1
+        while header < len(lines) and lines[header].lstrip().startswith(("#[", "//")):
+            header += 1
+        while header < len(lines) and not lines[header].rstrip().endswith(("{", ";", ",", "}")):
+            header += 1
+        end = header
+        if header < len(lines) and lines[header].rstrip().endswith("{"):
+            end = next((closing for closing in range(header + 1, len(lines)) if lines[closing].rstrip() in (f"{indent}}}", f"{indent}}};")), None)
+            if end is None:
+                # 找不到同缩进的右括号就不跳过，多查一段只会多报，不会漏报。
+                kept.append(line)
+                index += 1
+                continue
+        index = end + 1
+    return "\n".join(kept)
+
+
 def spdx_ids(expression: str) -> set[str]:
     return {term.strip() for term in expression.split(" AND ")}
 
@@ -119,12 +148,13 @@ def main() -> int:
     for relative in [*EMBEDDED, *ADAPTED]:
         check((source / relative).is_file(), f"crates/engine/src/{relative} is listed but missing")
         check(f"src/{relative}" in readme or f"`{relative.rsplit('/', 1)[-1]}`" in readme, f"crates/engine/README.md does not name src/{relative}")
-    # 非测试代码不许 include 到 crate 目录之外：tests 模块和 *tests.rs 里的读取由 cargo test 在仓库里跑，不进产品。
+    # 非测试代码不许 include 到 crate 目录之外：tests 模块、#[cfg(test)] 的辅助项和 *tests.rs 里的读取由 cargo test 在仓库里跑，不进产品。只去掉 #[cfg(test)] 标着的那一项，不从第一个 #[cfg(test)] 一刀切到文件尾：octagram.rs 的测试辅助函数后面还有几百行产品代码。
+    sample = "fn a() {}\n    #[cfg(test)]\n    fn helper(&self) -> usize {\n        include_str!(\"../test-only\").len()\n    }\n    fn shipped() {\n        include_str!(\"../shipped\");\n    }\n#[cfg(test)]\nmod tests {\n    const T: &str = include_str!(\"../tests-only\");\n}\n"
+    check(re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', production_code(sample)) == ["../shipped"], "production_code() no longer keeps the production code after a #[cfg(test)] helper, or no longer drops the test-only items")
     for path in sorted(source.rglob("*.rs")):
         if path.name.endswith("tests.rs") or "tests" in path.relative_to(source).parts[:-1]:
             continue
-        text = path.read_text(encoding="utf-8")
-        body = text.split("#[cfg(test)]", 1)[0]
+        body = production_code(path.read_text(encoding="utf-8"))
         for literal in re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', body):
             target = (path.parent / literal).resolve()
             check(target.is_relative_to(ENGINE.resolve()), f"{path.relative_to(ROOT)} compiles in {literal} from outside crates/engine")

@@ -24,9 +24,9 @@ C ABI of the 水杉输入法 (Metasequoia IME) input engine: a C library (shared
 Linux、macOS 上用 pkg-config（macOS 把归档名换成 `macos-universal` 那个）：
 
 ```sh
-tar -xzf msime-engine-capi-0.1.0-linux-x86_64.tar.gz
+tar -xzf msime-engine-capi-0.1.1-linux-x86_64.tar.gz
 tar -xzf msime-engine-data-quanpin-2.0.39.tar.gz
-capi=$PWD/msime-engine-capi-0.1.0-linux-x86_64
+capi=$PWD/msime-engine-capi-0.1.1-linux-x86_64
 export PKG_CONFIG_PATH=$capi/lib/pkgconfig
 cc -o example "$capi/examples/c/example.c" $(pkg-config --cflags --libs msime-engine) -Wl,-rpath,"$capi/lib"
 ./example "$PWD/msime-engine-data-quanpin-2.0.39" "$PWD/user" "$PWD/cache"
@@ -37,9 +37,9 @@ cc -o example "$capi/examples/c/example.c" $(pkg-config --cflags --libs msime-en
 Windows 上在 x64 的 Developer Command Prompt 里：
 
 ```bat
-tar -xf msime-engine-capi-0.1.0-windows-x86_64-msvc.zip
+tar -xf msime-engine-capi-0.1.1-windows-x86_64-msvc.zip
 tar -xf msime-engine-data-quanpin-2.0.39.zip
-set CAPI=%CD%\msime-engine-capi-0.1.0-windows-x86_64-msvc
+set CAPI=%CD%\msime-engine-capi-0.1.1-windows-x86_64-msvc
 cl /nologo /MD /I "%CAPI%\include" "%CAPI%\examples\c\example.c" /link "%CAPI%\lib\msime_engine.dll.lib"
 copy "%CAPI%\bin\msime_engine.dll" .
 example.exe "%CD%\msime-engine-data-quanpin-2.0.39" "%CD%\user" "%CD%\cache"

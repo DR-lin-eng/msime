@@ -44,9 +44,9 @@ Status: proposed
 
 未核实、P0 内要补完的：sunpinyin 源码没有比对（只声称借了 lattice columns 的概念）；msime-windows（`2dc940dc`）的 `engine/` 除 `fanlusky`、Jia Sui、`ouchihao` 外还有 HowGeGe、chr331、沐雪清泽、mushiyuki、古明四季、luojiyin、normaltank、AkaneIwasa、Jiaxin Ran、時崎 ギャラクシー、AaGMix、alayahbridge319-boop 的提交，是否进了 Rust 没查：其中 `engine/quanpin/quanpin_utils.cpp` 有 HowGeGe 59 行、chr331 38 行存活（`git blame -w`），Rust 的 `QU:` 引用可能指向这个文件；沐雪清泽的 `93c7b812`（日文 `nn` 记作一个ん）与 `japanese/romaji.rs:398-402` 的规则相同；`apple-ouyang` 的 #9243、#9253、#9265、#9305 对齐的 Windows 行为（`mid_sentence`、`direct_helpcode`、`date_time_query`）据评审的 blame 大部分出自 `fanlusky`，若属实已在他的同意范围内（未复核）；`TP:` 引用指向的 `TypoProfile` C++ 文件在 `a9b9f09` 和 msime-windows HEAD 都找不到，来源未定；`ouchihao` 在 `467b9804` 之后改过 msime-windows 的生成器（`1671c3a467`），是否进了 Rust 没有查；Rust 里 `WL:`/`QQ:` 行号对应的确切 C++ 版本（大概是固定提交加当时的 overlay）没有找到。
 
-**合并规则。** 同意评论只认表里列出的那个 GitHub 账号；git 作者名与账号不一致的（`fanlusky`、`yyy735934-prog`），issue 正文写明对应关系。P0 先开一个跟踪 issue，贴出统一的同意文字（「同意将我对 metasequoiaime/msime-engine、metasequoiaime/msime-windows 和本仓库的贡献中被移植或包含进 msime-engine、msime-path-trust 的部分，以 MPL-2.0（不附 Exhibit B）再许可」）；每位版权人用自己的账号在该 issue 下回复这段文字，issue 正文的表格链接每一条评论。所有「必须同意」的登录名都有这样一条评论、所有「同意或重写」的登录名要么有评论要么重写 PR 已合并之前，任何 PR 都不得改 LICENSE、Cargo 的 `license` 字段或任何说明引擎许可证的文本。P1 补的声明缺口不改变引擎的许可证说法，不受此限。
+**同意结果（2026-10-29）。** 维护者确认表中「必须同意」和「同意或重写」两类版权人全部同意把各自被移植或包含进 msime-engine、msime-path-trust 的贡献以 MPL-2.0（不附 Exhibit B）再许可；不开跟踪 issue，不在 GitHub 上逐个提及。同意记录由维护者自行留存，本仓库不保存联系方式或同意书原件。P2 据此与 P1 同时推进，合并仍按依赖顺序：P1 的 rink 自写定义、latex 表进 crate、符号分组重建先合，P2 后合。
 
-**`fanlusky` 不同意时，改许可证作罢。** 库照样可以以 GPL-3.0-only 发布：P3 到 P7 不依赖许可证，crates.io 接受 GPL crate，GPL 和 LGPL-2.1-or-later 的前端（如 fcitx5、ibus）仍能用，只是 App Store 和非 GPL 的采用方被挡在外面。净室重写不现实：按 `.cpp:`/`.h:` 行号或 `QQ/QU/QUH/QD/SD/WL/TP/GEN/J/NS/RP` 缩写引用 C++ 的 Rust 文件有 80 个、约 9.5 万行（含测试；引擎 `src` 共约 17.1 万行；只算 `QQ/QU/WL/TP/GEN` 是 72 个、约 8.8 万行），他的部分覆盖每个中文方案的核心（全拼、双拼词典、用户词典日志与排序与回放、英文、日文、辅助码、provider、方案）；净室要求作者没读过 C++ 和现有 Rust，维护者和现有贡献者都不合格，从 C++ 录下的黄金基准也是派生物。这等于重写引擎核心，不在本计划范围内。`jsfaint`、`apple-ouyang`、`EwigMidori` 不同意的后果实际相同。
+**（同意之前的退路）`fanlusky` 不同意时，改许可证作罢。** 库照样可以以 GPL-3.0-only 发布：P3 到 P7 不依赖许可证，crates.io 接受 GPL crate，GPL 和 LGPL-2.1-or-later 的前端（如 fcitx5、ibus）仍能用，只是 App Store 和非 GPL 的采用方被挡在外面。净室重写不现实：按 `.cpp:`/`.h:` 行号或 `QQ/QU/QUH/QD/SD/WL/TP/GEN/J/NS/RP` 缩写引用 C++ 的 Rust 文件有 80 个、约 9.5 万行（含测试；引擎 `src` 共约 17.1 万行；只算 `QQ/QU/WL/TP/GEN` 是 72 个、约 8.8 万行），他的部分覆盖每个中文方案的核心（全拼、双拼词典、用户词典日志与排序与回放、英文、日文、辅助码、provider、方案）；净室要求作者没读过 C++ 和现有 Rust，维护者和现有贡献者都不合格，从 C++ 录下的黄金基准也是派生物。这等于重写引擎核心，不在本计划范围内。`jsfaint`、`apple-ouyang`、`EwigMidori` 不同意的后果实际相同。
 
 P0 期间还有外部 PR 合进引擎时，同意名单会变长。P0 期间这些 crate 仍标 GPL-3.0-only，按 GitHub 服务条款 D.6「入站等于出站」，入站贡献默认只按仓库标明的许可证授权，单靠 CONTRIBUTING 的一段话证据很弱。所以 P0 起：`crates/engine`、`crates/path-trust`、`crates/engine-capi` 各自的 README 写明入站贡献以「GPL-3.0-only OR MPL-2.0」授权，CONTRIBUTING 同步；PR 模板加一条触及这些路径时必勾的确认项；P0 期间触及引擎的外部 PR，合并前要求作者在 PR 里回复同意文字。P2 之前对最终的树跑一次 `git blame -w -C -C -M`（按路径过滤的 shortlog 漏掉从别的 crate 搬进来的代码，P3 就要搬维护锁），并统计触及这些路径的提交里非 AI 的 `Co-authored-by` 尾行（`cyj-hashtag` 已经在引擎提交 `5a3b741191` 里以尾行出现）。
 
@@ -163,22 +163,22 @@ P1 顺手补的既有缺口（与改许可证无关）：移动端声明渠道�
 
 | 阶段 | 内容 | 退出条件 | 与 P0 的关系 |
 |---|---|---|---|
-| P0 收集同意书 | 开跟踪 issue 与同意文字；各引擎 crate 的 README、CONTRIBUTING 与 PR 模板加入站双授权条款；补完上文未核实项；P2 前对最终树重跑 blame 并统计 `Co-authored-by` 尾行 | 每个「必须同意」登录名都有评论；每个「同意或重写」登录名有评论或重写已合并；或 `fanlusky` 等明确拒绝，本笔记改记「改许可证作罢」 | — |
+| P0 收集同意书 | 已完成：2026-10-29 维护者确认全部同意（见「同意结果」）。剩余：各引擎 crate 的 README、CONTRIBUTING 与 PR 模板加入站双授权条款；补完上文未核实项；P2 前对最终树重跑 blame 并统计 `Co-authored-by` 尾行 | 维护者确认全部同意（已满足）；入站双授权条款随 P2 落地 | — |
 | P1 无论结果都安全的清理 | rink 自写定义；latex `symbols.tsv` 进 crate；`syllable_frequency.tsv` 的声明行和 kHanyuPinlu 原型；octagram 与 cxx_sort 的出处；zhuyin 注释措辞；既有声明缺口 | `cargo test -p msime-engine local::units` 不改测试通过；`cargo tree -p msime-engine -e normal,features -i rink-core` 的输出不含 `bundle-files`；`rg -n 'include_(str\|bytes)!' crates/engine/src` 列出的每个非测试数据文件都在「其余内嵌表」里有许可证行，且没有一行是 GPL；非测试代码没有 crate 外的 `include_str!`；`docs/ARCHITECTURE.md:66` 写上第三份符号表副本；各声明测试通过 | 可并行 |
-| P2 改许可证 | 上面的 P2 清单；`symbol_candidates.tsv` 经上游改头 | 清单全部勾掉，声明相关测试更新并通过 | 只能在 P0 完成、P1 的 rink 自写定义与 latex 表进 crate 已合并、待拍板 1 和 5 已定论之后（否则 MPL 版本仍内嵌 GPL 数据，而发出去的版本收不回） |
+| P2 改许可证 | 上面的 P2 清单；`symbol_candidates.tsv` 经上游改头 | 清单全部勾掉，声明相关测试更新并通过 | P0 已完成；合并要等 P1 的 rink 自写定义与 latex 表进 crate 已合并、待拍板 1 和 5 已定论之后（否则 MPL 版本仍内嵌 GPL 数据，而发出去的版本收不回） |
 | P3 引擎 API 加固 | 上面的硬点表 | 核心 `Session` 自己收尾；revision 在引擎；一套默认值；错误码；线程亲和按硬点表解决（`Send` 静态断言加跨线程 `reset_learning` 集成测试）；维护锁有归属；golden、input-runtime、host-api 测试通过 | 可并行 |
 | P4 msime-engine-capi | crate、cbindgen 头、pkg-config、SONAME、C 示例、ABI 测试 | C 示例在 Linux、macOS、Windows 上分别静态和动态链接，用仓库内生成的最小 SQLite 夹具（几十个词条，建表 SQL 同 `session/tests.rs` 的夹具）打出一句全拼、选词、上屏、冲刷学习；头文件漂移检查进 CI；`docs/ARCHITECTURE.md` 分层图加上 `crates/engine-capi` | ABI 冻结依赖 P3 的 revision、核心收尾和线程结论；构建可并行，发布等 P2 |
 | P5 数据格式文档与数据发布 | 规格文档；三个库加文件内版本与读端检查；按方案组装最小数据集，每个文件带许可证，排除无授权文件 | 运行时文件表的每一行都有规格；不兼容版本的库被拒绝而不是误读 | 可并行 |
 | P6 发布到 crates.io | 打包元数据、手动首发、发布工作流 | `cargo publish --dry-run -p msime-path-trust -p msime-engine -p msime-engine-capi` 通过并完成首发 | 需要 P1（latex 表进 crate，否则打包校验找不到它）、P2（或决定以 GPL 发布）、P3、P4 |
 | P7 msime 宿主自用 | input-runtime、host-api、engine-wasm、backend-engine 改用公开 API；engine-wasm 去掉自己的分页；dict-builder 是构建工具，可继续用内部接口 | 产品 crate 只用文档化的公开 API；`host` 门面只剩产品胶水 | P3 之后即可，可并行 |
 
-### 待维护者拍板
+### 维护者已拍板（2026-10-29，均按推荐）
 
-1. `syllable_frequency.tsv` 算不算 rime-ice 的派生物。➡️ 推荐：先按聚合事实保留并写明来源，kHanyuPinlu 原型不退步就替换，P2 之前定论。
-2. 默认数据（中文库 rime-ice GPL-3.0、n-gram CC-BY-SA-4.0、每个方案都硬性要求的 `msime-english.db` 含 rime-ice-en GPL-3.0）不能让 App Store 采用方直接带上。➡️ 推荐：v1 写明「引擎 MPL、数据按各自许可证」，由采用方选数据；宽松许可的最小数据集另立项目，前提是去掉非拼音方案对 `msime-english.db` 的硬性要求。
-3. `fanlusky` 不同意时库还做不做。➡️ 推荐：照做，以 GPL-3.0-only 发布，P3 到 P7 不受影响。
-4. 构建工具用 cargo-c（一步生成 cbindgen 头、`.pc`、SONAME 和两种库）还是 cbindgen 加自写脚本，二者都是新的构建依赖。➡️ 推荐：cargo-c。
-5. `symbol_groups.tsv` 的分组最初抄自 rime-prelude `symbols.yaml`（LGPL-3.0），这条链要不要按 LGPL-3.0 对待。➡️ 推荐：P2 之前定；按 LGPL 对待时改为运行时数据，或只用码位事实重建分组，不把它静态编进 MPL 库。
+1. `syllable_frequency.tsv` 算不算 rime-ice 的派生物。已定：先按聚合事实保留并写明来源，kHanyuPinlu 原型在九键评测不退步时替换。
+2. 默认数据（中文库 rime-ice GPL-3.0、n-gram CC-BY-SA-4.0、每个方案都硬性要求的 `msime-english.db` 含 rime-ice-en GPL-3.0）不能让 App Store 采用方直接带上。已定：v1 写明「引擎 MPL、数据按各自许可证」，由采用方选数据；宽松许可的最小数据集另立项目，前提是去掉非拼音方案对 `msime-english.db` 的硬性要求。
+3. `fanlusky` 不同意时库还做不做。已无需决定：全部版权人已同意。
+4. 构建工具用 cargo-c（一步生成 cbindgen 头、`.pc`、SONAME 和两种库）还是 cbindgen 加自写脚本，二者都是新的构建依赖。已定：cargo-c。
+5. `symbol_groups.tsv` 的分组最初抄自 rime-prelude `symbols.yaml`（LGPL-3.0），这条链要不要按 LGPL-3.0 对待。已定：按 LGPL-3.0 对待，只用 Unicode 字符数据库的事实（区块、类别、字符名）重建分组，不再内嵌由 rime-prelude 派生的分组。
 
 ### 相关笔记（审计）
 
@@ -194,7 +194,7 @@ P1 顺手补的既有缺口（与改许可证无关）：移动端声明渠道�
 
 ## Acceptance criteria
 
-- 跟踪 issue 的表格里，每个「必须同意」登录名都链接到本人的同意评论，每个「同意或重写」登录名链接到评论或已合并的重写 PR；做不到时本笔记改记改许可证作罢和库的 GPL 发布方案。
+- 版权人同意：2026-10-29 维护者确认全部同意，记录由维护者留存。
 - `cargo tree -p msime-engine -e normal,features -i rink-core` 不含 `bundle-files`，`include_str!`/`include_bytes!` 引入的每个非测试数据文件都有非 GPL 的许可证行；非测试代码没有 crate 外的 `include_str!`；`cargo package -p msime-engine --list` 不含 `tests/golden`、`testdata` 和自动纠错夹具。
 - P2 清单全部勾掉，`collect_notices.ps1`、`bundle_contents.py`、`test-symbol-groups.py`、`test-language-data-notices.py` 和 engine-wasm 的声明测试通过。
 - `msime-path-trust`、`msime-engine`、`msime-engine-capi` 的 `cargo publish --dry-run` 通过并完成首发；capi 的 C 示例在三个桌面平台上用安装后的头文件和 `.pc` 链接并能打字、选词、上屏。

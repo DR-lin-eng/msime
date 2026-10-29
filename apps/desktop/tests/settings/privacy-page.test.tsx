@@ -164,3 +164,111 @@ test("a HarmonyOS 2in1 without an account client gets no account page from conse
   expect(screen.queryByRole("heading", { name: /^(我的|账号与同步)$/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /^隐私/ })).toBeNull();
 });
+
+// 「防止截屏」（#10194）：宿主提供时「隐私」页多一组「截屏与录屏」；切换交给宿主，成功后开关跟着宿主的回答走。
+test("a HarmonyOS phone switches screen capture protection through the host", async () => {
+  const load = vi.fn().mockResolvedValue(false);
+  const save = vi.fn().mockResolvedValue(true);
+  render(
+    <SettingsPage
+      initialPage="privacy"
+      client={{
+        load: async () => initial,
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: true, panel_windows: false }),
+        screenCaptureProtection: { load, save },
+      }}
+    />,
+  );
+  await settingsFormReady();
+  const page = screen.getByRole("group", { name: "隐私" });
+  const titles = [...page.querySelectorAll("[data-group-title]")].map((node) => node.textContent);
+  expect(titles).toEqual(["你的数据", "匿名使用统计", "截屏与录屏"]);
+  const toggle = within(page).getByRole("switch", { name: /防止截屏/ }) as HTMLInputElement;
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+  expect(toggle.checked).toBe(false);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(save).toHaveBeenCalledWith(true));
+  await waitFor(() => expect(toggle.checked).toBe(true));
+});
+
+// 宿主拒绝（没有系统认证、认证没通过）时开关保持原值，并按原因提示；没设锁屏密码时提示先设置。
+test("a refused switch keeps its value and says why", async () => {
+  const save = vi
+    .fn()
+    .mockRejectedValueOnce({ code: "screen_capture_authentication_unavailable" })
+    .mockRejectedValueOnce({ code: "screen_capture_authentication_failed" });
+  render(
+    <SettingsPage
+      initialPage="privacy"
+      client={{
+        load: async () => initial,
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: true, panel_windows: false }),
+        screenCaptureProtection: { load: vi.fn().mockResolvedValue(false), save },
+      }}
+    />,
+  );
+  await settingsFormReady();
+  const page = screen.getByRole("group", { name: "隐私" });
+  const toggle = within(page).getByRole("switch", { name: /防止截屏/ }) as HTMLInputElement;
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+  fireEvent.click(toggle);
+  expect(
+    await screen.findByText("这台设备没有可用的系统认证，设置锁屏密码后才能打开防止截屏"),
+  ).toBeTruthy();
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+  expect(toggle.checked).toBe(false);
+  fireEvent.click(toggle);
+  expect(await screen.findByText("未通过系统认证，防止截屏保持关闭")).toBeTruthy();
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+  expect(toggle.checked).toBe(false);
+});
+
+// 2in1 没有「我的 › 隐私」，开关在「关于 › 许可与隐私」；那一页常驻，所以搜「录屏」能找到它。没有提供这项能力的宿主（Android 用原生页）不出现。
+test("a HarmonyOS 2in1 finds screen capture protection under 关于 by searching 录屏", async () => {
+  Element.prototype.scrollIntoView = vi.fn();
+  render(
+    <SettingsPage
+      initialPage="input"
+      client={{
+        load: async () => initial,
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: false }),
+        screenCaptureProtection: { load: vi.fn().mockResolvedValue(true), save: vi.fn() },
+      }}
+    />,
+  );
+  await settingsFormReady();
+  fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), {
+    target: { value: "录屏" },
+  });
+  const result = within(screen.getByRole("listbox", { name: "设置搜索结果" })).getByRole("option", {
+    name: /截屏与录屏/,
+  });
+  expect(result.textContent).toContain("关于");
+  fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), {
+    target: { value: "防止截屏" },
+  });
+  expect(
+    within(screen.getByRole("listbox", { name: "设置搜索结果" })).getByRole("option", {
+      name: /防止截屏/,
+    }),
+  ).toBeTruthy();
+});
+
+test("hosts without screen capture protection show no such switch", async () => {
+  render(
+    <SettingsPage
+      initialPage="privacy"
+      client={{
+        load: async () => initial,
+        save: vi.fn(),
+        host: testHost({ platform: "android", mobile_settings: true, panel_windows: false }),
+      }}
+    />,
+  );
+  await settingsFormReady();
+  expect(screen.queryByText("防止截屏")).toBeNull();
+  expect(screen.queryByText("截屏与录屏")).toBeNull();
+});

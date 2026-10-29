@@ -179,7 +179,8 @@ final class LoginSheet {
         scroll.addView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT));
         dialog.setContentView(scroll);
-        // 直接展开：内容比折叠高度长时（小屏、大字号），底部的同意勾选不能停在屏幕外。
+        // 直接展开，并且不留折叠高度：内容比折叠高度长时（小屏、大字号），底部的同意勾选不能停在屏幕外；往下拖就是关掉面板，不会停在一半让勾选和提示落到屏幕下面。
+        dialog.getBehavior().setSkipCollapsed(true);
         dialog.getBehavior().setState(BottomSheetBehavior.STATE_EXPANDED);
         dialog.setOnDismissListener(ignored -> {
             SignIn.stopWaitingForApple(appleResult);
@@ -285,11 +286,12 @@ final class LoginSheet {
     // ---- 状态 ----
 
     /**
-     * 登录操作发请求前的同意检查，对应共享页的 `consent.confirm()`。没勾时显示提示，收起键盘并把勾选框滚进可见区，读屏焦点移到勾选框上。
+     * 登录操作发请求前的同意检查，对应共享页的 `consent.confirm()`。没勾时显示提示，收起键盘，把面板展开并把勾选框下方的提示滚进可见区，读屏焦点移到勾选框上；勾选框的读屏提示（hint）此时就是这句提示，焦点播报盖掉 live region 时也听得到。
      */
     private boolean confirmConsent() {
         if (consent.confirm()) return true;
         renderConsentPrompt();
+        dialog.getBehavior().setState(BottomSheetBehavior.STATE_EXPANDED);
         View focused = dialog.getCurrentFocus();
         if (focused != null) {
             InputMethodManager keyboard = activity.getSystemService(InputMethodManager.class);
@@ -385,6 +387,12 @@ final class LoginSheet {
         LinearLayout row = LayoutPolicy.row(activity);
         ViewPolicy.setCentered(row);
         consentBox.setContentDescription(LoginConsentPolicy.TEXT);
+        consentBox.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.setHintText(consent.prompting() ? LoginConsentPolicy.PROMPT : null);
+            }
+        });
         consentBox.setOnCheckedChangeListener((button, checked) -> {
             consent.setAgreed(checked);
             renderConsentPrompt();
@@ -403,7 +411,7 @@ final class LoginSheet {
     }
 
     /**
-     * 把文档名做成链接。TextView 的整行点击和链接的点击在同一次抬手里都会触发：链接的 onClick 在触摸处理中同步执行，整行的点击是随后 post 出去的，所以链接先记下 {@link #consentLinkTapped}，再 post 一个排在整行点击之后的复位。
+     * 把文档名做成链接。TextView 的整行点击和链接的点击在同一次抬手里都会触发：抬手时 TextView 先交给 View 的触摸处理，那一步把整行点击 post 出去；随后 LinkMovementMethod 才同步执行链接的 onClick。所以链接记下 {@link #consentLinkTapped} 后再 post 的复位排在整行点击之后，整行点击执行时看到的还是 true。
      */
     private void consentLink(SpannableString text, String title, String url) {
         int start = text.toString().indexOf(title);

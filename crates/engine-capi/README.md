@@ -168,10 +168,10 @@ python3 -X utf8 platforms/linux/collect-notices.py cargo dist/THIRD_PARTY_NOTICE
 
 在要打包的那个平台上运行，Cargo 按该平台解析依赖图；`-X utf8` 是给 Windows 的，那里 Python 默认按 cp1252 读 cargo 的输出。它逐字复制每个 crate 自带的许可证、NOTICE 和版权文件（包括带 SQLite 的 `libsqlite3-sys`），本仓库自己的 crate 不列；自己不带许可证文件的 crate（现在是 `ewts`、`exmex`、`rink-core`）只列出声明的许可证表达式。归档里另外要放：
 
-- 引擎的许可证：P2 之前是仓库根目录的 `LICENSE`（GPL-3.0 全文，二进制整体按它分发；rink-core 内嵌的单位库 `definitions.units` 分叉自 GNU Units，是 GPL-3.0-or-later，也由它覆盖），以及这个目录的 `LICENSE`（MPL-2.0 全文，这个 crate 和 rink-core 用）。
+- 引擎的许可证：`crates/engine/LICENSE`（MPL-2.0 全文与 Exhibit A 声明，引擎、`msime-path-trust` 和 rink-core 用），以及这个目录的 `LICENSE`（同一份 MPL-2.0 全文，这个 crate 用）。
 - rink-core 的源码位置（MPL-2.0 §3.2）：crates.io 上的 `rink-core` 0.9，上游是 codeberg.org/tiffany/rink。
 - `ewts` 的许可证：`resources/licenses/ewts-MIT.txt`。crate 自己不带许可证文件，这份 MIT 全文末尾还附着它转换表来源 ewts-js 的 Apache-2.0 署名。
-- 引擎内嵌数据表的许可证与署名：`resources/licenses/` 下的 `libhangul-hanja-BSD-3-Clause.txt`、`kfcd-chaizi-CC-BY-3.0.txt`、`Unicode-License-V3.txt`、`OpenCC-Apache-2.0.txt`、`rime-wanxiang-CC-BY-4.0.txt`、`Administrative-divisions-of-China-WTFPL.txt`、`Zinnia-LICENSE.txt`、`librime-octagram-BSD-3-Clause.txt`，以及 LaTeX 符号表 `plugins/phrase_table/latex-symbols/symbols.tsv` 的 MIT 许可证 `plugins/phrase_table/LICENSE`。清单以 `docs/third-party.md` 的「输入引擎」一节为准。
+- 编进引擎的数据表和改编代码的许可证与署名：逐个文件见 [`crates/engine/README.md`](../engine/README.md) 的「许可证」一节，表里「全文」一列的文件都在 `resources/licenses/` 下，原样放进归档。
 
 CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为这张依赖图生成声明，并且不带许可证文件的 crate 仍只有上面列出的三个：依赖图里多出一个时作业失败，先在这里补上它的许可证文本。
 
@@ -187,4 +187,4 @@ CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为�
 
 向这个目录提交的贡献同样以 MPL-2.0 授权。
 
-它链接的 `msime-engine` 在改许可证（引擎库方案的 P2）落地之前仍是 GPL-3.0-only，所以今天从这里构建出的二进制整体按 GPL-3.0-only 分发；P2 之后整体是 MPL-2.0，内嵌的数据表保留各自的许可证。仓库其余部分仍是 GPL-3.0-only。
+它链接的 `msime-engine` 和 `msime-path-trust` 同样是 MPL-2.0，所以从这里构建出的二进制整体按 MPL-2.0 分发；链接进去的第三方 crate 和编进引擎的数据表保留各自的许可证。仓库其余部分仍是 GPL-3.0-only。

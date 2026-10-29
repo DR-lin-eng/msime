@@ -1,14 +1,19 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! The input engine: composition state, input schemes, dictionary queries, ranking and learning.
 //!
 //! This crate replaces the C++ MSIME-Engine that used to be fetched from `engine-lock.json` and patched by overlay scripts. It owns the input algorithms; `msime-input-runtime` keeps orchestrating hosts and does not duplicate any of it.
 //!
-//! The documented API is the core layer at the crate root: `Session`, its options and snapshot, and the functions and types beside them (they mirror the C++ `metasequoia::` API the golden fixtures were recorded against), plus the public modules such as `assets`, `diagnostics`, `touch` and `multilingual`. `host`, `ordering`, `backend` and `web` are msime's own product glue (the session facade and settings-page helpers its hosts call, its candidate ordering, its msime-cloud protocol, its browser storage): they are not part of the library API and change with msime's hosts. msime's product crates import everything the core layer takes or returns from the root, like a third party would; the boundary is described in `docs/ARCHITECTURE.md` and `.agents/notes/implemented/architecture/2026-10-29-engine-host-dogfood.md`. The module map and who owns what is `.migration/spec/modules.md`.
+//! The documented API is the core layer at the crate root: `Session`, its options and snapshot, and the functions and types beside them (they mirror the C++ `metasequoia::` API the golden fixtures were recorded against), plus the public modules such as `assets`, `diagnostics`, `touch` and `multilingual`. `host`, `ordering`, `backend` and `web` are msime's own product glue (the session facade and settings-page helpers its hosts call, its candidate ordering, its msime-cloud protocol, its browser storage): they stay `pub` only so msime's crates in the same repository can reach them, are hidden from the documentation, are not part of the library API and change with msime's hosts; other programs should not use them. msime's product crates import everything the core layer takes or returns from the root, like a third party would; the boundary is described in `docs/ARCHITECTURE.md` and `.agents/notes/implemented/architecture/2026-10-29-engine-host-dogfood.md`. The crate's README says which dictionary files a session reads, what to set in a downstream workspace, and the licences of the data compiled in.
+//!
+//! 引擎在运行时读写的每个文件（词库、模型、学习日志、代次目录）的格式、版本检查、产出方与数据许可证见仓库里的 `docs/data-formats.md`；代码注释里的 `data-formats.md §N` 指它的章节。
 
 // 非测试代码的日志一律走 `logging::warn`，嵌入方才换得掉出口（`set_log_sink`）；测试和基准测量照旧可以直接打印。
 #![cfg_attr(not(test), deny(clippy::print_stderr))]
 
 pub mod access;
 pub mod assets;
+#[doc(hidden)]
 pub mod backend;
 mod cache;
 pub mod cantonese;
@@ -18,6 +23,7 @@ mod error;
 pub mod format;
 mod handwriting;
 mod helpcode;
+#[doc(hidden)]
 pub mod host;
 mod ime;
 mod japanese;
@@ -30,6 +36,7 @@ pub mod logging;
 pub mod multilingual;
 mod nine_key;
 mod nine_key_shuangpin;
+#[doc(hidden)]
 pub mod ordering;
 mod paths;
 mod pinyin;
@@ -47,6 +54,7 @@ mod types;
 mod user_dictionary;
 pub mod vietnamese;
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+#[doc(hidden)]
 pub mod web;
 mod wubi;
 pub mod zhuyin;

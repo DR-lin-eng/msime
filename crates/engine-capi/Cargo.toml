@@ -4,7 +4,7 @@ name = "msime-engine-capi"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-# 这个 crate 自己的文件只有维护者的代码，从第一天起就是 MPL-2.0（README 的「许可证」一节）。字段不从工作区继承：工作区的 license 是 GPL-3.0-only。它链接的 msime-engine 在改许可证（引擎库方案的 P2）落地之前仍是 GPL-3.0-only，所以二进制要等 P2 之后才以 MPL-2.0 发布。
+# 这个 crate 自己的文件只有维护者的代码，用 MPL-2.0（README 的「许可证」一节）。字段不从工作区继承：工作区的 license 是 GPL-3.0-only。它链接的 msime-engine 与 msime-path-trust 也是 MPL-2.0，二进制整体按 MPL-2.0 发布。
 license = "MPL-2.0"
 description = "C ABI of the 水杉输入法 (Metasequoia IME) input engine: sessions, keys, candidates, selection and learning, as a C library with a header and pkg-config file."
 repository.workspace = true

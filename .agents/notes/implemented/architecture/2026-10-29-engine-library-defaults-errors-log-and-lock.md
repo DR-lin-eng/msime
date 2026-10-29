@@ -25,7 +25,7 @@ golden 基准按参照实现录制，`tests/golden_support/replay.rs` 的 `refer
 
 `ErrorCode`（`#[repr(u32)]`）是 `EngineError` 的稳定数字码，经 `EngineError::code()` 取得，说明文字照旧是 `Display`：`InvalidArgument = 1`、`Failed = 2`、`Storage = 3`（`Sqlite` 与 `Io`）、`Busy = 6`。编号与 C ABI 草案的返回码共用一个空间，0 是成功，4（不支持）、5（revision 不符）、7（会话已毒化）、8（空指针）留给 C ABI 自己的情形，引擎不产生它们。新增变体 `EngineError::Busy`，现在只有维护租约冲突用它（`DICTIONARY_MAINTENANCE_BUSY`，"Dictionary maintenance busy"）。
 
-`diagnostics::DiagnosticCode`（`#[repr(u16)]`）给 `diagnostics.rs` 里「KeyResult diagnostics」「Local mode query diagnostics」两段的 24 个常量各一个号（1 到 24，按文件里的顺序），映射表是 `DIAGNOSTIC_CODES`，`KeyResult::diagnostic_code()` 按文字查表。表外的文字是 `Other = 0xFFFF`：注音的选字和按键会把底层错误原文放进诊断。`KeyResult` 不加字段，免得改动所有构造处和快照；编号只追加、不改、不复用，测试按源码数两段里的常量，新加诊断忘了给码会红。
+`diagnostics::DiagnosticCode`（`#[repr(u16)]`）给 `diagnostics.rs` 里「KeyResult diagnostics」「Local mode query diagnostics」两段的 24 个常量各一个号（1 到 24，按文件里的顺序），九键笔画筛选拿不到笔画词库时放进诊断的 `LANGUAGE_DICTIONARY_UNAVAILABLE` 是 25（它定义在宿主门面错误那段，因为同时是查语言词库接口的错误文字），映射表是 `DIAGNOSTIC_CODES`，`KeyResult::diagnostic_code()` 按文字查表。表外的文字是 `Other = 0xFFFF`：注音的选字和按键会把底层错误原文放进诊断。`KeyResult` 不加字段，免得改动所有构造处和快照；编号只追加、不改、不复用。测试有两条：两段里的常量逐条要有码；引擎源码里每个 `with_diagnostic(...)` 实参引用的常量也要有码，不管定义在哪一段，按分段数常量的写法就漏掉过 25 号。
 
 ### 日志出口
 
@@ -45,7 +45,7 @@ golden 基准按参照实现录制，`tests/golden_support/replay.rs` 的 `refer
 
 - **门面继续从 `SessionOptions::new` 出发，只把核心默认值改成产品值** — 改动最小，一套默认值也成立。否掉是因为产品值（`ziranma`、学习关）恰好是引擎库不该有的默认值：`ziranma` 没有再分发授权，学习关会让嵌入方以为学习坏了；而且门面继承默认值的写法下次改核心默认值还会悄悄改到产品。
 - **辅助码默认关，表名保留 `lantian`** — 和参照实现差得最少。否掉是因为表名决定建会话时读哪张表，关着也读；默认读一张没有授权的表，和数据许可证的结论相悖。
-- **`KeyResult` 加一个 `diagnostic_code` 字段** — 取码不用查表。否掉是因为所有构造 `KeyResult` 的地方和 golden 快照都要改，按文字查 24 行的表只在出诊断时发生。
+- **`KeyResult` 加一个 `diagnostic_code` 字段** — 取码不用查表。否掉是因为所有构造 `KeyResult` 的地方和 golden 快照都要改，按文字查 25 行的表只在出诊断时发生。
 - **日志出口带级别（`Fn(Level, &str)`）** — C ABI 的回调通常带级别。现在四条日志都是警告，加一个只有一个取值的枚举没有用处；以后真有别的级别时 Rust 侧加一个新的设置函数，C ABI 的回调签名到时再定。
 - **只在 ABI 里写明「有会话打开时不调用维护接口」，锁留在 client-services** — 草案给的另一条路，不用搬代码。否掉是因为采用方和 msime 自己的宿主可能用同一份数据目录（同一台机器上的另一个前端），只有同一把文件锁能让它们互斥。
 - **`client-services` 直接 `pub use msime_engine::DictionaryAccess`，去掉 `directory`** — 少一层包装。`directory` 现在只有它自己的测试在用，但它是这个类型对外的一部分，返回的 `PrivateDirectory` 属于 client-base，引擎不能依赖 client-base；包一层能保住签名，不必顺手删接口。
@@ -59,7 +59,7 @@ golden 基准按参照实现录制，`tests/golden_support/replay.rs` 的 `refer
 
 ## Verification
 
-- 错误码：`error.rs` 的 `error_codes_are_frozen` 按变体核对 1、2、3、3、6，`codes_keep_the_message` 核对说明文字不变。诊断码：`diagnostics.rs` 的 `diagnostic_codes_are_frozen_and_round_trip` 核对编号连续且来回一致、表外文字是 `Other`，`every_key_result_diagnostic_has_a_code` 按源码数两段常量；九键到达按键上限的测试多核对一次 `diagnostic_code()`。
+- 错误码：`error.rs` 的 `error_codes_are_frozen` 按变体核对 1、2、3、3、6，`codes_keep_the_message` 核对说明文字不变。诊断码：`diagnostics.rs` 的 `diagnostic_codes_are_frozen_and_round_trip` 核对编号连续且来回一致、表外文字是 `Other`，`every_key_result_diagnostic_constant_has_a_code` 逐条核对两段常量，`every_constant_passed_to_with_diagnostic_has_a_code` 扫引擎源码里 `with_diagnostic` 的实参（把 25 号的文字临时改掉，它报出 `nine_key.rs` 那一处）；九键到达按键上限的测试多核对一次 `diagnostic_code()`。
 - 默认值：`host/tests.rs` 的 `session_options_do_not_inherit_the_library_defaults` 核对库默认值（辅助码关、`wubi86`、学习与个人上下文开）不漏进门面映射；原有的 `session_options_map_every_host_field` 照旧通过；golden 全部场景在 `reference_options()` 下不改基准通过。
 - 日志：`logging.rs` 的测试换上出口后收到不带前缀的整行，换回后不再收到。
-- 维护锁：`access.rs` 搬来了原 client-services 的全部锁测试（共享与独占互斥、描述符副本不延长租约、第二个根目录忙或锁文件不对时放掉第一把、拒绝符号链接根目录、目录句柄在根目录被替换后仍指向原目录），加上与旧版本同名文件互斥、相对路径、硬链接锁文件；client-services 保留经包装层取锁与 `directory` 的测试。引擎、client-base、client-services、host-api、input-runtime 的测试和 clippy 经 `rbuild` 在 Studio 上跑，命令与结果写在 PR 里；`cargo clippy -p msime-engine-wasm --target wasm32-unknown-unknown` 覆盖非 Unix 分支的编译。Windows 与 Android 分支在本机交叉编译不了（缺 C 工具链），由 CI 的 Windows 作业和 Android 设备测试覆盖。
+- 维护锁：`access.rs` 搬来了原 client-services 的全部锁测试（共享与独占互斥、描述符副本不延长租约、第二个根目录忙或锁文件不对时放掉第一把、拒绝符号链接根目录、目录句柄在根目录被替换后仍指向原目录），加上与旧版本同名文件互斥、相对路径、硬链接锁文件；client-services 保留经包装层取锁与 `directory` 的测试。引擎、client-base、client-services、host-api、input-runtime 的测试和 clippy 经 `rbuild` 在 Studio 上跑，命令与结果写在 PR 里；`cargo clippy -p msime-engine-wasm --target wasm32-unknown-unknown` 覆盖非 Unix 分支的编译。引擎层三个维护接口（`personal.rs`、`bundled.rs`、`reset.rs`）各有一条测试：会话持共享租约时报 `Busy`、不写数据，非法输入仍先报校验错误。Windows 分支由 CI 的 Windows 作业覆盖。Android 分支（`O_PATH` 逐级打开、`flock`）原来靠 client-services 的锁测试在设备上跑，搬进引擎后 `platforms/android/tests/device/build-core-test.sh` 加跑引擎的 `access::` 与 `maintenance_lease` 两组单测（`run-core-test.sh` 因此接受测试名过滤参数），合并前在 API 28 专用 AVD 上跑过，结果写在 PR 里；用标准库取锁的同名文件互斥测试不在 Android 上编译，那里新旧两边本来是同一个 `flock`。文件锁的标准库调用按函数分到 `cfg(not(target_os = "android"))`，`scripts/test-file-locking-goes-through-client-core.py` 照常扫引擎，靠的是它对 Android 不编译的函数的既有豁免。

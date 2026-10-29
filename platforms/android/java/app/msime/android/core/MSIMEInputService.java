@@ -420,6 +420,10 @@ public final class MSIMEInputService extends InputMethodService {
     private ImeInlineAutofill inlineAutofill;
     /** 本地设置 `platform.android.clipboard_suggestion` 的值；工具栏是否真的显示最近复制，还要看剪贴板历史开没开，一律问 {@link #recentClipEnabled()}。 */
     boolean clipboardSuggestionEnabled = true;
+    /** 本地设置 `platform.android.clipboard_suggestion_action`：最近复制那一行是否带分词或分类快捷键（#10079）。 */
+    boolean clipboardSuggestionActionEnabled = true;
+    /** 本地设置 `platform.android.clipboard_suggestion_action_kind`：快捷键的功能，取值见 {@link RecentClipboardSuggestion#quickAction}。 */
+    String clipboardSuggestionActionKind = RecentClipboardSuggestion.ACTION_CATEGORY;
     /** 工具栏上的「最近复制」（#5692）。 */
     final RecentClipboardSuggestion recentClip = new RecentClipboardSuggestion();
     /** 占工具栏那一行位置的「最近复制」：粘贴按钮和关闭按钮；有内容可显示时替换工具栏。 */
@@ -3034,6 +3038,8 @@ public final class MSIMEInputService extends InputMethodService {
         clipboardColumns = ClipboardLayoutPolicy.columns(
             localSettings.choice(AndroidLocalSettings.CLIPBOARD_COLUMNS));
         clipboardSuggestionEnabled = localSettings.bool(AndroidLocalSettings.CLIPBOARD_SUGGESTION);
+        clipboardSuggestionActionEnabled = localSettings.bool(AndroidLocalSettings.CLIPBOARD_SUGGESTION_ACTION);
+        clipboardSuggestionActionKind = localSettings.choice(AndroidLocalSettings.CLIPBOARD_SUGGESTION_ACTION_KIND);
         toolbarFloating = localSettings.bool(AndroidLocalSettings.TOOLBAR_FLOATING);
         toolbarTextEdit = localSettings.bool(AndroidLocalSettings.TOOLBAR_TEXT_EDIT);
         floatingKeyboard = localSettings.bool(AndroidLocalSettings.FLOATING_KEYBOARD);
@@ -8635,6 +8641,28 @@ public final class MSIMEInputService extends InputMethodService {
 
     void dismissRecentClip() {
         recentClip.dismiss();
+        render();
+    }
+
+    /** 最近复制那一行现在该显示的快捷键（#10079），见 {@link RecentClipboardSuggestion#quickAction}；`image` 为真时这一条是图片。 */
+    String recentClipQuickAction(boolean image) {
+        return RecentClipboardSuggestion.quickAction(clipboardSuggestionActionEnabled,
+            clipboardSuggestionActionKind, image);
+    }
+
+    /**
+     * 点最近复制那一行的分词或分类快捷键（#10079）：收起别的面板，打开剪贴板面板的本机历史，直接进入这一条的分词点选或「移动到分类」，省去进面板、长按、再选操作这几步。真正进入了分词或分类时这一条算用过，和粘贴一样不再出现；没进去（这一条不在历史里，不能移动分类）时保留它，关掉面板后还能点它粘贴。
+     */
+    void runRecentClipQuickAction() {
+        String text = recentClip.text(System.currentTimeMillis());
+        String action = recentClipQuickAction(false);
+        if (text == null || action == null) {
+            render();
+            return;
+        }
+        closeToolbarPanels();
+        if (imePanels.openRecentClipAction(text, RecentClipboardSuggestion.ACTION_SEGMENT.equals(action)))
+            recentClip.dismiss();
         render();
     }
 

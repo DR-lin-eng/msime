@@ -66,4 +66,5 @@ Status: implemented
 ## Verification
 
 - `cargo clippy -p msime-engine -p msime-input-runtime -p msime-host-api -p msime-engine-wasm -p msime-backend-engine -p msime-client-core --all-targets -- -D warnings`。
-- `cargo test -p msime-engine`（含 golden）、`-p msime-input-runtime`、`-p msime-host-api --lib`、`-p msime-engine-wasm`（原生目标，含 `routing.rs`、`parity.rs`）、`-p msime-backend-engine`，以及 `cargo check -p msime-engine-wasm --target wasm32-unknown-unknown`。门面快照的网格、双拼方案名、微软双拼和辅助码注释由 `host/tests.rs` 与冻结快照测试覆盖；网页引擎的按键路由、高亮保留与展开由 `routing.rs` 覆盖，排序与桌面 `Runtime` 的一致由 `parity.rs` 覆盖。
+- `cargo test -p msime-engine`（含 golden）、`-p msime-input-runtime`、`-p msime-host-api --lib`、`-p msime-engine-wasm`（原生目标）、`-p msime-backend-engine`，以及 `cargo check -p msime-engine-wasm --target wasm32-unknown-unknown`。门面快照的网格、双拼方案名（含 14 键双拼组字途中）、微软双拼和辅助码注释由 `host/tests.rs` 与冻结快照测试覆盖；网页引擎的按键路由、高亮保留、展开、引擎不收的键不触发重排、`set_helpcode` 后列表重来由 `routing.rs` 覆盖。`routing.rs` 不挂句子模型。
+- 挂真实词库和句子模型（`MSIME_EVAL_RESOURCES` 指向 Studio 上安装的 `MSIME.app/Contents/Resources/EngineResources`，release）：`rerank_routing.rs` 通过；`parity.rs` 在 26,596 例里有 2,212 例首页与桌面 `Runtime` 不同，而本篇的基线分支（#10201）在同一份资源上得到完全相同的 2,212 例和相同的差异内容，所以这些差异早于本篇、与修订号改写无关（列出的例子都是 `Runtime` 把正好拼完整个输入的词排在更长的补全词（如 anli 的「案例分析」「安理会」）之前，网页引擎把它们夹在中间）。`parity.rs` 因此不能当作本篇排序一致的证据，它的既有差异另行处理。

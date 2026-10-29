@@ -452,7 +452,7 @@ cargo --config "target.aarch64-linux-android.runner=['bash', '$PWD/platforms/and
   test -p msime-client-base -p msime-client-core -p msime-client-providers -p msime-client-services --lib --target aarch64-linux-android --locked
 ```
 
-runner 用 `--config` 传 TOML 数组，而不是 `CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER` 环境变量：cargo 会按空白切开那个变量，仓库路径带空格时脚本就找不到了。`platforms/android/tests/device/build-core-test.sh` 也是这样做的。
+runner 用 `--config` 传 TOML 数组，而不是 `CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER` 环境变量：cargo 会按空白切开那个变量，仓库路径带空格时脚本就找不到了。`platforms/android/tests/device/build-core-test.sh` 也是这样做的。引擎的跨进程词库维护锁在 msime-engine 里，`build-core-test.sh` 接着用同一个 runner 跑 `test -p msime-engine --lib ... -- access:: maintenance_lease`，runner 把测试名过滤参数传给设备上的测试程序。
 
 8 项测试在 Android 上通过，包含独立 PreferencesStore 的并发冲突和资源失败保护。Android 标准库文件锁不可用，共享锁封装在该目标使用 rustix 安全 flock，其他目标保留标准库锁；不放宽共享核心的 unsafe 禁令。启动页和软键盘均应用系统栏 inset，避免操作被 ActionBar 或导航栏遮挡。
 

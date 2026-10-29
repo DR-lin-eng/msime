@@ -78,7 +78,7 @@ else()
       set(archive "${MSIME_ENGINE_PREFIX}/lib/libmsime_engine.a")
     endif()
     target_link_libraries(msime_engine_example PRIVATE "${archive}" ${private})
-  else()
+  elseif(WIN32)
     if(MSVC)
       target_link_libraries(msime_engine_example PRIVATE "${MSIME_ENGINE_PREFIX}/lib/msime_engine.dll.lib")
     else()
@@ -87,6 +87,8 @@ else()
     # Windows 按可执行文件所在目录找 DLL。
     add_custom_command(TARGET msime_engine_example POST_BUILD
       COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${MSIME_ENGINE_PREFIX}/bin/msime_engine.dll" "$<TARGET_FILE_DIR:msime_engine_example>")
+  else()
+    target_link_libraries(msime_engine_example PRIVATE "${MSIME_ENGINE_PREFIX}/lib/libmsime_engine${CMAKE_SHARED_LIBRARY_SUFFIX}")
   endif()
 endif()
 

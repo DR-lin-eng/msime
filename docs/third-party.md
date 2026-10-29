@@ -12,7 +12,7 @@
 
 ## 本项目
 
-源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。例外是 `crates/script-sdk/`（脚本插件的 SDK，发布到 crates.io 的 `msime-script-sdk`）、`docs/script-plugin-template/`（脚本插件的模板）、`plugins/script/`（[脚本插件合集](#脚本插件合集pluginsscript)）的代码和 `plugins/phrase_table/`（官方短语表）的数据，用 MIT，全文在这四个目录各自的 `LICENSE`。SDK 是 Rust workspace 的成员，但它的 `license` 字段单独写 MIT、不从 workspace 继承；其余三个不属于 Rust workspace。其中 `plugins/official-packs.json` 登记的官方包（脚本插件 uuid、短语表 latex-symbols）随桌面安装包分发，每个包带着自己的 `LICENSE.txt`；其余只在源码里，由用户构建后导入。
+源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。例外是 `crates/script-sdk/`（脚本插件的 SDK，发布到 crates.io 的 `msime-script-sdk`）、`docs/script-plugin-template/`（脚本插件的模板）、`plugins/script/`（[脚本插件合集](#脚本插件合集pluginsscript)）的代码和 `plugins/phrase_table/`（官方短语表）的数据，用 MIT，全文在这四个目录各自的 `LICENSE`。SDK 是 Rust workspace 的成员，但它的 `license` 字段单独写 MIT、不从 workspace 继承；其余三个不属于 Rust workspace。其中 `plugins/official-packs.json` 登记的官方包（脚本插件 uuid、短语表 latex-symbols）随桌面安装包分发，每个包带着自己的 `LICENSE.txt`；其余只在源码里，由用户构建后导入。`crates/engine-capi/`（引擎的 C 接口 `msime-engine-capi`）自己的代码用 MPL-2.0（不附 Exhibit B），全文在该目录的 `LICENSE`，`license` 字段同样单独写、不从 workspace 继承；它链接的 `msime-engine` 改许可证之前仍是 GPL-3.0-only，所以从它构建出的二进制目前整体按 GPL-3.0-only 分发，二进制归档的第三方声明怎么生成见它的 README。
 
 ## 输入引擎（`crates/engine`）
 

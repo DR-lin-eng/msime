@@ -3234,6 +3234,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "msime-engine-capi"
+version = "0.1.0"
+dependencies = [
+ "msime-engine",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "msime-engine-wasm"
 version = "0.1.0"
 dependencies = [

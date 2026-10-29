@@ -35,6 +35,8 @@ final class ImeFrame {
     /** 大屏单手时空出来那一侧的数字键盘和它旁边的空白。 */
     final ImeSidePad sidePad;
     private String appliedMode = "";
+    /** 本机「按键区域宽度」：不在上游的 mode:blockDp:pad 缓存串里（契约逐字核对），单独记。 */
+    private int appliedWidthPercent = -1;
     private boolean keysCollapsed;
     private boolean keysCovered;
 
@@ -155,10 +157,11 @@ final class ImeFrame {
             s.imeLetterRows.drawnTouchLayout(), s.keyboardLayer, s.imeLetterRows.numberPadDrawn());
         int widthPercent = oneHanded(mode) || s.splitKeyboardDrawn() || s.floatingDrawn()
             ? 100 : s.touchKeyboardWidthPercent;
-        String applied = mode + ":" + blockDp + ":" + (padShown ? padDp : 0) + ":" + widthPercent;
-        if (applied.equals(appliedMode)) return;
+        String applied = mode + ":" + blockDp + ":" + (padShown ? padDp : 0);
+        if (applied.equals(appliedMode) && widthPercent == appliedWidthPercent) return;
         boolean surfaceChanged = !appliedMode.startsWith(mode + ":");
         appliedMode = applied;
+        appliedWidthPercent = widthPercent;
         // 键区占行宽的 widthPercent%（单手时份额由子视图权重决定），用权重总和保留两侧空白，屏幕旋转后按测得宽度重新分配，不缓存像素。
         row.setWeightSum(oneHanded(mode) ? 1f : 100f / widthPercent);
         // 大屏上单手模式开关会改变键盘表面铺不铺满窗口（KeyboardFormFactorPolicy.surfaceWidthDp），表面要跟着重排。

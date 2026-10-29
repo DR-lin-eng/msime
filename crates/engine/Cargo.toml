@@ -13,7 +13,7 @@ msime-path-trust = { path = "../path-trust" }
 chinese-ime-lm = "0.2"
 chinese-number = { version = "0.8", default-features = false, features = ["std", "number-to-chinese"] }
 # 藏文方案的 EWTS（扩展威利转写）到 Unicode 藏文的转换。MIT OR Apache-2.0，无依赖。
-ewts = "0.1.3"
+ewts = "0.1.4"
 exmex = "0.21"
 hex = "0.4"
 libc.workspace = true

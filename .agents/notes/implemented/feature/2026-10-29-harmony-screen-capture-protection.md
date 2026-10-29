@@ -51,4 +51,4 @@ Status: implemented
 
 代价：打开后用户自己也无法截屏反馈问题，需要先关掉（要认证）。键盘那一侧要等下一次编辑框获得焦点才跟上设置应用里的切换。没有共享沙箱的包（侧载调试签名、模拟器）里键盘面板不受保护。
 
-验证：`platforms/harmony/tests/run.sh`（含新的 `screen-capture-protection.test.ts` 和接线检查）通过；`apps/desktop` 的 `privacy-page.test.tsx` 新增 4 项（手机上经宿主切换、被拒时保持原值并提示、2in1 在「关于」里能搜到「录屏」、没有这项能力的宿主不出现）通过。没有在真机上验证截屏和录屏是否变黑、认证弹窗与取消后的原值、没有锁屏密码时的拒绝，也没有验证 `Panel.setPrivacyMode` 在浮动工具条、输入模式提示这类 STATUS_BAR 面板上的效果。
+验证：`platforms/harmony/tests/run.sh`（含新的 `screen-capture-protection.test.ts` 和接线检查）通过，删掉一处面板接线后接线检查失败；`hvigorw assembleHap` 的 ArkTS 编译通过（原生库和资源借用较早暂存的一份，新文件没有 ArkTS 警告）；`apps/desktop` 的 `privacy-page.test.tsx` 新增 4 项（手机上经宿主切换、被拒时保持原值并提示、2in1 在「关于」里能搜到「录屏」、没有这项能力的宿主不出现）通过。没有在真机上验证截屏和录屏是否变黑、认证弹窗与取消后的原值、没有锁屏密码时的拒绝，也没有验证 `Panel.setPrivacyMode` 在浮动工具条、输入模式提示这类 STATUS_BAR 面板上的效果。

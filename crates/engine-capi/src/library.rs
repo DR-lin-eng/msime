@@ -48,22 +48,38 @@ pub unsafe extern "C" fn msime_engine_string_free(text: *mut c_char) {
 
 // ---- 运行时 ----
 
-/// 读四个根目录里的前三个（`dictionaries` 不读）。
+/// 读四个根目录里的前三个，`dictionaries` 不碰：`msime_engine_prepare_runtime` 在代次准备好之前还没有代次目录，调用方可以不填这一项。
 ///
 /// # Safety
-/// `paths` 按 `struct_size` 约定可读，字段里的字符串指向各自长度的可读字节。
+/// `paths` 里前三个字段的字符串指向各自长度的可读字节。
+unsafe fn roots(paths: &msime_engine_paths) -> Outcome<[PathBuf; 3]> {
+    // SAFETY: 调用方的前提。
+    unsafe {
+        Ok([
+            PathBuf::from(field_str(paths.resources, "paths.resources")?),
+            PathBuf::from(field_str(paths.user_data, "paths.user_data")?),
+            PathBuf::from(field_str(paths.cache, "paths.cache")?),
+        ])
+    }
+}
+
+/// 读全部四个根目录，个人词典的三个函数用。
+///
+/// # Safety
+/// `paths` 按 `struct_size` 约定可读，四个字段的字符串指向各自长度的可读字节。
 unsafe fn runtime_paths(paths: *const msime_engine_paths) -> Outcome<RuntimePaths> {
     // SAFETY: 调用方的前提。
     let paths = unsafe { read_sized(paths, "paths") }?;
     // SAFETY: 同上。
-    unsafe {
-        Ok(RuntimePaths {
-            resources: PathBuf::from(field_str(paths.resources, "paths.resources")?),
-            user_data: PathBuf::from(field_str(paths.user_data, "paths.user_data")?),
-            cache: PathBuf::from(field_str(paths.cache, "paths.cache")?),
-            dictionaries: PathBuf::from(field_str(paths.dictionaries, "paths.dictionaries")?),
-        })
-    }
+    let [resources, user_data, cache] = unsafe { roots(&paths) }?;
+    // SAFETY: 同上。
+    let dictionaries = unsafe { field_str(paths.dictionaries, "paths.dictionaries") }?;
+    Ok(RuntimePaths {
+        resources,
+        user_data,
+        cache,
+        dictionaries: PathBuf::from(dictionaries),
+    })
 }
 
 fn utf8_path(path: &Path) -> Outcome<String> {
@@ -72,7 +88,7 @@ fn utf8_path(path: &Path) -> Outcome<String> {
         .ok_or_else(|| Failure::invalid("the path is not UTF-8"))
 }
 
-/// 准备运行时：在 `user_data/dictionaries/<content_id>` 原子地准备一个代次（从 `resources` 复制工作词库并回放学习日志），已就绪的代次只补回放。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据变了就换一个。三个根目录必须是绝对路径、互不重叠。成功时把代次目录写进 `*dictionaries`（可以是 NULL），用 `msime_engine_string_free` 释放；建会话时它就是 `paths.dictionaries`。
+/// 准备运行时：在 `user_data/dictionaries/<content_id>` 原子地准备一个代次（从 `resources` 复制工作词库并回放学习日志），已就绪的代次只补回放。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据变了就换一个；带点的版本号要先换掉点（`dict-v2_0_39`）。三个根目录必须是绝对路径、互不重叠。`paths.dictionaries` 不读。ABI 1.0 不分方案：`resources` 里必须有 `msime-pinyin.db` 和 `msime-english.db`，即使会话只用日文、韩文这类不读拼音词库的方案。成功时把代次目录写进 `*dictionaries`（可以是 NULL），用 `msime_engine_string_free` 释放；建会话时它就是 `paths.dictionaries`。
 ///
 /// # Safety
 /// `paths` 按 `struct_size` 约定可读；`content_id` 指向 `content_id_len` 个可读字节；`dictionaries` 是 NULL 或可写一个指针。
@@ -85,15 +101,13 @@ pub unsafe extern "C" fn msime_engine_prepare_runtime(
 ) -> i32 {
     guard(|| {
         // SAFETY: 调用方的前提。
-        let roots = unsafe { runtime_paths(paths) }?;
+        let paths = unsafe { read_sized(paths, "paths") }?;
+        // SAFETY: 同上；`dictionaries` 不读。
+        let [resources, user_data, cache] = unsafe { roots(&paths) }?;
         // SAFETY: 同上。
         let content_id = unsafe { input_str(content_id, content_id_len, "content_id") }?;
-        let prepared = msime_engine::prepare_runtime_paths(
-            &roots.resources,
-            &roots.user_data,
-            &roots.cache,
-            content_id,
-        )?;
+        let prepared =
+            msime_engine::prepare_runtime_paths(&resources, &user_data, &cache, content_id)?;
         let directory = utf8_path(&prepared.dictionaries)?;
         // SAFETY: 调用方的前提。
         unsafe { write_owned(dictionaries, directory) };
@@ -331,7 +345,7 @@ pub unsafe extern "C" fn msime_engine_user_dict_edit(
     })
 }
 
-/// 清空学到的一切：换回随包的工作词库、清空学习日志。还有会话开着时返回 `MSIME_ENGINE_BUSY`，什么也不换。
+/// 清空学到的一切：换回随包的工作词库、清空学习日志。和 `msime_engine_prepare_runtime` 一样要求 `resources` 里有 `msime-pinyin.db`。还有会话开着时返回 `MSIME_ENGINE_BUSY`，什么也不换。
 ///
 /// # Safety
 /// `paths` 按 `struct_size` 约定可读。

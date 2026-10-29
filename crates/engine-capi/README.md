@@ -23,7 +23,7 @@ cargo cinstall --locked --release -p msime-engine-capi --prefix /usr/local --lib
 | `lib/libmsime_engine.1.0.0.dylib`（macOS） | install name 是 `<libdir>/libmsime_engine.1.dylib`，compatibility version 是 ABI 主版本 |
 | `bin/msime_engine.dll`、`lib/msime_engine.dll.lib`（Windows MSVC） | DLL 和导入库 |
 | `lib/libmsime_engine.a`、`lib/msime_engine.lib`（MSVC） | 静态库 |
-| `lib/pkgconfig/msime-engine.pc` | `pkg-config --cflags --libs msime-engine`；静态链接用 `--static`，`Libs.private` 列出静态库要的系统库 |
+| `lib/pkgconfig/msime-engine.pc` | `pkg-config --cflags --libs msime-engine`；静态链接用 `--static`，`Libs.private` 列出静态库要的系统库。`Version` 是 ABI 版本（1.0.0），不是 crate 版本，可以写 `msime-engine >= 1.0` 按 ABI 做编译期开关。没有默认数据目录变量：cargo-c 生成的 `.pc` 不能加自定义变量，库也没有默认数据目录，四个根目录总由前端传入 |
 
 静态库要的系统库因平台而异，以 `.pc` 的 `Libs.private` 为准：macOS 是 `-liconv -lSystem -lc -lm`，Linux 是 `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc` 一类，Windows 是 `kernel32`、`advapi32`、`ntdll`、`userenv`、`ws2_32` 等。
 
@@ -43,7 +43,7 @@ bash crates/engine-capi/tests/c-example.sh --update-header
 ## 生命周期
 
 ```c
-msime_engine_prepare_runtime(&paths, "dict-v2.0.39", 12, &dictionaries); // 准备代次，交回代次目录
+msime_engine_prepare_runtime(&paths, "dict-v2_0_39", 12, &dictionaries); // 准备代次，交回代次目录
 msime_engine_session_new(options_json, len, &session);                 // 选项 JSON 见下文
 msime_engine_key_char(session, 'n', 0, &result);                       // 按键……
 msime_engine_state_get(session, &state);                               // 读状态和修订号
@@ -54,7 +54,7 @@ msime_engine_flush_learning(MSIME_ENGINE_FLUSH_STOP_THREAD);           // 退出
 msime_engine_string_free(dictionaries);
 ```
 
-- **准备运行时**：`msime_engine_prepare_runtime` 在 `user_data/dictionaries/<content_id>` 原子地准备一个代次：从 `resources` 复制工作词库，回放学习日志。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据一变就换一个（例如数据发布的版本号）；同一个 id 再调只补回放。它交回的代次目录就是建会话时的 `paths.dictionaries`。三个根目录都要是绝对路径、互不重叠：`resources` 只读，`user_data` 是用户数据（学习日志 `msime_user.db` 和代次），`cache` 随时可以清空。
+- **准备运行时**：`msime_engine_prepare_runtime` 在 `user_data/dictionaries/<content_id>` 原子地准备一个代次：从 `resources` 复制工作词库，回放学习日志。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据一变就换一个（例如数据发布的版本号，点要换掉：`dict-v2.0.39` 写成 `dict-v2_0_39`）；同一个 id 再调只补回放。`paths.dictionaries` 这时还没有，不读也不用填。ABI 1.0 准备代次时不分方案，`resources` 里必须有 `msime-pinyin.db` 和 `msime-english.db`（见[要带的数据文件](#要带的数据文件)）。它交回的代次目录就是建会话时的 `paths.dictionaries`。三个根目录都要是绝对路径、互不重叠：`resources` 只读，`user_data` 是用户数据（学习日志 `msime_user.db` 和代次），`cache` 随时可以清空。
 - **会话**：`msime_engine_session_new` 建会话时取这两个目录（`user_data` 和代次）上的共享词库租约，`msime_engine_session_free` 时交还。会话结束时写下最近约 2 秒排着的上下文学习、关掉自己的日志连接。
 - **维护**：`msime_engine_user_dict_edit` 和 `msime_engine_reset_learning` 要独占租约，同一份数据上还有会话开着（本进程、别的进程，包括 msime 自己的输入法）时返回 `MSIME_ENGINE_BUSY`、什么也不改：先释放会话。`msime_engine_user_dict_list` 只读，随时可以调。进行中的维护也让 `msime_engine_session_new` 返回 `MSIME_ENGINE_BUSY`。
 - **退出与卸载**：会话都释放之后调 `msime_engine_flush_learning(MSIME_ENGINE_FLUSH_STOP_THREAD)` 写完并停掉后台写线程。删除或替换数据目录之前调 `msime_engine_close_databases`。引擎还有进程级的缓存和单位换算的后台线程，没有办法全部收回，所以不要 `dlclose` 这个库后再重新加载，把它当作每个进程一份。
@@ -66,7 +66,7 @@ msime_engine_string_free(dictionaries);
 1. 字母一律 `msime_engine_key_char`。单独按下的 Shift 加字母（大写字母开本地模式）带 `MSIME_ENGINE_KEY_SHIFT_ONLY`。
 2. 数字、标点和空格先看 `state.spelling_symbols`：列在里面的此刻是拼写的一部分（表达式模式的运算符、`/` 和 `@` 的入口、注音的声调和空格、拆字的分隔符等），交给 `msime_engine_key_char`。`'` 在 `state.flags` 带 `MSIME_ENGINE_STATE_TAKES_SEPARATOR` 时也交给 `msime_engine_key_char`。
 3. 其余标点交给 `msime_engine_key_punct`：有组字时它以首选结束组字再接上中文标点。前端高亮的不是首选时，先 `msime_engine_finish(revision, 高亮行)`，再 `msime_engine_key_punct`。`handled` 为 0（中文标点关着、锁成 ASCII、这个键没有中文标点）时前端自己把字符交给应用，有 `commit` 就先交 `commit`。
-4. 数字 1–9 先交 `msime_engine_key_char`（Unicode 模式、日期模式等会自己用数字）。它没处理（`handled` 为 0、没有 `commit`）、有候选且不是联想（`MSIME_ENGINE_STATE_PREDICTION`）时，前端把它当作本页的选择键：`msime_engine_select(revision, 本页起点 + 数字 - 1)`。
+4. 数字 1–9 先交 `msime_engine_key_char`（Unicode 模式、日期模式等会自己用数字）。它没处理（`handled` 为 0、没有 `commit`）、按键之前有候选且不是联想（`MSIME_ENGINE_STATE_PREDICTION`）时，前端把它当作本页的选择键：`msime_engine_select(result.revision, 本页起点 + 数字 - 1)`。修订号要用这次 `msime_engine_key_char` 交回的 `result.revision`：交给引擎的每个字符都让修订号变，没处理的也一样，按键之前读到的 `state.revision` 这时已经过期（`MSIME_ENGINE_STALE`）；候选行没有变，前端手里的下标照旧有效。
 5. 空格：不在 `spelling_symbols` 里时，有候选就 `msime_engine_select(revision, 高亮行)`；联想的候选只在用户明确选择时上屏，空格和回车不上屏它们。
 6. 编辑键是命令：回车 `COMMIT_RAW`，Esc `CANCEL`（越南文、藏文和开着的韩文汉字列表第一次只退一步，再发一次才丢弃），退格 `BACKSPACE`，Delete `DELETE_FORWARD`，←/→ `MOVE_LEFT`/`MOVE_RIGHT`（全拼、双拼整句改字用 `CONVERSION_LEFT`/`CONVERSION_RIGHT`），Home/End `MOVE_HOME`/`MOVE_END`。
 7. 没有组字（`state.editing_text` 为空、没有候选）时引擎不处理的键，前端照常交给应用。
@@ -103,7 +103,7 @@ msime_engine_string_free(dictionaries);
 ```json
 {
   "version": 1,
-  "paths": {"resources": "/abs/res", "user_data": "/abs/user", "cache": "/abs/cache", "dictionaries": "/abs/user/dictionaries/dict-v2.0.39"},
+  "paths": {"resources": "/abs/res", "user_data": "/abs/user", "cache": "/abs/cache", "dictionaries": "/abs/user/dictionaries/dict-v2_0_39"},
   "scheme": "quanpin",
   "enabled_schemes": ["quanpin", "shuangpin", "wubi"],
   "shuangpin": {"profile": "xiaohe", "preedit_shows_keys": true},
@@ -144,16 +144,19 @@ msime_engine_string_free(dictionaries);
 
 库本身不带词库。运行时文件放在 `resources` 里，可以从 [msime-dictionary](https://github.com/metasequoiaime/msime-dictionary) 的 `dict-v*` 发布取，也可以自己按同样的格式生成。数据许可证跟着数据走，不随引擎：采用方按自己的发布方式挑选数据。
 
+ABI 1.0 的 `msime_engine_prepare_runtime` 和 `msime_engine_reset_learning` 不分方案，所以每个方案都要 `msime-pinyin.db` 和 `msime-english.db`，包括不读拼音词库的日文、韩文、越南文和藏文。引擎内部能按方案只准备 `msime-english.db`（msime 自己的宿主这样用），但它还不是公开接口，C 接口 1.0 也没有这个选项；以后要加就在次版本里追加一个带方案集合的函数，已有的两个不变。
+
 | 方案 | 至少要有 | 数据许可证 |
 | --- | --- | --- |
-| 全拼、双拼 | `msime-pinyin.db`、`msime-english.db`；排序与 msime 一样还要 `msime-bigram.bin`、`msime-trigram.bin` | `msime-pinyin.db`、`msime-english.db` 是 GPL-3.0（rime-ice、rime-ice-en 加补充）；n-gram 的计数来自 zhwiki（CC-BY-SA-4.0） |
-| 五笔 | 再加 `msime-wubi.db` | 混有 Apache-2.0、LGPL-3.0、GPL-3.0-or-later 和 Unlicense 的来源 |
-| 日文 | `msime-english.db`、`msime-japanese.dat` | Mozc 开源词库，带它的 README 与 LICENSE |
-| 韩文、越南文、藏文 | `msime-english.db` | 同上 |
-| 粤语、注音、笔画 | 再加 `msime-cantonese.db`、`msime-zhuyin.db`、`msime-stroke.db`（经 `language_dictionaries`） | CC BY 4.0、LGPL-2.1-or-later 加 MIT、LGPL-3.0 |
+| 每个方案 | `msime-pinyin.db`、`msime-english.db`，以及 `msime-english.db` 的 SCOWL 版权文件 `msime-scowl_Copyright.txt`（分发 `msime-english.db` 时必须一同携带） | `msime-pinyin.db` 是 GPL-3.0（rime-ice 加补充）；`msime-english.db` 是 GPL-3.0（rime-ice-en 加补充），英文词表含 SCOWL 的词 |
+| 全拼、双拼 | 排序与 msime 一样还要 `msime-bigram.bin`、`msime-trigram.bin` | n-gram 的计数来自 zhwiki（CC-BY-SA-4.0），词表来自 GPL-3.0 的 `msime-pinyin.db` |
+| 五笔 | 再加 `msime-wubi.db` | 混有 Apache-2.0（86 极点码表）、GPL-3.0（rime-ice 词条与人工词条补入的词）、GPL-3.0-or-later（Fcitx 的 98 表）、Unlicense（98 五笔小组的表）和 WTFPL（区划名称）的来源，逐项见 `resources/licenses/msime-engine-dictionary-NOTICE.md` |
+| 日文 | 再加 `msime-japanese.dat` | Mozc 开源词库（BSD-3-Clause 加词典附加条款），带它的 README 与 LICENSE（`msime-mozc_dictionary_oss_README.txt`、`msime-mozc_LICENSE.txt`） |
+| 韩文、越南文、藏文 | 不用再加 | 只有第一行的两个库 |
+| 粤语、注音、笔画 | 再加 `msime-cantonese.db`、`msime-zhuyin.db`、`msime-stroke.db`（经 `language_dictionaries`） | 粤语 CC BY 4.0；注音 LGPL-2.1-or-later 加 MIT；笔画 LGPL-3.0-only 加 GPL-3.0-only（笔顺码来自 rime-stroke，排序权重来自 rime-ice），带 `resources/licenses/` 下对应的许可证文件 |
 | 辅助码 | `resources/helpcodes/` 下的表 | 只有 `wubi86` 有来源与许可说明；仓库里其余几张没有再分发授权，不要随产品分发 |
 
-目前每个方案都硬性要求 `msime-english.db`。数据格式的规格文档还没有写完（引擎库方案的 P5），在那之前以 `crates/engine` 的读端为准。
+数据格式的规格文档还没有写完（引擎库方案的 P5），在那之前以 `crates/engine` 的读端为准。
 
 ## 二进制归档与第三方声明
 
@@ -163,7 +166,14 @@ C 库的二进制静态链接了整张 Rust 依赖图和 bundled SQLite，每个
 python3 -X utf8 platforms/linux/collect-notices.py cargo dist/THIRD_PARTY_NOTICES.txt msime-engine-capi
 ```
 
-在要打包的那个平台上运行，Cargo 按该平台解析依赖图；`-X utf8` 是给 Windows 的，那里 Python 默认按 cp1252 读 cargo 的输出。它逐字复制每个 crate 自带的许可证、NOTICE 和版权文件（包括带 SQLite 的 `libsqlite3-sys`），本仓库自己的 crate 不列。归档里另外要放：这个目录的 `LICENSE`（MPL-2.0 全文），rink-core 的源码位置（MPL-2.0 §3.2，crates.io 上的 `rink-core` 0.9），以及引擎内嵌数据表的许可证与署名（`resources/licenses/` 下的 `libhangul-hanja-BSD-3-Clause.txt`、`kfcd-chaizi-CC-BY-3.0.txt`、`Unicode-License-V3.txt`、`OpenCC-Apache-2.0.txt`、`rime-wanxiang-CC-BY-4.0.txt`、`Administrative-divisions-of-China-WTFPL.txt`、`Zinnia-LICENSE.txt`、`librime-octagram-BSD-3-Clause.txt`，清单以 `docs/third-party.md` 的「输入引擎」一节为准）。CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为这张依赖图生成声明。
+在要打包的那个平台上运行，Cargo 按该平台解析依赖图；`-X utf8` 是给 Windows 的，那里 Python 默认按 cp1252 读 cargo 的输出。它逐字复制每个 crate 自带的许可证、NOTICE 和版权文件（包括带 SQLite 的 `libsqlite3-sys`），本仓库自己的 crate 不列；自己不带许可证文件的 crate（现在是 `ewts`、`exmex`、`rink-core`）只列出声明的许可证表达式。归档里另外要放：
+
+- 引擎的许可证：P2 之前是仓库根目录的 `LICENSE`（GPL-3.0 全文，二进制整体按它分发；rink-core 内嵌的单位库 `definitions.units` 分叉自 GNU Units，是 GPL-3.0-or-later，也由它覆盖），以及这个目录的 `LICENSE`（MPL-2.0 全文，这个 crate 和 rink-core 用）。
+- rink-core 的源码位置（MPL-2.0 §3.2）：crates.io 上的 `rink-core` 0.9，上游是 codeberg.org/tiffany/rink。
+- `ewts` 的许可证：`resources/licenses/ewts-MIT.txt`。crate 自己不带许可证文件，这份 MIT 全文末尾还附着它转换表来源 ewts-js 的 Apache-2.0 署名。
+- 引擎内嵌数据表的许可证与署名：`resources/licenses/` 下的 `libhangul-hanja-BSD-3-Clause.txt`、`kfcd-chaizi-CC-BY-3.0.txt`、`Unicode-License-V3.txt`、`OpenCC-Apache-2.0.txt`、`rime-wanxiang-CC-BY-4.0.txt`、`Administrative-divisions-of-China-WTFPL.txt`、`Zinnia-LICENSE.txt`、`librime-octagram-BSD-3-Clause.txt`，以及 LaTeX 符号表 `plugins/phrase_table/latex-symbols/symbols.tsv` 的 MIT 许可证 `plugins/phrase_table/LICENSE`。清单以 `docs/third-party.md` 的「输入引擎」一节为准。
+
+CI 的 `engine-capi` 作业每次都跑一遍上面的命令，核对它能为这张依赖图生成声明，并且不带许可证文件的 crate 仍只有上面列出的三个：依赖图里多出一个时作业失败，先在这里补上它的许可证文本。
 
 ## 不在这个 ABI 里
 

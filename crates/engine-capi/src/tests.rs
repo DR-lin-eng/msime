@@ -248,22 +248,26 @@ fn user_dictionary(fixture: &Fixture) -> serde_json::Value {
     serde_json::from_str(&take_string(json)).expect("list JSON")
 }
 
+/// `Cargo.toml` 里某一节的 `version = "..."`。
+fn manifest_version(section: &str) -> &'static str {
+    let manifest = include_str!("../Cargo.toml");
+    manifest
+        .split(section)
+        .nth(1)
+        .and_then(|body| body.split("\n[").next())
+        .and_then(|body| {
+            body.lines()
+                .find_map(|line| line.strip_prefix("version = \""))
+        })
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("{section} has no version"))
+}
+
 #[test]
 fn library_version_follows_the_abi() {
-    let manifest = include_str!("../Cargo.toml");
-    let library = manifest
-        .split("[package.metadata.capi.library]")
-        .nth(1)
-        .expect("library section");
-    let version = library
-        .lines()
-        .find_map(|line| line.strip_prefix("version = \""))
-        .and_then(|rest| rest.strip_suffix('"'))
-        .expect("library version");
-    assert_eq!(
-        version,
-        format!("{MSIME_ENGINE_ABI_MAJOR}.{MSIME_ENGINE_ABI_MINOR}.0")
-    );
+    let abi = format!("{MSIME_ENGINE_ABI_MAJOR}.{MSIME_ENGINE_ABI_MINOR}.0");
+    assert_eq!(manifest_version("[package.metadata.capi.library]"), abi);
+    assert_eq!(manifest_version("[package.metadata.capi.pkg_config]"), abi);
     assert_eq!(
         msime_engine_abi_version(),
         (MSIME_ENGINE_ABI_MAJOR << 16) | MSIME_ENGINE_ABI_MINOR
@@ -339,6 +343,8 @@ fn types_a_sentence_selects_it_and_learns_it() {
     type_keys(session, "nihaoshijie");
     let current = state(session);
     assert_eq!(text(current.editing_text), "nihaoshijie");
+    // 给用户看的组字按音节分开，和 msime 自己的宿主一样。
+    assert_eq!(text(current.preedit), "ni'hao'shi'jie");
     assert_eq!(current.caret_byte, 11);
     assert_eq!(current.scheme, MSIME_ENGINE_SCHEME_QUANPIN);
     assert_eq!(current.local_mode, MSIME_ENGINE_LOCAL_MODE_NONE);
@@ -459,6 +465,120 @@ fn struct_size_is_negotiated() {
         MSIME_ENGINE_INVALID_ARGUMENT
     );
     free(session);
+}
+
+/// `struct_size` 太小的结果结构体在改变会话之前就被拒绝：键没有进组字，选择没有上屏，之后照常可用。
+#[test]
+fn a_too_small_result_is_rejected_before_the_session_changes() {
+    let fixture = Fixture::new();
+    let session = fixture.session();
+    type_keys(session, "nihao");
+    let before = state(session);
+    let mut small = empty_result();
+    small.struct_size = 0;
+    // SAFETY: 句柄有效，结构体比它声称的大。
+    unsafe {
+        assert_eq!(
+            msime_engine_key_char(session, b's', 0, &mut small),
+            MSIME_ENGINE_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            msime_engine_key_punct(session, b',', &mut small),
+            MSIME_ENGINE_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            msime_engine_command(session, MSIME_ENGINE_COMMAND_BACKSPACE, &mut small),
+            MSIME_ENGINE_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            msime_engine_select(session, before.revision, 0, &mut small),
+            MSIME_ENGINE_INVALID_ARGUMENT
+        );
+    }
+    assert!(last_error().contains("struct_size"), "{}", last_error());
+    let after = state(session);
+    assert_eq!(text(after.editing_text), "nihao");
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(small.struct_size, 0);
+
+    let mut result = empty_result();
+    // SAFETY: 句柄有效。
+    assert_eq!(
+        unsafe { msime_engine_select(session, before.revision, 0, &mut result) },
+        MSIME_ENGINE_OK
+    );
+    assert_eq!(text(result.commit), "你好");
+    free(session);
+}
+
+/// README 按键路由第 4 条：数字没被引擎处理时当选择键，用这次按键交回的修订号选。
+#[test]
+fn an_unhandled_digit_selects_with_the_revision_it_returned() {
+    let fixture = Fixture::new();
+    let session = fixture.session();
+    type_keys(session, "nihao");
+    let before = state(session);
+    let rows = words(session);
+    assert!(rows.len() > 1, "{rows:?}");
+    let mut result = empty_result();
+    // SAFETY: 句柄有效。
+    unsafe {
+        assert_eq!(
+            msime_engine_key_char(session, b'2', 0, &mut result),
+            MSIME_ENGINE_OK
+        );
+    }
+    assert_eq!(result.handled, 0);
+    assert_eq!(result.has_commit, 0);
+    // 没处理的键也让修订号变，候选行不变。
+    assert_ne!(result.revision, before.revision);
+    assert_eq!(words(session), rows);
+    // SAFETY: 句柄有效。
+    unsafe {
+        assert_eq!(
+            msime_engine_select(session, before.revision, 1, &mut result),
+            MSIME_ENGINE_STALE
+        );
+        let revision = state(session).revision;
+        assert_eq!(
+            msime_engine_select(session, revision, 1, &mut result),
+            MSIME_ENGINE_OK
+        );
+    }
+    assert_eq!(text(result.commit), rows[1]);
+    free(session);
+}
+
+/// `msime_engine_prepare_runtime` 不读 `paths.dictionaries`：调用方在准备之前没有代次目录。
+#[test]
+fn prepare_runtime_ignores_the_dictionaries_field() {
+    let fixture = Fixture::new();
+    let garbage = [0xFFu8, 0xFE];
+    let mut paths = fixture.paths();
+    paths.dictionaries = msime_engine_str {
+        ptr: garbage.as_ptr().cast(),
+        len: garbage.len(),
+    };
+    let mut directory: *mut c_char = ptr::null_mut();
+    let id = "fixture";
+    // SAFETY: 路径结构、id 和输出参数都在这里活着。
+    let status = unsafe {
+        msime_engine_prepare_runtime(&paths, id.as_ptr().cast(), id.len(), &mut directory)
+    };
+    assert_eq!(status, MSIME_ENGINE_OK, "{}", last_error());
+    assert_eq!(take_string(directory), fixture.dictionaries);
+    // 带点的 id 不是合法的代次 id。
+    let dotted = "dict-v2.0.39";
+    // SAFETY: 同上。
+    let status = unsafe {
+        msime_engine_prepare_runtime(
+            &paths,
+            dotted.as_ptr().cast(),
+            dotted.len(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, MSIME_ENGINE_INVALID_ARGUMENT);
 }
 
 #[test]

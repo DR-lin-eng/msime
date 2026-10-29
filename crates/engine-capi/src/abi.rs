@@ -73,7 +73,7 @@ pub struct msime_engine_state {
     /// 整句改字的光标，按 `conversion` 的字（Unicode 标量）计：光标在第 `conversion_focus_start_scalar` 个字之前，`[start, end)` 是候选替换的那一段；不在改字时两者都是 0。
     pub conversion_focus_start_scalar: u32,
     pub conversion_focus_end_scalar: u32,
-    /// 给用户看的组字（全拼按音节分开，双拼默认是按键原文）。
+    /// 给用户看的组字：全拼按音节分开（`ni'hao`），双拼默认是按键原文，本地模式与专用英文是按键原文。
     pub preedit: msime_engine_str,
     /// 按键原文（ASCII），`caret_byte` 指向它；为空就是没有在组字。
     pub editing_text: msime_engine_str,
@@ -118,7 +118,7 @@ pub struct msime_engine_paths {
     pub user_data: msime_engine_str,
     /// 可以随时清空的缓存。
     pub cache: msime_engine_str,
-    /// 代次目录，`msime_engine_prepare_runtime` 准备并交回；`msime_engine_prepare_runtime` 不读这一项。
+    /// 代次目录，`msime_engine_prepare_runtime` 准备并交回；`msime_engine_prepare_runtime` 不读这一项，调用方可以不填。
     pub dictionaries: msime_engine_str,
 }
 
@@ -292,6 +292,33 @@ pub(crate) unsafe fn read_sized<T: Sized1>(input: *const T, what: &'static str) 
     }
 }
 
+/// 调用方给的输出结构体声明的大小；比 1.0 的布局还小时失败。
+///
+/// # Safety
+/// `output` 非空，按 `T` 对齐，开头四个字节可读。
+unsafe fn output_size<T: Sized1>(output: *const T, what: &'static str) -> Outcome<usize> {
+    // SAFETY: 调用方的前提，开头四个字节是调用方填的 `struct_size`。
+    let caller = unsafe { output.cast::<u32>().read() } as usize;
+    if caller < T::V1_SIZE {
+        return Err(Failure::invalid(format!(
+            "{what}: struct_size is smaller than the ABI 1.0 layout"
+        )));
+    }
+    Ok(caller)
+}
+
+/// 改变会话之前核对可选的输出结构体（NULL 表示调用方不要结果）：`struct_size` 太小的调用在这里就被拒绝，会话原样不动，不会出现键已经处理、上屏文字却交不回去的情况。
+///
+/// # Safety
+/// `output` 是 NULL，或按 `T` 对齐、开头四个字节可读。
+pub(crate) unsafe fn check_output<T: Sized1>(output: *const T, what: &'static str) -> Outcome {
+    if output.is_null() {
+        return Ok(());
+    }
+    // SAFETY: 调用方的前提。
+    unsafe { output_size(output, what) }.map(|_| ())
+}
+
 /// 把输出结构体写给调用方：写 min(调用方大小, 库内大小) 个字节，`struct_size` 改成写入的大小，调用方多出的部分清零。
 ///
 /// # Safety
@@ -304,13 +331,8 @@ pub(crate) unsafe fn write_sized<T: Sized1>(
     if output.is_null() {
         return Err(Failure::null(what));
     }
-    // SAFETY: 非空且对齐，开头四个字节是调用方填的 `struct_size`。
-    let caller = unsafe { output.cast::<u32>().read() } as usize;
-    if caller < T::V1_SIZE {
-        return Err(Failure::invalid(format!(
-            "{what}: struct_size is smaller than the ABI 1.0 layout"
-        )));
-    }
+    // SAFETY: 非空且对齐，调用方的前提。
+    let caller = unsafe { output_size(output, what) }?;
     let written = caller.min(size_of::<T>());
     // SAFETY: 每个输出类型都以 `u32 struct_size` 开头（`repr(C)`），这里改写的就是它。
     unsafe {

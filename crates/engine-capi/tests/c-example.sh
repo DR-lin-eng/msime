@@ -55,6 +55,10 @@ elif ! diff -u --strip-trailing-cr "$committed" "$generated"; then
   exit 1
 fi
 
+# `.pc` 的 Version 是 ABI 版本（Cargo.toml 的 package.metadata.capi.pkg_config），前端按它做编译期开关。
+pc_version=$(sed -n 's/^Version: //p' "$stage/lib/pkgconfig/msime-engine.pc" | tr -d '\r')
+[[ "$pc_version" == 1.0.0 ]] || { echo "unexpected msime-engine.pc Version: $pc_version" >&2; exit 1; }
+
 # 共享库按 ABI 主版本命名：Linux 的 SONAME、macOS 的 install name 都带主版本 1（Cargo.toml 的 package.metadata.capi.library）。
 case "$(uname -s)" in
   Linux)
@@ -72,6 +76,9 @@ notices="$work/THIRD_PARTY_NOTICES.txt"
 # `-X utf8`：Windows 上 Python 默认按 cp1252 读 cargo 的输出，crate 元数据里的非 ASCII 字符会让它失败，与 release-windows.yml 的做法相同。
 (cd "$root" && "$python" -X utf8 platforms/linux/collect-notices.py cargo "$(native "$notices")" msime-engine-capi)
 grep -q '^libsqlite3-sys ' "$notices" || { echo "$notices does not list libsqlite3-sys" >&2; exit 1; }
+# 不带许可证文件的 crate 只列出许可证表达式，README 的「二进制归档与第三方声明」逐个交代它们；依赖图里多出一个时先在 README 里补上它的许可证文本，再改这里。
+unlicensed=$(awk '/^These packages ship no license file/ { list = 1; next } list && /^\* / { printf "%s ", $2; next } list { list = 0 }' "$notices")
+[[ "$unlicensed" == "ewts exmex rink-core " ]] || { echo "crates without a license file changed: $unlicensed; cover them in README.md" >&2; exit 1; }
 
 "$python" "$crate/tests/fixture/make_fixture.py" "$(native "$work/resources")"
 

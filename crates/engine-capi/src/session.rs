@@ -12,8 +12,9 @@ use msime_engine::{
 use serde_json::{json, Value};
 
 use crate::abi::{
-    guard, input_str, msime_engine_candidate, msime_engine_result, msime_engine_state,
-    msime_engine_str, panic_message, write_owned, write_sized, Failure, Outcome,
+    check_output, guard, input_str, msime_engine_candidate, msime_engine_result,
+    msime_engine_state, msime_engine_str, panic_message, write_owned, write_sized, Failure,
+    Outcome,
 };
 use crate::{
     MSIME_ENGINE_BUSY, MSIME_ENGINE_CANDIDATE_ANSWERS_KEY, MSIME_ENGINE_CANDIDATE_FUZZY,
@@ -57,8 +58,10 @@ impl SessionState {
         self.snapshot = None;
     }
 
+    /// 宿主看的快照：全拼的 `preedit` 按音节分开，与 msime 自己的宿主一致。
     fn snapshot(&mut self) -> &SessionSnapshot {
-        self.snapshot.get_or_insert_with(|| self.session.snapshot())
+        self.snapshot
+            .get_or_insert_with(|| self.session.display_snapshot())
     }
 
     fn check_revision(&self, revision: u64) -> Outcome {
@@ -443,6 +446,8 @@ pub unsafe extern "C" fn msime_engine_key_char(
                 format!("unknown key flags {flags:#x}"),
             ));
         }
+        // SAFETY: 调用方的前提。
+        unsafe { check_output(result, "result") }?;
         state.begin_change();
         let outcome = state
             .session
@@ -468,6 +473,8 @@ pub unsafe extern "C" fn msime_engine_key_punct(
                 "key_punct takes one ASCII punctuation character",
             ));
         }
+        // SAFETY: 调用方的前提。
+        unsafe { check_output(result, "result") }?;
         state.begin_change();
         let outcome = state.session.punctuation(character);
         // SAFETY: 调用方的前提。
@@ -495,6 +502,8 @@ pub unsafe extern "C" fn msime_engine_command(
                     format!("unknown command {command}"),
                 )
             })?;
+        // SAFETY: 调用方的前提。
+        unsafe { check_output(result, "result") }?;
         state.begin_change();
         let outcome = state.session.command(command);
         // SAFETY: 调用方的前提。
@@ -719,17 +728,19 @@ fn debug_json(revision: u64, snapshot: &SessionSnapshot) -> Value {
 //
 // 都带 `revision`：不是当前修订号时 `MSIME_ENGINE_STALE`，什么也不做。下标是引擎顺序里的行号，与 `msime_engine_candidate_get` 相同。
 
-/// 在核对修订号之后执行一次选择类调用。
+/// 在核对修订号和输出结构体之后执行一次选择类调用；被拒绝的调用不碰会话。
 fn with_candidate(
     session: *mut msime_engine_session,
     revision: u64,
     result: *mut msime_engine_result,
-    action: impl FnOnce(&mut Session) -> Outcome<KeyResult>,
+    action: impl FnOnce(&mut Session) -> KeyResult,
 ) -> i32 {
     with_session(session, |state| {
         state.check_revision(revision)?;
+        // SAFETY: 调用方的前提（每个公开函数的 Safety 段）。
+        unsafe { check_output(result, "result") }?;
         state.begin_change();
-        let outcome = action(&mut state.session)?;
+        let outcome = action(&mut state.session);
         // SAFETY: 调用方的前提（每个公开函数的 Safety 段）。
         unsafe { state.finish(outcome, result) }
     })
@@ -747,7 +758,7 @@ pub unsafe extern "C" fn msime_engine_select(
     result: *mut msime_engine_result,
 ) -> i32 {
     with_candidate(session, revision, result, |engine| {
-        Ok(engine.select(self::index(index)))
+        engine.select(self::index(index))
     })
 }
 
@@ -763,13 +774,15 @@ pub unsafe extern "C" fn msime_engine_select_edge(
     edge: u32,
     result: *mut msime_engine_result,
 ) -> i32 {
+    let edge = match edge {
+        MSIME_ENGINE_EDGE_FIRST_HAN => CandidateEdge::FirstHan,
+        MSIME_ENGINE_EDGE_LAST_HAN => CandidateEdge::LastHan,
+        _ => {
+            return guard(|| Err(Failure::invalid(format!("unknown edge {edge}"))));
+        }
+    };
     with_candidate(session, revision, result, |engine| {
-        let edge = match edge {
-            MSIME_ENGINE_EDGE_FIRST_HAN => CandidateEdge::FirstHan,
-            MSIME_ENGINE_EDGE_LAST_HAN => CandidateEdge::LastHan,
-            _ => return Err(Failure::invalid(format!("unknown edge {edge}"))),
-        };
-        Ok(engine.select_edge(self::index(index), edge))
+        engine.select_edge(self::index(index), edge)
     })
 }
 
@@ -785,7 +798,7 @@ pub unsafe extern "C" fn msime_engine_finish(
     result: *mut msime_engine_result,
 ) -> i32 {
     with_candidate(session, revision, result, |engine| {
-        Ok(engine.finish(self::index(first_index)))
+        engine.finish(self::index(first_index))
     })
 }
 
@@ -801,7 +814,7 @@ pub unsafe extern "C" fn msime_engine_pin(
     result: *mut msime_engine_result,
 ) -> i32 {
     with_candidate(session, revision, result, |engine| {
-        Ok(engine.pin(self::index(index)))
+        engine.pin(self::index(index))
     })
 }
 
@@ -817,7 +830,7 @@ pub unsafe extern "C" fn msime_engine_remove(
     result: *mut msime_engine_result,
 ) -> i32 {
     with_candidate(session, revision, result, |engine| {
-        Ok(engine.remove(self::index(index)))
+        engine.remove(self::index(index))
     })
 }
 
@@ -834,7 +847,7 @@ pub unsafe extern "C" fn msime_engine_fix_position(
     result: *mut msime_engine_result,
 ) -> i32 {
     with_candidate(session, revision, result, |engine| {
-        Ok(engine.fix_position(self::index(index), position))
+        engine.fix_position(self::index(index), position)
     })
 }
 
@@ -850,7 +863,7 @@ pub unsafe extern "C" fn msime_engine_clear_position(
     result: *mut msime_engine_result,
 ) -> i32 {
     with_candidate(session, revision, result, |engine| {
-        Ok(engine.clear_position(self::index(index)))
+        engine.clear_position(self::index(index))
     })
 }
 

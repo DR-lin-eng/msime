@@ -10,9 +10,9 @@ Status: implemented
 
 ### crate 形态
 
-`crates/engine-capi`，包名 `msime-engine-capi`，`license = "MPL-2.0"`（不从工作区继承，目录里有 MPL-2.0 全文的 `LICENSE`，README 的「许可证」段写 Exhibit A），`crate-type = ["cdylib", "staticlib", "rlib"]`，`#![allow(unsafe_code)]` 写在 crate 根并说明理由。rlib 是给工作区里的 Rust 代码（ABI 测试、以后 msime 宿主自用）链接同一份实现。它在工作区 `members` 和 `default-members` 里。引擎为它只多导出一个类型 `FirstPageRows`：`Session::set_first_page_rows` 是公开方法，参数类型却没导出。
+`crates/engine-capi`，包名 `msime-engine-capi`，`license = "MPL-2.0"`（不从工作区继承，目录里有 MPL-2.0 全文的 `LICENSE`，README 的「许可证」段写 Exhibit A），`crate-type = ["cdylib", "staticlib", "rlib"]`，`#![allow(unsafe_code)]` 写在 crate 根并说明理由。rlib 是给工作区里的 Rust 代码（ABI 测试、以后 msime 宿主自用）链接同一份实现。它在工作区 `members` 和 `default-members` 里。引擎为它多公开两样：类型 `FirstPageRows`（`Session::set_first_page_rows` 是公开方法，参数类型却没导出），以及 `Session::display_snapshot`。后者是 host 门面一直在用的宿主快照（全拼的 `preedit` 按音节分开，`ni'hao'shi'jie`），核心的 `snapshot()` 保留按键原文给参考回放比对；`msime_engine_state.preedit` 承诺的是给用户看的组字，所以 C 接口读宿主那一份。
 
-构建用 cargo-c（维护者 2026-10-29 拍板）。`package.metadata.capi` 定下 C 侧的名字与版本：库名 `msime_engine`，头文件 `msime_engine.h` 直接装进 includedir，pkg-config 名 `msime-engine`；库版本取 ABI 版本 `1.0.0`、`version_suffix_components = 1`，所以 Linux 的 SONAME 是 `libmsime_engine.so.1`，macOS 的 install name 是 `<libdir>/libmsime_engine.1.dylib`、compatibility version 是 1。crate 自己的版本是 0.1.0，与 ABI 版本分开；`tests::library_version_follows_the_abi` 核对库版本等于 `MSIME_ENGINE_ABI_MAJOR.MINOR.0`。cargo-c 生成的版本号宏会是 crate 版本，关掉（`emit_version_constants = false`），免得采用方拿它当 ABI 版本。苹果平台上给 rustc 加 `-Cstrip=none`：工作区 dev 配置 `debug = 0` 时 rustc 默认剥调试信息，Xcode 27 的 `strip` 剥过的 dylib 被它自己的链接器拒绝（`mis-aligned LINKEDIT string pool`，在 Studio 上复现：同一个 cdylib 不剥就能链接）。
+构建用 cargo-c（维护者 2026-10-29 拍板）。`package.metadata.capi` 定下 C 侧的名字与版本：库名 `msime_engine`，头文件 `msime_engine.h` 直接装进 includedir，pkg-config 名 `msime-engine`；库版本取 ABI 版本 `1.0.0`、`version_suffix_components = 1`，所以 Linux 的 SONAME 是 `libmsime_engine.so.1`，macOS 的 install name 是 `<libdir>/libmsime_engine.1.dylib`、compatibility version 是 1。crate 自己的版本是 0.1.0，与 ABI 版本分开。`.pc` 的 `Version` 同样设成 ABI 版本 `1.0.0`（cargo-c 缺省用 crate 版本），前端可以写 `msime-engine >= 1.0` 按 ABI 做编译期开关；`tests::library_version_follows_the_abi` 核对库版本和 `.pc` 版本都等于 `MSIME_ENGINE_ABI_MAJOR.MINOR.0`，C 示例脚本再核对装出来的 `.pc`。草案要的「默认共享数据目录变量」没有做：cargo-c 0.10 生成的 `.pc` 只有 prefix、exec_prefix、libdir、includedir 四个变量，不能加自定义变量；库本身也没有默认数据目录，四个根目录总由前端传入，这个变量没有可指的地方。cargo-c 生成的版本号宏会是 crate 版本，关掉（`emit_version_constants = false`），免得采用方拿它当 ABI 版本。苹果平台上给 rustc 加 `-Cstrip=none`：工作区 dev 配置 `debug = 0` 时 rustc 默认剥调试信息，Xcode 27 的 `strip` 剥过的 dylib 被它自己的链接器拒绝（`mis-aligned LINKEDIT string pool`，在 Studio 上复现：同一个 cdylib 不剥就能链接）。
 
 头文件由 cargo-c 调 cbindgen 从 `src/` 生成（`cbindgen.toml`：C、`MSIME_ENGINE_H`、C++ 兼容、按源码顺序、`size_t`），提交在 `include/msime_engine.h`；`tests/c-example.sh --update-header` 重新生成，CI 比对漂移。所有常量都是 `pub const`（cbindgen 出 `#define`），不用 C 的 `enum`：枚举的宽度在 C 里不固定。
 
@@ -26,6 +26,7 @@ Status: implemented
 - `preload_model(kind, path, bytes)` 现在只有 `MSIME_ENGINE_MODEL_JAPANESE`，对应 `preload_japanese_dictionary`；`bytes` 为 NULL 且长度为 0 时撤掉。别的种类是 `UNSUPPORTED`，以后加种类不加函数。
 - 选项 JSON 比草案的子集多一个 `next_word_prediction`：没有它，`MSIME_ENGINE_OPTION_PREDICTION_ALLOWED` 这个门禁永远无事可管。枚举类的取值在 JSON 里用名字（`quanpin`、`xiaohe`、`z_zh`），整数编号只出现在 C 函数的参数里。
 - 命令 11 在 ABI 里叫 `MSIME_ENGINE_COMMAND_OPEN_CANDIDATE_LIST`：核心层的 `ConvertHanja` 是历史名，它现在开关的是当前方案可打开的列表（韩文汉字、注音整句），编号不变。
+- `prepare_runtime` 和 `reset_learning` 不分方案，用引擎的 `prepare_runtime_paths` 和 `reset_learned_data`，所以每个方案都要 `msime-pinyin.db`，包括提案数据表里只要 `msime-english.db` 的日文、韩文、越南文和藏文。引擎能按方案只准备英文库（`prepare_runtime_paths_for`、`reset_learned_data_with`，msime 宿主在用），但前者不是公开接口；按方案准备留给以后的次版本追加一个带方案集合的函数，README 的数据表写明 1.0 的要求。`prepare_runtime` 不读 `paths.dictionaries`：调用时还没有代次目录，C 调用方很自然地只填前三项。
 - 个人词典三个函数用引擎层自己取锁的版本（`edit_personal_dictionary`、`reset_learned_data`）和只读的 `personal_dictionary_entries`。引擎以后新加的词条种类在 JSON 里还没有名字，列表里先略过（`PersonalDictionaryKind` 是 `non_exhaustive`）。
 
 ### 会话句柄
@@ -42,15 +43,15 @@ Status: implemented
 
 ### 结构体与错误
 
-每个进出的结构体以 `uint32_t struct_size` 开头。输出时库写 min(调用方大小, 库内大小) 个字节，把 `struct_size` 改写成写入的大小，调用方多出的部分清零；比 1.0 的布局还小是 `INVALID_ARGUMENT`。输出结构体按字节整块复制，所以设计成没有填充，编译期断言字段大小之和等于 `size_of`；输入结构体（`msime_engine_paths`）先复制进一块清零的内存再读，读不到的字段是零。`Sized1::V1_SIZE` 现在等于 `size_of`，追加字段时要把它固定成 1.0 的大小。
+每个进出的结构体以 `uint32_t struct_size` 开头。输出时库写 min(调用方大小, 库内大小) 个字节，把 `struct_size` 改写成写入的大小，调用方多出的部分清零；比 1.0 的布局还小是 `INVALID_ARGUMENT`。改变状态的调用（按键、标点、命令、七个选择类函数）在动会话之前就核对结果结构体的大小，被拒绝的调用什么也没做；如果等到写结果时才核对，键已经进了组字、整句已经上屏并学过，调用方却拿到失败和丢掉的上屏文字。输出结构体按字节整块复制，所以设计成没有填充，编译期断言字段大小之和等于 `size_of`；输入结构体（`msime_engine_paths`）先复制进一块清零的内存再读，读不到的字段是零。`Sized1::V1_SIZE` 现在等于 `size_of`，追加字段时要把它固定成 1.0 的大小。
 
 返回码的 1、2、3、6 与引擎 `ErrorCode` 相同，`lib.rs` 里有编译期断言；4、5、7、8 是包装层自己的情形。`last_error` 存在线程局部的 `Option<CString>` 里，每个入口先清掉它，成功的调用不分配；`last_error` 自己不清。`msime_engine_result.diagnostic_code` 是引擎的 `DiagnosticCode`，0 表示没有诊断。
 
 ### 测试与 CI
 
-`src/tests.rs` 经 C 函数本身测：版本与库版本一致、空指针、选项 JSON 拒绝未知键与错版本、打一句全拼后核对状态和候选、过期修订号被拒且不改状态、选词上屏、冲刷后个人词典里有这句、`struct_size` 的三种情形、并发调用报 `BUSY`、会话跨线程使用、panic 只作废自己的会话、会话开着时维护报 `BUSY` 而释放后成功、维护进行中建不了会话、各种不认识的编号、标点与命令的路由、`last_error` 按线程。夹具是 `tests/fixture/*.sql`，与 C 示例共用；建表方式同 `session/tests.rs`，另外有空的三、四音节表，因为选中整句时引擎把它当用户词写进对应长度的表，表不在就报 `SENTENCE_NOT_PERSISTED`。
+`src/tests.rs` 经 C 函数本身测：版本与库版本、`.pc` 版本一致、空指针、选项 JSON 拒绝未知键与错版本、打一句全拼后核对状态（含按音节分开的 `preedit`）和候选、过期修订号被拒且不改状态、选词上屏、冲刷后个人词典里有这句、`struct_size` 的三种情形、结果结构体太小的按键和选择不改会话、没处理的数字键按它交回的修订号选词（README 按键路由第 4 条）、`prepare_runtime` 不读 `paths.dictionaries` 并拒绝带点的 id、并发调用报 `BUSY`、会话跨线程使用、panic 只作废自己的会话、会话开着时维护报 `BUSY` 而释放后成功、维护进行中建不了会话、各种不认识的编号、标点与命令的路由、`last_error` 按线程。夹具是 `tests/fixture/*.sql`，与 C 示例共用；建表方式同 `session/tests.rs`，另外有空的三、四音节表，因为选中整句时引擎把它当用户词写进对应长度的表，表不在就报 `SENTENCE_NOT_PERSISTED`。
 
-`tests/c-example.sh` 用 `cargo cinstall --debug` 装进 `target/engine-capi/stage`，核对头文件没有漂移、共享库的 SONAME 或 install name 带主版本、`platforms/linux/collect-notices.py` 按 `msime-engine-capi` 的依赖图生成得出第三方声明（并且收进了 `libsqlite3-sys`），再用 CMake 把 `examples/c/example.c` 按动态库、静态库、静态库加系统 SQLite（Windows 上没有这一个）各编一遍并运行：准备代次、建会话、打 `nihaoshijie`、读状态与候选、过期修订号被拒、选第一行上屏「你好世界」、冲刷、释放、从个人词典读回这句。CMake 有 pkg-config 时用它（静态链接直接给出归档路径再接 `Libs.private`，因为前缀里同时有共享库），没有时（Windows）自己读同一个 `.pc` 的 `Libs.private`。
+`tests/c-example.sh` 用 `cargo cinstall --debug` 装进 `target/engine-capi/stage`，核对头文件没有漂移、共享库的 SONAME 或 install name 带主版本、`platforms/linux/collect-notices.py` 按 `msime-engine-capi` 的依赖图生成得出第三方声明（并且收进了 `libsqlite3-sys`，不带许可证文件的 crate 仍只有 README 交代过的 `ewts`、`exmex`、`rink-core`）、`.pc` 的 `Version` 是 ABI 版本，再用 CMake 把 `examples/c/example.c` 按动态库、静态库、静态库加系统 SQLite（Windows 上没有这一个）各编一遍并运行：准备代次、建会话、打 `nihaoshijie`、读状态与候选、过期修订号被拒、选第一行上屏「你好世界」、冲刷、释放、从个人词典读回这句。CMake 有 pkg-config 时用它（静态链接直接给出归档路径再接 `Libs.private`，因为前缀里同时有共享库），没有时（Windows）自己读同一个 `.pc` 的 `Libs.private`。
 
 CI 的 `engine-capi` 作业在 `ci-platforms.yml` 里，Linux、macOS、Windows 三个 runner 各跑 `cargo test -p msime-engine-capi` 和这个脚本。`changes` 作业新增 `engine_capi` 输出，只在 `crates/engine*`、`crates/path-trust/`、工作区清单与工具链、`collect-notices.py` 或这个 workflow 改动时为真；这个作业不是必需检查，所以在作业级跳过，不为不相干的改动占一台稀缺的 macOS runner。cargo-c 按版本、系统和工具链缓存装好的可执行文件，缓存不中才 `cargo install cargo-c --locked --version 0.10.26`。
 
@@ -67,7 +68,7 @@ CI 的 `engine-capi` 作业在 `ci-platforms.yml` 里，Linux、macOS、Windows 
 
 - **收益**：第三方前端拿到一个带版本、带头文件和 `.pc` 的 C 库，按键路径上没有 JSON 和额外分配，候选按下标随取，选择有修订号保护；会话可以在任何线程上用；会话与维护按 msime 宿主的同一把文件锁互斥；头文件、SONAME、第三方声明和三平台上的打字流程都有 CI 守着。
 - **代价**：cargo-c 总是按显式的目标三元组构建，产物在 `target/<三元组>/` 下，是与 `target/debug` 分开的第二棵构建树（CI 和本机跑脚本时都多编一遍引擎）。苹果平台的 dylib 不剥调试信息，体积大一些。CI 在引擎相关的 PR 上多占三台 runner，其中一台是 macOS。快照缓存在只读调用之间可能多取一次快照。
-- **没做的**：ABI 1.0 没有日志回调和事件通知（引擎的警告仍写标准错误）；二进制发布等 P2 改许可证，crates.io 等 P6，msime 自己的宿主改用公开 API 是 P7；九键、触点、神经重排等留到 v1.x。数据格式的规格文档（P5）还没写，README 的数据表以提案为准。Linux 和 Windows 上的 C 示例只在 CI 里跑过，本机只在 macOS（Studio，arm64）上跑过三种链接方式。
+- **没做的**：ABI 1.0 没有日志回调和事件通知（引擎的警告仍写标准错误）；二进制发布等 P2 改许可证，crates.io 等 P6，msime 自己的宿主改用公开 API 是 P7；九键、触点、神经重排等留到 v1.x。数据格式的规格文档（P5）还没写，README 的数据表以提案为准，许可证一列按仓库自己的声明（`resources/licenses/msime-engine-dictionary-NOTICE.md`、`docs/third-party.md`）改正过。Linux 和 Windows 上的 C 示例只在 CI 里跑过，本机只在 macOS（Studio，arm64）上跑过三种链接方式。
 
 ## 相关笔记
 

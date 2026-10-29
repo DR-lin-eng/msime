@@ -262,7 +262,7 @@ typedef struct msime_engine_paths {
   struct msime_engine_str user_data;
   // 可以随时清空的缓存。
   struct msime_engine_str cache;
-  // 代次目录，`msime_engine_prepare_runtime` 准备并交回；`msime_engine_prepare_runtime` 不读这一项。
+  // 代次目录，`msime_engine_prepare_runtime` 准备并交回；`msime_engine_prepare_runtime` 不读这一项，调用方可以不填。
   struct msime_engine_str dictionaries;
 } msime_engine_paths;
 
@@ -299,7 +299,7 @@ typedef struct msime_engine_state {
   // 整句改字的光标，按 `conversion` 的字（Unicode 标量）计：光标在第 `conversion_focus_start_scalar` 个字之前，`[start, end)` 是候选替换的那一段；不在改字时两者都是 0。
   uint32_t conversion_focus_start_scalar;
   uint32_t conversion_focus_end_scalar;
-  // 给用户看的组字（全拼按音节分开，双拼默认是按键原文）。
+  // 给用户看的组字：全拼按音节分开（`ni'hao`），双拼默认是按键原文，本地模式与专用英文是按键原文。
   struct msime_engine_str preedit;
   // 按键原文（ASCII），`caret_byte` 指向它；为空就是没有在组字。
   struct msime_engine_str editing_text;
@@ -350,7 +350,7 @@ const char *msime_engine_last_error(void);
 // `text` 是 NULL 或这个库交出、还没释放过的字符串。
 void msime_engine_string_free(char *text);
 
-// 准备运行时：在 `user_data/dictionaries/<content_id>` 原子地准备一个代次（从 `resources` 复制工作词库并回放学习日志），已就绪的代次只补回放。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据变了就换一个。三个根目录必须是绝对路径、互不重叠。成功时把代次目录写进 `*dictionaries`（可以是 NULL），用 `msime_engine_string_free` 释放；建会话时它就是 `paths.dictionaries`。
+// 准备运行时：在 `user_data/dictionaries/<content_id>` 原子地准备一个代次（从 `resources` 复制工作词库并回放学习日志），已就绪的代次只补回放。`content_id` 是 1 到 128 个 `[0-9A-Za-z_-]`，随包数据变了就换一个；带点的版本号要先换掉点（`dict-v2_0_39`）。三个根目录必须是绝对路径、互不重叠。`paths.dictionaries` 不读。ABI 1.0 不分方案：`resources` 里必须有 `msime-pinyin.db` 和 `msime-english.db`，即使会话只用日文、韩文这类不读拼音词库的方案。成功时把代次目录写进 `*dictionaries`（可以是 NULL），用 `msime_engine_string_free` 释放；建会话时它就是 `paths.dictionaries`。
 //
 // # Safety
 // `paths` 按 `struct_size` 约定可读；`content_id` 指向 `content_id_len` 个可读字节；`dictionaries` 是 NULL 或可写一个指针。
@@ -396,7 +396,7 @@ int32_t msime_engine_user_dict_edit(const struct msime_engine_paths *paths,
                                     const char *edit_json,
                                     size_t edit_len);
 
-// 清空学到的一切：换回随包的工作词库、清空学习日志。还有会话开着时返回 `MSIME_ENGINE_BUSY`，什么也不换。
+// 清空学到的一切：换回随包的工作词库、清空学习日志。和 `msime_engine_prepare_runtime` 一样要求 `resources` 里有 `msime-pinyin.db`。还有会话开着时返回 `MSIME_ENGINE_BUSY`，什么也不换。
 //
 // # Safety
 // `paths` 按 `struct_size` 约定可读。

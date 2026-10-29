@@ -14,6 +14,12 @@
       "copy": "plugins/phrase_table/latex-symbols/symbols.tsv",
       "size": 7284,
       "sha256": "6a7a520a60b390e72411c8d191ccbf7af23b6f4df752febfd84ed0d006ffa688"
+    },
+    {
+      "path": "sources/symbols/latex-symbols.tsv",
+      "copy": "crates/engine/src/local/latex_symbols.tsv",
+      "size": 7284,
+      "sha256": "6a7a520a60b390e72411c8d191ccbf7af23b6f4df752febfd84ed0d006ffa688"
     }
   ],
   "generator": "scripts/sync_symbol_tables.py"

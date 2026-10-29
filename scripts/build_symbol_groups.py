@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """生成符号模式（Shift+S）的分组码表。
 
-分组码（`xl` 希腊字母、`sx` 数学符号、`szq` 带圈数字、`jt` 箭头……）、中文组名和每组的取字规则都写在本文件的 GROUPS 里，组员只按 Unicode 字符数据库（UCD）的事实挑选：区块（Blocks.txt）、通用类别、字符名、分解映射（UnicodeData.txt），偏旁一组再用部首到统一汉字的等价映射（EquivalentUnifiedIdeograph.txt）。组内一律按码位排序，个别组另有写明的排序键（上标、下标按对应的基本字符，带变音的字母跟在它的基本字母后面），不沿用任何输入法符号表的取字或顺序。输入按 resources/symbol-groups.lock.json 固定的 UCD 版本从 unicode.org 下载并校验长度与 sha256，许可是 Unicode License V3（resources/licenses/Unicode-License-V3.txt，拆字反查的 Unihan 数据已经把它接进了各平台的声明渠道）。
+分组码（`xl` 希腊字母、`sx` 数学符号、`szq` 带圈数字、`jt` 箭头……）、中文组名和每组的取字规则都写在本文件的 GROUPS 里，组员只按 Unicode 字符数据库（UCD）的事实挑选：区块（Blocks.txt）、通用类别、字符名、分解映射（UnicodeData.txt），偏旁一组再用部首到统一汉字的等价映射（EquivalentUnifiedIdeograph.txt）。组内按码位排序，几处例外的排序键也由数据导出、写在对应规则旁边（上标、下标按分解出的基本字符；带变音的字母跟在它的基本字母后面；数学字母各字体按区里的排法，空位由字母类符号区的同形字补上；拼音按《汉语拼音方案》的字母与四声），不沿用任何输入法符号表的取字或顺序。输入按 resources/symbol-groups.lock.json 固定的 UCD 版本从 unicode.org 下载并校验长度与 sha256，许可是 Unicode License V3（resources/licenses/Unicode-License-V3.txt，拆字反查的 Unihan 数据已经把它接进了各平台的声明渠道）。
 
 输出一张 UTF-8 TSV，提交进仓库，由 crates/engine/src/local/symbol_groups.rs 用 include_str! 编进引擎：
 

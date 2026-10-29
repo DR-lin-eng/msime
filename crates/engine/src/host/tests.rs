@@ -2301,6 +2301,26 @@ fn session_options_map_every_host_field() {
     assert_eq!(mapped.enabled_schemes, crate::SchemeSet::ALL);
 }
 
+/// 引擎库只有一套默认值（`SessionOptions::new`：辅助码关、表名 `wubi86`、学习开），门面不从它继承：宿主给的辅助码、学习开关原样交给会话，个人上下文按产品一直的取值打开。
+#[test]
+fn session_options_do_not_inherit_the_library_defaults() {
+    let library = crate::SessionOptions::new(crate::RuntimePaths::default());
+    assert!(!library.helpcode);
+    assert_eq!(library.helpcode_schema, "wubi86");
+    assert!(library.learning && library.personal_context);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut value = options(dir.path());
+    value.helpcode = true;
+    value.helpcode_schema = "ziranma".into();
+    value.learning = false;
+    let mapped = super::options::session_options(&value).unwrap();
+    assert!(mapped.helpcode);
+    assert_eq!(mapped.helpcode_schema, "ziranma");
+    assert!(!mapped.learning);
+    assert!(mapped.personal_context);
+}
+
 /// `enabled_schemes` 原样交给会话。双拼不在其中时双拼键位不校验，不合法的值按小鹤处理；双拼在其中时照旧报错。
 #[test]
 fn session_options_skip_the_shuangpin_profile_without_shuangpin() {

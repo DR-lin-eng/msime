@@ -541,6 +541,9 @@ impl Fixture {
 
     fn options(&self) -> SessionOptions {
         let mut options = SessionOptions::new(self.paths());
+        // 这些测试按参照实现的默认值写成：辅助码开、表名 `lantian`（引擎库默认关，见 `SessionOptions::new`）。
+        options.helpcode = true;
+        options.helpcode_schema = "lantian".to_owned();
         // Frequency learning off, as the reference session tests configured it, so only the behaviour under test moves the order.
         options.frequency = FrequencyAdjustmentOptions {
             mode: FrequencyAdjustmentMode::Disabled,

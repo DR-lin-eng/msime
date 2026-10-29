@@ -9,7 +9,7 @@ Status: implemented
 ## Decision
 
 - 名称表与 LaTeX 命令名表迁到 `sources/symbols/symbol-names.tsv`、`latex-symbols.tsv`，msime 留锁定的同步副本，见 #9638 带来的 `feature/2026-10-25-math-greek-symbol-names.md`（本篇合入时它还在那个 PR 里，所以不写相对链接）。
-- 符号模式分组表的锁 `resources/symbol-groups.lock.json` 改从词库仓固定提交（`dictionary_commit`）下载 `sources/symbols/wanxiang_symbols.yaml` 与 `LICENSE`，它们与上游同一提交逐字节一致，生成的表不变；上游提交仍记在锁里供署名，`test-symbol-groups.py` 核对地址指向词库仓。
+- 符号模式分组表的锁 `resources/symbol-groups.lock.json` 改从词库仓固定提交（`dictionary_commit`）下载 `sources/symbols/wanxiang_symbols.yaml` 与 `LICENSE`，它们与上游同一提交逐字节一致，生成的表不变；上游提交仍记在锁里供署名，`test-symbol-groups.py` 核对地址指向词库仓。（这一条已不再成立：分组表现在按 Unicode 字符数据库重建，锁直接指向 unicode.org，见[符号模式分组表改由 Unicode 字符数据库重建](../feature/2026-10-29-symbol-groups-from-unicode.md)。）
 - 表情面板符号页的 `piliapp_symbols.txt` 原样移到词库仓 `sources/symbols/piliapp-symbols.txt`，dict-builder 的 Symbols 阶段按 `others::PILIAPP_SYMBOLS` 经 `--dictionary` 读取，面板内容、12 个父分类 ID 与小标题都不变。许可如实记为「未声明」：随词库分发的 `resources/licenses/msime-engine-dictionary-NOTICE.md` 加了这一行，词库仓 `NOTICE.md` 的「待解决」写明它照旧进入 `msime-others.db`、不在 `licensing.rs` 的排除名单里，以及可替换的来源能覆盖多少。
 
 ## Alternatives considered

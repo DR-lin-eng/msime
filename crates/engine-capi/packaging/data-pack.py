@@ -30,10 +30,12 @@ CACHE = ROOT / "target/engine-capi/data-download"
 # docs/data-formats.md §20：全拼、双拼的必需文件、产品同等再加的 n-gram 表，以及随 msime-english.db 必须携带的 SCOWL 声明。
 FILES = ("msime-pinyin.db", "msime-english.db", "msime-scowl_Copyright.txt", "msime-bigram.bin", "msime-trigram.bin")
 
-# 数据许可证要求随附的全文与声明（README 模板逐个说明）：msime-pinyin.db、msime-english.db 的 GPL-3.0 全文是仓库根目录的 LICENSE；行政区划名称是 WTFPL；词库每个来源的上游与条款在 msime-dictionary 的 NOTICE 里，这份是它在本仓库的副本。
+# 数据许可证要求随附的全文与声明（README 模板逐个说明）：msime-pinyin.db、msime-english.db 的 GPL-3.0 全文是仓库根目录的 LICENSE；行政区划名称是 WTFPL；msime-pinyin.db 的单字读音按 pinyin-data 校正、msime-english.db 的中英释义取自 ECDICT，两者都是 MIT，MIT 要求随副本附上版权与许可声明全文；词库每个来源的上游与条款在 msime-dictionary 的 NOTICE 里，这份是它在本仓库的副本。
 LICENCES = {
     "GPL-3.0.txt": ROOT / "LICENSE",
     "Administrative-divisions-of-China-WTFPL.txt": ROOT / "resources/licenses/Administrative-divisions-of-China-WTFPL.txt",
+    "pinyin-data-MIT.txt": ROOT / "resources/licenses/pinyin-data-MIT.txt",
+    "ECDICT-MIT.txt": ROOT / "resources/licenses/ECDICT-MIT.txt",
     "msime-engine-dictionary-NOTICE.md": ROOT / "resources/licenses/msime-engine-dictionary-NOTICE.md",
 }
 

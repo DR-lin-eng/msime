@@ -174,7 +174,7 @@ fn validate_entry(
 ///
 /// An empty request id edits without a receipt, as the reference allowed.
 ///
-/// 自己取独占的维护租约（`DictionaryAccess::try_maintenance`）：还有会话或别的维护持着租约时以 `Busy`（`DICTIONARY_MAINTENANCE_BUSY`）失败，什么也不写。不合法的改动在取租约之前就报出来。代次里没有 `msime-pinyin.db`（方案集合不读它）时只能编辑英文词，规则同 [`edit_personal_dictionary_with`]。
+/// 自己取独占的维护租约（`DictionaryAccess::try_maintenance`）：还有会话或别的维护持着租约时以 `Busy`（`DICTIONARY_MAINTENANCE_BUSY`）失败，什么也不写。不合法的改动在取租约之前就报出来。代次里没有 `msime-pinyin.db`（方案集合不读它）时只能编辑英文词，规则同 `edit_personal_dictionary_with`。
 pub fn edit_personal_dictionary(
     paths: &RuntimePaths,
     previous: Option<&PersonalDictionaryEntry>,

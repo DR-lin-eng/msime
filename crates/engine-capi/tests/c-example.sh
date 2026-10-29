@@ -50,6 +50,23 @@ elif ! diff -u --strip-trailing-cr "$committed" "$generated"; then
   exit 1
 fi
 
+# 共享库按 ABI 主版本命名：Linux 的 SONAME、macOS 的 install name 都带主版本 1（Cargo.toml 的 package.metadata.capi.library）。
+case "$(uname -s)" in
+  Linux)
+    soname=$(readelf -d "$stage/lib/libmsime_engine.so" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
+    [[ "$soname" == libmsime_engine.so.1 ]] || { echo "unexpected SONAME: $soname" >&2; exit 1; }
+    ;;
+  Darwin)
+    install_name=$(otool -D "$stage/lib/libmsime_engine.dylib" | tail -n 1)
+    [[ "$install_name" == */libmsime_engine.1.dylib ]] || { echo "unexpected install name: $install_name" >&2; exit 1; }
+    ;;
+esac
+
+# 二进制归档要带的第三方声明：按 msime-engine-capi 的依赖图收集（README 的「二进制归档与第三方声明」）。核对它生成得出来，并且收进了带 bundled SQLite 的 libsqlite3-sys。
+notices="$work/THIRD_PARTY_NOTICES.txt"
+(cd "$root" && "$python" platforms/linux/collect-notices.py cargo "$(native "$notices")" msime-engine-capi)
+grep -q '^libsqlite3-sys ' "$notices" || { echo "$notices does not list libsqlite3-sys" >&2; exit 1; }
+
 "$python" "$crate/tests/fixture/make_fixture.py" "$(native "$work/resources")"
 
 variants=(shared static)

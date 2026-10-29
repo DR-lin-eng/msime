@@ -49,5 +49,9 @@ name = "msime_engine"
 version = "1.0.0"
 version_suffix_components = 1
 
+# 苹果平台上不让 rustc 剥调试信息：Xcode 27 的 `strip` 剥过的 dylib，链接器拒绝链接（`mis-aligned LINKEDIT string pool`），工作区 dev 配置的 `debug = 0` 默认就会剥。静态库不剥，不受影响。
+[package.metadata.capi.library.target.'cfg(target_vendor = "apple")']
+rustflags = "-Cstrip=none"
+
 [lints]
 workspace = true

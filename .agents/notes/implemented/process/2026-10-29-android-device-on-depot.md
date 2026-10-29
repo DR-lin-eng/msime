@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-`android-device.yml` 的 job 跑在 `depot-ubuntu-24.04-8`。打开 KVM 权限的 udev 步骤保留：Depot 上 `/dev/kvm` 本来就是 0666，这一步不改变什么，GitHub 托管 runner 上则必须有，以后要临时退回时不用再加。
+`android-device.yml` 的 job 跑在 `depot-ubuntu-24.04-8`。打开 KVM 权限的 udev 步骤保留：Depot 上 `/dev/kvm` 本来就是 0666，GitHub 托管 runner 上则必须开放权限，以后要临时退回时不用再加。`udevadm trigger --name-match` 传完整设备路径 `/dev/kvm`，不传裸名字 `kvm`；[官方接口](https://freedesktop.org/software/systemd/man/latest/udevadm.html)按设备路径匹配，Depot 的实际作业会拒绝裸名字。失败日志收集先创建输出目录，避免安装工具或启动模拟器之前失败时，重定向也因目录不存在而丢失诊断。
 
 依据是 #10190 里的一次性探测（`depot-android-kvm-probe.yml`，在两种 runner 上做同一件事，结论记下后在同一个 PR 里删掉），2026-10-29 的结果：
 
@@ -38,3 +38,5 @@ GitHub 托管的 Linux 名额只剩发版、发布和 Pages 这类持有凭据�
 ## Verification
 
 `actionlint` 通过。这个 PR 改到了 `android-device.yml`，`ci-platforms.yml` 的 `android_device` 会点亮，PR 上的 API 35 整套验收就在 Depot 上实跑一遍。API 28 只在合并后的 develop 推送上跑，合并后看第一次的结果。
+
+[实际失败作业](https://github.com/metasequoiaime/msime/actions/runs/40891799388/job/123510811361)在 KVM 初始化阶段报 `Failed to open the device 'kvm': Invalid argument`，尚未安装工具或启动模拟器；原探测只验证 KVM 可用和开机时间，没有覆盖保留的 udev 命令。完整设备路径修正沿用权限规则与触发步骤，新的 runner 验收以修正后的设备作业结果为准，不能把原探测当成整个 workflow 已通过。

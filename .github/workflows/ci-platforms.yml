@@ -393,8 +393,9 @@ jobs:
           set -euo pipefail
           # 安装 rust-toolchain.toml 钉住的工具链。
           rustup toolchain install
-          if ! command -v cargo-cinstall >/dev/null 2>&1; then
-            cargo install cargo-c --locked --version "$CARGO_C_VERSION"
+          # 问 cargo 而不是 PATH：缓存还原的可执行文件在 ~/.cargo/bin，Windows 的 Git Bash 里它可能不在 PATH 上，cargo 照样找得到子命令。缓存不还原 cargo 的安装记录，所以重装时要 --force 覆盖这些文件。
+          if ! cargo cinstall --version 2>/dev/null | grep -q "^cargo-c $CARGO_C_VERSION"; then
+            cargo install cargo-c --locked --force --version "$CARGO_C_VERSION"
           fi
       - name: ABI tests
         run: cargo test --locked -p msime-engine-capi

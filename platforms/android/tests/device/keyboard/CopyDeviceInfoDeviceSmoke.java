@@ -164,14 +164,20 @@ public final class CopyDeviceInfoDeviceSmoke extends DeviceSmoke {
             for (String field : new String[] {"品牌", "型号", "系统版本", "处理器架构", "存储空间", "运行内存",
                     "Android System WebView", "CPU 名称", "屏幕参数"})
                 awaitAny(tool("插入" + field).and(AccessibilityNodeInfo::isEnabled));
-            awaitAny(tool("插入中文标签").and(node -> node.refresh() && node.isSelected()));
+            awaitAny(tool("中文标签").and(node -> node.refresh() && node.isSelected()));
             stage = "device information insert chinese field";
             tap(tool("插入运行内存"));
             await(field("msime-test-plain").and(node -> node.refresh() && node.getText() != null
                 && node.getText().toString().matches("你好\\n运行内存：[0-9.]+ [GM]B")));
+            // 连点两项不等第一项读完：插入不互相取消，两行都要按点按顺序进来。
+            stage = "device information insert consecutive fields";
+            tap(tool("插入品牌"));
+            tap(tool("插入型号"));
+            await(field("msime-test-plain").and(node -> node.refresh() && node.getText() != null
+                && node.getText().toString().matches("你好\\n运行内存：[0-9.]+ [GM]B\\n品牌：[^\\n]+\\n型号：[^\\n]+")));
             stage = "device information switch to english";
-            tap(tool("插入英文标签"));
-            awaitAny(tool("插入英文标签").and(node -> node.refresh() && node.isSelected()));
+            tap(tool("英文标签"));
+            awaitAny(tool("英文标签").and(node -> node.refresh() && node.isSelected()));
             stage = "device information insert english display";
             tap(tool("插入屏幕参数"));
             await(field("msime-test-plain").and(node -> node.refresh() && node.getText() != null

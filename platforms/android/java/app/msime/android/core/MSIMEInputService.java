@@ -695,20 +695,24 @@ public final class MSIMEInputService extends InputMethodService {
 
     void showClipboardPhraseNotice(long request, String text) { operationNotice.show(request, text); }
 
-    /** 设备信息的复制与插入共用一个代次：最后一次点击说了算，服务销毁后的回调不再写剪贴板或输入框。 */
-    private long deviceInfoGeneration;
+    /** 复制的代次：每次「复制全部」加一，最后一次说了算；服务销毁时也加一。 */
+    private long deviceInfoCopyGeneration;
+    /**
+     * 插入的代次：只在服务销毁时加一。插入不互相取消：子面板开着就是为了连着插几项，前一项还在读时点下一项，两项都要插进去；工作线程串行，结果仍按点按顺序回来。
+     */
+    private long deviceInfoInsertGeneration;
 
-    /** 只在用户点击时读取白名单信息；后台收集不阻塞按键，也不触碰组字会话。 */
-    private void collectDeviceInfo(java.util.function.Consumer<java.util.List<DeviceInfoReport.Item>> done,
+    /** 只在用户点击时读取白名单信息；后台收集不阻塞按键，也不触碰组字会话。{@code current} 在主线程上判断结果是否还该用。 */
+    private void collectDeviceInfo(java.util.function.BooleanSupplier current,
+                                   java.util.function.Consumer<java.util.List<DeviceInfoReport.Item>> done,
                                    Runnable unavailable) {
-        long generation = ++deviceInfoGeneration;
         // 屏幕参数要从已附着的视图取 Display，在主线程读好再交给工作线程。
         DeviceInfoReport.ScreenFacts screen = DeviceInfoCollector.screenFacts(moreButton);
         try {
             preferencesWorker.execute(() -> {
                 var items = DeviceInfoCollector.keyboard(getApplicationContext(), screen);
                 main.post(() -> {
-                    if (generation != deviceInfoGeneration || preferencesWorker.isShutdown()) return;
+                    if (!current.getAsBoolean() || preferencesWorker.isShutdown()) return;
                     done.accept(items);
                 });
             });
@@ -722,7 +726,8 @@ public final class MSIMEInputService extends InputMethodService {
         // 复制完成后直接回到键盘，提示会在键盘内部显示，避免用户还要手动关闭工具面板。
         closeMoreTools();
         render();
-        collectDeviceInfo(items -> {
+        long generation = ++deviceInfoCopyGeneration;
+        collectDeviceInfo(() -> generation == deviceInfoCopyGeneration, items -> {
             try {
                 ClipboardManager clipboard = getSystemService(ClipboardManager.class);
                 if (clipboard == null) {
@@ -748,11 +753,21 @@ public final class MSIMEInputService extends InputMethodService {
 
     /**
      * 子面板里的单项或「全部」（{@code field} 为 null）：读完后直接写进当前输入框，不经过剪贴板（#10045）。子面板保持打开，方便接着插下一项；读的过程中换了输入框就不写。
+     *
+     * <p>插入格不按输入框状态置灰（子面板开着时输入框会变），这里是唯一的判断处，插不了就说明原因，不悄悄忽略这次点按。
      */
     void insertDeviceInfo(DeviceInfoReport.Field field, DeviceInfoReport.Language language) {
-        if (!deviceInfoInsertable()) return;
+        if (connection == null) {
+            notice("没有可插入的输入框");
+            return;
+        }
+        if (!deviceInfoInsertable()) {
+            notice("密码框里不插入设备信息");
+            return;
+        }
         InputConnection target = connection;
-        collectDeviceInfo(items -> {
+        long generation = deviceInfoInsertGeneration;
+        collectDeviceInfo(() -> generation == deviceInfoInsertGeneration, items -> {
             if (connection != target || !deviceInfoInsertable()) return;
             String text = field == null ? DeviceInfoCollector.text(this, items, language)
                 : DeviceInfoReport.line(DeviceInfoReport.item(items, field), language);
@@ -2272,7 +2287,8 @@ public final class MSIMEInputService extends InputMethodService {
         getContentResolver().unregisterContentObserver(inputMethodWatcher);
         if (inlineAutofill != null) inlineAutofill.finishInput();
         clearQuickDeleteUndo();
-        deviceInfoGeneration++;
+        deviceInfoCopyGeneration++;
+        deviceInfoInsertGeneration++;
         ClipboardManager clipboard = getSystemService(ClipboardManager.class);
         if (clipboard != null) clipboard.removePrimaryClipChangedListener(clipboardWatcher);
         main.removeCallbacks(recentClipExpiry);

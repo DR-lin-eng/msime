@@ -371,12 +371,11 @@ final class ImeFunctionPanel {
     /**
      * 设备信息（#10045）：标题栏右侧切换中文 / English，下面一行说明用途，九个字段各一格，点一下按所选语言直接插进输入框；「全部」插入整段，「复制全部」保留原来复制到剪贴板的做法。磁贴标签不随语言变，变的只是插进去的文字。
      *
-     * <p>没有输入框或在密码框里时插入的格子不可用，复制照常。
+     * <p>插入格一直可点：输入框会在子面板开着时变化（WebView 里焦点移到密码框、或者连接晚一步才到），按渲染那一刻的状态置灰会过时，所以改在点按时判断，插不了就提示原因；复制不受影响。
      */
     private void renderDeviceInfo() {
         List<FunctionPanelView.Entry> entries = new ArrayList<>(DeviceInfoReport.INSERTABLE.size() + 2);
         List<Boolean> enabled = new ArrayList<>(DeviceInfoReport.INSERTABLE.size() + 2);
-        boolean insertable = s.deviceInfoInsertable();
         for (DeviceInfoReport.Field field : DeviceInfoReport.INSERTABLE) {
             String label = field == DeviceInfoReport.Field.WEBVIEW ? "WebView"
                 : field.label(DeviceInfoReport.Language.CHINESE);
@@ -395,25 +394,29 @@ final class ImeFunctionPanel {
             entries.add(FunctionPanelView.Entry.glyph(label,
                 "插入" + field.label(DeviceInfoReport.Language.CHINESE), glyph,
                 played(() -> s.insertDeviceInfo(field, deviceInfoLanguage)), null));
-            enabled.add(insertable);
+            enabled.add(true);
         }
         entries.add(FunctionPanelView.Entry.glyph("全部", "插入全部设备信息", "全",
             played(() -> s.insertDeviceInfo(null, deviceInfoLanguage)), null));
-        enabled.add(insertable);
+        enabled.add(true);
         entries.add(FunctionPanelView.Entry.icon("复制全部", "复制设备信息", KeyboardIconPaths.Icon.DEVICE_INFO,
             played(() -> s.copyDeviceInfo(deviceInfoLanguage)), null));
         enabled.add(true);
         renderChooser("设备信息", entries, enabled, 4, 3, this::deviceInfoLanguageSwitch,
-            "反馈问题时直接插入设备参数，不含账号、输入内容或设备标识");
-        ViewPolicy.setSelected(deviceInfoChinese, deviceInfoLanguage == DeviceInfoReport.Language.CHINESE);
-        ViewPolicy.setSelected(deviceInfoEnglish, deviceInfoLanguage == DeviceInfoReport.Language.ENGLISH);
+            "插入设备参数，不含账号、输入内容和设备标识");
+        ImePanels.selectReplySegment(deviceInfoChinese, deviceInfoLanguage == DeviceInfoReport.Language.CHINESE);
+        ImePanels.selectReplySegment(deviceInfoEnglish, deviceInfoLanguage == DeviceInfoReport.Language.ENGLISH);
     }
 
-    /** 标题栏右侧的语言切换：两个小按钮，选中的那个用磁贴的开启态表示。 */
+    /**
+     * 标题栏右侧的语言切换：两个小按钮，选中的那个铺实心强调色、文字用 onAccent，和简繁开关、回复面板分段的选中态一样。
+     *
+     * <p>不能用 TILE 角色：选中的 TILE 底色是 accentSoft，自定义皮肤的 KeyboardSkinKeyDrawable 按 action 绘制时把它自带的 0x24 透明度改成不透明，文字 accentText 又是同一个 accent，就成了看不见字的实心块（见本类开头）。
+     */
     private View deviceInfoLanguageSwitch() {
         LinearLayout row = LayoutPolicy.row(s);
-        deviceInfoChinese = languageButton("中文", "插入中文标签", DeviceInfoReport.Language.CHINESE);
-        deviceInfoEnglish = languageButton("English", "插入英文标签", DeviceInfoReport.Language.ENGLISH);
+        deviceInfoChinese = languageButton("中文", "中文标签", DeviceInfoReport.Language.CHINESE);
+        deviceInfoEnglish = languageButton("English", "英文标签", DeviceInfoReport.Language.ENGLISH);
         LinearLayout.LayoutParams chinese = LayoutPolicy.linearParamsPx(s.pixels(52), s.pixels(32));
         LinearLayout.LayoutParams english = LayoutPolicy.linearParamsPx(s.pixels(68), s.pixels(32));
         english.leftMargin = s.pixels(4);
@@ -426,7 +429,7 @@ final class ImeFunctionPanel {
 
     private Button languageButton(String label, String description, DeviceInfoReport.Language language) {
         KeyboardPressButton button = ViewPolicy.newPressButton(s);
-        button.setKeyboardRole(KeyboardKeyRole.TILE);
+        button.setKeyboardRole(KeyboardKeyRole.KEY);
         button.setText(label);
         button.setContentDescription(description);
         ViewPolicy.setPadding(button, 0, 0, 0, 0);
@@ -501,6 +504,9 @@ final class ImeFunctionPanel {
         if (note != null) {
             TextView explanation = ViewPolicy.centeredText(s, note, 12);
             KeyboardTypographyPolicy.setKeyTextSize(explanation, 12);
+            // 行高固定 20dp，大字体或窄屏上折成两行会被截掉下半截，所以只留一行、放不下用省略号。
+            explanation.setMaxLines(1);
+            explanation.setEllipsize(android.text.TextUtils.TruncateAt.END);
             s.moreToolsPanel.addView(explanation, LayoutPolicy.matchWidthHeightPx(s.pixels(20)));
         }
         s.moreToolsPanel.addView(chooserPanel, LayoutPolicy.matchWidthHeightPx(

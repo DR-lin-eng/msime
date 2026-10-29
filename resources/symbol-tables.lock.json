@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/metasequoiaime/msime-dictionary",
-  "commit": "85197da6cbd6e833f060698d6b845e2bd9a487a6",
+  "commit": "1af243cc1fb2fdc8b7b01c56c0cc18f423c08ac5",
   "files": [
     {
       "path": "sources/symbols/symbol-names.tsv",

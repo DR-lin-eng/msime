@@ -363,12 +363,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Depot 标签只在 metasequoiaime 组织存在，fork 在同一表达式里回退到同架构的 GitHub 托管 runner（与其他 workflow 的写法一致）。
           - name: Linux
-            runner: depot-ubuntu-24.04-8
+            runner: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
           - name: macOS
-            runner: depot-macos-26
+            runner: ${{ github.repository_owner == 'metasequoiaime' && 'depot-macos-26' || 'macos-26' }}
           - name: Windows
-            runner: depot-windows-2025-8
+            runner: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:

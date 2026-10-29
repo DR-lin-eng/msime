@@ -268,57 +268,53 @@ fn ensure_regular(file: File) -> io::Result<File> {
     Ok(file)
 }
 
-/// 假是被占用，不是出错；从不等待。
+/// 假是被占用，不是出错；从不等待。Android 上标准库的文件锁不可用（直接失败而不是等待），那里用下面 rustix 的 `flock` 版本；按函数而不是按语句分开，`scripts/test-file-locking-goes-through-client-core.py` 才认得出这是 Android 不编译的标准库调用。
+#[cfg(not(target_os = "android"))]
 fn try_shared(file: &File) -> io::Result<bool> {
-    #[cfg(not(target_os = "android"))]
-    {
-        match file.try_lock_shared() {
-            Ok(()) => Ok(true),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
-            Err(std::fs::TryLockError::Error(error)) => Err(error),
-        }
+    match file.try_lock_shared() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
-    // Android 上标准库的文件锁不可用，用 rustix 的 `flock`。
-    #[cfg(target_os = "android")]
-    {
-        match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockShared) {
-            Ok(()) => Ok(true),
-            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
-    }
+}
+
+#[cfg(target_os = "android")]
+fn try_shared(file: &File) -> io::Result<bool> {
+    flock(file, rustix::fs::FlockOperation::NonBlockingLockShared)
 }
 
 /// 假是被占用，不是出错；从不等待。
+#[cfg(not(target_os = "android"))]
 fn try_exclusive(file: &File) -> io::Result<bool> {
-    #[cfg(not(target_os = "android"))]
-    {
-        match file.try_lock() {
-            Ok(()) => Ok(true),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
-            Err(std::fs::TryLockError::Error(error)) => Err(error),
-        }
-    }
-    #[cfg(target_os = "android")]
-    {
-        match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(true),
-            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "android")]
+fn try_exclusive(file: &File) -> io::Result<bool> {
+    flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+}
+
+#[cfg(target_os = "android")]
+fn flock(file: &File, operation: rustix::fs::FlockOperation) -> io::Result<bool> {
+    match rustix::fs::flock(file, operation) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
 fn unlock(file: &File) -> io::Result<()> {
-    #[cfg(not(target_os = "android"))]
-    {
-        file.unlock()
-    }
-    #[cfg(target_os = "android")]
-    {
-        rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock).map_err(Into::into)
-    }
+    file.unlock()
+}
+
+#[cfg(target_os = "android")]
+fn unlock(file: &File) -> io::Result<()> {
+    rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -363,7 +359,8 @@ mod tests {
         );
     }
 
-    /// 旧版本的宿主直接对两个根目录里的 `.msime-dictionary-access.lock` 取文件锁；搬进引擎后的租约必须和它互斥，文件名和锁的种类都不能变。
+    /// 旧版本的宿主直接对两个根目录里的 `.msime-dictionary-access.lock` 取文件锁；搬进引擎后的租约必须和它互斥，文件名和锁的种类都不能变。旧锁在这里用标准库来取，Android 上标准库的文件锁不可用，这条只在其他平台跑；Android 上新旧两边本来就是同一个 `flock`。
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn interoperates_with_a_lock_taken_on_the_same_file_names() {
         let user = tempfile::tempdir().unwrap();

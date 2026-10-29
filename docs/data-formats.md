@@ -4,7 +4,7 @@
 
 代码注释里的 `data-formats.md §N` 指的就是本文的章节号。章节号沿用移植时那份规格的编号，所以中间有空号；新增章节只往后加，不重排。建表语句均取自代码：SQLite 的 `sqlite_master` 保存的是原文，dict-builder 为了与旧流水线逐字节一致保留了原来的空白和注释，下文为了可读把它们排成多行，列名、类型、约束与代码一致。
 
-**许可证。** 引擎代码按 MPL-2.0 发布；数据不随引擎改许可证，每个数据文件按它自己的许可证发布，见 [§21](#21-数据许可证)。采用方自己选择带哪些数据。
+**许可证。** 引擎代码目前按 GPL-3.0-only 发布，计划改为 MPL-2.0（见可嵌入引擎库设计笔记的 P2）；无论引擎用哪个许可证，数据都不随它改许可证，每个数据文件按它自己的许可证发布，见 [§21](#21-数据许可证)。采用方自己选择带哪些数据。
 
 ## 1. 运行时根目录与文件总表
 
@@ -64,7 +64,7 @@
 
 **只读布局**是 `dictionaries == resources` 的 `RuntimePaths`：不调用 `prepare_runtime_paths`，引擎直接在资源目录里读主库。网页引擎（`crates/engine-wasm`，主库放在 `/res`）和后端（`backend::execute`）这样用。这种布局下：
 
-- 没有代次准备这一步，所以建会话时（`Session::new`）检查 `msime-pinyin.db`、`msime-wubi.db` 的文件内版本（[§4.3](#43-文件内版本)），比引擎新的格式拒绝建会话。
+- 没有代次准备这一步，所以建会话时（`Session::new`）检查 `msime-pinyin.db`、`msime-wubi.db` 的文件内版本（[§4.3](#43-文件内版本)），比引擎新的格式拒绝建会话。后端不建会话，在每次请求前自己查这两个文件和 `msime-others.db`，比引擎新的格式让 `convert` 以外的请求都报 `resources_unavailable`（资源目录整体与这个后端不匹配）。
 - 五笔从资源目录的 `msime-wubi.db` 读（`ime::registry::wubi_database` 依次找代次的 `msime-wubi.db`、代次的 `msime-pinyin.db`、资源的 `msime-wubi.db`，最后退回资源的 `msime-pinyin.db`）；五笔的 14 键排序另读 `msime-pinyin.db` 的词频。
 - 学习、删词和个人词典编辑写的是 `dictionaries` 下的文件，在只读布局下就是资源文件本身；引擎不拦这些写入，所以只读布局要么用可写、可丢弃的资源副本（网页引擎的内存 VFS），要么由宿主不开学习。重置学习数据拒绝在只读布局上执行（`Cannot reset packaged dictionaries in place`），合并下载的五笔库也跳过。
 - 日志仍在 `user_data/msime_user.db`。
@@ -167,10 +167,10 @@ INSERT OR REPLACE INTO metadata(name, value) VALUES('format_version', '1');
 | --- | --- |
 | 没有 `metadata` 表 | 版本 0（`LEGACY_FORMAT_VERSION`），照常读。`dict-v2.0.39` 及以前的发布都是这样 |
 | `format_version` 是 0 到 `FORMAT_VERSION` 之间的整数 | 照常读 |
-| 更大的整数、不是整数、没有 `format_version` 行、或 `metadata` 读不出 | 拒绝，报 `Dictionary format version unsupported: <文件名> ..., this engine reads format_version <N> or older`，错误里只有文件名，没有路径 |
-| 连 `sqlite_master` 都读不出（不是数据库、被锁） | 版本检查不报错，交给原来的读写步骤按「读不了」处理 |
+| 更大的整数、不是整数、没有 `format_version` 行、或 `metadata` 的列不对 | 拒绝，报 `Dictionary format version unsupported: <文件名> ..., this engine reads format_version <N> or older`，错误里只有文件名，没有路径 |
+| 连 `sqlite_master` 都读不出（不是数据库、被锁），或读 `metadata` 时被锁、读写出错、文件损坏 | 版本检查不报错，交给原来的读写步骤按「读不了」处理 |
 
-检查发生在：准备代次复制主库之前、合并 `msime-wubi.db` 之前（包括合并宿主下载的五笔库），只读布局下建会话时（主库与五笔库），以及打开 `msime-others.db` 时。符号与 emoji 目录接口（`read_emoji_catalog_slice`、`emoji_catalog_groups`、`emoji_symbol_groups`）把版本错误原样返回；按键路径上的本地模式查询（emoji、颜文字、快捷短语、超级简拼）没有报告别的错误的出口，版本不支持的文件按读不了处理，出它们原有的「不可用」诊断。
+检查发生在：准备代次复制主库之前、重新打开已经就绪的代次时（查代次里的主库副本，它带着来源文件的 `metadata`；更新的引擎准备的代次在降级后不会被照旧格式读）、合并 `msime-wubi.db` 之前（包括合并宿主下载的五笔库），只读布局下建会话时（主库与五笔库），后端每次请求前（主库、五笔库与 `msime-others.db`），以及打开 `msime-others.db` 时。符号与 emoji 目录接口（`read_emoji_catalog_slice`、`emoji_catalog_groups`、`emoji_symbol_groups`）把版本错误原样返回；按键路径上的本地模式查询（emoji、颜文字、快捷短语、超级简拼）没有报告别的错误的出口，版本不支持的文件按读不了处理，出它们原有的「不可用」诊断。
 
 **改格式的规矩。** 读端不认识的改动（换列、改列的含义、改表名规则）必须把 `FORMAT_VERSION` 加一，新文件写新版本，引擎同一个提交里学会读新版本；只追加读端会忽略的东西（新表、新索引）不必加版本。旧引擎遇到新版本的文件会清楚地拒绝，而不是误读。
 
@@ -539,18 +539,18 @@ dict-builder 的其他子命令（`places`、`hanja`、`syllable-frequency`）�
 
 ## 21. 数据许可证
 
-**引擎代码按 MPL-2.0 发布；数据按各自的许可证发布，不随引擎改许可证，由采用方自行选择带哪些数据。** 下表是每个文件的数据许可证，未经律师审阅；更完整的来源说明在 `docs/third-party.md`。
+**引擎代码目前按 GPL-3.0-only 发布，计划改为 MPL-2.0；数据按各自的许可证发布，不随引擎改许可证，由采用方自行选择带哪些数据。** 下表按文件列出数据里各个来源的许可证，未经律师审阅。每个来源文件的上游、固定的提交与条款以 msime-dictionary 的 `NOTICE.md` 为准，与下表不一致时以它为准；本仓库内的来源说明在 `docs/third-party.md`。发布构建不读 `sources/unlicensed/` 下没有再分发授权的输入（`crates/dict-builder/src/licensing.rs`，`--include-unlicensed` 只用于本地评测），所以下表不列它们。
 
 | 文件 | 数据许可证 |
 | --- | --- |
-| `msime-pinyin.db` | GPL-3.0（rime-ice 及其补充） |
-| `msime-wubi.db` | Apache-2.0（极点 86）、LGPL-3.0（rime-wubi 补入的词条）、GPL-3.0-or-later（fcitx 98）、Unlicense（98 五笔小组），以及本项目生成的补充表 |
+| `msime-pinyin.db` | GPL-3.0（rime-ice 及其补充）；与万象共有词条的权重和字频为 CC-BY-4.0（rime-wanxiang）；单字读音按 MIT 的 pinyin-data 校正；行政区划地名为 WTFPL |
+| `msime-wubi.db` | Apache-2.0（极点 86）、LGPL-3.0（rime-wubi 补入的词条）、GPL-3.0-or-later（fcitx 98）、Unlicense（98 五笔小组）；本项目生成的 86、98 补充表为 GPL-3.0，词条依据 GPL-3.0 的 rime-ice、人工词条与 WTFPL 的区划名称 |
 | `msime-english.db` | GPL-3.0（rime-ice-en 及补充）；含 SCOWL 的词，分发时必须附 `msime-scowl_Copyright.txt`；Google 词频以来源页面说明为准 |
 | `msime-bigram.bin`、`msime-trigram.bin` | 计数来自中文维基百科（CC-BY-SA-4.0），词表是 GPL-3.0 的 `msime-pinyin.db` |
-| `msime-others.db` | emoji 数据来源未记录，PiliApp 符号未声明许可，再分发前需另行确认 |
+| `msime-others.db` | emoji 数据与颜文字（`resources/dictionary-sources/kaomoji/kaomoji.txt`）的来源都未记录，PiliApp 符号未声明许可，再分发前需另行确认 |
 | `msime-japanese.dat` | Mozc 开源词库：Google 三条款 BSD 加词典目录的 IPAdic、ICOT、冲绳辞書条款；分发时必须附 `msime-mozc_dictionary_oss_README.txt` 与 `msime-mozc_LICENSE.txt` |
 | `msime-cantonese.db` | CC-BY-4.0（rime-cantonese、HKCanCor） |
-| `msime-zhuyin.db` | LGPL-2.1-or-later（libchewing-data），含 McBopomofo 的 MIT 数据 |
+| `msime-zhuyin.db` | LGPL-2.1-or-later（libchewing-data）；McBopomofo 的词频 `phrase.occ` 为 MIT，补充词表（`BPMFMappings.txt`，源自 libtabe）为 BSD |
 | `msime-stroke.db` | LGPL-3.0（rime-stroke），权重取自 GPL-3.0 的 rime-ice 字频（文件内记为 `LGPL-3.0-only AND GPL-3.0-only`） |
 | `sentence-model.safetensors` | Apache-2.0（权重）；训练语料 C4 中文部分 ODC-BY、LCCC MIT，署名在 `__metadata__` 里 |
 | octagram `.gram` | 按模型：rime-wanxiang-data CC-BY-4.0、rime-octagram-data LGPL-3.0、rime-frost GPL-3.0 |

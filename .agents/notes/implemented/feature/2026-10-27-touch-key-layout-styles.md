@@ -2,6 +2,8 @@
 
 Status: implemented
 
+设置子页「按键布局」的界面和说明文字已在 2026-10-29 改版，见 [按键布局设置页改版](2026-10-29-key-layout-page-redesign.md)；本篇里描述设置页三组单选、底行缩略图和组末说明的段落是改版前的样子。偏好、键盘排法、迁移和热力图仍以本篇为准。九键左侧符号栏的两张表后来也提成了共享偏好、入口放进这个子页，见[九键左侧符号栏三端共享](2026-10-29-nine-key-sidebar-shared.md)。
+
 ## Problem
 
 手机触屏键盘的底行只有一种排法。Android 先后加了两个本机设置来满足不同习惯：[长空格布局](2026-10-27-android-long-space-layout.md)（`platform.android.long_space_layout`）和[数字行](2026-10-09-android-number-row-and-split-duplicates.md)（`platform.android.number_row`），都只存在 Android 本机、不随账号同步，iOS 与鸿蒙没有对应的选择。产品决定把「底行样式」按键面类型做成三端共享的选择，并把顶部数字行一起提成共享开关。
@@ -52,13 +54,11 @@ Android 的拼音九键（含九键双拼）右列 ！ 原本上滑输入 0、�
 
 三端设置页的说明逐字相同，改动时三端一起改，各端的测试逐字钉住：
 
-- 键盘页「按键布局」入口副标题：「各类键盘的底行样式和顶部数字行」。入口只在本版本至少提供 26 键、14/18 键、9 键中的一组时列出。
-- 26 键组末：「长空格：符号键移到工具栏；表情键：长按 123 打开符号。」
-- 14 键与 18 键组末：「表情键：长按 123 打开符号。」
-- 9 键组末：「右侧大回车：回车竖占两行，符号键在左下角。」
+- 键盘页「按键布局」入口副标题：「各类键盘的底行样式、键位和顶部数字行」。入口只在本版本至少提供 26 键、14/18 键、9 键中的一组时列出。
+- 每种样式自己的说明（改版后取代了原来的三条组末说明，只在选中这种样式时显示）：26 键长空格「符号键移到工具栏。」，26 键与 14/18 键表情键「长按 123 打开符号。」，9 键右侧大回车「回车竖占两行，符号键在左下角。」，其他样式不显示。
 - 「顶部数字行」开关说明：「在 26 键、14 键和 18 键上方加一行 1 到 0；横屏时不显示。」各端的高度门槛写法不同（见「有意保留的差异」），这句只说用户实际会遇到的情况。
 
-文字各端集中放：Android 是 `KeyLayoutStylesPage` 的静态常量（`TWENTY_SIX_KEY_NOTE`、`FOURTEEN_KEY_NOTE`、`NINE_KEY_NOTE`、`NUMBER_ROW_NOTE`），入口副标题写在 `KeyboardOptionsPage` 的入口行里，iOS 是 `TouchKeyLayoutOffering` 的常量（`entrySubtitle`、`twentySixKeyFooter`、`letterGridFooter`、`nineKeyFooter`、`numberRowSubtitle`），鸿蒙是 `packages/ui/src/keyboard/touch-key-layout-styles.ts` 导出的 `keyLayoutEntryDescription`、`twentySixKeyStyleNote`、`fourteenKeyStyleNote`、`nineKeyStyleNote`、`numberRowDescription`。
+文字各端集中放：Android 是 `KeyLayoutStylesPolicy` 的 `LONG_SPACE_NOTE`、`EMOJI_NOTE`、`TALL_RETURN_NOTE` 和 `KeyLayoutStylesPage.NUMBER_ROW_NOTE`，入口副标题写在 `KeyboardOptionsPage` 的入口行里；iOS 是 `TouchKeyLayoutOffering` 的常量（`entrySubtitle`、`longSpaceNote`、`emojiNote`、`tallReturnNote`、`numberRowSubtitle`）；鸿蒙是 `packages/ui/src/keyboard/touch-key-layout-styles.ts` 导出的 `keyLayoutEntryDescription`、`twentySixKeyStyleNotes`、`fourteenKeyStyleNotes`、`nineKeyStyleNotes` 和 `numberRowDescription`。
 
 ## 各端实现
 
@@ -77,7 +77,7 @@ Android 的拼音九键（含九键双拼）右列 ！ 原本上滑输入 0、�
 - 左列：跨三行的符号栏，栏下是与左列同宽的 符；数字层照旧在符号栏下方保留 #+=。默认字母符号表末尾接上 ！（`NineKeySidebarPolicy.letterSymbols(stored, true)`），与默认表相同的存储也按默认算，因为「恢复默认」会把默认表写回存储；自定义表原样使用。笔画的符号栏在这个样式下一屏最多五项，！ 不用滚动。
 - 中列：九宫格正下方是 `KeyboardActionRow.tallReturnEntries`，恰好与九宫格同宽。123 1.25、地球键 1、中/英 1.05 保持标准九键底行里的绝对宽度，空格占剩下的：拼音九键 4.175，带地球键 3.875，笔画 3.48125。交换中/英与 123 时两键对调。
 - 右列：⌫、重输、回车。回车格从第三行顶边画到底行底边，中间无缝；⌫ 和重输先包进没有外边距的格子再与回车格分高度，否则键距外边距先被扣掉，两键会比九宫格的行矮。九键双拼的网格是四行，⌫ 照旧占两格、重输一格，回车从第四行起，约 1.75 行高。
-- 数字层：符 和切换键横向位置不变，0 在空格的位置，右边是与中/英同宽（1.05，`KeyboardActionRow.TALL_RETURN_DIGIT_SPACE_WEIGHT`）的常驻空格键，长按语音和拖动光标跟着它走，0 占剩下的宽度；小数点（按字面上屏）在右列重输的位置，回车仍两倍高。三端这一层排法相同。
+- 数字层：符 和切换键横向位置不变，0 在空格的位置，右边是与中/英同宽（1.05，`KeyboardActionRow.TALL_RETURN_DIGIT_SPACE_WEIGHT`）的常驻空格键，长按语音和拖动光标跟着它走（Android 键面见[数字页空格键主标画 ␣](../bug-fix/2026-10-29-android-number-pad-space-glyph.md)），0 占剩下的宽度；小数点（按字面上屏）在右列重输的位置，回车仍两倍高。三端这一层排法相同。
 - 中/英与回车不在同一行，回车不让出点击区。
 - 换样式、进出密码框或地球键变化时，`ImeLayoutRows.tallReturnStale` 让下一次渲染重建键行。建外框时当场把功能行按空排布重排：偏好重读换了键面时只重建键行、不一定接着渲染，否则会留下上一个键面的功能行。外框里的常驻键经 `ImeBottomRow.placeKey` 挂入，与功能行同样上色。
 
@@ -117,7 +117,7 @@ Android 的拼音九键（含九键双拼）右列 ！ 原本上滑输入 0、�
 
 右侧大回车用于拼音九键、九键双拼和笔画的字母层与数字层；26/14/18 键和手写借来的数字九宫格不跟。
 
-- 左列：符号栏（宽度仍是 14%）跨三行，标点是 ，。？！，！ 是只在这个样式里出现的新按钮（iOS 没有自定义符号栏列表）；栏下底行是与它同宽的 符。
+- 左列：符号栏（宽度仍是 14%）跨三行，标点是 ，。？！，！ 是只在这个样式里出现的新按钮（自定义符号表见[九键左侧符号栏三端共享](2026-10-29-nine-key-sidebar-shared.md)，用自定义表时不接 ！）；栏下底行是与它同宽的 符。
 - 中列：九宫格下方是 123 |（🌐）| 空格 |（九键双拼的 0）| 中/英，左右与九宫格对齐。123、🌐、中/英 与同一地球键状态下拼音九键的标准底行同宽，0 是 1.05 份，空格占剩下的部分；表里写作 符 和回车各 1.281（9.15 × 14%），总份额仍是 9.15，带地球键时与标准底行一样按 10.15 份算，符 和回车各 1.421（`TouchBottomRowLayout.nineKeyTallReturn`、`nineKeyRowWeight(globe:)`）。第一版带地球键时仍按 9.15 份算，123 和中/英比标准底行宽了约 11%。九键双拼的标准底行另加了 0、整行 10.2 份，右侧大回车仍按拼音九键的份额算。这些宽度约束都是必需优先级：用 999 时会与分离键盘里隐藏的第二个空格的 999 约束打平，切过数字层后空格和中/英宽度会错。中列的绝对宽度还要扣键距：标准九键底行是 stack view 先从行宽里扣掉键数减一道键距、再按份额分，第二版只对份额（行宽 × 份额 / 总份额），键距 6pt 时 123 比标准底行宽约 3.3pt、中/英 约 3pt。现在 `tallReturnActionWidths` 以底行宽度为基准，常数扣掉拼音九键标准底行（符 | 123 |（🌐）| 空格 |（中/英）| 回车，`TouchBottomRowLayout.nineKeyStandardKeyCount`）的键距总和，按行和键距缓存（`TallReturnWidthsKey`）；于是 123、🌐、中/英 与同一地球键和中/英状态下的标准底行逐点等宽，0 和数字层的空格与标准底行的 符 等宽。常数扣的是建约束时的键距，所以凡是改了键距的路径都要重排底行：键盘里调完高度点「完成」、共享文档没写成时，`commitTouchKeyboardGeometry` 按文档对齐 App Group 后接着调用 `updateKeyboardLayoutIfNeeded`（几何在 `layoutInputs` 里），与重载共享偏好的路径相同；否则键距从 6pt 变成 3pt 时 123、🌐、中/英 会比标准九键底行窄约 1.6pt，直到下一次重排。
 - 右列：沿用 iOS 现有的 ⌫ 和中间键（拼音是「分词」，笔画是「重输」，数字层是「.」）。回车 `tallReturnKey` 是叠在按键列上的独立键，从第三格顶边伸到底行底边；右列原来的 ！ 留着占位，但不画、不接触摸、不进无障碍，底行原来的回车隐藏。回车不在任何一行里，所以经 `KeyAreaStackView.overlayKeys` 加入键距分配，相邻键距里靠它的一半归它；其他样式下它隐藏、不参与。
 - 数字层：符 在符号栏下方（栏里自己的 符 隐藏，运算符占满），123 的位置放回到字母层的键（九键，笔画是「笔」），0 占空格的位置，空格在 0 右边、与中/英同宽，回车仍两倍高。

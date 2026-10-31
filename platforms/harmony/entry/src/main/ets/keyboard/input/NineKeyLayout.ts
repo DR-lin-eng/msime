@@ -84,6 +84,13 @@ export interface NineKeyActionItem {
   readonly besideReturn: boolean;
 }
 
+/** 自定义左列（`NineKeyLayout.sidebarItems`）画出来的一项：符号、这一项的高度和它在 ForEach 里的键，按值传给键的 @Builder 的量都在这里。 */
+export interface NineKeySidebarItem {
+  readonly symbol: string;
+  readonly height: number;
+  readonly key: string;
+}
+
 function action(kind: NineKeyActionKind, weight: number): NineKeyAction {
   return { kind: kind, weight: weight };
 }
@@ -265,7 +272,7 @@ export class NineKeyLayout {
   /**
    * 触屏九键外框的底行，与 iOS 的 `ActionRowStyle.nineKey`、Android 的 `KeyboardActionRow.designEntries` 一致：符 1.05 | 123 1.25 | space 4.2 | 中 1.05 | return 1.6，中/英紧挨回车。标点在网格两侧的列里，所以没有逗号和句号；符 是九键上打开符号面板的键。
    *
-   * 数字网格只有 1-9，这里补上 0：数字层去掉 符，0 排在空格右边，占 符 让出的同一份宽度。常规中文数字入口借用同一套网格和底行。
+   * 数字网格只有 1-9，这里补上 0，排在空格右边。从拼音九键、九键双拼和笔画进的数字层（`nineKeyDigits`）与 Android #9113、iOS 相同，符 和切换键留在字母层那一格、宽度不变：符 1.05 | 九键 1.25 | 空格 3.15 | 0 1.05 | 中/英 1.05 | 回车 1.6，0 的一份从空格里让出（#10061）。从 26 键、14 键、18 键、手写借来的数字九宫格底行是 返回 1.25 | 空格 4.2 | 0 1.05 | 中/英 | 回车，返回键本来就在它们 123 那一格，0 占 符 让出的那一份。
    *
    * 英文九键的字母层在空格左边放句点、右边放逗号（符 | 123 | . | space | , | 中 | return），与三端英文 26 键底行的句点、逗号位置一致；两键各占 1 份，从空格里让出，左列的 , . ? 不变。
    *
@@ -276,11 +283,15 @@ export class NineKeyLayout {
    * @param digitLayer 画的是数字层
    * @param english 英文模式下的九键（数字层不受影响）
    * @param style 九键样式（`TouchLayoutStylePolicy.nineKeyStyle` 读出的值），缺省为 `standard`
+   * @param nineKeyDigits 数字层是从拼音九键、九键双拼或笔画进的（字母层底行以 符 打头），只在 `digitLayer` 时有意义；缺省为借来的数字九宫格
+   * @param space 数字层空格的位置（`TouchLayoutStylePolicy.numberPadSpace` 读出的值，共享偏好 `touch_number_pad_space`），只在 `digitLayer` 且不是右侧大回车时有意义：`before_zero`（缺省，鸿蒙原来的排法）空格在 0 左边占大份、0 与中/英同宽；`after_zero` 两键对调，0 占大份、空格与中/英同宽；`right_column` 底行没有空格，0 占两键合起来的份额，空格画在网格右列最下面一格（`KeyboardView.touchNineKeyGrid`）
    */
   static actionRow(
     digitLayer: boolean,
     english: boolean = false,
     style: string = "standard",
+    nineKeyDigits: boolean = false,
+    space: string = "before_zero",
   ): NineKeyAction[] {
     const row: NineKeyAction[] = [];
     const englishMarks: boolean = english && !digitLayer;
@@ -314,24 +325,37 @@ export class NineKeyLayout {
       row.push(action(NineKeyActionKind.RETURN, NineKeyLayout.RETURN_WEIGHT));
       return row;
     }
-    if (!digitLayer) {
+    // 符 在字母层和九键一族的数字层都排第一，切层时与切换键一起不挪位置。
+    const symbolPanel: boolean = !digitLayer || nineKeyDigits;
+    if (symbolPanel) {
       row.push(action(NineKeyActionKind.SYMBOL_PANEL, NineKeyLayout.SYMBOL_PANEL_WEIGHT));
     }
     row.push(action(NineKeyActionKind.LAYER_TOGGLE, NineKeyLayout.LAYER_WEIGHT));
     if (englishMarks) {
       row.push(action(NineKeyActionKind.PERIOD, NineKeyLayout.PUNCTUATION_WEIGHT));
     }
-    row.push(
-      action(
-        NineKeyActionKind.SPACE,
-        englishMarks ? NineKeyLayout.ENGLISH_SPACE_WEIGHT : NineKeyLayout.SPACE_WEIGHT,
-      ),
-    );
-    if (englishMarks) {
-      row.push(action(NineKeyActionKind.COMMA, NineKeyLayout.PUNCTUATION_WEIGHT));
+    let spaceWeight: number = englishMarks
+      ? NineKeyLayout.ENGLISH_SPACE_WEIGHT
+      : NineKeyLayout.SPACE_WEIGHT;
+    if (digitLayer && symbolPanel) {
+      // 九键一族的数字层：0 的一份从空格里让出，整行份额与字母层相同。
+      spaceWeight -= NineKeyLayout.ZERO_WEIGHT;
     }
-    if (digitLayer) {
-      row.push(action(NineKeyActionKind.ZERO, NineKeyLayout.ZERO_WEIGHT));
+    if (digitLayer && space === "right_column") {
+      // 空格在右列：0 占空格和 0 合起来的份额。
+      row.push(action(NineKeyActionKind.ZERO, spaceWeight + NineKeyLayout.ZERO_WEIGHT));
+    } else if (digitLayer && space === "after_zero") {
+      // 两键对调：0 占大份，空格与中/英同宽。
+      row.push(action(NineKeyActionKind.ZERO, spaceWeight));
+      row.push(action(NineKeyActionKind.SPACE, NineKeyLayout.ZERO_WEIGHT));
+    } else {
+      row.push(action(NineKeyActionKind.SPACE, spaceWeight));
+      if (englishMarks) {
+        row.push(action(NineKeyActionKind.COMMA, NineKeyLayout.PUNCTUATION_WEIGHT));
+      }
+      if (digitLayer) {
+        row.push(action(NineKeyActionKind.ZERO, NineKeyLayout.ZERO_WEIGHT));
+      }
     }
     row.push(action(NineKeyActionKind.LANGUAGE, NineKeyLayout.LANGUAGE_WEIGHT));
     row.push(action(NineKeyActionKind.RETURN, NineKeyLayout.RETURN_WEIGHT));
@@ -366,9 +390,114 @@ export class NineKeyLayout {
     return key.input === QUICK_MARKS_KEY.input;
   }
 
-  /** 触屏网格左列的标点；「右侧大回车」时末尾多一个右列让出来的 !。 */
-  static sideMarks(tallReturn: boolean = false): string[] {
+  /**
+   * 触屏网格左列的标点；「右侧大回车」时末尾多一个右列让出来的 !。
+   *
+   * `custom` 是共享偏好 `touch_nine_key_sidebar_symbols`（#10223）：空表用出厂的 ASCII `, . ?`，点按交给 Engine 的标点处理；用户的表原样返回，点按按字面上屏（`customSidebar`），右侧大回车也不再接 !。
+   */
+  static sideMarks(tallReturn: boolean = false, custom: readonly string[] = []): string[] {
+    if (NineKeyLayout.customSidebar(custom)) {
+      return custom.slice();
+    }
     return tallReturn ? TALL_RETURN_SIDE_MARKS : SIDE_MARKS;
+  }
+
+  /**
+   * 九宫格数字键盘左列 #+= 上面的符号：`custom` 是共享偏好 `touch_nine_key_digit_sidebar_symbols`，空表用出厂的四则运算 `DIGIT_SIDEBAR`（与 `digitPunctuation` 相同），用户的表原样返回，点按按字面上屏。#+= 不在表里，固定在左列最后一格。
+   */
+  static digitSidebar(custom: readonly string[] = []): string[] {
+    return NineKeyLayout.customSidebar(custom) ? custom.slice() : DIGIT_SIDEBAR;
+  }
+
+  /** 这张左列符号表是用户自定义的（非空）：左列改画可滚动的等高栈，点按先按首选结束组字再字面上屏；空表是本端出厂表，照原来的画法和输入路径。 */
+  static customSidebar(custom: readonly string[]): boolean {
+    return custom.length > 0;
+  }
+
+  /** 左列符号每项至少多高（vp），与 Android `NineKeySidebarPolicy.MIN_ROW_HEIGHT_DP` 相同：键盘调到最矮时一屏少放几项，不把键压扁。 */
+  static readonly SIDEBAR_MIN_ROW_VP: number = 28;
+  /** 字母层自定义表一屏最多几项：与九宫格三行对齐。 */
+  static readonly LETTER_SIDEBAR_VISIBLE_ROWS: number = 3;
+  /** 数字层自定义表一屏最多几项：#+= 下面那一格之外的滚动区有四格高。 */
+  static readonly DIGIT_SIDEBAR_VISIBLE_ROWS: number = 4;
+
+  /**
+   * 左列一屏画几项：不超过本端上限 `limit`，也不让每项矮于 `SIDEBAR_MIN_ROW_VP`；项数更少时按实际项数均分。至少一项。
+   *
+   * @param count 表里的项数
+   * @param limit 本端一屏最多几项（`LETTER_SIDEBAR_VISIBLE_ROWS` 或 `DIGIT_SIDEBAR_VISIBLE_ROWS`）
+   * @param height 左列（数字层是 #+= 上面的滚动区）的可见高度
+   */
+  static sidebarVisibleRows(count: number, limit: number, height: number): number {
+    const fits: number = Math.floor(height / NineKeyLayout.SIDEBAR_MIN_ROW_VP);
+    return Math.max(1, Math.min(count, limit, fits));
+  }
+
+  /**
+   * 自定义左列里每一项的高度：可见高度减去项与项之间的行距，再按 `sidebarVisibleRows` 均分。多于一屏的项接在后面，上下滚动。
+   *
+   * @param height 左列（数字层是滚动区）的可见高度
+   * @param count 表里的项数
+   * @param limit 本端一屏最多几项
+   * @param spacing 项与项之间的行距，与出厂表各格之间的行距相同
+   */
+  static sidebarRowHeight(height: number, count: number, limit: number, spacing: number): number {
+    const rows: number = NineKeyLayout.sidebarVisibleRows(count, limit, height);
+    return Math.max(0, (height - (rows - 1) * spacing) / rows);
+  }
+
+  /**
+   * 数字层自定义表时左列的切法，与出厂表五格等高的画法对齐：#+= 仍是最后一格、与出厂时同高，上面四格加三道行距是滚动区。返回滚动区的高度。
+   *
+   * @param height 整个左列的高度
+   * @param spacing 格与格之间的行距
+   */
+  static digitSidebarScrollHeight(height: number, spacing: number): number {
+    const cell: number = NineKeyLayout.digitSidebarCellHeight(height, spacing);
+    return (
+      NineKeyLayout.DIGIT_SIDEBAR_VISIBLE_ROWS * cell +
+      (NineKeyLayout.DIGIT_SIDEBAR_VISIBLE_ROWS - 1) * spacing
+    );
+  }
+
+  /** 出厂数字层左列一格的高度：四个运算符加 #+= 五格、四道行距均分整列，自定义表时 #+= 也是这么高。 */
+  static digitSidebarCellHeight(height: number, spacing: number): number {
+    const cells: number = NineKeyLayout.DIGIT_SIDEBAR_VISIBLE_ROWS + 1;
+    return Math.max(0, (height - (cells - 1) * spacing) / cells);
+  }
+
+  /**
+   * 自定义左列逐项要画的东西：每项等高（`sidebarRowHeight`），键带上符号、下标、高度和 `face`（`sidebarItemKey`）。视图每次重建左列只算一次，交给 ForEach。
+   *
+   * @param symbols 用户的表
+   * @param height 左列（数字层是滚动区）的可见高度
+   * @param limit 本端一屏最多几项
+   * @param spacing 项与项之间的行距；笔画的标点栏格与格之间没有空隙，传 0
+   * @param face 视图的 `faceKey`
+   */
+  static sidebarItems(
+    symbols: readonly string[],
+    height: number,
+    limit: number,
+    spacing: number,
+    face: string,
+  ): NineKeySidebarItem[] {
+    const rowHeight: number = NineKeyLayout.sidebarRowHeight(
+      height,
+      symbols.length,
+      limit,
+      spacing,
+    );
+    return symbols.map((symbol: string, index: number): NineKeySidebarItem => ({
+      symbol: symbol,
+      height: rowHeight,
+      key: NineKeyLayout.sidebarItemKey(symbol, index, rowHeight, face),
+    }));
+  }
+
+  /** 自定义左列每一项在 ForEach 里的键：符号、下标、高度和键面的 `faceKey`。只用符号会把重复的项并掉，按值传给 @Builder 的高度变了也不会刷新。 */
+  static sidebarItemKey(symbol: string, index: number, height: number, face: string): string {
+    return `${symbol}:${index}:${height}:${face}`;
   }
 
   /** 触屏网格右列底部的标点。 */
@@ -384,6 +513,11 @@ export class NineKeyLayout {
 
   static digitPunctuation(): string[] {
     return DIGIT_SIDEBAR;
+  }
+
+  /** 笔画键盘左侧标点栏：空表是出厂的 `, . ? !` 四格（`punctuation`），用户的字母层表（`touch_nine_key_sidebar_symbols`）原样返回，与拼音九键共用一张表。 */
+  static strokeSidebar(custom: readonly string[] = []): string[] {
+    return NineKeyLayout.customSidebar(custom) ? custom.slice() : PUNCTUATION;
   }
 
   /** 长按选项：常用标点键提供 1，字母键提供数字和各个小写字母。 */

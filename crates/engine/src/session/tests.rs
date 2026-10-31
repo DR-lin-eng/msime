@@ -468,6 +468,31 @@ fn next_word_prediction_is_opt_in_and_has_no_composing_text() {
     assert!(on.snapshot().candidates.iter().any(|row| row.word == "菜"));
 }
 
+/// 联想按上屏的词查以它开头的长词，给的是后半截：上屏 巨 不联想出 巨乳 的 乳。
+#[test]
+fn next_word_prediction_skips_offensive_words() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_1_j VALUES('ju','j','巨',1000);
+CREATE TABLE tbl_2_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+INSERT INTO tbl_2_j VALUES('ju''ru','jr','巨乳',300);
+INSERT INTO tbl_2_j VALUES('ju''ren','jr','巨人',100);",
+    );
+    let mut session = fixture.session_with(|options| {
+        options.next_word_prediction = true;
+        options.learning = false;
+    });
+    type_text(&mut session, "ju");
+    assert_eq!(
+        select_word(&mut session, "巨").commit.as_deref(),
+        Some("巨")
+    );
+    let snapshot = session.snapshot();
+    assert!(snapshot.prediction);
+    assert!(snapshot.candidates.iter().any(|row| row.word == "人"));
+    assert!(snapshot.candidates.iter().all(|row| row.word != "乳"));
+}
+
 #[test]
 fn next_word_prediction_never_commits_on_space_return_delete_or_finish() {
     let fixture = prediction_fixture();
@@ -788,6 +813,9 @@ impl Fixture {
 
     fn options(&self) -> SessionOptions {
         let mut options = SessionOptions::new(self.paths());
+        // 这些测试按参照实现的默认值写成：辅助码开、表名 `lantian`（引擎库默认关，见 `SessionOptions::new`）。
+        options.helpcode = true;
+        options.helpcode_schema = "lantian".to_owned();
         // Frequency learning off, as the reference session tests configured it, so only the behaviour under test moves the order.
         options.frequency = FrequencyAdjustmentOptions {
             mode: FrequencyAdjustmentMode::Disabled,
@@ -7350,15 +7378,96 @@ fn rejected_capital_after_bare_shortcut_keeps_both_letters_composing() {
     }
 }
 
+/// #10123：大写字母入口后只打了字母，模式不收的字母（小写或大写）把整串转回普通组字，驼峰英文不会在中途上屏。
+#[test]
+fn rejected_letter_after_letter_only_shortcut_keeps_the_whole_word_composing() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    for scheme in [SchemeType::Quanpin, SchemeType::Shuangpin] {
+        for text in [
+            "TextBlock",
+            "TxB",
+            "TbU",
+            "UbU",
+            "TuU",
+            "Uu",
+            "Ui",
+            "Uq",
+            "Uw",
+            "Uo",
+            "Ur",
+            "Uy",
+            "Ut",
+            "Up",
+            "KabA",
+            "Trq",
+        ] {
+            let mut session = fixture.session_with(|options| options.scheme = scheme);
+            for byte in text.bytes() {
+                let result = session.character(byte, byte.is_ascii_uppercase());
+                assert!(
+                    result.handled && result.commit.is_none(),
+                    "{scheme:?} {text}: {} gave {result:?}",
+                    byte as char
+                );
+            }
+            let snapshot = session.snapshot();
+            // `Trq` 全是日期时间模式收的小写，留在模式里；其余都在第一个被拒字母处转回普通组字。
+            let expected_mode = if text == "Trq" {
+                LocalInputMode::DateTime
+            } else {
+                LocalInputMode::None
+            };
+            assert_eq!(snapshot.local_mode, expected_mode, "{scheme:?} {text}");
+            assert_eq!(snapshot.editing_text, text, "{scheme:?} {text}");
+            assert_eq!(
+                session.command(Command::CommitRaw).commit.as_deref(),
+                Some(text),
+                "{scheme:?} {text}"
+            );
+        }
+
+        // 转回后退格只删最后一个字母，仍是普通组字，不回到模式。
+        let mut session = fixture.session_with(|options| options.scheme = scheme);
+        assert!(session.character(b'U', true).handled);
+        assert!(session.character(b'i', false).handled);
+        assert!(session.command(Command::Backspace).handled);
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.local_mode, LocalInputMode::None);
+        assert_eq!(snapshot.editing_text, "U");
+
+        // 十六进制字母仍是 Unicode 码位。
+        let mut session = fixture.session_with(|options| options.scheme = scheme);
+        assert!(session.character(b'U', true).handled);
+        for byte in *b"ae" {
+            assert!(session.character(byte, false).handled);
+        }
+        assert_eq!(session.snapshot().local_mode, LocalInputMode::Unicode);
+        assert_eq!(session.snapshot().editing_text, "Uae");
+    }
+}
+
+/// 五笔不走拼音的大写字面组字，入口后的拒绝字母沿用提交并透传。
+#[test]
+fn wubi_rejected_letter_after_shortcut_still_commits_and_returns_the_key() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| options.scheme = SchemeType::Wubi);
+    assert!(session.character(b'U', true).handled);
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::Unicode);
+    let result = session.character(b'i', false);
+    assert!(!result.handled);
+    assert_eq!(result.commit.as_deref(), Some("U"));
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
+    assert!(session.snapshot().editing_text.is_empty());
+}
+
 #[test]
 fn rejected_local_mode_characters_commit_raw_and_return_the_key() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
     for (entry, spelling, rejected) in [
-        (b'U', "", b'i'),
         (b'U', "0041", b'I'),
         (b'U', "0041", b'g'),
-        (b'T', "rq", b'A'),
-        (b'K', "ab", b'A'),
+        (b'T', "rq", b'1'),
+        (b'K', "ab", b'1'),
         (b'E', "xiao", b'0'),
         (b'M', "xiao", b'0'),
         (b'J', "nh", b'0'),
@@ -8931,7 +9040,15 @@ fn convert_hanja_is_named_for_the_golden_scenarios() {
         Command::from_name("ConversionRight"),
         Some(Command::ConversionRight)
     );
-    assert_eq!(Command::from_u8(14), None);
+    assert_eq!(
+        Command::from_u8(14),
+        Some(Command::CommitRawWithoutLearning)
+    );
+    assert_eq!(
+        Command::from_name("CommitRawWithoutLearning"),
+        Some(Command::CommitRawWithoutLearning)
+    );
+    assert_eq!(Command::from_u8(15), None);
 }
 
 // ---- expression, command and mention modes ----
@@ -8988,11 +9105,16 @@ fn expression_mode_evaluates_what_follows_shift_v() {
     assert_eq!(snapshot.local_mode, LocalInputMode::Expression);
     assert_eq!(snapshot.spelling_symbols, "0123456789+-*/.()%^#$&");
     assert_eq!(words(&session), ["V"]);
-    // 数字之前的字母不能表示单位，提交入口字母后交还当前键。
+    // 数字之前的字母不能表示单位，入口和它一起转回普通组字（#10123），不提前上屏。
     let rejected = session.character(b'x', false);
-    assert!(!rejected.handled);
-    assert_eq!(rejected.commit.as_deref(), Some("V"));
-    assert!(session.snapshot().preedit.is_empty());
+    assert!(
+        rejected.handled && rejected.commit.is_none(),
+        "{rejected:?}"
+    );
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.local_mode, LocalInputMode::None);
+    assert_eq!(snapshot.editing_text, "Vx");
+    assert!(session.command(Command::Cancel).handled);
 
     session.character(b'V', true);
     assert!(session.character(b'1', false).handled);
@@ -14517,3 +14639,5 @@ INSERT INTO quick_parases VALUES('qq','腾讯',20);"
 }
 
 mod caret_suffix;
+mod lifecycle;
+mod raw_commit;

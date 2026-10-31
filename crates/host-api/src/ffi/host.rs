@@ -897,6 +897,12 @@ pub unsafe extern "C" fn msime_client_migrate_android_key_layout(
         revision: u64,
         long_space: bool,
         number_row: bool,
+        /// 本机旧键里用户自定义的九键左侧符号表；缺省或空表表示不迁。
+        #[serde(default)]
+        nine_key_symbols: Vec<String>,
+        /// 本机旧键里用户自定义的九键数字键盘左侧符号表；缺省或空表表示不迁。
+        #[serde(default)]
+        nine_key_digit_symbols: Vec<String>,
     }
     response(|| {
         if request.is_null() || length > 65536 {
@@ -912,7 +918,13 @@ pub unsafe extern "C" fn msime_client_migrate_android_key_layout(
             "preferences directory must be absolute",
         )?;
         let saved = PreferencesStore::new(directory)
-            .migrate_android_key_layout(request.revision, request.long_space, request.number_row)
+            .migrate_android_key_layout(
+                request.revision,
+                request.long_space,
+                request.number_row,
+                &request.nine_key_symbols,
+                &request.nine_key_digit_symbols,
+            )
             .map_err(|error| error.to_string())?;
         serde_json::to_value(saved).map_err(|error| error.to_string())
     })
@@ -3152,11 +3164,9 @@ pub unsafe extern "C" fn msime_client_vocabulary_review(
     }
 
     response(|| {
-        // Deliberately not the 65_536 the other entry points use. Those carry a setting or one
-        // clipboard row; this one carries an imported word list, and a five-thousand-word CET book
-        // is a few hundred kilobytes of text. Copying the smaller cap here would have made the
-        // import path reject every real file while looking like it was merely being careful.
-        if request.is_null() || length > session::MAX_IMPORT_BYTES {
+        // 文件本身仍由共享解析器限制为 8 MiB；请求另给常规 JSON 转义的两倍空间及目录等元数据余量。
+        const MAX_REQUEST_BYTES: usize = 17 * 1024 * 1024;
+        if request.is_null() || length > MAX_REQUEST_BYTES {
             return Err("invalid vocabulary review buffer".into());
         }
         // SAFETY: guaranteed by the documented caller contract.

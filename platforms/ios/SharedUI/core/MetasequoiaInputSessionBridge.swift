@@ -805,11 +805,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
 
   /// Show touch keyboard geometry on the live session while it is being dragged. The shared snapshot is the source that is reloaded when the extension appears.
   @discardableResult
-  func setTouchKeyboardGeometry(keySpacing: Double, rowSpacing: Double,
-                                heightAdjustment: Double, voiceEnabled: Bool) -> Bool {
+  func setTouchKeyboardGeometry(keySpacing: Double, rowSpacing: Double, heightAdjustment: Double) -> Bool {
     guard let mapping = Self.geometryMapping(keySpacing: keySpacing, rowSpacing: rowSpacing,
-                                             heightAdjustment: heightAdjustment,
-                                             voiceEnabled: voiceEnabled) else { return false }
+                                             heightAdjustment: heightAdjustment) else { return false }
     return updatePreferences(mapping)
   }
 
@@ -820,19 +818,16 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   ///
   /// 返回值是共享文档有没有写成。组字中会话会把偏好推迟到空闲时再应用（`deferred`），这不是失败：键距、行距、高度只由宿主自己读，文档照样要写。原先推迟了就不写文档，下次唤出键盘时文档里的旧高度又把这次调整盖了回去。
   @discardableResult
-  func persistTouchKeyboardGeometry(keySpacing: Double, rowSpacing: Double,
-                                    heightAdjustment: Double, voiceEnabled: Bool) -> Bool {
+  func persistTouchKeyboardGeometry(keySpacing: Double, rowSpacing: Double, heightAdjustment: Double) -> Bool {
     guard let mapping = Self.geometryMapping(keySpacing: keySpacing, rowSpacing: rowSpacing,
-                                             heightAdjustment: heightAdjustment,
-                                             voiceEnabled: voiceEnabled) else { return false }
+                                             heightAdjustment: heightAdjustment) else { return false }
     _ = updatePreferences(mapping)
     return persistSharedPreferences(mapping)
   }
 
-  /// 只写传了值的那几项。设置 App 一次只改一项，只写这一项，就不会把它页面上停留着的旧值（比如键盘里刚调过的高度）写回文档。
+  /// 只写传了值的那几项。设置 App 一次只改一项，只写这一项，就不会把它页面上停留着的旧值（比如键盘里刚调过的高度）写回文档。`touch_voice_shortcut` 是 Android 的工具栏语音按钮，iOS 不写它，免得键盘里调一下高度就把别的设备同步来的值盖掉。
   static func geometryMapping(keySpacing: Double? = nil, rowSpacing: Double? = nil,
-                              heightAdjustment: Double? = nil, widthPercent: Double? = nil,
-                              voiceEnabled: Bool? = nil) -> ((inout [String: Any]) -> Void)? {
+                              heightAdjustment: Double? = nil, widthPercent: Double? = nil) -> ((inout [String: Any]) -> Void)? {
     guard [keySpacing, rowSpacing, heightAdjustment, widthPercent].allSatisfy({ $0?.isFinite ?? true }) else { return nil }
     let keySpacingTenths = keySpacing.map { Int((SharedNumber.clamped($0, to: 0...12) * 10).rounded()) }
     let rowSpacingTenths = rowSpacing.map { Int((SharedNumber.clamped($0, to: 0...16) * 10).rounded()) }
@@ -843,7 +838,6 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       if let keySpacingTenths { preferences["touch_key_spacing_tenths"] = keySpacingTenths }
       if let rowSpacingTenths { preferences["touch_row_spacing_tenths"] = rowSpacingTenths }
       if let clampedHeight { preferences["touch_keyboard_height_adjustment"] = clampedHeight }
-      if let voiceEnabled { preferences["touch_voice_shortcut"] = voiceEnabled }
     }
   }
 
@@ -855,7 +849,6 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       preferences.removeValue(forKey: "touch_key_spacing_tenths")
       preferences.removeValue(forKey: "touch_row_spacing_tenths")
       preferences.removeValue(forKey: "touch_keyboard_height_adjustment")
-      preferences.removeValue(forKey: "touch_voice_shortcut")
     }
   }
 
@@ -2051,6 +2044,28 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       "operation": "night_learning", "charging": charging, "idle": idle, "local_hour": hour,
       "private": KeyboardPrivacyPreference.incognito]
     return try callOptions(msimeClientDictionary, ["options": options, "action": action])
+  }
+
+  /// 「清除学习记录」失败的两种情况：键盘会话还开着（Rust 报 `dictionary maintenance busy`），或者别的原因。
+  enum LearnedDataResetFailure: Error, Equatable {
+    case busy
+    case failed
+  }
+
+  /// 设置 App「词库 › 学习」的「清除学习记录」：与五笔查码、词库同步一样经 `msime_client_prepare_host` 解析出键盘用的那套词库路径，发词库请求 `reset`，换回随包的工作词库、清空学习日志（调频、置顶、固定位置、选词计数、整句联想、拼写纠错和自造词），共享偏好、常用语、剪贴板和打字统计不动。Rust 要独占的维护权；键盘扩展收起时就销毁会话放掉它，键盘还开着时是 `.busy`，什么也不换。键盘扩展有没有完全访问，状态目录都是 App Group 里的同一个 `MSIME`（`bootstrapOptions`），没有另一份：没开完全访问时键盘写不了 App Group，它学到的东西本来就落不了盘，所以这里清的就是键盘下次读的那一份。读写文件，调用方放到主线程之外。
+  static func resetLearnedData(resources: URL? = PersonalDictionaryBridge.packagedResources,
+                               stateRoot: URL? = nil) throws {
+    guard let resources else { throw LearnedDataResetFailure.failed }
+    let result: [String: Any]
+    do {
+      let options = try callOptions(msimeClientPrepareHost, bootstrapOptions(resources: resources, stateRoot: stateRoot))
+      result = try callOptions(msimeClientDictionary, ["options": options, "action": ["operation": "reset"]])
+    } catch InputBridgeFailure.response("dictionary maintenance busy") {
+      throw LearnedDataResetFailure.busy
+    } catch {
+      throw LearnedDataResetFailure.failed
+    }
+    guard result["reset"] as? Bool == true else { throw LearnedDataResetFailure.failed }
   }
 
   /// 五笔查码（#6789）：`text` 里每个不同汉字（以及整段作为一个词）在 86 和 98 码表里的编码。给设置 App 用，不建输入会话：经 `msime_client_prepare_host` 解析出选项后发词库请求 `wubi_codes`，host-api 只读打开会话用的同一份五笔码表，不拿词库维护租约，键盘开着也能查。

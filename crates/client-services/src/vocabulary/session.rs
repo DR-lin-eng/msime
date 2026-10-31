@@ -71,8 +71,10 @@ pub struct ReviewStatus {
 pub enum ReviewAction {
     Load,
     Answer {
+        /// 显示卡片时所属词书，不从全局当前选择推断。
+        wordbook: String,
         word: String,
-        /// The 认识 button. False is 不认识 and returns the card to the same day.
+        /// 「认识」按钮；为 false 时表示「不认识」，卡片留在当天队列。
         known: bool,
     },
     SetSettings {
@@ -86,6 +88,10 @@ pub enum ReviewAction {
     },
     Remove {
         wordbook: String,
+    },
+    /// 把一个词移出生词本，复习进度留着。词不在生词本里时什么也不改。
+    RemovePersonalWord {
+        word: String,
     },
     Reset,
 }
@@ -109,14 +115,17 @@ pub fn apply(
     }
     let library = WordbookLibrary::new(directory);
     let store = VocabularyProgressStore::new(directory);
-    // 作答时已经读过的选中书，交给最后的 `status` 复用：插件书最大 4 MiB，没必要在一次作答里再解析一遍。
+    // 作答时已经读过的来源书，仍是当前选择时交给 `status` 复用，避免重复解析。
     let mut answered_book = None;
 
     match action {
         ReviewAction::Load => {}
-        ReviewAction::Answer { word, known } => {
-            let document = store.load()?;
-            let book = selected_book(&library, resources, plugins, &document.settings.wordbook)?
+        ReviewAction::Answer {
+            wordbook,
+            word,
+            known,
+        } => {
+            let book = selected_book(&library, resources, plugins, &wordbook)?
                 .ok_or(ReviewSessionError::UnknownWordbook)?;
             let grade = if known {
                 ReviewGrade::Known
@@ -138,22 +147,16 @@ pub fn apply(
             })?;
         }
         ReviewAction::Import { name, text } => {
-            // Validate the existing progress before writing the new book. Import spans two
-            // stores; if the progress document is damaged, returning an error after the library
-            // write would leave a book behind even though the action failed.
-            let document = store.load()?;
+            // 写词书前先验证进度，避免损坏文档让失败的导入仍留下词书；不把此时的设置快照写回。
+            store.load()?;
             let report = wordbook_import::parse(&text, MAX_IMPORT_BYTES)?;
             // The id is minted here and never taken from the file. A book keys the review
             // progress, so a file that named its own id could inherit or destroy the schedule of a
             // book the user imported earlier.
             let id = format!("user-{}", crate::uuid::Uuid::new_v4().simple());
             let book = library.import(&name, report.entries, &id)?;
-            // Selecting it is the only useful next step; leaving the user to pick the book they
-            // just imported out of a list is a step with exactly one right answer.
-            store.set_settings(VocabularyReviewSettings {
-                wordbook: book.id,
-                ..document.settings
-            })?;
+            // 导入后选中新书，只在进度锁内改选择，保留另一窗口刚保存的限额。
+            store.select_wordbook(&book.id)?;
         }
         ReviewAction::Remove { wordbook } => {
             // Validate progress before deleting the book. Removal spans two stores; if the
@@ -174,6 +177,10 @@ pub fn apply(
             // The book is gone, so its schedule is unreachable. Leaving it would grow the progress
             // document forever and would silently return if the same id ever came back.
             store.remove_wordbook_progress(&wordbook)?;
+        }
+        ReviewAction::RemovePersonalWord { word } => {
+            // 移走最后一个词时生词本随之删除；它若正被选中，下面的状态按「选中的书不在了」给出书目选择。
+            library.remove_personal_entry(&word)?;
         }
         ReviewAction::Reset => {
             // Only the progress. The imported books are the user's own material and are deleted
@@ -199,12 +206,48 @@ fn selected_book(
         return Ok(None);
     }
     if builtin::is_builtin(id) {
-        return Ok(builtin::load(resources)?.into_iter().find(|b| b.id == id));
+        return Ok(builtin::load_one(resources, id)?);
     }
     if wordbook_pack::is_pack_book(id) {
         return Ok(plugins.and_then(|root| wordbook_pack::load_book(root, id)));
     }
     Ok(library.load(id)?)
+}
+
+/// 今日待复习的张数，和 [`status`] 报告的 `due` 是同一个数，但只读进度文档和选中的那一本书。
+///
+/// 给菜单栏、托盘菜单这类被动显示的地方用：它们每次打开菜单都来问一次，不需要书目、队列和卡片内容，所以不走 [`apply`] 的 `Load`（那要读全部内置书、插件目录和导入书目，再把整条队列的词条拷出来）。两个数必须一致，否则菜单上写着 12，点进去页面说 9；所以排程照样交给 [`build_queue`]，这里只是不去组装页面。
+///
+/// 从没开过背单词（还没有进度文件）、没选书、选中的书已经不在时都是 `Ok(0)`，而且不创建任何文件或目录。进度文档损坏、选中的书读不出来时报错，不当成 0：宿主据此隐藏这一项，用户点进背单词页面时看到的是同一个错误。
+pub fn due_count(
+    directory: &Path,
+    resources: &Path,
+    plugins: Option<&Path>,
+    day: &str,
+) -> Result<usize, ReviewSessionError> {
+    if !crate::calendar::is_valid_day(day) {
+        return Err(ReviewSessionError::InvalidDay);
+    }
+    let Some(document) = VocabularyProgressStore::new(directory).load_existing()? else {
+        return Ok(0);
+    };
+    let settings = &document.settings;
+    if settings.wordbook.is_empty() {
+        return Ok(0);
+    }
+    let library = WordbookLibrary::new(directory);
+    let Some(book) = selected_book(&library, resources, plugins, &settings.wordbook)? else {
+        return Ok(0);
+    };
+    let built = build_queue(
+        &document,
+        &book,
+        day,
+        settings.new_per_day as usize,
+        settings.session_limit as usize,
+    )
+    .ok_or(ReviewSessionError::InvalidDay)?;
+    Ok(built.due + built.introducing)
 }
 
 /// The status for `day`, changing nothing.
@@ -240,6 +283,7 @@ fn status_with(
         total: book.entries.len(),
         builtin: true,
         pack: false,
+        personal: false,
     }));
     // 插件词书在内置书之后、导入的书之前。
     if let Some(root) = plugins {
@@ -343,6 +387,95 @@ mod tests {
     }
 
     #[test]
+    fn the_personal_book_is_listed_and_reviewed_like_any_other() {
+        use super::super::library::{personal_entry_from_gloss, PERSONAL_ID};
+        let root = directory();
+        let library = WordbookLibrary::new(root.path());
+        library
+            .add_personal(personal_entry_from_gloss("面试", "interview", "").unwrap())
+            .unwrap();
+        let status = apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::SetSettings {
+                wordbook: PERSONAL_ID.to_owned(),
+                new_per_day: 20,
+                session_limit: 200,
+            },
+        )
+        .unwrap();
+        assert_eq!(status.wordbooks.len(), 1);
+        assert!(status.wordbooks[0].personal);
+        assert_eq!(status.queue.len(), 1);
+        assert_eq!(status.queue[0].word, "interview");
+        assert_eq!(status.queue[0].meaning, "面试");
+
+        let status = apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::RemovePersonalWord {
+                word: "absent".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            status.queue.len(),
+            1,
+            "removing an absent word changes nothing"
+        );
+
+        // 删掉生词本就是清空它，复习进度随之清掉。
+        let status = apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::Remove {
+                wordbook: PERSONAL_ID.to_owned(),
+            },
+        )
+        .unwrap();
+        assert!(status.wordbooks.is_empty());
+    }
+
+    #[test]
+    fn removing_the_last_personal_word_offers_the_picker() {
+        use super::super::library::{personal_entry_from_gloss, PERSONAL_ID};
+        let root = directory();
+        WordbookLibrary::new(root.path())
+            .add_personal(personal_entry_from_gloss("面试", "interview", "").unwrap())
+            .unwrap();
+        apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::SetSettings {
+                wordbook: PERSONAL_ID.to_owned(),
+                new_per_day: 20,
+                session_limit: 200,
+            },
+        )
+        .unwrap();
+        let status = apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::RemovePersonalWord {
+                word: "interview".to_owned(),
+            },
+        )
+        .unwrap();
+        assert!(status.wordbooks.is_empty());
+        assert!(status.queue.is_empty());
+    }
+
+    #[test]
     fn a_fresh_directory_has_no_books_and_no_queue() {
         let root = directory();
         let status = status(root.path(), root.path(), None, TODAY).unwrap();
@@ -437,9 +570,75 @@ mod tests {
     }
 
     #[test]
+    fn an_old_card_answers_its_source_book_after_the_selection_changes() {
+        let root = directory();
+        let first = import(root.path(), "合成词书甲");
+        let second = apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::Import {
+                name: "合成词书乙".into(),
+                text: "alpha,合成释义乙\n".into(),
+            },
+        )
+        .unwrap();
+        let action: ReviewAction = serde_json::from_value(serde_json::json!({
+            "operation": "answer", "wordbook": first.settings.wordbook,
+            "word": first.queue[0].word, "known": true,
+        }))
+        .unwrap();
+        let answered = apply(root.path(), root.path(), None, TODAY, action).unwrap();
+        let progress = VocabularyProgressStore::new(root.path()).load().unwrap();
+        assert!(progress.card(&first.settings.wordbook, "alpha").is_some());
+        assert!(progress.card(&second.settings.wordbook, "alpha").is_none());
+        assert_eq!(answered.settings, second.settings);
+        assert_eq!(answered.queue, second.queue);
+        assert_eq!(answered.answered_today, 1);
+    }
+
+    #[test]
+    fn an_answer_without_its_source_book_is_refused() {
+        let action = serde_json::from_value::<ReviewAction>(serde_json::json!({
+            "operation": "answer", "word": "alpha", "known": true,
+        }));
+        assert!(action.is_err(), "缺少来源词书时不能猜测当前选择");
+    }
+
+    #[test]
+    fn a_missing_source_book_never_answers_the_current_selection() {
+        let root = directory();
+        let first = import(root.path(), "合成词书甲");
+        let second = import(root.path(), "合成词书乙");
+        WordbookLibrary::new(root.path())
+            .remove(&first.settings.wordbook)
+            .unwrap();
+        let before = VocabularyProgressStore::new(root.path()).load().unwrap();
+        for id in [first.settings.wordbook.as_str(), "", "user-missing"] {
+            let action: ReviewAction = serde_json::from_value(serde_json::json!({
+                "operation": "answer", "wordbook": id, "word": "alpha", "known": true,
+            }))
+            .unwrap();
+            assert!(apply(root.path(), root.path(), None, TODAY, action).is_err());
+        }
+        let after = VocabularyProgressStore::new(root.path()).load().unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert_eq!(
+            status(root.path(), root.path(), None, TODAY)
+                .unwrap()
+                .settings,
+            second.settings
+        );
+    }
+
+    #[test]
     fn recall_leaves_todays_queue_and_a_lapse_stays_in_it() {
         let root = directory();
-        import(root.path(), "合成词表");
+        let book = import(root.path(), "合成词表").settings.wordbook;
 
         let answered = apply(
             root.path(),
@@ -447,6 +646,7 @@ mod tests {
             None,
             TODAY,
             ReviewAction::Answer {
+                wordbook: book.clone(),
                 word: "alpha".to_owned(),
                 known: true,
             },
@@ -461,6 +661,7 @@ mod tests {
             None,
             TODAY,
             ReviewAction::Answer {
+                wordbook: book.clone(),
                 word: "beta".to_owned(),
                 known: false,
             },
@@ -476,13 +677,14 @@ mod tests {
     #[test]
     fn the_next_day_starts_its_own_count_and_the_recalled_card_is_due() {
         let root = directory();
-        import(root.path(), "合成词表");
+        let book = import(root.path(), "合成词表").settings.wordbook;
         apply(
             root.path(),
             root.path(),
             None,
             TODAY,
             ReviewAction::Answer {
+                wordbook: book.clone(),
                 word: "alpha".to_owned(),
                 known: true,
             },
@@ -516,6 +718,7 @@ mod tests {
                 None,
                 TODAY,
                 ReviewAction::Answer {
+                    wordbook: chosen.settings.wordbook.clone(),
                     word: word.to_owned(),
                     known,
                 },
@@ -546,6 +749,7 @@ mod tests {
             None,
             TODAY,
             ReviewAction::Answer {
+                wordbook: book.clone(),
                 word: "alpha".to_owned(),
                 known: true,
             },
@@ -569,6 +773,7 @@ mod tests {
             None,
             TODAY,
             ReviewAction::Answer {
+                wordbook: book.clone(),
                 word: "alpha".to_owned(),
                 known: true,
             },
@@ -655,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn answering_without_a_selected_book_is_refused() {
+    fn answering_without_a_source_book_is_refused() {
         let root = directory();
         assert!(matches!(
             apply(
@@ -664,6 +869,7 @@ mod tests {
                 None,
                 TODAY,
                 ReviewAction::Answer {
+                    wordbook: String::new(),
                     word: "alpha".to_owned(),
                     known: true,
                 },
@@ -736,6 +942,7 @@ mod tests {
             None,
             TODAY,
             ReviewAction::Answer {
+                wordbook: "cet4".to_owned(),
                 word: "alpha".to_owned(),
                 known: true,
             },
@@ -861,6 +1068,7 @@ mod tests {
         .unwrap();
         assert_eq!(chosen.queue[0].word, "cache");
         let answered = apply_with(ReviewAction::Answer {
+            wordbook: "pack-cs-words".to_owned(),
             word: "cache".to_owned(),
             known: true,
         })
@@ -886,5 +1094,150 @@ mod tests {
         let back = status(root.path(), root.path(), Some(&plugins), TODAY).unwrap();
         assert_eq!(back.answered_today, 1);
         assert_eq!(back.queue[0].word, "compiler");
+    }
+
+    /// 待复习计数必须和页面上的「今日待复习」逐字相同，否则菜单写一个数、点进去页面是另一个数。
+    fn assert_count_matches_page(root: &Path, plugins: Option<&Path>, day: &str) -> usize {
+        let count = due_count(root, root, plugins, day).unwrap();
+        assert_eq!(count, status(root, root, plugins, day).unwrap().due);
+        count
+    }
+
+    #[test]
+    fn the_due_count_of_a_profile_that_never_opened_vocabulary_is_zero_and_writes_nothing() {
+        let root = directory();
+        let missing = root.path().join("never-created");
+        assert_eq!(due_count(&missing, &missing, None, TODAY).unwrap(), 0);
+        assert!(
+            !missing.exists(),
+            "opening a menu must not create the state directory"
+        );
+
+        // 目录在（别的功能建的），进度文件不在：同样是 0，也不留下锁文件。
+        assert_eq!(due_count(root.path(), root.path(), None, TODAY).unwrap(), 0);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_due_count_without_a_selected_book_is_zero() {
+        let root = directory();
+        stage_builtin(root.path(), "cet4", "CET-4", &["alpha"]);
+        VocabularyProgressStore::new(root.path())
+            .set_settings(VocabularyReviewSettings::default())
+            .unwrap();
+        assert_eq!(assert_count_matches_page(root.path(), None, TODAY), 0);
+    }
+
+    #[test]
+    fn the_due_count_rises_at_midnight_without_a_write() {
+        let root = directory();
+        stage_builtin(root.path(), "cet4", "CET-4", &["alpha", "beta", "gamma"]);
+        apply(
+            root.path(),
+            root.path(),
+            None,
+            TODAY,
+            ReviewAction::SetSettings {
+                wordbook: "cet4".to_owned(),
+                new_per_day: 2,
+                session_limit: 200,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            assert_count_matches_page(root.path(), None, TODAY),
+            2,
+            "today offers two new cards"
+        );
+        for word in ["alpha", "beta"] {
+            apply(
+                root.path(),
+                root.path(),
+                None,
+                TODAY,
+                ReviewAction::Answer {
+                    wordbook: "cet4".to_owned(),
+                    word: word.to_owned(),
+                    known: true,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            assert_count_matches_page(root.path(), None, TODAY),
+            0,
+            "both recalled, and today's new allowance is spent"
+        );
+
+        let before = std::fs::read(root.path().join("vocabulary-progress.json")).unwrap();
+        assert_eq!(
+            assert_count_matches_page(root.path(), None, "2026-09-24"),
+            3,
+            "after midnight alpha and beta are due and gamma is new again"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("vocabulary-progress.json")).unwrap(),
+            before,
+            "counting never writes the progress document"
+        );
+    }
+
+    #[test]
+    fn the_due_count_follows_imported_and_plugin_books_and_a_book_that_is_gone() {
+        let root = directory();
+        import(root.path(), "合成词表");
+        assert_eq!(assert_count_matches_page(root.path(), None, TODAY), 3);
+
+        let plugins = root.path().join("plugins");
+        install_wordbook_pack(
+            &plugins,
+            "cs-words",
+            "cache\tn. 缓存\ncompiler\tn. 编译器\n",
+        );
+        apply(
+            root.path(),
+            root.path(),
+            Some(&plugins),
+            TODAY,
+            ReviewAction::SetSettings {
+                wordbook: "pack-cs-words".to_owned(),
+                new_per_day: 20,
+                session_limit: 200,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            assert_count_matches_page(root.path(), Some(&plugins), TODAY),
+            2
+        );
+        // 不传插件目录的宿主看不到插件书，页面和计数都当它不在。
+        assert_eq!(assert_count_matches_page(root.path(), None, TODAY), 0);
+
+        std::fs::remove_dir_all(plugins.join("wordbook/cs-words")).unwrap();
+        assert_eq!(
+            assert_count_matches_page(root.path(), Some(&plugins), TODAY),
+            0
+        );
+    }
+
+    #[test]
+    fn the_due_count_reports_a_damaged_progress_document_and_leaves_it_alone() {
+        let root = directory();
+        let path = root.path().join("vocabulary-progress.json");
+        std::fs::write(&path, b"corrupt synthetic progress").unwrap();
+        assert!(matches!(
+            due_count(root.path(), root.path(), None, TODAY),
+            Err(ReviewSessionError::Progress(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"corrupt synthetic progress");
+    }
+
+    #[test]
+    fn the_due_count_refuses_a_day_it_cannot_read() {
+        let root = directory();
+        assert!(matches!(
+            due_count(root.path(), root.path(), None, "2026-13-01"),
+            Err(ReviewSessionError::InvalidDay)
+        ));
     }
 }

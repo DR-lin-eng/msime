@@ -7,6 +7,7 @@ import app.msime.android.core.InputViewValuePolicy;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.InsetDrawable;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -27,6 +28,10 @@ final class ImeLayoutRows {
     private final MSIMEInputService s;
     /** 拼音九键侧栏里的标点列；拼音列出现时让出位置。换了布局后它已不在侧栏里，按父视图判断。 */
     private View nineKeyPunctuation;
+    /** 无键帽符号栏单独的底轨；用明确的上下 margin 对齐三行字母键帽。 */
+    private View sidebarRailSurface;
+    /** 拼音选择当前挂在哪里；读音行里的按钮要按读音行的行高单独排。 */
+    private SpellingPlacement spellingPlacement = SpellingPlacement.SIDEBAR;
     private Button letterOptionsAnchor;
     private LinearLayout letterOptions;
     private final java.util.List<Button> letterOptionButtons = new java.util.ArrayList<>();
@@ -269,17 +274,31 @@ final class ImeLayoutRows {
     void applySidebarRail() {
         if (s.nineKeySidebar == null) return;
         if (builtSidebarCapped) {
-            ViewPolicy.clearBackground(s.nineKeySidebar);
+            if (sidebarRailSurface != null) ViewPolicy.clearBackground(sidebarRailSurface);
+            else ViewPolicy.clearBackground(s.nineKeySidebar);
             return;
         }
         GradientDrawable rail = DrawablePolicy.rounded(
             Color.parseColor(s.skin.sidebarBackground()), s.pixels(s.skin.cornerRadius()));
-        ViewPolicy.setBackground(s.nineKeySidebar, rail);
+        int rowInset = s.halfSpacingPixels(s.touchRowSpacingTenths);
+        if (sidebarRailSurface == null) {
+            // 兼容旧的侧栏实例；新实例走下面的独立底轨视图。
+            ViewPolicy.setBackground(s.nineKeySidebar, rowInset == 0
+                ? rail : new InsetDrawable(rail, 0, rowInset, 0, rowInset));
+            return;
+        }
+        ViewPolicy.setBackground(sidebarRailSurface, rail);
+        if (sidebarRailSurface.getLayoutParams() instanceof FrameLayout.LayoutParams params) {
+            params.setMargins(0, rowInset, 0, rowInset);
+            sidebarRailSurface.setLayoutParams(params);
+        }
     }
 
     /** 当前键行建出来时用的左侧符号和它属于哪个键面；设置改了以后 {@link #sidebarStale} 据此判断要不要重建。 */
     private java.util.List<String> builtSidebarSymbols;
     private boolean builtSidebarDigits;
+    /** 数字九宫格建出来时的标点写法；字母键面为 null。 */
+    private NumberPadPunctuation.Style builtPadPunctuation;
     private boolean builtSidebarCapped;
     /** 符号栏是按右侧大回车外框建的：字母键面的出厂表末尾多一个 ！（{@link NineKeySidebarPolicy#letterSymbols(java.util.List, boolean)}）。 */
     private boolean builtSidebarTallReturn;
@@ -289,16 +308,19 @@ final class ImeLayoutRows {
         return sidebarSymbols(digits, false);
     }
 
-    /** 同上；{@code tallReturn} 为真（右侧大回车外框）时字母键面的出厂表末尾多一个 ！，自定义的表原样使用。 */
+    /** 同上；{@code tallReturn} 为真（右侧大回车外框）时字母键面的出厂表末尾多一个 ！，自定义的表原样使用。数字九宫格的表按当前语言换写法（{@link NumberPadPunctuation}）：英文和写半角标点的方案里是半角，日文里逗号是「、」；半角写法下出厂表末尾再接 `; ' " $` 这些半角符号，自定义的表不接。 */
     java.util.List<String> sidebarSymbols(boolean digits, boolean tallReturn) {
-        return NineKeySidebarPolicy.sidebarSymbols(digits, s.nineKeySidebarSymbols, s.nineKeyDigitSidebarSymbols,
+        java.util.List<String> symbols = NineKeySidebarPolicy.sidebarSymbols(digits, s.nineKeySidebarSymbols, s.nineKeyDigitSidebarSymbols,
             tallReturn);
+        return digits ? NumberPadPunctuation.symbols(symbols, s.numberPadPunctuation(),
+            NineKeySidebarPolicy.custom(s.nineKeyDigitSidebarSymbols, NineKeySidebarPolicy.DEFAULT_DIGIT_SYMBOLS)) : symbols;
     }
 
-    /** 九键、14 键或笔画的符号栏与设置不一致时，下一次渲染重建键行。 */
+    /** 九键、14 键或笔画的符号栏与设置不一致时，下一次渲染重建键行；数字九宫格上切了中/英、换了方案或开关了中文标点，左列和右列 ！ 的写法变了，同样重建。 */
     boolean sidebarStale() {
         return s.nineKeySidebar != null && builtSidebarSymbols != null
-            && !builtSidebarSymbols.equals(sidebarSymbols(builtSidebarDigits, builtSidebarTallReturn));
+            && (!builtSidebarSymbols.equals(sidebarSymbols(builtSidebarDigits, builtSidebarTallReturn))
+                || builtSidebarDigits && builtPadPunctuation != s.numberPadPunctuation());
     }
 
     /**
@@ -323,6 +345,9 @@ final class ImeLayoutRows {
     private FrameLayout symbolSidebar(boolean digits, boolean capped, int visibleRows, boolean tallReturn,
             boolean zeroShortcut) {
         java.util.List<String> symbols = sidebarSymbols(digits, tallReturn);
+        // 数字九宫格左列的出厂项（含半角写法接上的符号）和数字键同一条上屏路径；用户自定义的表项按字面上屏，与 iOS 相同。
+        boolean factoryDigits = digits
+            && !NineKeySidebarPolicy.custom(s.nineKeyDigitSidebarSymbols, NineKeySidebarPolicy.DEFAULT_DIGIT_SYMBOLS);
         int zeroIndex = zeroShortcut ? NineKeySidebarPolicy.appendedExclamationIndex(digits,
             s.nineKeySidebarSymbols, tallReturn) : -1;
         NineKeySymbolRail rail = new NineKeySymbolRail(s, visibleRows);
@@ -340,7 +365,7 @@ final class ImeLayoutRows {
             } else {
                 // 长按提示接在 keyboardKey 的描述后面，保留所有键共用的「按键 」前缀：读屏靠它念出这是一个键，设备验收也按它找键。
                 key = s.keyId(s.keyboardKey(symbol, "符号 " + symbol + "；长按快速修改符号栏",
-                    () -> commitNineKeyLiteral(symbol)), "SoftPunctuation");
+                    factoryDigits ? () -> commitNumberPadText(symbol) : () -> commitNineKeyLiteral(symbol)), "SoftPunctuation");
                 // 长按打开「按键布局」并直接进入这一张表的编辑页（#10223），参数是这张表的共享偏好名。
                 key.setOnLongClickListener(ignored -> {
                     Bundle args = new Bundle();
@@ -355,8 +380,9 @@ final class ImeLayoutRows {
             ViewPolicy.setSingleLine(key);
             if (capped)
                 KeyboardTypographyPolicy.setKeyTextSize(key, KeyboardTypographyPolicy.NINE_KEY_SIDE_TEXT_SP);
-            // 全角「，」「。」的墨迹只占字身左下角，直接当键面文字会缩成贴底的小点。
-            if ("，".equals(symbol) || "。".equals(symbol)) CenteredGlyphSpan.apply(key, symbol, 1.3f);
+            // 全角「，」「。」「、」的墨迹只占字身左下角，直接当键面文字会缩成贴底的小点。
+            if ("，".equals(symbol) || "。".equals(symbol) || "、".equals(symbol))
+                CenteredGlyphSpan.apply(key, symbol, 1.3f);
             // 独立键帽与无键帽底轨按布局区分，避免按钮和整列背景叠加。
             if (key instanceof KeyboardPressButton press)
                 press.setKeyboardRole(capped ? KeyboardKeyRole.KEY : KeyboardKeyRole.PLAIN);
@@ -364,8 +390,11 @@ final class ImeLayoutRows {
         }
         FrameLayout sidebar = new FrameLayout(s);
         s.nineKeySidebar = sidebar;
+        sidebarRailSurface = new View(s);
+        sidebar.addView(sidebarRailSurface, LayoutPolicy.frameMatchParentParams());
         builtSidebarSymbols = symbols;
         builtSidebarDigits = digits;
+        builtPadPunctuation = digits ? s.numberPadPunctuation() : null;
         builtSidebarCapped = capped;
         builtSidebarTallReturn = tallReturn;
         applySidebarRail();
@@ -380,13 +409,15 @@ final class ImeLayoutRows {
     /** 当前键行是 {@link #rebuildNineKeyRows} 建的。 */
     private boolean builtNineKeyGrid;
 
-    /** 按实际绘制的网格选择高度分摊，包含其他中文布局借用的数字页。 */
+    /** 按实际绘制的网格选择高度分摊，包含其他键面借用的数字页。 */
     boolean nineKeyGridDrawn() { return builtNineKeyGrid; }
 
     /** 当前键行是九键外框（{@link #rebuildNineKeyRows} 或 {@link #rebuildStrokeRows} 建的），以及建的时候是否画了右侧大回车、带没带地球键。 */
     private boolean builtNineFrame;
     private boolean builtTallReturn;
     private boolean builtTallReturnGlobe;
+    /** 右侧大回车外框建的时候九宫格下方那一行的中/英是否排在空格左边（`touch_language_key_side`）。 */
+    private boolean builtTallReturnLanguageLeft;
     /** 建九键数字层（不是右侧大回车）时右列最下面一格放的是不是空格（{@link TouchKeyStyle.NumberPadSpace#inRightColumn}）；没建数字层时为 null。 */
     private Boolean builtSpaceInColumn;
 
@@ -405,11 +436,12 @@ final class ImeLayoutRows {
         return KeyboardActionRow.drawsTallReturn(layout, s.bottomRowStyle(layout));
     }
 
-    /** 九键外框建出来时的右侧大回车与现在该画的不一致（换了样式、进出密码框），或者大回车外框九宫格下方那一行的地球键变了：下一次渲染重建键行。 */
+    /** 九键外框建出来时的右侧大回车与现在该画的不一致（换了样式、进出密码框），或者大回车外框九宫格下方那一行的地球键、中/英在空格哪一边变了：下一次渲染重建键行。 */
     boolean tallReturnStale() {
         if (!builtNineFrame) return false;
         boolean tall = tallReturnDrawn();
-        return tall != builtTallReturn || tall && builtTallReturnGlobe != s.offersGlobeKey();
+        return tall != builtTallReturn
+            || tall && (builtTallReturnGlobe != s.offersGlobeKey() || builtTallReturnLanguageLeft != s.languageKeyLeft);
     }
 
     /** 九键数字层建出来时右列最下面一格（空格还是 ！）与现在的数字键盘空格位置不一致（设置页换了 `touch_number_pad_space`）：下一次渲染重建键行。 */
@@ -452,7 +484,7 @@ final class ImeLayoutRows {
     }
 
     /**
-     * 右侧大回车外框的中列：九宫格（或笔画网格）占三行，正下方是与它同宽的 123 |（地球）| 空格 | 中/英（{@link KeyboardActionRow#tallReturnEntries}）。数字层是切换键 |（地球）| 0 | 空格 | 中/英，空格就是常驻的空格键，长按语音和拖动光标的手势跟着它走。
+     * 右侧大回车外框的中列：九宫格（或笔画网格）占三行，正下方是与它同宽的 123 |（地球）| 空格 | 中/英（{@link KeyboardActionRow#tallReturnEntries}；中/英放在空格左边时是 123 |（地球）| 中/英 | 空格）。数字层是切换键 |（地球）| 0 | 空格 | 中/英（左边时 切换键 |（地球）| 中/英 | 0 | 空格），空格就是常驻的空格键，长按语音和拖动光标的手势跟着它走。
      */
     private LinearLayout tallReturnMiddleColumn(LinearLayout grid, float gridShare, boolean digits) {
         LinearLayout middle = LayoutPolicy.column(s);
@@ -460,8 +492,10 @@ final class ImeLayoutRows {
         LinearLayout cell = tallReturnBottomCell(true);
         boolean globe = s.offersGlobeKey();
         builtTallReturnGlobe = globe;
+        boolean languageLeft = s.languageKeyLeft;
+        builtTallReturnLanguageLeft = languageLeft;
         for (KeyboardActionRow.DesignEntry entry : KeyboardActionRow.tallReturnEntries(gridShare, globe,
-                s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS), digits)) {
+                s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS), digits, languageLeft)) {
             Button key = s.imeBottomRow.actionRowKey(entry.slot());
             if (key == null) continue;
             s.imeBottomRow.placeKey(cell, entry.slot(), key, LayoutPolicy.weightedMatchParentParams(entry.weight()));
@@ -559,7 +593,7 @@ final class ImeLayoutRows {
                 // 数字层按字面上屏，不把数字交给拼音组码或选词。
                 NineKeyDigitButton keyButton = s.nineKeyGridKey(
                     NineKeyLayout.face(key, digits, composing), description,
-                    digits ? () -> commitNineKeyLiteral(NineKeyLayout.digitInput(key))
+                    digits ? () -> commitNumberPadText(NineKeyLayout.digitInput(key))
                         : NineKeyLayout.offersPunctuation(key, false) ? () -> symbolKey(key)
                         : () -> s.character(key.input()));
                 KeyboardTypographyPolicy.setFittedKeyTextSize(keyButton, 14,
@@ -637,10 +671,10 @@ final class ImeLayoutRows {
         container.addView(actions, LayoutPolicy.weightedMatchParentParams(NineKeyLayout.SIDE_COLUMN_WEIGHT));
     }
 
-    /** 空格在底行时数字层右列最下面一格的 ！：按字面上屏，记 `SoftPunctuation`，与字母层右列的 ！ 同一个字，不带字母层那个键上滑出 0 的手势（0 就在底行）。 */
+    /** 空格在底行时数字层右列最下面一格的 ！：按字面上屏，记 `SoftPunctuation`，写法随数字九宫格的标点（{@link NumberPadPunctuation}，英文里是 `!`），不带字母层那个键上滑出 0 的手势（0 就在底行）。 */
     private Button nineKeyDigitExclamationKey() {
         java.util.List<String> punctuation = NineKeyLayout.punctuation();
-        String last = punctuation.get(punctuation.size() - 1);
+        String last = NumberPadPunctuation.face(punctuation.get(punctuation.size() - 1), s.numberPadPunctuation());
         NineKeyDigitButton exclamation = s.keyId(s.nineKeyGridKey(last, "符号 " + last,
             () -> commitNineKeyLiteral(last)), "SoftPunctuation");
         KeyboardTypographyPolicy.setKeyTextSize(exclamation, KeyboardTypographyPolicy.NINE_KEY_LABEL_TEXT_SP);
@@ -650,7 +684,7 @@ final class ImeLayoutRows {
 
     /** 数字层右列的小数点：按字面上屏 `.`，记 `Period`；标准外框和右侧大回车外框都放在 ⌫ 下面，大屏单手的侧边数字键盘（ImeSidePad）放在底行最左。 */
     Button nineKeyDecimalKey() {
-        Button period = s.keyId(s.keyboardKey(".", "小数点", () -> commitNineKeyLiteral(".")), "Period");
+        Button period = s.keyId(s.keyboardKey(".", "小数点", () -> commitNumberPadText(".")), "Period");
         KeyboardTypographyPolicy.setKeyTextSize(period, 22);
         if (period instanceof KeyboardPressButton press) press.setKeyboardRole(KeyboardKeyRole.KEY);
         return period;
@@ -895,14 +929,19 @@ final class ImeLayoutRows {
         if (s.candidateViewport != null) attachSpellings(s.candidateViewport, SpellingPlacement.CANDIDATE_ROW);
     }
 
-    /** 拼音选择只使用九键侧栏或注音九键候选行。 */
-    enum SpellingPlacement { SIDEBAR, CANDIDATE_ROW }
+    /** 拼音选择使用九键 / 14 键侧栏、注音九键候选行或 18 键读音行。 */
+    enum SpellingPlacement { SIDEBAR, CANDIDATE_ROW, READING_ROW }
 
     /** 14 键共用九键的左侧符号栏；组字时由纵向拼音列覆盖符号。 */
     FrameLayout fourteenSpellingSidebar() {
         FrameLayout sidebar = symbolSidebar(false, false);
         attachSpellings(sidebar, SpellingPlacement.SIDEBAR);
         return sidebar;
+    }
+
+    /** 十八键没有左侧符号栏；拼音选择挂到读音行、读音右边，与 iOS、鸿蒙相同。18 键组字时拼音和候选同时出现，选择条不能叠在候选行上，否则会盖住候选、抢走候选的点按。 */
+    void attachEighteenSpellingsToReadingRow() {
+        if (s.candidateHeader != null) attachSpellings(s.candidateHeader, SpellingPlacement.READING_ROW);
     }
 
     /** 换挂载位置时先摘下旧容器、清空按钮，避免父视图和按钮尺寸沿用另一种布局。 */
@@ -935,7 +974,15 @@ final class ImeLayoutRows {
         ViewPolicy.hide(scroll);
         s.nineKeySpellingScroll = scroll;
         s.nineKeySpellingGeneration = -1;
-        parent.addView(scroll, LayoutPolicy.frameMatchParentParams());
+        spellingPlacement = placement;
+        if (placement == SpellingPlacement.READING_ROW) {
+            // 紧接在读音后面，和读音各分一半宽度：读音最多占半行，长了截尾；没有拼音可选时选择条收起，读音占满整行。
+            int index = s.preedit != null && s.preedit.getParent() instanceof View frame
+                ? parent.indexOfChild(frame) + 1 : parent.getChildCount();
+            parent.addView(scroll, index, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1));
+        } else {
+            parent.addView(scroll, LayoutPolicy.frameMatchParentParams());
+        }
     }
 
     /**
@@ -997,7 +1044,7 @@ final class ImeLayoutRows {
     }
 
     /**
-     * 拼音九键网格键的滑动（#5580，规则见 {@link NineKeySwipePolicy}）：沿「九键滑动输入数字」选的方向滑过「九键滑动距离」，键面换成数字、松手上屏这个数字；往反方向滑，弹出和长按一样的数字与字母选项。按下时不拦截，没滑过阈值时点按和长按照常由按钮自己处理；滑过阈值的那一刻给按钮补一个 CANCEL，它就不会再点按或长按。长按选项已经弹出时不再判定滑动。
+     * 拼音九键网格键的滑动（#5580，规则见 {@link NineKeySwipePolicy}）：沿「九键滑动输入数字」（共享偏好 `touch_nine_key_swipe_digits`，每次判定读当前值）选的方向滑过「九键滑动距离」（本机设置），键面换成数字、松手上屏这个数字；往反方向滑，弹出和长按一样的数字与字母选项。按下时不拦截，没滑过阈值时点按和长按照常由按钮自己处理；滑过阈值的那一刻给按钮补一个 CANCEL，它就不会再点按或长按。长按选项已经弹出时不再判定滑动。
      */
     private void bindNineKeySwipe(NineKeyDigitButton keyButton, NineKeyLayout.Key key) {
         final float[] downY = new float[1];
@@ -1022,7 +1069,7 @@ final class ImeLayoutRows {
                     if (gesture[0] != NineKeySwipePolicy.Gesture.NONE) return true;
                     if (s.nineKeyHoldPopup != null) return false;
                     NineKeySwipePolicy.Gesture next = NineKeySwipePolicy.gesture(
-                        s.localSettings.choice(AndroidLocalSettings.NINE_KEY_SWIPE), downY[0],
+                        s.nineKeySwipeDigits, downY[0],
                         DimensionPolicy.fromPixels(s, event.getY()), hasLetters,
                         s.localSettings.integer(AndroidLocalSettings.NINE_KEY_SWIPE_DISTANCE));
                     if (next == NineKeySwipePolicy.Gesture.NONE) return false;
@@ -1666,6 +1713,18 @@ final class ImeLayoutRows {
         s.commitLiteralText(s.fullWidthOutput(text));
     }
 
+    /**
+     * 数字九宫格上的数字、0、小数点、左列出厂项和第五排补充行的一个键：本地模式、越南语和藏文里 Engine 此刻把它当拼写时（{@link NumberPadPunctuation#typesThroughSession}）先作为字符交给会话（{@link MSIMEInputService#character(int, boolean)}，与硬件数字行的拼写路径相同），会话收下就留在组字里；不收时和其余所有情况一样按字面上屏（{@link #commitNineKeyLiteral}）。大屏单手的侧边数字键盘只挂在九键一族的中文字母层旁边（`OneHandSidePadPolicy.shown`，本地模式画的是 26 键），仍按字面。
+     */
+    void commitNumberPadText(String text) {
+        if (s.view != null && NumberPadPunctuation.typesThroughSession(text,
+                InputViewValuePolicy.textOr(s.view, "local_mode", "none"), s.letterCaseSchemeActive(),
+                s.tibetanSchemeActive(), InputViewValuePolicy.editingText(s.view),
+                InputViewValuePolicy.textOr(s.view, "spelling_symbols", ""))
+                && s.character(text.charAt(0), false)) return;
+        commitNineKeyLiteral(text);
+    }
+
     void commitNineKeyPeriod() {
         if (s.dedicatedEnglish || !s.punctuation('.')) commitNineKeyLiteral(".");
     }
@@ -1713,6 +1772,16 @@ final class ImeLayoutRows {
         ViewPolicy.setHorizontalPadding(key, s.pixels(2));
         key.setLayoutParams(LayoutPolicy.matchWidthHeightPx(s.pixels(SPELLING_ROW_DP)));
         return key;
+    }
+
+    /** 读音行里的一项拼音：不画键帽、用强调色，与同一行的「漢」同字号；读音行的行高已按「漢」量过，所以放得下，不撑高读音行。 */
+    private void readingRowSpelling(Button key) {
+        if (key instanceof KeyboardPressButton press) press.setKeyboardRole(KeyboardKeyRole.GLYPH);
+        s.imeStyler.styleButton(key, KeyboardKeyRole.GLYPH, s.skin);
+        KeyboardTypographyPolicy.setKeyTextSize(key, 12);
+        ViewPolicy.setSingleLine(key);
+        ViewPolicy.clearMinimumSize(key);
+        LayoutPolicy.setSymmetricPaddingDp(key, s, 6, 0);
     }
 
     /** `suppressed`：显示诊断提示时不出选择条（与候选行一样让位给提示）。 */
@@ -1766,6 +1835,10 @@ final class ImeLayoutRows {
                 LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) key.getLayoutParams();
                 params.width = LinearLayout.LayoutParams.WRAP_CONTENT;
                 params.weight = 0;
+                if (spellingPlacement == SpellingPlacement.READING_ROW) {
+                    params.height = LinearLayout.LayoutParams.MATCH_PARENT;
+                    readingRowSpelling(key);
+                }
                 key.setLayoutParams(params);
             }
             key.setContentDescription("选择拼音");

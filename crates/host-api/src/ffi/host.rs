@@ -903,6 +903,9 @@ pub unsafe extern "C" fn msime_client_migrate_android_key_layout(
         /// 本机旧键里用户自定义的九键数字键盘左侧符号表；缺省或空表表示不迁。
         #[serde(default)]
         nine_key_digit_symbols: Vec<String>,
+        /// 本机旧设置 `platform.android.nine_key_swipe` 的原值；本机没有这个键时不带。
+        #[serde(default)]
+        nine_key_swipe: Option<String>,
     }
     response(|| {
         if request.is_null() || length > 65536 {
@@ -924,6 +927,12 @@ pub unsafe extern "C" fn msime_client_migrate_android_key_layout(
                 request.number_row,
                 &request.nine_key_symbols,
                 &request.nine_key_digit_symbols,
+                // 不认识的旧值（不会出现，旧设置只存过 off、up、down）当作没有旧值，不迁。
+                request
+                    .nine_key_swipe
+                    .as_deref()
+                    .and_then(msime_client_core::preferences::TouchNineKeySwipeDigits::parse)
+                    .unwrap_or_default(),
             )
             .map_err(|error| error.to_string())?;
         serde_json::to_value(saved).map_err(|error| error.to_string())
@@ -3195,6 +3204,105 @@ pub unsafe extern "C" fn msime_client_vocabulary_review(
         .map_err(|error| error.to_string())?;
         serde_json::to_value(status).map_err(|_| "vocabulary review response failed".to_owned())
     })
+}
+
+/// 候选窗的「加入生词本」：把一个候选的释义加进本机生词本。
+///
+/// 只做转接：释义怎么变成卡片、怎么合并、给用户看哪句提示都在 `msime_client_services::vocabulary::personal`。
+/// # Safety
+/// `request` points to `length` readable JSON bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_personal_wordbook_add(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    use msime_client_services::vocabulary::personal;
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        directory: String,
+        candidate: String,
+        gloss: String,
+        #[serde(default)]
+        pronunciation: String,
+    }
+
+    response(|| {
+        // 候选和释义都是一行显示文字，宿主自己也把它们限制在几 KiB 内。
+        const MAX_REQUEST_BYTES: usize = 64 * 1024;
+        if request.is_null() || length > MAX_REQUEST_BYTES {
+            return Err("invalid personal wordbook buffer".into());
+        }
+        // SAFETY: guaranteed by the documented caller contract.
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: Request =
+            serde_json::from_slice(bytes).map_err(|_| "invalid personal wordbook request")?;
+        if request.directory.len() > 16_384
+            || !std::path::Path::new(&request.directory).is_absolute()
+        {
+            return Err("invalid personal wordbook directory".into());
+        }
+        let reply = personal::add_gloss(
+            std::path::Path::new(&request.directory),
+            &request.candidate,
+            &request.gloss,
+            &request.pronunciation,
+        )
+        .map_err(|error| error.to_string())?;
+        serde_json::to_value(reply).map_err(|_| "personal wordbook response failed".to_owned())
+    })
+}
+
+/// 今日待复习的张数，给菜单栏、托盘菜单这类被动显示的地方用。
+///
+/// 和 `msime_client_vocabulary_review` 应答里的 `due` 是同一个数，但只读进度文档和选中的那一本书（见 `msime_client_services::vocabulary::session::due_count`）。返回张数（不小于 0）；请求不合法、进度文档损坏或选中的书读不出来时返回 -1，宿主据此隐藏这一项。
+/// # Safety
+/// `request` points to `length` readable JSON bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_vocabulary_due_count(
+    request: *const u8,
+    length: usize,
+) -> i32 {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        directory: String,
+        resources: String,
+        day: String,
+        #[serde(default)]
+        plugins: Option<String>,
+    }
+
+    // 三个路径各不超过 16 KiB，再加日期和键名。
+    const MAX_REQUEST_BYTES: usize = 64 * 1024;
+    if request.is_null() || length > MAX_REQUEST_BYTES {
+        return -1;
+    }
+    // SAFETY: guaranteed by the documented caller contract.
+    let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+    let Ok(request) = serde_json::from_slice::<Request>(bytes) else {
+        return -1;
+    };
+    let valid_path = |path: &str| path.len() <= 16_384 && std::path::Path::new(path).is_absolute();
+    if !valid_path(&request.directory)
+        || !valid_path(&request.resources)
+        || request
+            .plugins
+            .as_deref()
+            .is_some_and(|plugins| !valid_path(plugins))
+    {
+        return -1;
+    }
+    match msime_client_services::vocabulary::session::due_count(
+        std::path::Path::new(&request.directory),
+        std::path::Path::new(&request.resources),
+        request.plugins.as_deref().map(std::path::Path::new),
+        &request.day,
+    ) {
+        Ok(count) => i32::try_from(count).unwrap_or(i32::MAX),
+        Err(_) => -1,
+    }
 }
 
 #[cfg(test)]

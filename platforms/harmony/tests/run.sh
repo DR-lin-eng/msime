@@ -28,6 +28,14 @@ if ! grep -qF "await KeyboardSession.commonPhrasesCall(directory, { operation: '
   echo "Harmony common phrases must reload after starter seeding" >&2
   exit 1
 fi
+# 引擎的 character(0x20) 从不选词：触屏空格必须走 pressSpace（选高亮候选，运行时不处理时键盘自己输入空格），回到 press(0x20) 时中文模式下空格既不上屏候选也打不出空格。
+if ! grep -qF 'KeyboardSession.shared.pressSpace();' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'this.command(InputCommand.SELECT_HIGHLIGHTED) || this.inputClient === undefined' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardSession.ets"; then
+  echo "Harmony touch Space must select the highlighted candidate and type a space when the runtime declines it" >&2
+  exit 1
+fi
 # 字母键的 ForEach 按 faceKey() 判定子树是否重建。「双拼键位提示」不在这个键里时，键盘开着切换开关，已经画好的字母键会一直留着旧提示。
 face_key_body=$(sed -n '/^  private faceKey(): string {$/,/^  }$/p' \
   "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets")
@@ -37,15 +45,30 @@ if ! grep -qF 'this.shuangpinKeyHints' <<< "$face_key_body"; then
   exit 1
 fi
 # 底行样式和数字行同理：设置页改了之后键盘开着也要按新排法重建键，所以这四个值都要在 faceKey() 里；密码框、数字框退回标准底行也换键，所以编辑框这一项也要在。
-for field in this.twentySixKeyStyle this.fourteenKeyStyle this.nineKeyStyle this.numberRow this.standardRowsField this.twentySixSymbolFirst this.numberPadSpace; do
+for field in this.twentySixKeyStyle this.fourteenKeyStyle this.nineKeyStyle this.numberRow this.standardRowsField this.twentySixSymbolFirst this.numberPadSpace this.languageKeyLeft; do
   if ! grep -qF "$field" <<< "$face_key_body"; then
     echo "KeyboardView.faceKey must include $field so a live layout style change redraws the keys" >&2
     exit 1
   fi
 done
+# 组字中 Shift 加字母是辅助码：引擎只认大写字母，不看 Shift 标志，所以字母键要按 Shift 发大写字母，规则由 keyboard-logic.test.ts 覆盖，这里钉住视图的接线。
+if ! grep -qF 'const input: string = ChineseHelpcodePolicy.letterInput(letter, shifted);' \
+  "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"; then
+  echo "KeyboardView.tapLetter must send a shifted letter as a capital: the Engine reads helpcode from the case, not from the shift flag" >&2
+  exit 1
+fi
+# 123 层和数字九宫格上的辅助码触发键先问 Engine，收下就不按原样上屏。
+for body in tapLayerCharacter typeNumberPadText; do
+  view_body=$(sed -n "/^  private $body(text: string): void {\$/,/^  }\$/p" \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets")
+  if ! grep -qF 'if (this.typeHelpcodeTrigger(text)) {' <<< "$view_body"; then
+    echo "KeyboardView.$body must offer a helpcode trigger to the Engine before inserting the key's face" >&2
+    exit 1
+  fi
+done
 # 「符」与「123」互换和数字键盘空格位置（#10056）：排法由 touch-layout-styles.test.ts 覆盖，这里钉住视图的接线：设计底行按开关互换，借来的数字九宫格按互换后的字母层排前两键，数字层底行按空格位置排，右列最下面一格在空格位置为右列时画空格；两项从会话偏好读，设置页改了就随 applySettings 换。
 keyboard_view="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"
-if ! grep -qF 'return TouchLayoutStylePolicy.symbolFirst(TouchLayoutStylePolicy.designRow(this.designCommaSecondaryPeriod(),' "$keyboard_view" \
+if ! grep -qF 'const row: DesignRowEntry[] = TouchLayoutStylePolicy.symbolFirst(TouchLayoutStylePolicy.designRow(' "$keyboard_view" \
   || ! grep -qF '|| this.letterRowSymbolLeads());' "$keyboard_view" \
   || ! grep -qF 'return NineKeyLayout.actionRow(this.symbols, this.english, this.nineKeyFrameStyle(), nineKeyDigits,' "$keyboard_view" \
   || ! grep -qF 'if (this.symbols && this.numberPadSpace === TouchLayoutStylePolicy.RIGHT_COLUMN) {' "$keyboard_view" \
@@ -58,27 +81,81 @@ if ! grep -qF 'return TouchLayoutStylePolicy.symbolFirst(TouchLayoutStylePolicy.
   echo "Harmony must lay the 26-key row by touch_twenty_six_symbol_first and the number pad by touch_number_pad_space" >&2
   exit 1
 fi
-# 九键左侧符号栏自定义（#10223）：空表回出厂表、右侧大回车只给出厂表接 !、一屏几项、ForEach 键和整对符号的光标由 nine-key-sidebar.test.ts 覆盖。视图和会话是 ArkTS，这里钉住接线：两张表从会话偏好读、随 applySettings 换；拼音九键左列、数字层左列和笔画标点栏在自定义时走各自的滚动栈，英文九键不读；自定义项经 insertSidebarSymbol 字面上屏，数字层与出厂运算符一样原样结束组字；两张表与本端出厂表相同时按出厂表读；ForEach 用带下标和高度的 item.key；长按打开设置。
+# 触屏 123 一律打开数字九宫格（维护者的产品决定）：规则由 keyboard-logic.test.ts 的 opensNumberPad 覆盖，这里钉住视图的接线。numberPadShowing 只看符号层、#+= 和触屏，不再按长空格、英文、本地模式或独立语言排除；假名网格只在字母层（和 2in1）画，它的 123 进数字九宫格；数字、小数点和出厂运算符经 typeNumberPadText 输入（交不交给会话见下一段）；返回键按借出的键面印；大千注音 #+= 的共享符号行用 123 回到数字九宫格。
+number_pad_body=$(sed -n '/^  private numberPadShowing(): boolean {$/,/^  }$/p' "$keyboard_view")
+if ! grep -qF 'return NineKeyLayout.opensNumberPad(this.symbols, this.moreSymbols, this.touchDesign());' <<< "$number_pad_body" \
+  || grep -qE 'longSpaceActive|english|localMode|japanese|koreanFace|vietnameseFace|tibetanFace|zhuyinFace' <<< "$number_pad_body" \
+  || ! grep -qF 'if (this.kanaGridShowing()) {' "$keyboard_view" \
+  || ! grep -qF 'return this.touchDesign() && !this.kanaGridShowing() && this.gridActionRow();' "$keyboard_view" \
+  || ! grep -qF 'this.typeNumberPadText(digit);' "$keyboard_view" \
+  || ! grep -qF "this.typeNumberPadText('.');" "$keyboard_view" \
+  || ! grep -qF 'this.typeNumberPadText(symbol);' "$keyboard_view" \
+  || ! grep -qF '? this.numberPadReturnTitle()' "$keyboard_view" \
+  || ! grep -qF 'face: NumberSymbolLayout.layerKeyFace(this.symbols, this.moreSymbols),' "$keyboard_view"; then
+  echo "Harmony touch 123 must open the number pad on every scheme and keep each scheme's digit routing and return title" >&2
+  exit 1
+fi
+# 数字九宫格的后续决定（维护者，三端相同）：规则由 keyboard-logic.test.ts 的「the ASCII number pad column, its extras and the Zhuyin #+= page」和「number pad keys reach the session only as spelling」覆盖，这里钉住视图的接线。(1) 半角语境的左列是 NineKeyLayout.digitSidebar 按 numberPadPunctuation 给出的表（出厂运算符后接 @ : ; ( ) ' " $，自定义过就照用户的表），画在滚动栈里；出厂项和半角符号与出厂运算符同经 numberPadMarkOptions → typeNumberPadText 输入，用户的表照旧经 insertSidebarSymbol 按字面上屏（藏文里也是）。(2) 数字九宫格上的键（数字、0、小数点、左列出厂项、顶部补充行）只由 NineKeyLayout.numberPadToSession 决定：本地模式、越南语、藏文里引擎此刻列为拼写符号的字符和藏文的 ' 交给会话（press），其余一律经 insertNumberPadLiteral 按字面上屏；typeNumberPadText 不再按日语、韩文、注音分流，也不借 123 层的路由。(3) 注音的 #+= 由 NumberSymbolLayout.drawsDesignLayer 保留共享符号行，设计底行那一格按 layerKeyFace 印 123、在 #+= 上点按关掉 #+= 回到数字九宫格。
+digit_items_body=$(sed -n '/^  private digitSidebarItems(): NineKeySidebarItem\[\] {$/,/^  }$/p' "$keyboard_view")
+type_pad_body=$(sed -n '/^  private typeNumberPadText(text: string): void {$/,/^  }$/p' "$keyboard_view")
+extra_key_body=$(sed -n '/^  symbolExtraKey(text: string) {$/,/^  }$/p' "$keyboard_view")
+custom_item_body=$(sed -n '/^  private customSidebarOptions(symbol: string, digits: boolean): KeyOptions {$/,/^  }$/p' "$keyboard_view")
+design_row_key_body=$(sed -n '/^  designRowKey(item: DesignRowItem) {$/,/^  }$/p' "$keyboard_view")
+if ! grep -qF 'NineKeyLayout.digitSidebar(this.digitSidebarTable(), this.numberPadPunctuation()),' <<< "$digit_items_body" \
+  || ! grep -qF "if (NineKeyLayout.numberPadToSession(text, this.localMode !== 'none', this.vietnameseFace(), this.tibetanFace()," <<< "$type_pad_body" \
+  || ! grep -qF 'KeyboardSession.shared.hardwareSpelling())) {' <<< "$type_pad_body" \
+  || ! grep -qF 'KeyboardSession.shared.press(text.charCodeAt(0), false);' <<< "$type_pad_body" \
+  || ! grep -qF 'this.insertNumberPadLiteral(text);' <<< "$type_pad_body" \
+  || grep -qE 'japanese|koreanFace|zhuyinFace|english|tapLayerCharacter|tapSymbol' <<< "$type_pad_body" \
+  || grep -qF 'numberPadTypesLiterally' "$keyboard_view" \
+  || ! grep -qF 'KeyboardSession.shared.insertSidebarSymbol(symbol, digits);' <<< "$custom_item_body" \
+  || grep -qE 'numberPadToSession|typeNumberPadText|tibetanFace|press\(' <<< "$custom_item_body" \
+  || ! grep -qF 'if (this.numberPadShowing()) {' <<< "$extra_key_body" \
+  || ! grep -qF 'this.typeNumberPadText(text);' <<< "$extra_key_body" \
+  || ! grep -qF 'return NumberSymbolLayout.drawsDesignLayer(this.touchDesign(), this.symbols, this.zhuyinFace());' "$keyboard_view" \
+  || ! grep -qF 'this.toggleMoreSymbols();' <<< "$design_row_key_body"; then
+  echo "Harmony number pad must append the ASCII extras, hand only spelling symbols and the Tibetan ' to the session, and keep the Zhuyin #+= rows with 123 back to the pad" >&2
+  exit 1
+fi
+# 九键左侧符号栏自定义（#10223）：空表回出厂表、右侧大回车只给出厂表接 !、一屏几项、ForEach 键和整对符号的光标由 nine-key-sidebar.test.ts 覆盖。视图和会话是 ArkTS，这里钉住接线：两张表从会话偏好读、随 applySettings 换；拼音九键左列、数字层左列和笔画标点栏在自定义时走各自的滚动栈，英文九键不读；自定义项经 insertSidebarSymbol 字面上屏，数字层与出厂运算符一样原样结束组字；两张表与本端出厂表相同时按出厂表读；ForEach 用带下标和高度的 item.key；长按带上那张表的共享偏好名打开「按键布局」里的编辑页，数字层两处（出厂与自定义）传数字表，字母层和笔画四处传字母表。
 session_file="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardSession.ets"
 if ! grep -qF 'preferences.touch_nine_key_sidebar_symbols,' "$session_file" \
   || ! grep -qF 'TouchLayoutStylePolicy.NINE_KEY_SIDEBAR_DEFAULTS' "$session_file" \
   || ! grep -qF 'preferences.touch_nine_key_digit_sidebar_symbols,' "$session_file" \
   || ! grep -qF 'TouchLayoutStylePolicy.DIGIT_SIDEBAR_DEFAULTS' "$session_file" \
   || [[ $(grep -cF 'TouchLayoutStylePolicy.sidebarSymbols(' "$session_file") -ne 2 ]] \
-  || ! grep -qF 'this.fixedKey(this.customSidebarOptions(item.symbol, true));' "$keyboard_view" \
+  || ! grep -qF 'this.fixedKey(this.digitSidebarOptions(item.symbol));' "$keyboard_view" \
+  || ! grep -qF '? this.customSidebarOptions(symbol, true) : this.numberPadMarkOptions(symbol);' "$keyboard_view" \
   || ! grep -qF 'if (PairedPunctuationPolicy.literalPairClosing(text) !== null) {' "$session_file" \
   || ! grep -qF 'this.nineKeySidebarSymbols = this.settings.nineKeySidebarSymbols;' "$keyboard_view" \
   || ! grep -qF 'this.nineKeyDigitSidebarSymbols = this.settings.nineKeyDigitSidebarSymbols;' "$keyboard_view" \
-  || ! grep -qF 'if (this.symbols && NineKeyLayout.customSidebar(this.digitSidebarTable())) {' "$keyboard_view" \
+  || ! grep -qF 'if (this.symbols && NineKeyLayout.digitSidebarScrolls(this.digitSidebarTable(), this.numberPadPunctuation())) {' "$keyboard_view" \
   || ! grep -qF '} else if (NineKeyLayout.customSidebar(this.letterSidebarTable())) {' "$keyboard_view" \
   || [[ $(grep -cF 'NineKeyLayout.customSidebar(this.letterSidebarTable())' "$keyboard_view") -ne 2 ]] \
   || ! grep -qF 'return this.english ? [] : this.nineKeySidebarSymbols;' "$keyboard_view" \
-  || ! grep -qF 'return this.english ? [] : this.nineKeyDigitSidebarSymbols;' "$keyboard_view" \
+  || ! grep -qF 'return this.english ? [] : NineKeyLayout.numberPadSymbols(this.nineKeyDigitSidebarSymbols,' "$keyboard_view" \
   || [[ $(grep -cF 'KeyboardSession.shared.insertSidebarSymbol(' "$keyboard_view") -ne 2 ]] \
   || [[ $(grep -cF '(item: NineKeySidebarItem) => item.key)' "$keyboard_view") -ne 3 ]] \
-  || [[ $(grep -cF '.gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))' "$keyboard_view") -ne 6 ]] \
-  || ! grep -qF "KeyboardSession.shared.openSettings('screen-keyboard');" <<< "$(sed -n '/^  private openSidebarSettings(): void {$/,/^  }$/p' "$keyboard_view")"; then
+  || [[ $(grep -cF '.gesture(LongPressGesture().onAction(() => this.openSidebarSettings(true)))' "$keyboard_view") -ne 2 ]] \
+  || [[ $(grep -cF '.gesture(LongPressGesture().onAction(() => this.openSidebarSettings(false)))' "$keyboard_view") -ne 4 ]] \
+  || ! grep -qF 'digits ? SettingsPageLink.NINE_KEY_DIGIT_SIDEBAR_TARGET : SettingsPageLink.NINE_KEY_SIDEBAR_TARGET' <<< "$(sed -n '/^  private openSidebarSettings(digits: boolean): void {$/,/^  }$/p' "$keyboard_view")"; then
   echo "Harmony must draw the nine-key sidebars from touch_nine_key_sidebar_symbols and touch_nine_key_digit_sidebar_symbols" >&2
+  exit 1
+fi
+# 「中/英键放在空格左边」（#10228）：排法由 touch-layout-styles.test.ts 覆盖，这里钉住视图的接线：设计底行在「符」与「123」互换之后再挪 中/英，九键外框（字母层、数字层、借来的数字九宫格）和右侧大回车量到宽度后的固定宽度都带上这一项，手写底行左边时把 中/英 画在 123 和 ， 之间、右边时照原样画在 。 后面；值从会话偏好读，设置页改了就随 applySettings 换。
+handwriting_row_body=$(sed -n '/^  handwritingActionRow() {$/,/^  }$/p' "$keyboard_view")
+left_language_line=$(grep -nF 'this.handwritingLeftLanguageKey()' <<< "$handwriting_row_body" | cut -d: -f1 || true)
+comma_line=$(grep -nF 'action: () => this.typeComma()' <<< "$handwriting_row_body" | cut -d: -f1 || true)
+if ! grep -qF 'return TouchLayoutStylePolicy.languageBeforeSpace(row, this.languageKeyLeft);' "$keyboard_view" \
+  || ! grep -qF 'this.numberPadSpace, this.languageKeyLeft);' "$keyboard_view" \
+  || ! grep -qF 'NineKeyLayout.tallReturnRow(this.symbols, this.tallReturnFaceWidth, this.keySpacing(), this.languageKeyLeft)' "$keyboard_view" \
+  || ! grep -qF 'this.languageKeyLeft = this.settings.languageKeyLeft;' "$keyboard_view" \
+  || ! grep -qF 'languageKeyLeft: TouchLayoutStylePolicy.languageKeyLeft(preferences.touch_language_key_side)' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardSession.ets" \
+  || [[ $(grep -cF 'if (this.languageKeyLeft) {' <<< "$handwriting_row_body") -ne 1 ]] \
+  || [[ $(grep -cF 'if (!this.languageKeyLeft) {' <<< "$handwriting_row_body") -ne 1 ]] \
+  || [[ -z "$left_language_line" || -z "$comma_line" || "$left_language_line" -ge "$comma_line" ]]; then
+  echo "Harmony must move the 中/英 key left of the space by touch_language_key_side on the design row, the nine-key frame, the tall return segment and the handwriting row" >&2
   exit 1
 fi
 # 统计页认证默认关闭，认证成功后五分钟冷却。冷却规则由 keyboard-logic.test.ts 的 `StatisticsAuthenticationCooldown` 覆盖；认证本身是 ArkTS，node 下编不了，这里钉住接线：默认值是关、冷却期内直接放行、认证成功开启冷却、离开时从现在算起，时钟用含深度睡眠的开机时间。
@@ -160,7 +237,7 @@ if ! grep -qF 'ForEach(this.designRowItems(), (item: DesignRowItem) => {' <<< "$
 fi
 if ! grep -qF 'ForEach(this.nineKeyActionItems(), (item: NineKeyActionItem) => {' <<< "$nine_row_body" \
   || ! grep -qF '(item: NineKeyActionItem): string => NineKeyLayout.actionItemKey(item))' <<< "$nine_row_body" \
-  || ! grep -qF 'NineKeyLayout.tallReturnRow(this.symbols, this.tallReturnFaceWidth, this.keySpacing())' <<< "$nine_items_body" \
+  || ! grep -qF 'NineKeyLayout.tallReturnRow(this.symbols, this.tallReturnFaceWidth, this.keySpacing(), this.languageKeyLeft)' <<< "$nine_items_body" \
   || ! grep -qF 'NineKeyLayout.actionItems(this.nineKeyActions(), fixed, NineKeyLayout.tallReturnFill(this.symbols))' <<< "$nine_items_body" \
   || ! grep -qF '.width(item.width)' <<< "$nine_key_body" \
   || ! grep -qF '.layoutWeight(item.share)' <<< "$nine_key_body" \
@@ -230,6 +307,33 @@ if ! grep -qF 'this.commaSwipe.down(touch.windowX, touch.windowY, Date.now());' 
   || ! grep -qF 'this.commaSwipe.up(touch.windowX, touch.windowY, Date.now())' <<< "$comma_touch_body" \
   || ! grep -qF '} else if (!this.commaSwipe.longPress()) {' <<< "$design_comma_body"; then
   echo "KeyboardView must feed the comma touch's down, move and up with their time into CommaSwipeGesture, and the design-row comma's long press must ask commaSwipe.longPress() first" >&2
+  exit 1
+fi
+# 九键滑动输入数字（#10229）：判定的方向、阈值、1 键、锁定和长按与点击的先后由 nine-key-swipe.test.ts 覆盖。会话和视图是 ArkTS，这里钉住接线：会话经 `NineKeySwipePolicy.mode` 读共享偏好 `touch_nine_key_swipe_digits`；拼音九键字母层的键（`nineKeyHoldKey`，两处网格都经它）把触摸交给 `nineKeySwipeTouch`，按下时读当前设置，滑出去之后点击和长按都不再做事；数字层和九键双拼不经 `nineKeyHoldKey`，不受影响；抬手按长按选数字的路径上屏（先结束组字再字面上屏），并补上点按的按键音、振动和键位统计；滑出数字时角标藏起来；键被替换时丢掉进行中的判定。
+nine_hold_body=$(sed -n '/^  nineKeyHoldKey(key: NineKey) {$/,/^  }$/p' "$view")
+nine_swipe_body=$(sed -n '/^  private nineKeySwipeTouch(key: NineKey, event: TouchEvent): void {$/,/^  }$/p' "$view")
+nine_digit_body=$(sed -n '/^  private typeNineKeySwipeDigit(key: NineKey): void {$/,/^  }$/p' "$view")
+drop_nine_body=$(sed -n '/^  private dropLetterGestures(): void {$/,/^  }$/p' "$view")
+if ! grep -qF 'nineKeySwipeDigits: NineKeySwipePolicy.mode(preferences.touch_nine_key_swipe_digits)' "$session" \
+  || [[ $(grep -cF 'if (!this.symbols && !this.nineKeyShuangpinFaceActive()' "$view") -ne 2 ]] \
+  || ! grep -qF '.onTouch((event: TouchEvent): void => this.nineKeySwipeTouch(key, event))' <<< "$nine_hold_body" \
+  || ! grep -qF 'if (this.nineKeySwipes.swallows(key.input)) {' <<< "$nine_hold_body" \
+  || ! grep -qF 'if (!this.nineKeySwipes.hold(key.input)) {' <<< "$nine_hold_body" \
+  || ! grep -qF '.visibility(this.nineKeySwipeKey === key.input ? Visibility.Hidden : Visibility.Visible)' <<< "$nine_hold_body" \
+  || ! grep -qF 'this.settings.nineKeySwipeDigits' <<< "$nine_swipe_body" \
+  || ! grep -qF 'this.nineKeySwipes.down(key.input, touch.id, touch.windowY, mode, hasLetters);' <<< "$nine_swipe_body" \
+  || ! grep -qF 'this.nineKeySwipes.move(key.input, touch.id, touch.windowY);' <<< "$nine_swipe_body" \
+  || ! grep -qF 'if (this.nineKeySwipes.up(key.input, touch.id) === NineKeySwipe.DIGIT) {' <<< "$nine_swipe_body" \
+  || ! grep -qF 'this.nineKeySwipes.cancel(key.input);' <<< "$nine_swipe_body" \
+  || ! grep -qF 'this.openKeyHold(NineKeyLayout.holdOptions(key));' <<< "$nine_swipe_body" \
+  || ! grep -qF 'this.typeNineKeySwipeDigit(key);' <<< "$nine_swipe_body" \
+  || ! grep -qF 'KeyboardSession.shared.softKeyPress(KeyIdPolicy.nineKey(key.input));' <<< "$nine_digit_body" \
+  || ! grep -qF 'KeyboardSession.shared.holdFeedback();' <<< "$nine_digit_body" \
+  || [[ $(grep -A1 -F 'KeyboardSession.shared.finishComposition();' <<< "$nine_digit_body" | grep -cF 'KeyboardSession.shared.insert(digit);') -ne 1 ]] \
+  || ! grep -qF 'this.nineKeySwipes.clear();' <<< "$drop_nine_body" \
+  || ! grep -qF 'nineKeyInput: this.symbols || shuangpin ? undefined : key.input,' "$view" \
+  || ! grep -qF ': this.nineKeySwipeFace($$.nineKeyInput, this.eighteenSwipeFace($$.swipeLetters, $$.face)))' "$view"; then
+  echo "Harmony must read touch_nine_key_swipe_digits through NineKeySwipePolicy, feed the pinyin nine-key letter keys' touches into NineKeySwipeGesture, swallow the click and the long press once a swipe took the touch, type the digit the way a held key's digit is typed, hide the corner digit while the face shows it, and drop the tracker when keys are replaced" >&2
   exit 1
 fi
 # 密码框和只收数字的编辑框里三种键面类型都退回标准底行（`TouchLayoutStylePolicy.fieldRowStyle`、`EditorPolicy.keepsStandardRows` 由测试覆盖）：会话从编辑框类型认出只收数字，视图每次接上编辑框都刷新这个状态，九键外框与 26/14/18 键底行都经 fieldRowStyle 取样式。
@@ -415,6 +519,18 @@ if [[ -z "$gate_line" || -z "$community_line" || "$gate_line" -ge "$community_li
   echo "Settings.startRequest must ask CommunityContributionGate before it dispatches community requests" >&2
   exit 1
 fi
+# 屏蔽作者走自己的 `community_block` 请求（名单和隐私授权由 account-requests.test.ts、privacy-consent.test.ts 覆盖，总闸不拦它由 community-contribution-gate.test.ts 覆盖）；设置桥是 ArkTS，这里钉住接线：startRequest 分发它，账号桥经 `communityBlockRequest` 拼请求、先等会话采用再交给 `msime_client_community`。
+block_body=$(sed -n '/^  async communityBlock(action: string): Promise<string> {$/,/^  }$/p' \
+  "$ets/account/HarmonyAccountCloudBridge.ets")
+if ! grep -qF "} else if (kind === 'community_block') {" <<< "$dispatch_body" \
+  || ! grep -qF 'this.communityBlock(payload).then(deliver)' <<< "$dispatch_body" \
+  || ! grep -qF 'return await this.accountBridge.communityBlock(actionDocument);' "$ets/pages/Settings.ets" \
+  || ! grep -qF 'communityBlockRequest(this.directory, action);' <<< "$block_body" \
+  || ! grep -qF 'await AccountSessionAdoption.beforeRequest();' <<< "$block_body" \
+  || ! grep -qF 'return await client.community(plan.request);' <<< "$block_body"; then
+  echo "Settings.startRequest must dispatch community_block to the account bridge, which builds it with communityBlockRequest and adopts the session before msime_client_community" >&2
+  exit 1
+fi
 # 按键振动的 `startVibration` 在 NAPI 层同步发 IPC，放在 UI 线程上开了振动打字就跟不上手；这里钉住接线：振动经 TaskPool 以高优先级发出，上一下还没发完时不再排队。
 if ! grep -qF 'new taskpool.Task(startKeyVibration,' "$ets/keyboard/KeyboardSession.ets" \
   || ! grep -qF 'taskpool.Priority.HIGH);' "$ets/keyboard/KeyboardSession.ets" \
@@ -517,6 +633,18 @@ if [[ $(grep -cF 'confidentCorrection: CorrectionMarkPolicy.confident(candidate.
   echo "KeyboardSession must read confident_correction through CorrectionMarkPolicy for the strip and the expanded panel, and KeyboardView must draw those rows' word and every detail text in the mark colour from the right surface tokens in the candidate window, the touch chip and the expanded grid, and append the screen reader suffix to both labels" >&2
   exit 1
 fi
+# 展开候选网格分批建格子：规则由 keyboard-logic.test.ts 的 `ExpandedCandidateBatchPolicy` 覆盖；视图是 ArkTS，node 下编不了，这里钉住接线：网格只画已建到 expandedBuilt 的格子，重取候选按 initialCount 定已建数（同一代比 candidateListIdentity），滚动、视口和内容尺寸变化都去问要不要追加，关面板时清零。
+refresh_body=$(view_body 'private refreshExpanded(): void {')
+indices_body=$(view_body 'private expandedIndices(): number\[\] {')
+if ! grep -qF 'constbuilt:number=Math.min(this.expandedBuilt,this.expanded.length);' <<< "$indices_body" \
+  || ! grep -qF 'this.expandedListIdentity=KeyboardSession.shared.candidateListIdentity();' <<< "$refresh_body" \
+  || ! grep -qF 'this.expandedBuilt=ExpandedCandidateBatchPolicy.initialCount(this.expanded.length,this.expandedBuilt,sameGeneration);' <<< "$refresh_body" \
+  || ! grep -qF 'Scroll(this.expandedScroller){' <<< "$grid_body" \
+  || [[ $(grep -oF 'this.appendExpandedIfNeeded()' <<< "$grid_body" | wc -l) -ne 3 ]] \
+  || ! grep -qF 'this.expandedBuilt = 0;' "$view"; then
+  echo "The expanded grid must draw only the cells built so far, rebuild them through ExpandedCandidateBatchPolicy when the list is fetched again, append as it scrolls or resizes and reset when the panel closes" >&2
+  exit 1
+fi
 # 大屏单手的侧边数字键盘（#10203）：宽度、取值和显示条件由 keyboard-logic.test.ts 的 `OneHandedPolicy` 覆盖；视图、会话和设置桥是 ArkTS，node 下编不了，这里钉住接线：会话按 sidePanel 读共享偏好，视图随设置重读、转屏时按按键这一行的宽度重算，handedKeys 只在 sidePadShown 时画面板，数字和小数点走字面上屏，设置桥按设备形态（含可折叠）报告能力位。
 side_pad_body=$(awk '/^  oneHandSidePad\(\) \{/,/^  \}$/' "$keyboard_view")
 side_pad_key_body=$(awk '/^  private sidePadDigitKey\(digit: string\): KeyOptions \{/,/^  \}$/' "$keyboard_view")
@@ -536,6 +664,25 @@ if ! grep -qF 'oneHandedSidePanel: OneHandedPolicy.sidePanel(preferences.touch_o
   || ! grep -qF 'SettingsFormFactorCapabilities.resolve(deviceInfo.deviceType, this.foldable());' \
     "$repo_root/platforms/harmony/entry/src/main/ets/pages/Settings.ets"; then
   echo "Harmony must draw the one-handed side number pad from touch_one_handed_side_panel only when OneHandedPolicy.sidePadShown allows, type its digits literally, and report the capability by form factor" >&2
+  exit 1
+fi
+# 大屏分离式键盘（#10224）：启用条件和几何由 split-keyboard.test.ts 的 `SplitKeyboardPolicy` 覆盖；视图、会话和设置桥是 ArkTS，node 下编不了，这里钉住接线：会话按 SplitKeyboardPolicy.settings 读四项共享偏好，视图随设置重读、转屏时记下屏幕宽高，分离时单手让位，字母三排、数字行、补充行、123 / #+= 层和两种底行都插入空隙，重复的 G、V 不记滑行键位，设置桥按设备形态报告能力位。
+split_letter_body=$(awk '/^  splitLetterFace\(\) \{/,/^  \}$/' "$keyboard_view")
+split_action_body=$(awk '/^  designActionRow\(\) \{/,/^  \}$/' "$keyboard_view")
+if ! grep -qF 'splitKeyboard: SplitKeyboardPolicy.settings(preferences.touch_keyboard_split,' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardSession.ets" \
+  || ! grep -qF 'this.splitKeyboard = this.settings.splitKeyboard;' "$keyboard_view" \
+  || ! grep -qF 'this.screenWidthVp = widthVp;' "$keyboard_view" \
+  || ! grep -qF 'return OneHandedPolicy.active(this.feedback.oneHanded, KeyboardFormFactor.isDesktop()) && !this.splitDrawn() && !this.floatingDrawn();' "$keyboard_view" \
+  || ! grep -qF '} else if (this.splitDrawn()) {' "$keyboard_view" \
+  || ! grep -qF 'this.splitGap(this.splitLetterRow(row).gapShare)' <<< "$split_letter_body" \
+  || ! grep -qF 'this.duplicateLetterKey(' <<< "$split_letter_body" \
+  || ! grep -qF 'this.splitGap(this.designRowSplitSpace().gap)' <<< "$split_action_body" \
+  || [[ $(grep -cF 'this.splitGap(' "$keyboard_view") -ne 8 ]] \
+  || ! grep -qF 'if ($$.duplicate !== true) {' "$keyboard_view" \
+  || ! grep -qF "value['touch_keyboard_split'] = projection.splitKeyboard;" \
+    "$repo_root/platforms/harmony/entry/src/main/ets/pages/Settings.ets"; then
+  echo "Harmony must draw the split keyboard from the touch_keyboard_split preferences only when SplitKeyboardPolicy.drawn allows, put a dead gap into every split row, give way to one-handed mode, and report the capability by form factor" >&2
   exit 1
 fi
 # 「防止截屏」（#10194）：切换规则和镜像条目由 screen-capture-protection.test.ts 覆盖；窗口、面板和认证是 ArkTS，node 下编不了，这里钉住接线：声明 PRIVACY_WINDOW；软键盘（或候选窗）、浮动工具条、输入模式提示三块面板新建时各设一次隐私模式，编辑框获得焦点导入镜像后（含面板建好前就来的那一个）再按开关重设，值没变的面板不再调用 `setPrivacyMode`；设置应用主窗口在载入页面前设上，设置页写入后当场改窗口并立即发布给键盘（发布失败只记日志，仍回答已保存），写入前先过切换规则；没有锁屏密码时认证不可用，不能放行。
@@ -562,6 +709,30 @@ if ! grep -qF '"name": "ohos.permission.PRIVACY_WINDOW"' "$repo_root/platforms/h
   || ! grep -qF 'return false;' <<< "$capture_available" \
   || [[ $(grep -cF 'return true;' <<< "$capture_available") -ne 1 ]]; then
   echo "Screen capture protection must declare PRIVACY_WINDOW, set privacy mode on all three keyboard panels and on the settings window, re-apply it after each focus import, skip panels whose mode has not changed, publish every change to the keyboard without reporting a saved change as failed when that publish fails, and refuse when no system authentication is set up" >&2
+  exit 1
+fi
+# 浮动键盘（#10225）：大小、位置钳制和转屏由 floating-keyboard.test.ts 覆盖。扩展能力和视图是 ArkTS，这里钉住接线：`changeFlag` 要求先隐藏面板，所以只在 `applyFloatingSetting` 里、`await panel.hide()` 之后调用，换完无论成败都显示回来；`moveTo` 对 `FLG_FIXED` 不可用，停靠路径只 resize；转屏经 `display.on('change')` 重新摆浮动面板，销毁时退订；浮动时单手模式不生效，分离式键盘也不画（`SplitKeyboardPolicy.drawn` 收到浮动状态，规则由 split-keyboard.test.ts 覆盖），单手磁贴在分离和浮动时都置灰。
+floating_ability="$repo_root/platforms/harmony/entry/src/main/ets/inputmethodextability/KeyboardExtensionAbility.ets"
+floating_apply=$(sed -n '/^  private async applyFloatingSetting(panel: inputMethodEngine.Panel): Promise<void> {$/,/^  }$/p' "$floating_ability")
+floating_fit=$(sed -n '/^  private async fitTouchPanel(panel: inputMethodEngine.Panel): Promise<void> {$/,/^  }$/p' "$floating_ability")
+floating_fixed=$(sed -n '/^    if (!this.floating) {$/,/^    }$/p' <<< "$floating_fit")
+if [[ $(grep -cF 'panel.changeFlag(' "$floating_ability") -ne 1 ]] \
+  || ! grep -qF 'await panel.hide();' <<< "$floating_apply" \
+  || ! grep -qF 'panel.changeFlag(wanted ? inputMethodEngine.PanelFlag.FLG_FLOATING : inputMethodEngine.PanelFlag.FLG_FIXED);' <<< "$floating_apply" \
+  || ! grep -qF '} finally {' <<< "$floating_apply" \
+  || ! grep -qF 'await panel.show();' <<< "$floating_apply" \
+  || grep -qF 'moveTo' <<< "$floating_fixed" \
+  || ! grep -qF 'FloatingKeyboardPolicy.position(this.floatingFraction[0], this.floatingFraction[1],' <<< "$floating_fit" \
+  || ! grep -qF "display.on('change', this.displayChanged);" "$floating_ability" \
+  || ! grep -qF "display.off('change', this.displayChanged);" "$floating_ability" \
+  || ! grep -qF 'KeyboardSession.shared.saveFloatingPosition(this.floatingFraction[0], this.floatingFraction[1]);' "$floating_ability" \
+  || ! grep -qF 'return OneHandedPolicy.active(this.feedback.oneHanded, KeyboardFormFactor.isDesktop()) && !this.splitDrawn() && !this.floatingDrawn();' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'KeyboardFormFactor.isDesktop(), this.splitsFace(), this.floatingDrawn());' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'return this.touchDesign() && !this.splitDrawn() && !this.floatingDrawn();' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"; then
+  echo "The floating keyboard must change the panel flag only while the panel is hidden and show it again afterwards, never move a fixed panel, refit the floating panel when the display changes, save the dragged position, suspend one-handed mode while floating or split, and stop drawing the split keyboard while floating" >&2
   exit 1
 fi
 "$tsc" --project "$here/tsconfig.json"

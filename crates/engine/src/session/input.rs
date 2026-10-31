@@ -1410,8 +1410,11 @@ impl InputSession {
     pub fn spelling_symbols(&self) -> String {
         let mut symbols = self.base_spelling_symbols();
         symbols.extend(self.literal_spelling_symbols());
-        if self.shuangpin_helpcode_marker(b'\t').is_some() {
-            symbols.push('\t');
+        // 双拼辅助码的触发键此刻要是会记成标记，就发布出来：触屏的符号面板和外接键盘把 `;` 和反引号当标点送来，runtime 只把已发布的符号转给 `dispatch_character`，没发布时标点会先按首选结束组字。
+        for key in *b"\t`;/" {
+            if self.shuangpin_helpcode_marker(key).is_some() && !symbols.contains(char::from(key)) {
+                symbols.push(char::from(key));
+            }
         }
         symbols
     }
@@ -2411,7 +2414,7 @@ impl InputSession {
     }
 }
 
-fn frequency_options_valid(options: FrequencyAdjustmentOptions) -> bool {
+pub(super) fn frequency_options_valid(options: FrequencyAdjustmentOptions) -> bool {
     (1..=10).contains(&options.trigger_count) && (1..=10).contains(&options.linear_step)
 }
 

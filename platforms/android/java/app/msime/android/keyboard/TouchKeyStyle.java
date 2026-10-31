@@ -69,6 +69,22 @@ public final class TouchKeyStyle {
     public static final String SYMBOL_FIRST_TITLE = "26 键「符」与「123」互换";
     public static final String SYMBOL_FIRST_NOTE = "符 排在 123 左边；长空格和表情键样式没有 符，不受影响。";
 
+    /** 中/英键在空格哪一边（共享偏好 `touch_language_key_side`，`right` 缺省、`left`），见 {@link KeyboardActionRow#languageBeforeSpace}。 */
+    public static final String LANGUAGE_KEY_SIDE_PREFERENCE = "touch_language_key_side";
+    /** 「中/英键放在空格左边」开关的标题和说明，三端逐字相同（iOS `TouchKeyLayoutOffering.languageLeftTitle`、共享设置页 `languageKeyLeftTitle`）。 */
+    public static final String LANGUAGE_LEFT_TITLE = "中/英键放在空格左边";
+    public static final String LANGUAGE_LEFT_NOTE = "中/英 排到空格左边，逗号、句号仍紧挨空格。";
+
+    /** 偏好里读到的值（`JSONObject.opt` 的结果，缺键时为 null）是不是「左」：只有字符串恰好是 `left` 才算，缺键、`right`、不认识的字符串和非字符串都按右读（不认识的字符串与 client-core 的宽松读取一致；非字符串在 client-core 那里整份文档报错，宿主拿到的偏好里不会有）。 */
+    public static boolean languageLeft(Object value) {
+        return "left".equals(value);
+    }
+
+    /** 设置页开关写进偏好的写法：打开写 `left`，关上写 `right`（client-core 保存时把缺省的 `right` 从文档里省掉）。 */
+    public static String languageKeySideWire(boolean left) {
+        return left ? "left" : "right";
+    }
+
     /** 底行的一种排法；每类键面只提供其中几种（{@link #TWENTY_SIX_KEY_ROWS}、{@link #FOURTEEN_KEY_ROWS}、{@link #NINE_KEY_ROWS}）。 */
     public enum Row {
         STANDARD("standard"),
@@ -115,12 +131,12 @@ public final class TouchKeyStyle {
          * 这一刻画出来的字母层底行用哪种样式。中文 26 键（标准 26 键键面上的中文方案，含全拼、双拼、五笔、粤拼等）读 26 键样式；英文模式、韩文和其他语言的 26 键保留标准底行；14 键与 18 键读 14 键样式；拼音九键与笔画（共用九键外框）读九键样式；其余键面（手写、注音、日文假名）没有可选样式。
          *
          * @param touchLayout {@link KeyboardLayout} 的界面常量
-         * @param scheme View 报告的方案编号，未知时为 -1（按中文算，与数字九宫格的判断一致）
+         * @param scheme View 报告的方案编号，未知时为 -1（按中文算，见 {@link KeyboardLayout#chineseFace}）
          * @param english 宿主处在英文模式
          */
         public Row forLayout(int touchLayout, int scheme, boolean english) {
             if (touchLayout == KeyboardLayout.STANDARD_TOUCH_LAYOUT)
-                return KeyboardLayout.numberPadLanguage(scheme, english) ? twentySix : Row.STANDARD;
+                return KeyboardLayout.chineseFace(scheme, english) ? twentySix : Row.STANDARD;
             if (touchLayout == KeyboardLayout.FOURTEEN_KEY_LAYOUT || touchLayout == KeyboardLayout.EIGHTEEN_KEY_LAYOUT)
                 return fourteen;
             if (touchLayout == KeyboardLayout.QUANPIN_NINE_KEY_LAYOUT || touchLayout == KeyboardLayout.STROKE_LAYOUT)

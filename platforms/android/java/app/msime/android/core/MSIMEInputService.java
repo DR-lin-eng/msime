@@ -334,13 +334,13 @@ public final class MSIMEInputService extends InputMethodService {
     int touchKeySpacingTenths = KeyboardSpacingPolicy.DEFAULT_KEY_SPACING_TENTHS;
     int touchRowSpacingTenths = KeyboardSpacingPolicy.DEFAULT_ROW_SPACING_TENTHS;
     int touchKeyboardHeightAdjustment = KeyboardHeightPolicy.DEFAULT_HEIGHT_ADJUSTMENT_DP;
-    /** 工具栏语音按钮，来自共享偏好 `touch_voice_shortcut`，缺省为关；「语音输入 → 启动方式」选「工具栏按钮」或工具栏设置里打开「语音」时为真（#10142）。 */
+    /** 工具栏语音按钮，来自共享偏好 `touch_voice_shortcut`，缺省为关；在「键盘 → 工具栏」打开「语音」或键盘内打开「顶部语音入口」时为真（#10142）；「语音输入 → 启动方式」选「无」会关掉它，选「工具栏/长按空格」不改它（#10309）。 */
     boolean touchVoiceShortcutEnabled;
     /** 26 键双拼的字母键画不画声母/韵母提示，来自共享偏好 `touch_shuangpin_key_hints`，缺省为关。 */
     private boolean shuangpinKeyHintsEnabled = false;
 
-    /** 全拼 26 键组字时 ⇧ 保留（臂辅助码）而不换成「分词」，来自共享偏好 `touch_quanpin_shift`，缺省为关。 */
-    private boolean quanpinShiftEnabled = false;
+    /** 全拼 26 键组字时 ⇧ 保留（臂辅助码）而不换成「分词」，来自共享偏好 `touch_quanpin_shift`，缺省为开。 */
+    private boolean quanpinShiftEnabled = true;
     /** 上屏后联想时候选栏右端的按键样式，来自共享偏好 `next_word_prediction_buttons`，缺省为现有的只有展开键。 */
     private PredictionButtonsPolicy.Style predictionButtons = PredictionButtonsPolicy.Style.EXPAND_ONLY;
     /** 26 键、14/18 键与九键各自的底行样式，来自共享偏好 `touch_*_key_style`，缺省都是标准底行。 */
@@ -355,6 +355,10 @@ public final class MSIMEInputService extends InputMethodService {
     java.util.List<String> nineKeyDigitSidebarSymbols = java.util.List.of();
     /** 大屏单手模式空出来那一侧放什么（#10203），来自共享偏好 `touch_one_handed_side_panel`，缺省空着；画不画还要看单手、屏宽和键面，见 {@link OneHandSidePadPolicy#shown}。 */
     OneHandSidePadPolicy.Panel oneHandedSidePanel = OneHandSidePadPolicy.Panel.OFF;
+    /** 中/英键排在空格左边，来自共享偏好 `touch_language_key_side`（只有 `left` 算），缺省在右边、紧挨回车。 */
+    boolean languageKeyLeft;
+    /** 拼音九键「九键滑动输入数字」的方向，来自共享偏好 `touch_nine_key_swipe_digits`（{@link NineKeySwipePolicy#mode}），缺省关闭。只影响按键的触摸判定，不改键面，所以不进 touchGeometryKey；每次触摸判定时读当前值，改了下一次触摸就生效。 */
+    String nineKeySwipeDigits = NineKeySwipePolicy.OFF;
     /** 日语九键连点同键时是否循环假名，旧设置和新装默认都开启。 */
     boolean japaneseToggleInputEnabled = InputFeatureToggle.JAPANESE_TOGGLE_INPUT.enabledByDefault();
     private boolean voiceInputEnabled = true;
@@ -1785,7 +1789,7 @@ public final class MSIMEInputService extends InputMethodService {
 
     @Override public void onStartInput(EditorInfo info, boolean restarting) {
         // restart 保留组字也属于新的焦点边界，旧照片和识别回调不能跨过去。
-        if (imeOcr != null && imeOcr.active()) closeMoreTools();
+        if (imeOcr != null) imeOcr.close();
         cancelPendingCompositionMarkerLoss();
         super.onStartInput(info, restarting);
         if (info != null) automaticNumberRow.enterEditor(info.inputType, info.packageName);
@@ -1941,6 +1945,8 @@ public final class MSIMEInputService extends InputMethodService {
         updateAutomaticCapitalization();
         imeLetterRows.refreshKeyRowsForEditor();
         render();
+        // 保留会话的重启也可能只复用已有键行；会话切换后仍要重新把当前布局注册给引擎。
+        imeTouchPoints.registerAfterLayout();
         synchronizeReplyKeyboard();
         imeWorldClock.resumePicker(getCurrentInputEditorInfo());
     }
@@ -2211,7 +2217,6 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     @Override public void onFinishInputView(boolean finishingInput) {
-        if (imeOcr != null && imeOcr.active()) closeMoreTools();
         operationNotice.cancel();
         if (inlineAutofill != null) inlineAutofill.finishInput();
         imePanels.dismissClipboardPreview();
@@ -2232,7 +2237,6 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     @Override public void onWindowHidden() {
-        if (imeOcr != null && imeOcr.active()) closeMoreTools();
         // 窗口收起后不再每秒重读偏好：会话要一直活到输入框失焦，按返回键收起键盘后输入框通常还留着焦点，原先这段时间里每秒都在后台读偏好、解析皮肤、把快照推给引擎，电池统计里全算后台耗电（#9916）。窗口再显示时 onWindowShown 先读一次再接着轮询。
         imeWindowVisible = false;
         // 收起前第一帧还没交出去：不再等它，也不记这次弹出的耗时。排着的建会话马上放行，不空等兜底：它自己核对启动代次，用户收起时 onFinishInputView 已经先换了代，放行即作废；跟随光标的候选栏自己收起窗口时不换代，会话照常马上建好。
@@ -2770,6 +2774,14 @@ public final class MSIMEInputService extends InputMethodService {
             // 会把它画在组字与候选条的读音前面，两件事必须一起做：请求了却不画，用户已经选中的字
             // 既不在文档里也不在屏幕上（scripts/test-phrase-preedit-hosts.py 守的就是这一半状态）。
             options.put("phrase_preedit", true);
+            // 没读到实时偏好时（读取失败、建会话的回退路径、没有偏好目录），选项里的偏好是出厂默认的全拼 26 键副本，九键用户的键盘会先跳回 26 键（#10389）。按上次确认的键面把副本换成九键：引擎从九键网格起来，键面照旧只按引擎视图画，画的九键和引擎一致，网格键能打字。实时偏好随后到达时照常换成用户的真实设置。
+            JSONObject startupPreferences = livePreferences == null ? options.optJSONObject("preferences") : null;
+            if (startupPreferences != null) {
+                String copyLayout = InputViewValuePolicy.textOr(startupPreferences, "touch_keyboard_layout", "twenty_six_key");
+                String startupLayout = TouchLayoutHintPolicy.startupTouchKeyboardLayout(touchLayoutHint(),
+                    InputViewValuePolicy.textOr(startupPreferences, "scheme", "quanpin"), copyLayout);
+                if (!startupLayout.equals(copyLayout)) startupPreferences.put("touch_keyboard_layout", startupLayout);
+            }
             // 建会话在主线程上，这段时间里点按都要排队（#10086），单独记下它的耗时，与整段等待分开看。
             long createStartedAt = SystemClock.uptimeMillis();
             String created = NativeClient.create(options.toString());
@@ -2836,6 +2848,8 @@ public final class MSIMEInputService extends InputMethodService {
             recordEngineSessionTiming(createMillis, SystemClock.uptimeMillis() - startedAt);
             // 会话在建时点下的皮肤、输入方式或要轮换语言的「中」键，此刻会话和（多数时候）偏好都有了；偏好还没读到时由 reloadPreferences 第一次读到后再执行。排到这次建会话之后再做：打开面板出的错不能落进下面的 catch 把刚建好的会话停掉。
             main.post(this::runDeferredToolbarTaps);
+            // 键行通常在会话建立前已经完成布局；此时外层布局监听不会再次触发，必须在会话就绪后补量一次双拼几何。
+            imeTouchPoints.registerAfterLayout();
             // 窗口没显示时（会话在 onStartInput 里先于窗口建好，或在收起后为隐私模式重建）不起轮询，等 onWindowShown 再起。
             // 刚应用的就是几毫秒前读到的实时偏好，不必立刻再整套读一遍，按平常的节奏一秒后再查；没应用上时照旧马上读。
             if (hasPreferencesDirectory && imeWindowVisible) {
@@ -2972,6 +2986,8 @@ public final class MSIMEInputService extends InputMethodService {
         nineKeySidebarSymbols = sidebarSymbolsFrom(preferences, NineKeySidebarPolicy.LETTER_PREFERENCE);
         nineKeyDigitSidebarSymbols = sidebarSymbolsFrom(preferences, NineKeySidebarPolicy.DIGIT_PREFERENCE);
         oneHandedSidePanel = oneHandedSidePanelFrom(preferences);
+        languageKeyLeft = languageKeyLeftFrom(preferences);
+        nineKeySwipeDigits = nineKeySwipeDigitsFrom(preferences);
         applyJapaneseToggleInput(japaneseToggleInputFrom(preferences));
         splitKeyboardPortrait = preferences != null
             && preferences.optBoolean(SplitKeyboardPolicy.PORTRAIT_PREFERENCE, false);
@@ -2988,9 +3004,9 @@ public final class MSIMEInputService extends InputMethodService {
         return preferences != null && preferences.optBoolean(ShuangpinKeyHintPolicy.PREFERENCE_KEY, false);
     }
 
-    /** 没有偏好或旧文档里没有这个键时按关（分词），与 client-core 的默认值一致。 */
+    /** 没有偏好或旧文档里没有这个键时按开（保留 Shift），与 client-core 的默认值一致。 */
     private static boolean quanpinShiftFrom(JSONObject preferences) {
-        return preferences != null && preferences.optBoolean(QuanpinSeparatorPolicy.PREFERENCE_KEY, false);
+        return preferences == null || preferences.optBoolean(QuanpinSeparatorPolicy.PREFERENCE_KEY, true);
     }
 
     /** 三类键面的底行样式；没有偏好、缺键或不认识的写法都按标准底行，与 client-core 的宽松读取一致。 */
@@ -3026,6 +3042,17 @@ public final class MSIMEInputService extends InputMethodService {
     private static OneHandSidePadPolicy.Panel oneHandedSidePanelFrom(JSONObject preferences) {
         return preferences == null ? OneHandSidePadPolicy.Panel.OFF
             : OneHandSidePadPolicy.parse(JsonPolicy.strictString(preferences.opt(OneHandSidePadPolicy.PREFERENCE_KEY)));
+    }
+
+    /** 中/英键在空格左边；没有偏好、缺键、`right` 和不认识的写法都按右边，与 client-core 的宽松读取一致。 */
+    private static boolean languageKeyLeftFrom(JSONObject preferences) {
+        return preferences != null && TouchKeyStyle.languageLeft(preferences.opt(TouchKeyStyle.LANGUAGE_KEY_SIDE_PREFERENCE));
+    }
+
+    /** 九键滑动输入数字；没有偏好、缺键或不认识的写法都按关闭，与 client-core 的宽松读取一致。 */
+    private static String nineKeySwipeDigitsFrom(JSONObject preferences) {
+        return NineKeySwipePolicy.mode(preferences == null ? null
+            : JsonPolicy.strictString(preferences.opt(NineKeySwipePolicy.PREFERENCE)));
     }
 
     private static boolean japaneseToggleInputFrom(JSONObject preferences) {
@@ -3254,8 +3281,8 @@ public final class MSIMEInputService extends InputMethodService {
         return candidateTranslationRouteFrom(preferences).provider() == CandidateTranslationRoute.Provider.ACCOUNT;
     }
 
-    /** 候选翻译的路由，规则在 {@link CandidateTranslationPolicy#route}；没有偏好时什么都不发。腾讯缺 `enabled` 时按共享层的默认值算开着，但没有凭据照样选不中。 */
-    private static CandidateTranslationRoute candidateTranslationRouteFrom(JSONObject preferences) {
+    /** 候选翻译的路由，规则在 {@link CandidateTranslationPolicy#route}；没有偏好时什么都不发。腾讯缺 `enabled` 时按共享层的默认值算开着，但没有凭据照样选不中。「翻译服务」设置页也用它判断 AI 辅助的配置能不能用，与键盘读同一份规则。 */
+    public static CandidateTranslationRoute candidateTranslationRouteFrom(JSONObject preferences) {
         if (preferences == null) return CandidateTranslationRoute.NONE;
         JSONObject niutrans = preferences.optJSONObject("niutrans");
         JSONObject custom = preferences.optJSONObject("custom_translation");
@@ -3277,7 +3304,7 @@ public final class MSIMEInputService extends InputMethodService {
             translationProviderText(custom, "api_key"),
             translationProviderEnabled(tencent, true), translationProviderText(tencent, "secret_id"),
             translationProviderText(tencent, "secret_key"), translationProviderText(tencent, "region"),
-            ai != null && ai.optBoolean("enabled", false), translationProviderText(ai, "provider"),
+            preferences.optBoolean("translation_ai", false), translationProviderText(ai, "provider"),
             aiEndpoint, translationProviderText(ai, "model"), aiToken);
     }
 
@@ -3537,7 +3564,7 @@ public final class MSIMEInputService extends InputMethodService {
             + touchVoiceShortcutEnabled + ":" + voiceInputEnabled + ":" + voiceLanguage + ":"
             + shuangpinKeyHintsEnabled + ":" + quanpinShiftEnabled + ":" + splitKeyboardPortrait + ":" + japaneseToggleInputEnabled
             + ":" + oneHandedSidePanel.wire
-            + ":" + touchKeyStyles + ":" + numberRowEnabled + ":" + twentySixSymbolFirst + ":" + numberPadSpace.resolved()
+            + ":" + touchKeyStyles + ":" + numberRowEnabled + ":" + twentySixSymbolFirst + ":" + numberPadSpace.resolved() + ":" + languageKeyLeft
             + ":" + NineKeySidebarPolicy.format(nineKeySidebarSymbols) + ":" + NineKeySidebarPolicy.format(nineKeyDigitSidebarSymbols);
     }
 
@@ -3686,6 +3713,8 @@ public final class MSIMEInputService extends InputMethodService {
         java.util.List<String> nextSidebarSymbols = sidebarSymbolsFrom(preferences, NineKeySidebarPolicy.LETTER_PREFERENCE);
         java.util.List<String> nextDigitSidebarSymbols = sidebarSymbolsFrom(preferences, NineKeySidebarPolicy.DIGIT_PREFERENCE);
         OneHandSidePadPolicy.Panel nextOneHandedSidePanel = oneHandedSidePanelFrom(preferences);
+        boolean nextLanguageKeyLeft = languageKeyLeftFrom(preferences);
+        String nextNineKeySwipeDigits = nineKeySwipeDigitsFrom(preferences);
         boolean nextJapaneseToggleInput = japaneseToggleInputFrom(preferences);
         boolean japaneseToggleInputChanged = japaneseToggleInputEnabled != nextJapaneseToggleInput;
         boolean nextSplitPortrait = preferences.optBoolean(SplitKeyboardPolicy.PORTRAIT_PREFERENCE, false);
@@ -3790,6 +3819,10 @@ public final class MSIMEInputService extends InputMethodService {
         nineKeyDigitSidebarSymbols = nextDigitSidebarSymbols;
         // 侧边面板同样进了 touchGeometryKey，变了就 render()，渲染里的 ImeFrame.applyOneHanded 按它摆上或摘下面板。
         oneHandedSidePanel = nextOneHandedSidePanel;
+        // 中/英在空格哪一边同样进了 touchGeometryKey：底行签名带着它，右侧大回车外框由 render 里的 tallReturnStale 整块重建。
+        languageKeyLeft = nextLanguageKeyLeft;
+        // 九键滑动只在触摸判定时读（bindNineKeySwipe），不用重画键盘，下一次触摸就按新方向判定。
+        nineKeySwipeDigits = nextNineKeySwipeDigits;
         applyJapaneseToggleInput(nextJapaneseToggleInput);
         voiceInputEnabled = nextVoiceEnabled;
         voiceLanguage = nextVoiceLanguage;
@@ -4968,6 +5001,24 @@ public final class MSIMEInputService extends InputMethodService {
             label.getCompoundPaddingTop() + label.getCompoundPaddingBottom() + headerPadding);
     }
 
+    private SpellingEditIcon spellingEditIcon;
+
+    /**
+     * 读音行左端的笔：边长约等于读音的字号（不超过一行字高，读音行的高度不变），点按区放宽到 40 dp，小图标也点得中。
+     */
+    private void showSpellingEditIcon(boolean shown) {
+        if (!shown) {
+            preedit.setCompoundDrawablesRelative(null, null, null, null);
+            preedit.setMinWidth(0);
+            return;
+        }
+        if (spellingEditIcon == null) spellingEditIcon = new SpellingEditIcon(preedit);
+        int size = Math.round(preedit.getTextSize() * 1.15f);
+        spellingEditIcon.setBounds(0, 0, size, size);
+        preedit.setCompoundDrawablesRelative(spellingEditIcon, null, null, null);
+        preedit.setMinWidth(pixels(40));
+    }
+
     void fail(Throwable error) {
         // 不把异常交给 Log：解析异常可能包含输入原文，固定类别足以区分下一步排查方向。
         ImeLog.e(InputFailurePolicy.logMessage(error), null);
@@ -5831,6 +5882,13 @@ public final class MSIMEInputService extends InputMethodService {
             InputViewValuePolicy.scheme(view, -1), InputViewValuePolicy.textOr(view, "local_mode", "none"), chinesePunctuation);
     }
 
+    /** 数字九宫格左列符号和右列 ！ 此刻的写法（{@link NumberPadPunctuation#style}）：中文标点生效时是中文，日文方案是日文，其余半角 ASCII。 */
+    NumberPadPunctuation.Style numberPadPunctuation() {
+        return NumberPadPunctuation.style(chinesePunctuation, dedicatedEnglish,
+            view == null ? -1 : InputViewValuePolicy.scheme(view, -1),
+            view == null ? "none" : InputViewValuePolicy.textOr(view, "local_mode", "none"));
+    }
+
     /** 当前 View 报告的引号与方头括号样式；画键面、提示和 123 层时用它，不自己解析偏好。 */
     ChineseSymbolFaces.Marks punctuationMarks() {
         return InputViewValuePolicy.punctuationMarks(view);
@@ -6267,10 +6325,13 @@ public final class MSIMEInputService extends InputMethodService {
         String shownTitle = composing ? (japaneseSchemeActive() ? "確定" : "确认") : title;
         // 长按「确认」能上屏译文时角上标「译」（#6792），没有实体键盘的人也看得到 Ctrl+Enter 的那条路。
         boolean translationHold = composing && returnHoldCommitsTranslation();
+        boolean newlineHold = returnHoldInsertsNewline();
         if (enterButton != null) {
             enterButton.setText(shownTitle);
-            enterButton.setContentDescription(translationHold ? shownTitle + "；长按上屏译文" : shownTitle);
-            if (enterButton instanceof KeyboardIconKey icon) icon.setCornerHint(translationHold ? "译" : "");
+            enterButton.setContentDescription(translationHold ? shownTitle + "；长按上屏译文"
+                : newlineHold ? shownTitle + "；长按换行" : shownTitle);
+            if (enterButton instanceof KeyboardIconKey icon)
+                icon.setCornerHint(translationHold ? "译" : newlineHold ? "换行" : "");
             KeyboardKeyRole role = imeBottomRow.returnKeyRole();
             if (enterButton instanceof KeyboardPressButton press && press.keyboardRole() != role) {
                 press.setKeyboardRole(role);
@@ -6899,7 +6960,8 @@ public final class MSIMEInputService extends InputMethodService {
         TouchKeyStyle.SYMBOL_FIRST_PREFERENCE, TouchKeyStyle.NUMBER_PAD_SPACE_PREFERENCE,
         NineKeySidebarPolicy.LETTER_PREFERENCE, NineKeySidebarPolicy.DIGIT_PREFERENCE,
         OneHandSidePadPolicy.PREFERENCE_KEY,
-        "screen_keyboard_theme", "emoji_theme", "handwriting_theme", "touch_toolbar"};
+        TouchKeyStyle.LANGUAGE_KEY_SIDE_PREFERENCE,
+        NineKeySwipePolicy.PREFERENCE, "screen_keyboard_theme", "emoji_theme", "handwriting_theme", "touch_toolbar"};
     /** 上次换上的皮肤所用的偏好片段，存在键盘进程自己的 filesDir 里。 */
     private static final String SKIN_HINT_FILE = "keyboard-skin-hint.json";
     private String writtenSkinHint;
@@ -7254,7 +7316,6 @@ public final class MSIMEInputService extends InputMethodService {
     void closeMoreTools() {
         if (imeFunctionPanel != null) imeFunctionPanel.close();
         if (imeWorldClock != null) imeWorldClock.close();
-        if (imeOcr != null) imeOcr.close();
         localInputToolsOpen = false;
         aiAssistChooserOpen = false;
         deviceInfoOpen = false;
@@ -7272,6 +7333,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     void closeSymbolPanel() {
+        if (imePanels != null) imePanels.invalidatePluginSymbolGroupReads();
         if (symbolPanel != null) ViewPolicy.hide(symbolPanel);
         synchronizeReplyKeyboard();
     }
@@ -9418,11 +9480,22 @@ public final class MSIMEInputService extends InputMethodService {
         return HardwareTranslationCommitPolicy.marksReturnKey(target.eligible(), target.senses().size());
     }
 
-    /**
-     * 屏幕键盘长按组字中的「确认」（#6792 第三点）：没有实体键盘时代替 Ctrl+Enter，一个义项直接上屏，几个打开义项页。没有译文时不接，长按当作点按，照常确认组字。
-     */
+    /** 空闲时提供字面换行；组字中的长按仍归确认或译文上屏，不能覆盖尚未确认的组字。 */
+    private boolean returnHoldInsertsNewline() {
+        return ReturnKeyHoldPolicy.insertsNewline(
+            connection != null, hasEngineComposition(), returnKeyConfirms());
+    }
+
+    /** 长按空闲回车插入换行；长按组字中的「确认」保留 #6792 的译文上屏，无译文时当作点按。 */
     void bindReturnTranslationHold(Button button) {
         button.setOnLongClickListener(ignored -> {
+            if (returnHoldInsertsNewline()) {
+                imeKeyFeedback.playFeedback(button);
+                countKey("Enter");
+                selectionEcho.invalidate();
+                InputConnectionGuard.commitText(connection, "\n", 1);
+                return true;
+            }
             TranslationTarget target = translationTarget();
             int action = HardwareTranslationCommitPolicy.returnHold(target.eligible(), target.senses().size());
             if (action == HardwareTranslationCommitPolicy.NONE) return false;
@@ -9431,7 +9504,7 @@ public final class MSIMEInputService extends InputMethodService {
             performTranslationCommit(action, target);
             return true;
         });
-        // 给读屏的长按动作一个名字；不能上屏译文时不加，长按就是点按。
+        // 读屏与键面使用同一条件，组字中没有译文时保留点按确认。
         button.setAccessibilityDelegate(new View.AccessibilityDelegate() {
             @Override public void onInitializeAccessibilityNodeInfo(
                     View host, android.view.accessibility.AccessibilityNodeInfo info) {
@@ -9439,6 +9512,9 @@ public final class MSIMEInputService extends InputMethodService {
                 if (returnHoldCommitsTranslation())
                     info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(
                         android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK, "上屏译文"));
+                else if (returnHoldInsertsNewline())
+                    info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK, "换行"));
             }
         });
     }
@@ -10660,10 +10736,22 @@ public final class MSIMEInputService extends InputMethodService {
         });
         bindInputMethodPicker(languageButton);
         layerButton = button(controls, "123", () -> {
-            keyboardLayer = keyboardLayer == KeyboardLayout.Layer.LETTERS
+            // 注音的 #+= 是共享符号行，底行用的就是这个键：那一页上它印 123，回到数字九宫格，不回字母层（KeyboardLayout.drawsSharedSymbolRows）。
+            if (imeLetterRows.sharedSymbolRowsDrawn()) {
+                imeLetterRows.showNumberPad();
+                imeCalculator.refresh();
+                return;
+            }
+            boolean enteringSymbols = keyboardLayer == KeyboardLayout.Layer.LETTERS;
+            keyboardLayer = enteringSymbols
                 ? KeyboardLayout.Layer.SYMBOLS : KeyboardLayout.Layer.LETTERS;
-            imeLetterRows.rebuildKeyRows();
-            render();
+            if (enteringSymbols) {
+                // 从字母层进入数字九宫格时清掉上一轮停留的 #+= 页，123 的入口必须始终是 123。
+                imeLetterRows.showNumberPad();
+            } else {
+                imeLetterRows.rebuildKeyRows();
+                render();
+            }
             imeCalculator.refresh();
         });
         layerButton.setContentDescription("切换到数字和符号");
@@ -11717,7 +11805,7 @@ public final class MSIMEInputService extends InputMethodService {
         // 中文标点开关在 123 / #+= 层上切换了（工具面板、设置页、Ctrl + .）：这一层的标点按新状态重画。
         // 设置页开关了「数字行」：按新状态重建。
         // 拼音九键和九键双拼之间换了、或九键双拼换了表：同一个触屏布局，按新键面重建。
-        // 借用的数字九宫格上切了中/英：触屏布局没变，也要换回对应的键面。
+        // 数字页状态和键行建成时不一致（例如编辑器换了初始键层）：触屏布局没变，也要按当前状态换键面。数字九宫格上切了中/英或换了方案，左列和右列 ！ 的标点写法变了，由 sidebarStale 发现。
         // 九键外框换了是否画右侧大回车（设置页换了九键样式、进出密码框），或大回车外框的地球键变了：外框连同底行整块重建。
         // 设置页换了数字键盘的空格位置：数字层右列最下面一格在空格和 ！ 之间换，按新状态重建。
         if (imeLetterRows.drawnTouchLayout() != displayedTouchLayout(view)
@@ -11858,9 +11946,12 @@ public final class MSIMEInputService extends InputMethodService {
             // 光标符画成强调色的粗竖条（#6110），文本里仍是那个字符，点读音行的下标换算不变。
             int caretInTitle = idleTitle ? -1
                 : CompositionCaretPolicy.markInTitle(phrasePrefix, caretMark, !"none".equals(localModeKey));
-            if (caretEditable && !spellingDrawn && phrasePrefix.isEmpty()) displayText = "编辑拼写";
+            // 拼写已写在输入框里时读音行只画一支笔（SpellingEditIcon），点它打开放大编辑条；不再放「编辑拼写」四个字，描述仍是「编辑拼写」。
+            boolean spellingEditIcon = caretEditable && !spellingDrawn && phrasePrefix.isEmpty();
+            if (spellingEditIcon) displayText = "";
             preedit.setText(CompositionCaretSpan.mark(displayText, caretInTitle, pixels(2), pixels(2),
                 imeStyler.caretColor()));
+            showSpellingEditIcon(spellingEditIcon);
             preedit.setContentDescription(caretEditable ? "编辑拼写"
                 : offersLocalModes ? "长按打开本地输入模式" : displayText);
             preedit.setLongClickable(offersLocalModes);
@@ -12032,9 +12123,13 @@ public final class MSIMEInputService extends InputMethodService {
         if (layerButton != null) {
             boolean symbols = keyboardLayer == KeyboardLayout.Layer.SYMBOLS;
             int layerLayout = displayedTouchLayout(view);
-            layerButton.setText(KeyboardActionRow.layerTitle(layerLayout, symbols,
-                symbols && imeLetterRows.numberPadDrawn(layerLayout)));
-            layerButton.setContentDescription(KeyboardActionRow.layerDescription(symbols));
+            // 数字九宫格上的返回键印进来之前那块键面的名字；中文键面借来时印「返回」。注音的共享符号行（#+= 页）上它回到数字九宫格，印 123、描述与设计稿 #+= 层的 123 相同。
+            boolean sharedSymbolRows = imeLetterRows.sharedSymbolRowsDrawn();
+            layerButton.setText(sharedSymbolRows ? KeyboardActionRow.layerTitle(layerLayout, false)
+                : KeyboardActionRow.layerTitle(layerLayout, symbols,
+                    symbols && imeLetterRows.numberPadDrawn() && KeyboardLayout.chineseFace(
+                        view == null ? -1 : InputViewValuePolicy.scheme(view, -1), dedicatedEnglish)));
+            layerButton.setContentDescription(KeyboardActionRow.layerDescription(symbols && !sharedSymbolRows));
         }
         if (symbolPanelButton != null) {
             // 这个键出现在 26 键一族、拼音九键和笔画键盘的底行；拼音九键的数字键面也画这一行，在那里同样能打开面板。
@@ -12156,7 +12251,7 @@ public final class MSIMEInputService extends InputMethodService {
             imeToolbar.styleTopRow();
             return;
         }
-        // 注音 9 键的读音选择条叠在候选区上：选择条只在候选列表关着时出现，那时候选行本来就是空的，所以把候选滚动区让成不可见（仍占位，键盘高度不变）。
+        // 注音 9 键的读音选择条叠在候选区上：选择条只在候选列表关着时出现，那时候选行本来就是空的，所以把候选滚动区让成不可见（仍占位，键盘高度不变）。18 键组字时拼音和候选同时出现，它的拼音条在读音行（ImeLayoutRows#attachEighteenSpellingsToReadingRow），不叠在这里，候选照常显示、可点。
         boolean zhuyinSpellingsShown = ViewPolicy.isVisible(nineKeySpellingScroll)
             && displayedTouchLayout(view) == KeyboardLayout.ZHUYIN_NINE_KEY_LAYOUT;
         int candidateScrollShown = zhuyinSpellingsShown ? View.INVISIBLE : View.VISIBLE;

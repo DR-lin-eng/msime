@@ -28,7 +28,7 @@ export interface SettingsFormFactorProjection {
   keySound: boolean;
   /** Background music from a music pack, streamed through AVPlayer on a 2in1 while an editor that may hear it has focus; a phone plays none. */
   music: boolean;
-  /** V、/ 和 @ 三种模式（`plugin_triggers`）：每种形态都声明。实体键盘接上任何设备都经 Engine 的拼写符号路由它们的数字、运算符和标点；手机和平板的触屏键盘另从功能面板「本地输入」进入 / 指令，指令表和短语表也由 host-api 从镜像过来的 `plugins/` 读进会话。设置页靠这一项给出 / 和 @ 的开关和插件页的指令表、短语表。 */
+  /** V、/ 和 @ 三种模式（`plugin_triggers`）：只在 2in1 上声明。设置页靠这一项给出 / 和 @ 的开关、@ 名单和插件页的指令表、短语表。手机和平板不提供快捷模式入口：设置页没有「快捷模式」组，功能面板也没有「本地输入」，K 和 / 模式无从进入，所以插件页不列指令表、短语表，也不给 @ 名单。 */
   pluginTriggers: boolean;
   /** The typing effect and the combo counter: a 2in1 flashes its candidate card, shows the combo and plays the tier-up sound for a hardware keyboard; a phone draws none. */
   typingEffects: boolean;
@@ -46,6 +46,8 @@ export interface SettingsFormFactorProjection {
   candidateSkinEditor: boolean;
   /** 屏幕键盘页「大屏单手时侧边显示数字键盘」（`touch_one_handed_side_panel`，#10203）：只在有大屏触屏键盘的设备上声明，即平板和可折叠手机（展开后是大屏）；直板手机的单手模式铺满整行，空不出一侧，2in1 不画触摸按键。 */
   oneHandedSidePanel: boolean;
+  /** 屏幕键盘页「分离式键盘」四行（`touch_keyboard_split` 等，#10224）：与 `oneHandedSidePanel` 一样只在有大屏触屏键盘的设备上声明，即平板和可折叠手机；直板手机的最短边不到最低的 480vp 启用宽度，从不分离，2in1 不画触摸按键。 */
+  splitKeyboard: boolean;
 }
 
 /** Keep the shared settings page aligned with the keyboard's actual device form factor. */
@@ -76,7 +78,7 @@ export class SettingsFormFactorCapabilities {
       inputModeHud: desktop,
       keySound: desktop,
       music: desktop,
-      pluginTriggers: true,
+      pluginTriggers: desktop,
       typingEffects: desktop,
       wordbookPacks: true,
       symbolSetPacks: true,
@@ -85,6 +87,7 @@ export class SettingsFormFactorCapabilities {
       touchPluginPacks: !desktop,
       candidateSkinEditor: desktop,
       oneHandedSidePanel: deviceType === "tablet" || (deviceType === "phone" && foldable),
+      splitKeyboard: deviceType === "tablet" || (deviceType === "phone" && foldable),
     };
   }
 }

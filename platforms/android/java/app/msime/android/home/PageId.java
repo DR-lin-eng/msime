@@ -28,10 +28,10 @@ public enum PageId {
         "滑动输入符号", "滑动方向", "下滑", "上滑", "九键滑动输入数字", "九键滑动距离", "快速删除范围", "滑行输入", "空格键滑动移动光标", "长按空格语音输入", "按钮顺序", "键盘工具栏", "显示方式", "候选栏大小", "工具栏尺寸", "表情", "常用语",
         "皮肤", "剪贴板", "输入方式", "文本编辑", "撤销", "重做", "语音", "文本编辑按键顺序", "尺寸", "按键区域宽度", "恢复默认宽度与间距", "按键间距", "行间距", "剪贴板排列", "剪贴板分类", "撤销时长", "历史记录上限", "单列", "双列", "导出文件夹", "导出剪贴板", "工具栏显示最近复制", "最近复制", "复制后自动显示快捷键", "快捷键功能", "分词",
         "触控板", "优先使用触控板", "按住工具临时打开", "水平移动距离", "垂直移动距离", "双击选词与三击选行", "逐步振动", "显示移动轨迹", "光标文字放大镜"),
-    /** 键盘页「按键布局」进来的子页：三类键面的底行样式、九键与数字键盘的左侧符号和顶部数字行（{@link KeyLayoutStylesPage}）。「九键数字键盘左侧符号」是这一行原来在键盘页时的名字，留作别名。 */
+    /** 键盘页「按键布局」进来的子页：三类键面的底行样式、中/英键位置、九键与数字键盘的左侧符号和顶部数字行（{@link KeyLayoutStylesPage}）。「九键数字键盘左侧符号」是这一行原来在键盘页时的名字，留作别名。 */
     KEY_LAYOUT_STYLES("KeyLayoutStylesPage", "按键布局", HostDeepLink.TAB_SETTINGS,
         "26 键", "14 键与 18 键", "9 键", "九键", "底行", "标准", "逗号句号", "逗号句号在空格两侧", "长空格", "长空格布局", "表情键", "底栏带标点",
-        "右侧大回车", "大回车", "顶部数字行", "数字行", "「符」与「123」互换", "符号键位置", "数字键盘", "空格在右列", "空格在 0 右边", "空格在 0 左边",
+        "右侧大回车", "大回车", "顶部数字行", "数字行", "「符」与「123」互换", "符号键位置", "中/英键放在空格左边", "中英切换键", "数字键盘", "空格在右列", "空格在 0 右边", "空格在 0 左边",
         "九键左侧符号", "数字键盘左侧符号", "九键数字键盘左侧符号", "左侧符号", "符号栏"),
     TOOLBAR_EDITOR("ToolbarEditorPage", "编辑工具栏", HostDeepLink.TAB_SETTINGS, "编辑工具栏"),
     PLUGINS("PluginsPage", "插件", HostDeepLink.TAB_SETTINGS,
@@ -58,7 +58,7 @@ public enum PageId {
         "联系人", "电话本", "导入联系人", "清空联系人", "刷新联系人"),
     TRANSLATION_SERVICE("TranslationServicePage", "翻译服务", HostDeepLink.TAB_SETTINGS,
         "不使用", "水杉账号", "小牛翻译", "腾讯云机器翻译", "自定义", "DeepLX", "DeepL", "接口地址", "API Key", "App ID",
-        "SecretId", "SecretKey", "地域", "测试连接"),
+        "SecretId", "SecretKey", "地域", "测试连接", "AI 辅助", "当前服务商与模型"),
     WUBI_LOOKUP("WubiLookupPage", "五笔查码", HostDeepLink.TAB_SETTINGS,
         "查汉字的五笔编码", "五笔编码", "86 五笔", "98 五笔", "反查"),
     NINE_KEY_SHUANGPIN("NineKeyShuangpinPage", "九键双拼", HostDeepLink.TAB_SETTINGS,
@@ -120,6 +120,9 @@ public enum PageId {
     PRIVACY("PrivacyPage", "隐私", HostDeepLink.TAB_ACCOUNT,
         "本地优先", "联网功能", "本机数据", "剪贴板历史", "充电夜间自学习", "短信验证码提示", "匿名使用统计", "用水杉账号翻译候选", "隐私模式",
         "截屏与录屏", "防止截屏", "隐私政策"),
+    /** 隐私页「社区」组进来的子页（{@link BlockedAuthorsPage}）：登录账号屏蔽的社区作者和取消屏蔽。 */
+    BLOCKED_AUTHORS("BlockedAuthorsPage", "已屏蔽的作者", HostDeepLink.TAB_ACCOUNT,
+        "屏蔽作者", "取消屏蔽"),
     /** 一类社区作品的完整列表，参数 `kind` 选类型（见 {@link CommunityFragment#ARG_KIND}）；从各功能页的「浏览更多…」进来，本身不进设置搜索，搜索里出现的是那几个功能页。皮肤和词库不压栈，{@link SettingsNavigator} 把它们切到社区 tab 的对应分类。 */
     COMMUNITY("CommunityFragment", "社区", HostDeepLink.TAB_SETTINGS);
 

@@ -204,8 +204,10 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "platform.android.keyboard_layout",
             "platform.android.keyboard_skin_dark",
             "platform.android.keyboard_skin_light",
+            "platform.android.language_key_side",
             "platform.android.nine_key_digit_symbols",
             "platform.android.nine_key_style",
+            "platform.android.nine_key_swipe",
             "platform.android.nine_key_symbols",
             "platform.android.number_keypad_order",
             "platform.android.number_pad_space",
@@ -374,6 +376,8 @@ fn settings_sync_round_trips_every_exported_key() {
         touch_number_pad_space: TouchNumberPadSpace::BeforeZero,
         touch_nine_key_sidebar_symbols: vec!["、".into(), "……".into(), "（）".into()],
         touch_nine_key_digit_sidebar_symbols: vec!["=".into(), "%".into()],
+        touch_language_key_side: TouchLanguageKeySide::Left,
+        touch_nine_key_swipe_digits: TouchNineKeySwipeDigits::Up,
         ..Preferences::default()
     };
     expected.frequency = FrequencyPreferences {
@@ -1725,6 +1729,128 @@ fn one_handed_side_panel_syncs_by_its_wire_name() {
     );
     let next_round = export_android_settings(&applied.preferences, None).unwrap();
     assert_eq!(next_round[ONE_HANDED_SIDE_PANEL], newer);
+}
+
+/// 中/英键位置按共享偏好的写法上传，读回来还是原值；默认的右边也导出，云端写回 `right` 时本机回到右边，云端是本机不认识的位置时只跳过这一个键。
+#[test]
+fn language_key_side_syncs_by_its_wire_name() {
+    let defaults = export_android_settings(&Preferences::default(), None).unwrap();
+    assert_eq!(
+        defaults[LANGUAGE_KEY_SIDE],
+        AccountPreferenceValue::String("right".into())
+    );
+
+    let left = Preferences {
+        touch_language_key_side: TouchLanguageKeySide::Left,
+        ..Preferences::default()
+    };
+    let exported = export_android_settings(&left, None).unwrap();
+    assert_eq!(
+        exported[LANGUAGE_KEY_SIDE],
+        AccountPreferenceValue::String("left".into())
+    );
+    let applied = apply(&Preferences::default(), exported, &full_schema());
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert_eq!(applied.preferences, left);
+
+    let applied = apply(
+        &left,
+        BTreeMap::from([(
+            LANGUAGE_KEY_SIDE.to_owned(),
+            AccountPreferenceValue::String("right".into()),
+        )]),
+        &full_schema(),
+    );
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert_eq!(applied.preferences, Preferences::default());
+
+    let applied = apply(
+        &left,
+        BTreeMap::from([
+            (
+                LANGUAGE_KEY_SIDE.to_owned(),
+                AccountPreferenceValue::String("before_space".into()),
+            ),
+            (
+                TWENTY_SIX_SYMBOL_FIRST.to_owned(),
+                AccountPreferenceValue::Boolean(true),
+            ),
+        ]),
+        &full_schema(),
+    );
+    assert_eq!(applied.skipped, [LANGUAGE_KEY_SIDE]);
+    assert_eq!(
+        applied.preferences,
+        Preferences {
+            touch_twenty_six_symbol_first: true,
+            ..left
+        }
+    );
+}
+
+/// 九键滑动输入数字按共享偏好的写法上传，读回来还是原值；默认值 `off` 也导出，云端才能被改回关闭；云端是本机不认识的写法时只跳过这一个键。同步键与 Android 本机旧设置同名，旧键不在本机同步表里，导出的值只来自共享偏好。
+#[test]
+fn nine_key_swipe_digits_syncs_by_its_wire_names() {
+    assert!(ANDROID_LOCAL_SETTINGS
+        .iter()
+        .all(|(key, _)| *key != NINE_KEY_SWIPE));
+    let defaults = export_android_settings(&Preferences::default(), None).unwrap();
+    assert_eq!(
+        defaults[NINE_KEY_SWIPE],
+        AccountPreferenceValue::String("off".into())
+    );
+
+    for swipe in [TouchNineKeySwipeDigits::Up, TouchNineKeySwipeDigits::Down] {
+        let local = Preferences {
+            touch_nine_key_swipe_digits: swipe,
+            ..Preferences::default()
+        };
+        let exported = export_android_settings(&local, None).unwrap();
+        assert_eq!(
+            exported[NINE_KEY_SWIPE],
+            AccountPreferenceValue::String(swipe.as_str().into())
+        );
+        let applied = apply(&Preferences::default(), exported, &full_schema());
+        assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+        assert_eq!(applied.preferences, local);
+    }
+
+    // 云端写回 `off` 时本机关掉。
+    let chosen = Preferences {
+        touch_nine_key_swipe_digits: TouchNineKeySwipeDigits::Down,
+        ..Preferences::default()
+    };
+    let applied = apply(
+        &chosen,
+        BTreeMap::from([(
+            NINE_KEY_SWIPE.to_owned(),
+            AccountPreferenceValue::String("off".into()),
+        )]),
+        &full_schema(),
+    );
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert_eq!(applied.preferences, Preferences::default());
+
+    // 不认识的写法只跳过这一个键，同一批里别的键照常应用，本机的方向留着。
+    let applied = apply(
+        &chosen,
+        BTreeMap::from([
+            (
+                NINE_KEY_SWIPE.to_owned(),
+                AccountPreferenceValue::String("both_ways".into()),
+            ),
+            (NUMBER_ROW.to_owned(), AccountPreferenceValue::Boolean(true)),
+        ]),
+        &full_schema(),
+    );
+    assert_eq!(applied.skipped, [NINE_KEY_SWIPE]);
+    assert_eq!(
+        applied.preferences,
+        Preferences {
+            touch_number_row: true,
+            ..chosen
+        }
+    );
 }
 
 /// 每个宿主只导出本机设置页能改、运行时也读的新增共享偏好：Android 一个都不导出，Windows 只有语法模型，Linux 是除思考强度和快捷键之外的全部。

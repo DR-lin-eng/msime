@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-引擎要做成给其他输入法嵌入的库（PR #10167 合入的提案「msime-engine 作为可嵌入的输入引擎库」，`proposed/architecture/2026-10-29-embeddable-engine-library.md`，本分支的基点早于它合入），其中 P4 是新 crate `crates/engine-capi`：一个只包核心层 `msime_engine::Session` 的 C 库。仓库里唯一的 C ABI 是 host-api 的 `msime_client.h`，它是 GPL 的客户端门面，每次按键走 JSON，错误只有字符串，会话绑定在线程上，不能直接给第三方。草案定下了 33 个函数、`struct_size` 版本协商、`int32_t` 返回码、线程局部的错误说明、热路径上借用的字符串和 cargo-c 构建；P3 的两篇笔记（[核心会话收尾与日志连接的线程归属](2026-10-29-core-session-lifecycle-and-journal-threads.md)、[引擎库的一套默认值、错误码、日志出口与维护锁归属](2026-10-29-engine-library-defaults-errors-log-and-lock.md)）给出了它依赖的修订号、核心收尾、`Send` 的会话、错误码和搬进引擎的维护锁。落地时要定的是草案没写到或者写得和代码对不上的细节。
+引擎要做成给其他输入法嵌入的库（PR #10167 合入的提案「msime-engine 作为可嵌入的输入引擎库」，`implemented/architecture/2026-10-29-embeddable-engine-library.md`，本分支的基点早于它合入），其中 P4 是新 crate `crates/engine-capi`：一个只包核心层 `msime_engine::Session` 的 C 库。仓库里唯一的 C ABI 是 host-api 的 `msime_client.h`，它是 GPL 的客户端门面，每次按键走 JSON，错误只有字符串，会话绑定在线程上，不能直接给第三方。草案定下了 33 个函数、`struct_size` 版本协商、`int32_t` 返回码、线程局部的错误说明、热路径上借用的字符串和 cargo-c 构建；P3 的两篇笔记（[核心会话收尾与日志连接的线程归属](2026-10-29-core-session-lifecycle-and-journal-threads.md)、[引擎库的一套默认值、错误码、日志出口与维护锁归属](2026-10-29-engine-library-defaults-errors-log-and-lock.md)）给出了它依赖的修订号、核心收尾、`Send` 的会话、错误码和搬进引擎的维护锁。落地时要定的是草案没写到或者写得和代码对不上的细节。
 
 ## Decision
 
@@ -18,7 +18,7 @@ Status: implemented
 
 ### 函数面
 
-33 个函数与草案一一对应（ABI 1.1 为按方案准备追加了 `prepare_runtime_for`、`reset_learning_for`，见下文「不分方案」一条），按代码调整的地方：
+33 个函数与草案一一对应（ABI 1.1 为按方案准备追加了 `prepare_runtime_for`、`reset_learning_for`，见下文「不分方案」一条；又追加了 `candidate_key`、`user_dict_validate`、`set_log_callback`，以及选项 JSON 的调频、混排与本地模式开关和四个运行时选项编号，见 [引擎 C ABI 1.1 补上的缺口](2026-10-30-engine-capi-abi-1-1-additions.md)，现在共 38 个），按代码调整的地方：
 
 - 四个函数不返回状态码：`abi_version` 返回 `(major << 16) | minor`，`version` 和 `last_error` 返回 `const char*`，`string_free` 无返回值。其余 29 个返回 `int32_t`。
 - `prepare_runtime` 用 `char**` 交回代次目录，由 `string_free` 释放：采用方要把它原样放进选项的 `paths.dictionaries`，自己拼路径在 Windows 上容易错。所以 `string_free` 释放的是库交出的一切字符串，不只 JSON。
@@ -70,8 +70,8 @@ CI 的 `engine-capi` 作业在 `ci-platforms.yml` 里，Linux、macOS、Windows 
 
 - **收益**：第三方前端拿到一个带版本、带头文件和 `.pc` 的 C 库，按键路径上没有 JSON 和额外分配，候选按下标随取，选择有修订号保护；会话可以在任何线程上用；会话与维护按 msime 宿主的同一把文件锁互斥；头文件、SONAME、第三方声明和三平台上的打字流程都有 CI 守着。
 - **代价**：cargo-c 总是按显式的目标三元组构建，产物在 `target/<三元组>/` 下，是与 `target/debug` 分开的第二棵构建树（CI 和本机跑脚本时都多编一遍引擎）。苹果平台的 dylib 不剥调试信息，体积大一些。CI 在引擎相关的 PR 上多占三台 runner，其中一台是 macOS。快照缓存在只读调用之间可能多取一次快照。
-- **没做的**：ABI 1.0 没有日志回调和事件通知（引擎的警告仍写标准错误）；二进制发布见 [msime-engine-capi 的预编译归档、最小数据包与快速上手](../process/2026-10-29-engine-capi-prebuilt-release-and-data-pack.md)，crates.io 等 P6，msime 自己的宿主改用公开 API 是 P7；九键、触点、神经重排等留到 v1.x。数据格式的规格文档（P5）还没写，README 的数据表以提案为准，许可证一列按仓库自己的声明（`resources/licenses/msime-engine-dictionary-NOTICE.md`、`docs/third-party.md`）改正过。Linux 和 Windows 上的 C 示例只在 CI 里跑过，本机只在 macOS（Studio，arm64）上跑过三种链接方式。
+- **没做的**：ABI 1.0 没有日志回调，1.1 加上了（`msime_engine_set_log_callback`，见 [引擎 C ABI 1.1 补上的缺口](2026-10-30-engine-capi-abi-1-1-additions.md)）；事件通知仍没有；二进制发布见 [msime-engine-capi 的预编译归档、最小数据包与快速上手](../process/2026-10-29-engine-capi-prebuilt-release-and-data-pack.md)，crates.io 等 P6，msime 自己的宿主改用公开 API 是 P7；九键、触点、神经重排等留到 v1.x。数据格式的规格文档（P5）还没写，README 的数据表以提案为准，许可证一列按仓库自己的声明（`resources/licenses/msime-engine-dictionary-NOTICE.md`、`docs/third-party.md`）改正过。Linux 和 Windows 上的 C 示例只在 CI 里跑过，本机只在 macOS（Studio，arm64）上跑过三种链接方式。
 
 ## 相关笔记
 
-按 engine-capi、C ABI、cbindgen、cargo-c 检索活跃笔记：[核心会话收尾与日志连接的线程归属](2026-10-29-core-session-lifecycle-and-journal-threads.md) 和 [引擎库的一套默认值、错误码、日志出口与维护锁归属](2026-10-29-engine-library-defaults-errors-log-and-lock.md) 是本篇依赖的 P3，部分重叠，互链（后者「没做的」一条由本篇回答）；[脚本插件工具链](../feature/2026-10-26-script-plugin-toolchain.md) 是按 crate 单独定许可证的先例，部分重叠。其余命中的是 host-api 的 `msime_client.h`，与这个 ABI 无关。没有被本篇吸收或取代的笔记。
+按 engine-capi、C ABI、cbindgen、cargo-c 检索活跃笔记：[引擎 C ABI 1.1 补上的缺口](2026-10-30-engine-capi-abi-1-1-additions.md) 在本篇的函数面上追加调频、混排、本地模式开关、数字选词、词条检查和日志回调，部分重叠，互链；[核心会话收尾与日志连接的线程归属](2026-10-29-core-session-lifecycle-and-journal-threads.md) 和 [引擎库的一套默认值、错误码、日志出口与维护锁归属](2026-10-29-engine-library-defaults-errors-log-and-lock.md) 是本篇依赖的 P3，部分重叠，互链（后者「没做的」一条由本篇回答）；[脚本插件工具链](../feature/2026-10-26-script-plugin-toolchain.md) 是按 crate 单独定许可证的先例，部分重叠。其余命中的是 host-api 的 `msime_client.h`，与这个 ABI 无关。没有被本篇吸收或取代的笔记。

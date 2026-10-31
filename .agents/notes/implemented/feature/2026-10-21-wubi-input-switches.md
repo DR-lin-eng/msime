@@ -40,6 +40,7 @@ Status: implemented
 - **关掉只在混输开启时生效**：`(top_commit_enabled || !mixed_pinyin)`。混输关掉时引擎把码裁回四位，字母无处容纳；宿主已经按下的键不能丢，所以仍按顶字上屏。这正是来源 `ShouldCommitCompleteWubiCodeOnNextKey` 的兜底分支。
 - 为了让 runtime 知道混输状态，`InputEngine` 加 `wubi_mixed_pinyin()`（默认 `false`），`Session` 从 `WubiInputOptions::mixed_pinyin` 转发。runtime 不复制引擎的读音规则。
 - 宿主状态而不是 Engine 状态：改偏好不必等 Engine 空闲重建，下一键生效，与 `wubi_auto_commit_unique` 同一条规矩。
+- 开着 `phrase_preedit` 的宿主（安卓、现代 Windows）上，顶下来的首选和其他组字中途的选词一样进暂存词段（`hold_phrase_progress`：字符键属于选择动作，提交非空且组字还在），不立即写进文档；下一组编码选词或结束组字时连同它一起上屏。Windows 的[五笔提交所有权](../bug-fix/2026-10-23-windows-wubi-commit-owner.md)回归明确核对这个边界。#10419 加的安卓设备验收「26 键五笔第五码顶字」按「立即上屏、读音行画 `a`」断言，与这条约定和安卓默认的拼写写进输入框都不符，develop 的 API 35 设备任务因此一直红（#10442）。改为断言输入框组字区是「你a」、读音行画暂存的「你」，再选「工」核对「你工」一起上屏；运行时回归 `a_fifth_letter_after_wqiy_holds_the_topped_word_with_phrase_preedit` 用真实会话钉住同一行为。顶字该不该立即上屏是产品取舍，改它会同时改变 Windows 的既有行为，不在修红里动。
 
 ### 四码唯一自动上屏
 
@@ -85,7 +86,7 @@ Status: implemented
 
 - `msime-engine`：`a_z_in_the_code_matches_any_one_letter_when_the_wildcard_is_on`、`a_wildcard_query_does_not_leak_glob_metacharacters`、`the_wildcard_only_takes_the_pattern_path_when_the_code_holds_z`、`the_wubi_wildcard_matches_any_letter_and_keeps_guessing_codes_open`、`the_wubi_wildcard_takes_z_from_the_pinyin_lookup`、`turning_the_wubi_wildcard_off_keeps_z_out_of_the_code`、`a_wildcard_code_never_counts_as_a_unique_four_code`。
 - `msime-client-core`：`wubi_z_wildcard_defaults_off_and_roundtrips`、`wubi_fifth_code_top_commit_defaults_on_and_roundtrips`（缺键仍读出出厂值、显式值往返保持）。
-- `msime-input-runtime`：`the_wubi_top_commit_decision_is_the_reference_truth_table`（来源六项真值表逐条）、`the_wubi_auto_commit_decision_needs_all_five_facts`、`turning_off_the_wubi_top_commit_lets_a_mixed_spelling_grow`、`turning_off_the_wubi_top_commit_still_tops_with_mixed_input_off`。
+- `msime-input-runtime`：`the_wubi_top_commit_decision_is_the_reference_truth_table`（来源六项真值表逐条）、`the_wubi_top_commit_tops_a_mixed_letter_that_continues_no_reading`（混输与顶字都开时，续不上读音的字母顶字、能续写的保留组字）、`the_wubi_auto_commit_decision_needs_all_five_facts`、`turning_off_the_wubi_top_commit_lets_a_mixed_spelling_grow`、`turning_off_the_wubi_top_commit_still_tops_with_mixed_input_off`。
 - `msime-client-services`：账号同步导出的键清单与逐键往返带上 `input.wubi_fifth_code_top_commit`。
 - `apps/desktop`：`wubi-preferences.test.ts` 的缺键默认值、`wubi-section.test.tsx` 的两行控件与各自写回的 patch。
 

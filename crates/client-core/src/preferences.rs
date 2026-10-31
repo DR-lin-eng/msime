@@ -454,6 +454,98 @@ impl<'de> Deserialize<'de> for TouchOneHandedSidePanel {
     }
 }
 
+/// 手机触屏底行的中/英键放在空格哪一边（#10228）。默认 [`Self::Right`] 是原来的排法：中/英在空格右边、紧挨回车。[`Self::Left`] 把中/英挪到空格左边：它左边紧挨着的那一串空格、0、逗号、句号整体右移一格，中/英排到这一串的最左边，所以空格左边有标点时标点仍贴着空格、中/英在标点左边；各键宽度不变。作用于 26 键一族（含英文、韩文等同一条底行）、14/18 键、九键外框（含右侧大回车）、九宫格数字键盘和手写的底行，iPad 全尺寸键盘和鸿蒙 2in1 的底行不受影响；底行没有中/英（iOS 隐藏了中/英键）时不起作用。桌面宿主原样保留、不使用。
+///
+/// 读文档时不认识的值按默认读，不是字符串照样报错，与 [`TouchNumberPadSpace`] 一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchLanguageKeySide {
+    /// 中/英在空格右边、紧挨回车，不写进文档。
+    #[default]
+    Right,
+    /// 中/英在空格左边，排在 123、地球键、符、😀 这些左侧功能键之后。
+    Left,
+}
+
+impl TouchLanguageKeySide {
+    /// 文档和同步键里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Left => "left",
+        }
+    }
+
+    /// 严格解析：只认两种写法，其他值为 `None`。偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "right" => Some(Self::Right),
+            "left" => Some(Self::Left),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for TouchLanguageKeySide {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串（较新版本加的位置）按原来的右边读；不是字符串照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
+}
+
+/// 手机触屏拼音九键字母层 1–9 键上的纵向滑动（#10229，接替 Android 本机设置 `platform.android.nine_key_swipe`，写法与它逐字相同）：沿所选方向滑过判定距离，松手输入键上印的数字；往反方向滑，弹出与长按相同的数字和字母选项（1 键没有字母，不弹）。九键双拼、笔画、数字层和别的键面不受影响。桌面宿主原样保留、不使用。
+///
+/// 读文档时不认识的值按默认（关闭）读，不是字符串照样报错，与 [`TouchNumberPadSpace`] 一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchNineKeySwipeDigits {
+    /// 没有滑动手势，点按和长按照旧；不写进文档。
+    #[default]
+    Off,
+    /// 上滑输入数字，下滑弹出数字和字母。
+    Up,
+    /// 下滑输入数字，上滑弹出数字和字母。
+    Down,
+}
+
+impl TouchNineKeySwipeDigits {
+    /// 文档和同步键里的写法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+
+    /// 严格解析：只认三种写法，其他值为 `None`。偏好文档走宽松的反序列化。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl<'de> Deserialize<'de> for TouchNineKeySwipeDigits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 不认识的字符串（较新版本加的写法）按关闭读；不是字符串照样报错，和其他字段的类型错误一致。
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value).unwrap_or_default())
+    }
+}
+
 /// 上屏后联想显示时候选栏右端放哪些按键（#10078）。只在 `next_word_prediction` 开着时有意义；普通组字的候选栏不受它影响。目前只有 Android 原生键盘读它，其他宿主原样保留。
 ///
 /// 读文档时不认识的值按默认读，不是字符串照样报错，与 [`TouchTwentySixKeyStyle`] 一致。
@@ -1765,9 +1857,24 @@ pub struct Preferences {
     pub wubi_profile: WubiProfile,
     #[serde(default)]
     pub touch_keyboard_layout: TouchKeyboardLayout,
-    /// Android 大屏竖屏也使用分离键盘；还需宿主的分离主开关开启，默认关闭。其他宿主原样保留。
+    /// 大屏竖屏也使用分离键盘；还需宿主的分离主开关开启，默认关闭。Android 与鸿蒙读它，其他宿主原样保留。
     #[serde(default)]
     pub touch_keyboard_split_portrait: bool,
+    /// 鸿蒙大屏（平板、折叠屏内屏）横屏时把 26 键一族和韩文键盘分成左右两半，规则与 Android 的 `SplitKeyboardPolicy` 相同。Android 的主开关在它自己的本机设置 `platform.android.split_keyboard` 里，不读这个字段；iOS 用 App Group 里的开关。默认关且不写进文档，其他宿主原样保留。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub touch_keyboard_split: bool,
+    /// 鸿蒙分离键盘开始启用的最短屏幕边（vp），480–1000、步进 20，默认 600，与 Android 本机设置 `platform.android.split_keyboard_threshold` 同一范围。默认值不写进文档。
+    #[serde(
+        default = "default_touch_keyboard_split_threshold",
+        skip_serializing_if = "is_default_touch_keyboard_split_threshold"
+    )]
+    pub touch_keyboard_split_threshold: u16,
+    /// 鸿蒙分离键盘中间空隙至少占整行的百分比，10–40、步进 5，默认 25，与 Android 本机设置 `platform.android.split_keyboard_gap` 同一范围。默认值不写进文档。
+    #[serde(
+        default = "default_touch_keyboard_split_gap",
+        skip_serializing_if = "is_default_touch_keyboard_split_gap"
+    )]
+    pub touch_keyboard_split_gap: u8,
     /// Android 和 iOS 双拼键盘的 26 / 14 键选择；默认 26 键，其他宿主保留该字段。
     #[serde(default, skip_serializing_if = "TouchShuangpinLayout::is_default")]
     pub touch_shuangpin_layout: TouchShuangpinLayout,
@@ -1815,8 +1922,8 @@ pub struct Preferences {
     /// 触屏键盘的拼写写进输入框还是只画在候选栏；缺这个键的旧文档读作输入框。
     #[serde(default)]
     pub touch_spelling_position: TouchSpellingPosition,
-    /// 全拼 26 键组字时第三排左端的 ⇧ 默认画「分词」（送 `'` 断音节）；打开后保留 Shift，点一下臂辅助码（Shift+字母）。九键、14 键和 18 键有自己的分词键，不受它影响。默认关，即原有分词行为。桌面宿主原样保留、不使用。
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// 全拼 26 键组字时第三排左端默认保留 ⇧，点一下再输字母即臂辅助码；关闭后改画「分词」（送 `'` 断音节）。九键、14 键和 18 键有自己的分词键，不受它影响。桌面宿主原样保留、不使用。
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
     pub touch_quanpin_shift: bool,
     /// 手机触屏中文 26 键字母层（全拼、26 键双拼、五笔 26 键、粤拼等）底行的样式，见 [`TouchTwentySixKeyStyle`]；英文 26 键、iPad 全尺寸键盘和鸿蒙 2in1 不受它影响。默认即现有底行且不写进文档。桌面宿主原样保留、不使用。
     #[serde(default, skip_serializing_if = "TouchTwentySixKeyStyle::is_default")]
@@ -1853,6 +1960,12 @@ pub struct Preferences {
     /// 大屏单手模式时空出来的一侧放什么，见 [`TouchOneHandedSidePanel`]。默认空着且不写进文档。桌面宿主原样保留、不使用。
     #[serde(default, skip_serializing_if = "TouchOneHandedSidePanel::is_default")]
     pub touch_one_handed_side_panel: TouchOneHandedSidePanel,
+    /// 手机触屏底行的中/英键在空格哪一边，见 [`TouchLanguageKeySide`]。默认在右边且不写进文档。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "TouchLanguageKeySide::is_default")]
+    pub touch_language_key_side: TouchLanguageKeySide,
+    /// 手机触屏拼音九键 1–9 键滑动输入数字的方向，见 [`TouchNineKeySwipeDigits`]。接替 Android 本机设置 `platform.android.nine_key_swipe`，由 Android 宿主一次性迁入（[`PreferencesStore::migrate_android_key_layout`]）；判定距离仍是 Android 本机设置。默认关且不写进文档。桌面宿主原样保留、不使用。
+    #[serde(default, skip_serializing_if = "TouchNineKeySwipeDigits::is_default")]
+    pub touch_nine_key_swipe_digits: TouchNineKeySwipeDigits,
     /// 仅 Android 使用，其他宿主原样保留。
     #[serde(default)]
     pub android_text_trackpad: TextTrackpadPreferences,
@@ -2168,6 +2281,9 @@ pub struct Preferences {
     /// 候选翻译服务选的是 AI 辅助时为真，复用 `ai_assistant` 的服务商、接口地址、Token 与模型做候选词翻译；不要求 `ai_assistant.enabled`，只想用翻译、不开 AI 联想也能生效。与 `translation_account` 一样必须由用户显式选择。
     #[serde(default)]
     pub translation_ai: bool,
+    /// 内部标记，不是设置：这份文档已经按「AI 辅助翻译要显式选择」定过一次。Android 和 iOS 以前不读 `translation_ai`，AI 联想开着、又没选别的翻译服务时就用 AI 翻译候选；现在各端都只认 `translation_ai`，所以读到没有这个标记的文档时，在这两个平台上把当时实际在用 AI 翻译的情形一次性写成显式选择，再标上它（`Preferences::settle_translation_ai_selection`）；之后用户改选别的服务也不会再被改回来。新文档从一开始就带着它（`Default` 为真），缺键时按假读。保存时只会从假变真（`PreferencesStore::save`），恢复默认设置和导入设置文件都不会把它清掉。不在任何设置页上显示。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub translation_ai_migrated: bool,
     /// 向 `https://api.msime.app/v1/telemetry/events` 发送匿名使用报告（每日活跃、会话结束、崩溃摘要；见 `telemetry` 和 PRIVACY.md）。默认开启；关闭后停止全部上报并清空本地队列。读取方把缺失的键当作开启。
     #[serde(default = "enabled_by_default")]
     pub usage_reporting: bool,
@@ -3833,6 +3949,38 @@ impl Preferences {
     }
 }
 
+/// Android 和 iOS 以前不读 `translation_ai`：AI 联想（`ai_assistant.enabled`）开着、又没选别的翻译服务时，键盘就用 AI 配置翻译候选。读入没有 `translation_ai_migrated` 标记的旧文档时，要把这种情形一次性写成显式选择；其余平台一直只认 `translation_ai`，不动。
+const TRANSLATION_AI_WAS_IMPLICIT: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+impl Preferences {
+    /// 读入偏好文档时调用一次：文档还没有 `translation_ai_migrated` 标记，就是各端统一成「AI 辅助翻译要显式选择」之前写下的。`was_implicit` 为真（Android、iOS，见 [`TRANSLATION_AI_WAS_IMPLICIT`]）、AI 联想开着且服务商、接口地址、模型都已填写、没有选 AI 翻译、没有选水杉账号、小牛和自定义都没启用、腾讯仍是默认的开着但两项凭据不全时，那台设备当时就在用 AI 翻译候选：把 `translation_ai` 打开，同时关掉没有凭据的腾讯（不关的话共享层的选路会先选中它），与设置页选「AI 辅助」写下的样子相同。腾讯关着说明用户在旧版「翻译服务」页存过「不使用在线翻译」之类的非腾讯选择（旧版两端的那一页都没有 AI 选项，选非腾讯项时会把腾讯显式写成关），那是明确不要在线翻译，不能改成 AI；三项 AI 配置不全时旧版键盘也不发 AI 请求，同样不选。令牌不在这里查：iOS 的令牌在钥匙串里，共享层看不到。不论平台都标上标记，之后再读不会重来。只改内存里读到的这份，文件等下一次真正的保存才带上新值和标记，在那之前每次读都得到同样的结果。
+    fn settle_translation_ai_selection(&mut self, was_implicit: bool) {
+        if self.translation_ai_migrated {
+            return;
+        }
+        let tencent_unconfigured = self.tencent_tmt.enabled
+            && !(crate::translation::usable_credential(&self.tencent_tmt.secret_id)
+                && crate::translation::usable_credential(&self.tencent_tmt.secret_key));
+        let ai = &self.ai_assistant;
+        let ai_configured = !ai.provider.trim().is_empty()
+            && !ai.endpoint.trim().is_empty()
+            && !ai.model.trim().is_empty();
+        if was_implicit
+            && ai.enabled
+            && ai_configured
+            && !self.translation_ai
+            && !self.translation_account
+            && !self.niutrans.enabled
+            && !self.custom_translation.enabled
+            && tencent_unconfigured
+        {
+            self.translation_ai = true;
+            self.tencent_tmt.enabled = false;
+        }
+        self.translation_ai_migrated = true;
+    }
+}
+
 /// Three voice switches the source ships on and the shared document had off: muting other audio while recording, Doubao's semantic smoothing (DDC), and polishing the recognized text.
 ///
 /// `platforms/windows/installer/config.default.toml` has all three `true`, matching the source's factory configuration, but like smart punctuation that file is only the installed template - the running host reads this document - so the effective first-run value on Windows was `false`. macOS is the port of that desktop product and follows it. None of the three depends on the platform: muting uses CoreAudio on macOS, DDC is a Doubao request flag, and polishing still needs a polish token before anything is sent.
@@ -3996,6 +4144,31 @@ fn default_touch_key_spacing_tenths() -> u8 {
     60
 }
 
+/// 分离键盘阈值的取值范围、步进和默认值，与 Android `SplitKeyboardPolicy` 的本机设置相同。
+pub const TOUCH_KEYBOARD_SPLIT_THRESHOLD_RANGE: std::ops::RangeInclusive<u16> = 480..=1000;
+pub const TOUCH_KEYBOARD_SPLIT_THRESHOLD_STEP: u16 = 20;
+pub const TOUCH_KEYBOARD_SPLIT_THRESHOLD_DEFAULT: u16 = 600;
+/// 分离键盘中间空隙百分比的取值范围、步进和默认值，与 Android `SplitKeyboardPolicy` 的本机设置相同。
+pub const TOUCH_KEYBOARD_SPLIT_GAP_RANGE: std::ops::RangeInclusive<u8> = 10..=40;
+pub const TOUCH_KEYBOARD_SPLIT_GAP_STEP: u8 = 5;
+pub const TOUCH_KEYBOARD_SPLIT_GAP_DEFAULT: u8 = 25;
+
+fn default_touch_keyboard_split_threshold() -> u16 {
+    TOUCH_KEYBOARD_SPLIT_THRESHOLD_DEFAULT
+}
+
+fn is_default_touch_keyboard_split_threshold(value: &u16) -> bool {
+    *value == TOUCH_KEYBOARD_SPLIT_THRESHOLD_DEFAULT
+}
+
+fn default_touch_keyboard_split_gap() -> u8 {
+    TOUCH_KEYBOARD_SPLIT_GAP_DEFAULT
+}
+
+fn is_default_touch_keyboard_split_gap(value: &u8) -> bool {
+    *value == TOUCH_KEYBOARD_SPLIT_GAP_DEFAULT
+}
+
 fn default_touch_row_spacing_tenths() -> u8 {
     70
 }
@@ -4073,6 +4246,9 @@ impl Default for Preferences {
             wubi_profile: WubiProfile::default(),
             touch_keyboard_layout: TouchKeyboardLayout::default(),
             touch_keyboard_split_portrait: false,
+            touch_keyboard_split: false,
+            touch_keyboard_split_threshold: TOUCH_KEYBOARD_SPLIT_THRESHOLD_DEFAULT,
+            touch_keyboard_split_gap: TOUCH_KEYBOARD_SPLIT_GAP_DEFAULT,
             touch_shuangpin_layout: TouchShuangpinLayout::default(),
             touch_wubi_layout: TouchWubiLayout::default(),
             touch_keyboard_schemes: TouchKeyboardSchemePreferences::default(),
@@ -4088,7 +4264,7 @@ impl Default for Preferences {
             touch_shuangpin_key_hints: false,
             touch_japanese_toggle_input: true,
             touch_spelling_position: TouchSpellingPosition::default(),
-            touch_quanpin_shift: false,
+            touch_quanpin_shift: true,
             touch_twenty_six_key_style: TouchTwentySixKeyStyle::default(),
             touch_fourteen_key_style: TouchFourteenKeyStyle::default(),
             touch_nine_key_style: TouchNineKeyStyle::default(),
@@ -4098,6 +4274,8 @@ impl Default for Preferences {
             touch_twenty_six_symbol_first: false,
             touch_number_pad_space: TouchNumberPadSpace::default(),
             touch_one_handed_side_panel: TouchOneHandedSidePanel::default(),
+            touch_language_key_side: TouchLanguageKeySide::default(),
+            touch_nine_key_swipe_digits: TouchNineKeySwipeDigits::default(),
             touch_quick_punctuation_symbols: default_touch_quick_symbols(),
             touch_toolbar: TouchToolbarPreferences::default(),
             harmony_toolbar: HarmonyToolbarPreferences::default(),
@@ -4195,6 +4373,7 @@ impl Default for Preferences {
             translation_secondary_language: None,
             translation_account: false,
             translation_ai: false,
+            translation_ai_migrated: true,
             usage_reporting: true,
             update_channel: UpdateChannel::Stable,
         }
@@ -5018,6 +5197,15 @@ impl Preferences {
         {
             return Err(PreferencesError::InvalidTouchKeyboardSpacing);
         }
+        if !TOUCH_KEYBOARD_SPLIT_THRESHOLD_RANGE.contains(&self.touch_keyboard_split_threshold)
+            || !(self.touch_keyboard_split_threshold - TOUCH_KEYBOARD_SPLIT_THRESHOLD_RANGE.start())
+                .is_multiple_of(TOUCH_KEYBOARD_SPLIT_THRESHOLD_STEP)
+            || !TOUCH_KEYBOARD_SPLIT_GAP_RANGE.contains(&self.touch_keyboard_split_gap)
+            || !(self.touch_keyboard_split_gap - TOUCH_KEYBOARD_SPLIT_GAP_RANGE.start())
+                .is_multiple_of(TOUCH_KEYBOARD_SPLIT_GAP_STEP)
+        {
+            return Err(PreferencesError::InvalidTouchKeyboardSplit);
+        }
         if self.touch_quick_punctuation_symbols
             != normalize_touch_quick_symbols(&self.touch_quick_punctuation_symbols)
         {
@@ -5200,6 +5388,8 @@ pub enum PreferencesError {
     InvalidAdaptiveCandidateLayout,
     #[error("触屏键盘宽度必须为 75–100%，键距为 0–12 dp，行距为 0–16 dp，高度调整为 -12–48 dp")]
     InvalidTouchKeyboardSpacing,
+    #[error("分离键盘启用宽度须为 480–1000、步进 20，中间空隙须为 10–40%、步进 5")]
+    InvalidTouchKeyboardSplit,
     #[error("触控板水平步长须为 4–48 dp，垂直步长须为 8–96 dp")]
     InvalidTextTrackpad,
     #[error("快捷符号必须是去重的单字素列表，最多十二项且不含空白或控制字符")]
@@ -5512,6 +5702,9 @@ impl PreferencesStore {
         snapshot
             .preferences
             .settle_smart_punctuation_default(SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT);
+        snapshot
+            .preferences
+            .settle_translation_ai_selection(TRANSLATION_AI_WAS_IMPLICIT);
         // 读到哪份文档就按哪份文档的代理设置发请求：设置窗口和输入宿主都可能建 HTTP 客户端，
         // 每个进程自己那份 `network::current` 由它读到的最近一版偏好决定（见 `crate::network`）。
         crate::network::install(&snapshot.preferences.network);
@@ -5648,6 +5841,8 @@ impl PreferencesStore {
     /// 把 Android 本机旧开关迁进共享偏好；在同一把锁里核对修订号和原始字段。较新版本写入的样式不能被宽松反序列化后的默认值覆盖，迁移数字行时也要原样保留。
     ///
     /// `nine_key_symbols` / `nine_key_digit_symbols` 是本机旧键 `platform.android.nine_key_symbols` / `platform.android.nine_key_digit_symbols` 里用户自定义的表：宿主只在旧值解析得出、又不等于 Android 出厂表时传非空表，等于出厂表或解析不出时传空表（什么也不迁）。共享偏好里这一项在盘上缺键或是空数组时才写入规范化后的表；盘上已经有非空数组（别的设备或较新版本写的，哪怕本版本读出来全被丢掉）时不拿本机旧值覆盖。
+    ///
+    /// `nine_key_swipe_digits` 是本机旧设置 `platform.android.nine_key_swipe` 严格解析后的值，没有旧值或旧值不认识时传 [`TouchNineKeySwipeDigits::Off`]：上滑或下滑只在共享字段缺键或明写 `off` 时写入，别的设备选的方向和较新版本的写法都原样留着。
     pub fn migrate_android_key_layout(
         &self,
         expected_revision: u64,
@@ -5655,6 +5850,7 @@ impl PreferencesStore {
         number_row: bool,
         nine_key_symbols: &[String],
         nine_key_digit_symbols: &[String],
+        nine_key_swipe_digits: TouchNineKeySwipeDigits,
     ) -> Result<PreferencesSnapshot, PreferencesError> {
         let _lock = self.lock()?;
         let (current, mut unknown) = self.read_locked_keeping_unknown()?;
@@ -5702,6 +5898,12 @@ impl PreferencesStore {
                 *field = normalize_nine_key_sidebar_symbols(legacy);
             }
         }
+        let swipe = document.pointer("/preferences/touch_nine_key_swipe_digits");
+        if nine_key_swipe_digits != TouchNineKeySwipeDigits::Off
+            && swipe.is_none_or(|value| value.as_str() == Some("off"))
+        {
+            preferences.touch_nine_key_swipe_digits = nine_key_swipe_digits;
+        }
         // 只在此次迁移接回未知样式，不改变设置页主动选择新样式的保存规则。
         for (key, is_known) in [
             (
@@ -5726,6 +5928,12 @@ impl PreferencesStore {
                     .pointer("/preferences/touch_nine_key_style")
                     .and_then(serde_json::Value::as_str)
                     .is_none_or(|value| TouchNineKeyStyle::parse(value).is_some()),
+            ),
+            (
+                "touch_nine_key_swipe_digits",
+                swipe
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|value| TouchNineKeySwipeDigits::parse(value).is_some()),
             ),
         ] {
             if !is_known {
@@ -5795,6 +6003,10 @@ impl PreferencesStore {
         // 智能标点的一次性迁移标记同样只增不减：`current` 是按迁移后的样子读出来的，标记总在；写入方（设置页、宿主、MCP、同步）的偏好里没有这个键时照样带上，否则下一次读会把用户刚关掉的智能标点又打开。
         if current.preferences.smart_punctuation_migrated {
             preferences.smart_punctuation_migrated = true;
+        }
+        // AI 辅助翻译的迁移标记同理：不带上它，下一次读会把用户刚改选的服务又改回 AI 辅助。
+        if current.preferences.translation_ai_migrated {
+            preferences.translation_ai_migrated = true;
         }
         // 切换热键在文档里只有规范形一种写法：别名写法在写入处归一，与出厂值等价的写法按出厂值不落盘。
         preferences.keybindings.normalize_toggle_hotkeys();
@@ -6345,6 +6557,10 @@ fn salvage_preferences(
     if !source.contains_key("smart_punctuation_migrated") {
         salvaged.remove("smart_punctuation_migrated");
     }
+    // AI 辅助翻译的迁移标记也一样：没有它的损坏文档出自统一成显式选择之前，读回来照旧文档那样迁移一次。
+    if !source.contains_key("translation_ai_migrated") {
+        salvaged.remove("translation_ai_migrated");
+    }
     let mut kept = false;
     let mut not_kept = BTreeSet::new();
     for (key, value) in &source {
@@ -6384,6 +6600,7 @@ fn salvage_preferences(
         deserialize_keeping_unknown::<Preferences>(&serde_json::Value::Object(salvaged), &[])?;
     unknown.extend(newer_list_values(&serde_json::Value::Object(source)));
     preferences.settle_smart_punctuation_default(SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT);
+    preferences.settle_translation_ai_selection(TRANSLATION_AI_WAS_IMPLICIT);
     Ok(Salvage {
         preferences,
         kept,

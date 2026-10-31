@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""iOS「按键布局」设置：键盘页的入口只在本版本至少提供一组时显示，入口副标题取自 SharedUI 里三端共用的文字；子页是键盘类型分段、整块预览加等宽样式胶囊和当前样式说明的一张卡片（26 键卡片里还有「符」与「123」互换开关，9 键卡片里还有「九键左侧符号」导航行），下面是「数字键盘」一组胶囊（组末是「数字键盘左侧符号」导航行）和顶部数字行开关；两张符号表共用一个编辑页（KeyLayoutStyleTests 与 NineKeySidebarSettingsTests 钉住文字本身、预览的底行和高亮、编辑规则）。"""
+"""iOS「按键布局」设置：键盘页的入口只在本版本至少提供一组时显示，入口副标题取自 SharedUI 里三端共用的文字；子页是键盘类型分段、整块预览加等宽样式胶囊和当前样式说明的一张卡片（26 键卡片里还有「符」与「123」互换开关，每张卡片都有「中/英键放在空格左边」开关，9 键卡片里还有「九键左侧符号」导航行），下面是「数字键盘」一组胶囊（组末是「数字键盘左侧符号」导航行）和顶部数字行开关；两张符号表共用一个编辑页（KeyLayoutStyleTests 与 NineKeySidebarSettingsTests 钉住文字本身、预览的底行和高亮、编辑规则）。"""
 from pathlib import Path
 import re
 import unittest
@@ -95,6 +95,22 @@ class KeyLayoutSettingsContract(unittest.TestCase):
         self.assertIn('.accessibilityIdentifier("keyLayoutSymbolFirstToggle")', toggle)
         self.assertEqual(self.source.count("TouchKeyLayoutOffering.symbolFirstTitle"), 1, "one toggle, only in the 26-key card")
 
+    def test_language_left_toggle_sits_in_every_card_after_the_other_toggles(self):
+        # #10228：「中/英键放在空格左边」在每个分段的样式卡片里，不按分段设条件；26 键里排在「符」与「123」互换之后，文字取自三端共用的常量，打开写 left、关上写 right。
+        card = member(self.source, "  private func styleCard(")
+        note = card.index("if let note = kind.note(style) {")
+        symbol_first = card.index("TouchKeyLayoutOffering.symbolFirstTitle")
+        toggle = card.index("DesignToggleRow(title: TouchKeyLayoutOffering.languageLeftTitle, subtitle: TouchKeyLayoutOffering.languageLeftSubtitle,")
+        self.assertLess(note, toggle)
+        self.assertLess(symbol_first, toggle)
+        # 互换开关的条件块在中/英开关之前就闭合了：中/英开关不在 `if kind == .twentySixKey` 里。
+        gated = card[card.index("if kind == .twentySixKey {"):toggle]
+        self.assertEqual(gated.count("{") - gated.count("}"), 0, "the language toggle is shown on every kind")
+        self.assertIn("isOn: Binding(get: { style.languageKeySide == .left },", card[toggle:])
+        self.assertIn("set: { save(TouchKeyLayoutStyle.save(languageKeySide: $0 ? .left : .right)) }))", card[toggle:])
+        self.assertIn('.accessibilityIdentifier("keyLayoutLanguageLeftSwitch")', card[toggle:])
+        self.assertEqual(self.source.count("TouchKeyLayoutOffering.languageLeftTitle"), 1, "one toggle, in the shared card")
+
     def test_number_pad_group_uses_the_same_pills_below_the_style_card(self):
         # #10056：「数字键盘」一组有入口就列，在样式卡片和顶部数字行开关之间；选项是同一套等宽胶囊，说明在胶囊下方，不画预览。
         gate = self.body.index("if offering.offersAnyGroup { numberPadGroup }")
@@ -169,6 +185,99 @@ class KeyLayoutSettingsContract(unittest.TestCase):
         self.assertIn(".accessibilityHidden(true)", body)
         # 加了标识的子元素会重新出现在读屏和 UI 测试的树里，预览里不给任何键标识。
         self.assertNotIn(".accessibilityIdentifier(", preview)
+
+
+class NineKeySwipeDigitsSettingsContract(unittest.TestCase):
+    """#10229「九键滑动输入数字」：放在键盘页「手势」组里紧跟 26 键「滑动方向」那一行之后，不进「按键布局」子页；三端同一行文字，写共享偏好 `touch_nine_key_swipe_digits`。"""
+
+    def setUp(self):
+        self.source = LAYOUT_PAGE.read_text()
+        self.group = member(self.source, "  private var gestureGroup: some View {")
+
+    def test_row_follows_the_twenty_six_key_direction_inside_the_gesture_group(self):
+        direction = self.group.index('sheetTitle: "滑动方向", identifier: "appSwipeSymbolsDirection")')
+        gate = self.group.index("if Self.offersNineKeySwipeDigits {")
+        glide = self.group.index('DesignToggleRow(title: "滑行输入"')
+        self.assertLess(direction, gate)
+        self.assertLess(gate, glide)
+        between = self.group[direction:gate]
+        self.assertIn(".disabled(!swipeSymbols)", between)
+        self.assertEqual(between.count("DesignDivider()"), 1, "the row comes right after the direction row and its divider")
+        row = self.group[gate:glide]
+        self.assertIn("DesignSelectRow(title: NineKeySwipeDigits.title, subtitle: NineKeySwipeDigits.subtitle,", row)
+        self.assertIn("options: NineKeySwipeDigits.allCases.map {", row)
+        self.assertIn("DesignOption(title: $0.optionTitle, value: $0, identifier: Self.nineKeySwipeDigitsIdentifier($0))", row)
+        self.assertIn("selection: Binding(get: { nineKeySwipeDigits }, set: { saveNineKeySwipeDigits($0) }),", row)
+        self.assertIn('sheetTitle: NineKeySwipeDigits.title, identifier: "appNineKeySwipeDigits")', row)
+        self.assertIn("DesignDivider()", row)
+        # 与 26 键的开关无关，不跟着它置灰。
+        self.assertNotIn(".disabled(", row)
+
+    def test_row_is_listed_only_when_the_edition_offers_pinyin_nine_key(self):
+        self.assertIn("static var offersNineKeySwipeDigits: Bool { ChineseInputScheme.nineKey.isOfferedByEdition }", self.source)
+
+    def test_option_identifiers(self):
+        identifier = member(self.source, "  static func nineKeySwipeDigitsIdentifier(")
+        for case, name in (("off", "appNineKeySwipeDigitsOff"), ("up", "appNineKeySwipeDigitsUp"), ("down", "appNineKeySwipeDigitsDown")):
+            self.assertIn(f'case .{case}: "{name}"', identifier)
+
+    def test_saving_writes_the_shared_preference_and_reading_follows_the_document(self):
+        save = member(self.source, "  private func saveNineKeySwipeDigits(")
+        self.assertIn("NineKeySwipeDigits.save(value)", save)
+        self.assertIn("NineKeySwipeDigits(in: MetasequoiaInputSessionBridge.loadSharedPreferences())", save)
+        read = member(self.source, "  private func readPreferences() {")
+        guard = read.index("guard let preferences else { return }")
+        self.assertLess(guard, read.index("NineKeySwipeDigits.mirror(preferences)"))
+        self.assertIn("nineKeySwipeDigits = NineKeySwipeDigits(in: preferences)", read[guard:])
+
+    def test_shared_texts_and_wire_values(self):
+        source = (ROOT / "platforms/ios/SharedUI/preferences/KeyboardLayoutPreference.swift").read_text()
+        self.assertIn('static let documentKey = "touch_nine_key_swipe_digits"', source)
+        self.assertIn('static let mirrorKey = "keyboard.nineKeySwipeDigits"', source)
+        self.assertIn("case off, up, down", source)
+        self.assertIn('static let title = "九键滑动输入数字"', source)
+        self.assertIn('static let subtitle = "沿所选方向滑动输入数字，反方向弹出字母。"', source)
+        for case, title in (("off", "关闭"), ("up", "上滑"), ("down", "下滑")):
+            self.assertIn(f'case .{case}: "{title}"', source)
+
+    def test_key_layout_page_is_unchanged(self):
+        self.assertNotIn("NineKeySwipe", KEY_LAYOUT_PAGE.read_text())
+
+    def test_reset_all_settings_drops_the_mirror(self):
+        source = (ROOT / "platforms/ios/App/Sources/settings/DeveloperOptionsView.swift").read_text()
+        self.assertIn("NineKeySwipeDigits.mirrorKey", member(source, "  @MainActor static func resetLocalPreferences() {"))
+
+
+class NineKeySwipeDigitsKeyboardContract(unittest.TestCase):
+    """键盘里的接线：九宫格建键时接上按键级的滑动跟踪，只在拼音九键字母层按设置判定，两种结果走长按菜单的路径；共享文档变了就抄进镜像。行为本身由 NineKeySwipeDigitsTests 钉住。"""
+
+    def setUp(self):
+        self.source = (ROOT / "platforms/ios/KeyboardExtension/Sources/keyboard/KeyboardViewController.swift").read_text()
+
+    def test_grid_keys_are_wired(self):
+        layout = member(self.source, "  private func makeNineKeyLayout() -> UIView {")
+        for line in ("key.nineKeySwipeDigit = digit", "key.nineKeySwipeHasLetters = letters != nil", "key.nineKeySwipeHint = number",
+                     "key.nineKeySwipeMode = { [weak self] in self?.activeNineKeySwipeDigits ?? .off }",
+                     "self.handleNineKeySwipe(gesture, from: key, digit: digit)"):
+            self.assertIn(line, layout)
+
+    def test_only_the_pinyin_letter_layer_swipes(self):
+        gate = member(self.source, "  var activeNineKeySwipeDigits: NineKeySwipeDigits {")
+        for condition in ("!showsSymbols", "inputScheme == .nineKey", "nineKeyHoldPopup == nil", "!cursorSwipeActive", "!isVoiceOverRunning()"):
+            self.assertIn(condition, gate)
+
+    def test_results_reuse_the_hold_menu_paths(self):
+        handler = member(self.source, "  private func handleNineKeySwipe(")
+        digit = handler[handler.index("case .digit:"):handler.index("case .letters:")]
+        self.assertIn("countKeyPress(numberPadKeyID(digit))", digit)
+        self.assertIn("commitNineKeyHoldOption(String(digit))", digit)
+        letters = handler[handler.index("case .letters:"):]
+        self.assertIn("countKeyPress(TypingKeyID.nineKey(digit))", letters)
+        self.assertIn("showKeyHoldOptions(from: key, options: Self.nineKeyHoldOptions(digit))", letters)
+
+    def test_the_document_refreshes_the_setting(self):
+        self.assertEqual(self.source.count("NineKeySwipeDigits.mirror("), 2, "at load and on every document reload")
+        self.assertIn("nineKeySwipeDigits = NineKeySwipeDigits(in: preferences)", self.source)
 
 
 if __name__ == "__main__":

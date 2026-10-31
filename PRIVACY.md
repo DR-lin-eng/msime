@@ -10,7 +10,7 @@
 
 新装的默认配置下，**没有任何功能会把你输入的内容发出设备**。会这样做的两项都要你自己打开：云联想把当前正在组的拼音串发给 Google 输入工具，新装默认关闭，Windows、Linux 与 macOS 在第一次使用时说明并让你选择，默认选项是不启用（见[云联想](#云联想新装默认关闭)）；候选翻译要你在设置里选择一个翻译服务（自己的凭据，或显式选择「水杉账号」，后者把当前页的中文候选词发到 `api.msime.app`，见[候选翻译](#候选翻译默认不联网)）。其余所有联网功能——语音识别、语音润色、AI 联想、账号同步——默认凭据为空，你不填自己的密钥它们就不会发出任何请求。从旧版本升级时沿用配置文件里已存的值，不会替你改。
 
-另有一条不携带输入内容的自有上报路径，端点是本项目自己的 `https://api.msime.app`：六个平台都会发送匿名使用统计（每天一条活跃记录、每个输入法进程一条会话记录、崩溃时的错误摘要与调用栈），**默认开启**，可以在设置里用「匿名使用统计」（偏好字段 `usage_reporting`）关闭，关闭后不再发送并清空本机队列，见[使用统计与崩溃上报](#使用统计与崩溃上报默认开启可关闭)。打字统计的每日计数只有在你登录账号并打开「上传到云端」后才会上传，默认关闭，见[打字统计上传](#打字统计上传默认关闭需要登录)。设置窗口或 App 首页打开时会拉取一次不带凭据的[服务公告](#服务公告)；社区里只有你主动提交时才会发出[举报](#社区举报与审核)。六个平台还会在安装后首次启动时向同一端点注册一个本机匿名水杉账号，只发送本机随机生成的标识与口令，见[账号与同步](#账号与同步需要登录)。上述自有上报不依赖第三方统计或崩溃上报 SDK。可选的 Android 拍照识字模块在本机离线识别，关闭了所用推理库的遥测，见[拍照识字](#android-拍照识字可选模块手动导入)；Android 与 iOS 手写所用 ML Kit 自带的诊断上报也关掉了（Android 在基础 APK 里删掉上传组件，iOS 键盘写入 ML Kit 的统计关闭开关），见[资源与更新下载](#资源与更新下载)。
+另有一条不携带输入内容的自有上报路径，端点是本项目自己的 `https://api.msime.app`：六个平台都会发送匿名使用统计（每天一条活跃记录、每个输入法进程一条会话记录、崩溃时的错误摘要与调用栈），**默认开启**，可以在设置里用「匿名使用统计」（偏好字段 `usage_reporting`）关闭，关闭后不再发送并清空本机队列，见[使用统计与崩溃上报](#使用统计与崩溃上报默认开启可关闭)。打字统计的每日计数只有在你登录账号并打开「上传到云端」后才会上传，默认关闭，见[打字统计上传](#打字统计上传默认关闭需要登录)。设置窗口或 App 首页打开时会拉取一次不带凭据的[服务公告](#服务公告)；社区里只有你主动提交时才会发出[举报和屏蔽作者](#社区举报与审核)的请求。六个平台还会在安装后首次启动时向同一端点注册一个本机匿名水杉账号，只发送本机随机生成的标识与口令，见[账号与同步](#账号与同步需要登录)。上述自有上报不依赖第三方统计或崩溃上报 SDK。可选的 Android 拍照识字模块在本机离线识别，关闭了所用推理库的遥测，见[拍照识字](#android-拍照识字可选模块手动导入)；Android 与 iOS 手写所用 ML Kit 自带的诊断上报也关掉了（Android 在基础 APK 里删掉上传组件，iOS 键盘写入 ML Kit 的统计关闭开关），见[资源与更新下载](#资源与更新下载)。
 
 HarmonyOS 在这些之前还多一道门：设置应用首次启动时弹窗征得隐私政策授权，选择「不同意」或还没选之前，设置应用和键盘都不发出本文列出的任何请求（使用统计、匿名账号注册、公告、账号、社区、云同步、检查更新、词库更新、模型下载，以及你自己配置的云联想、翻译、AI 和云端语音），本机打字照常；升级上来的老用户也会看到一次。规则在 `platforms/harmony/entry/src/main/ets/privacy/PrivacyConsentPolicy.ts`，说明见 `platforms/harmony/README.md` 的「首次启动的隐私政策授权」。
 
@@ -145,18 +145,19 @@ Windows 与 HarmonyOS 除了你主动提交的[社区举报](#社区举报与审
 - 非英文离线释义（法、日、西、俄、德、韩）与本地语音运行库（sherpa-onnx 与 ONNX Runtime 两个原生库）：只有 Android 的 full 与拼音版下载，其他平台和 Android 的其他版本照旧随包。
 - 手写模型：macOS 下载；Windows 只在系统没有中文 Windows Ink 手写识别器、安装目录里也没有模型时下载；Linux 只在安装前缀里没有随包模型时下载（我们自己发布的 deb/rpm 不带它，各发行版仓库的包继续内置）。
 - 桌面神经联想模型（约 25 MB）：三个桌面平台都只在打开「桌面神经联想」时下载，安装布局里已经带着它时不下载。
+- 离线英文音标词典（ECDICT 生成的 `en-phonetic.db` 与许可声明，约 5.7 MB）：只有 Android 和 Linux 下载，而且只在你打开「显示英文音标」（偏好字段 `candidate_pronunciation`，默认关闭）后、在设置里那一行点「下载」时发生，打开开关本身不联网；macOS 和 Windows 随安装包带着。原地址是 `https://github.com/metasequoiaime/chinese-ime-lm/releases/download/pronunciations-ecdict-.../`，和其他资源包一样依次尝试：填了下载镜像时先走你的镜像，再走本项目的镜像 `https://dl.msime.app/gh/` 加原地址，都失败才直连 GitHub，所以通常是本项目的镜像先收到这个请求，能看到你的 IP 和下载的是这个资源包；长度和 SHA-256 固定在 `resources/pronunciations.lock.json`，不论从哪里取到的都按它校验。装好后打字时只在本机查这张表，不发送候选、释义或任何输入内容。
 
 三个桌面平台的 octagram 语法模型只在你点「检查更新」或「下载／更新」时读取官方目录 `https://raw.githubusercontent.com/metasequoiaime/msime/develop/resources/grammar-models.catalog.json`；稳定版、测试版和每日构建在本机按已保存的更新通道筛选，不把通道作为请求参数发送。目录返回模型下载地址、大小和 SHA-256；下载由你再次点击后进行，经设置过的 HTTPS 镜像或目录中的上游 HTTPS 地址获取。请求只包含固定路径和 User-Agent `msime/<版本号>`，不发送输入内容、账号、设备标识、本地路径或已安装模型列表。已安装模型日常离线使用，不因目录更新自动下载或替换；目录或下载失败时保留旧模型。
 
 | | |
 | --- | --- |
 | 触发 | 桌面上只在这几种情况下发生：在设置里选日文、五笔、粤拼、注音或笔画方案（macOS；水杉五笔随包带着五笔码表）；在设置里选用本地语音识别而输入法没有自带语音运行库（macOS）；第一次打开手写面板（宿主需要下载手写模型时）；打开「桌面神经联想」；设置应用启动时发现已保存的方案（或上一次的中文方案）需要的词库、已打开的桌面神经联想需要的模型、或已选用的本地语音识别需要的运行库（macOS）还没装；在资源包那一行点「下载」或「重试」。Android 上只在你在「添加语言」里添加日语、五笔、粤语、注音或笔画，打开离线释义，打开「离线识别」（本机还没有语音运行库时），或在资源包那一行点「下载」「重试」时发生；应用启动时不自动下载，唯一的例外是五笔码表：全功能版的当前方案或上一次的中文方案是五笔、本机却没有五笔码表时（例如在首次设置里选了五笔），回到设置应用时弹窗说明原因和大小，问你要不要下载，你点了「下载」才开始（水杉五笔随包带着五笔码表，拼音版没有五笔）。词库自动更新已经下载过同一份五笔码表或日文词典时，安装资源包直接从本机复制，不联网。使用按流量计费的网络时先告诉你下载大小、等你确认。从内置这些文件的旧版 Android 升级时，已经解压在本机的文件按固定的长度和 SHA-256 校验后直接转成资源包，不联网；新版同时换了词库版本、旧文件与新的长度和 SHA-256 对不上时，旧文件删除，改为按上面的规则下载 |
-| 目的地 | GitHub Releases（`https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v.../` 的词库，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/` 的桌面神经联想模型，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/offline-glosses-.../` 的离线释义，`https://github.com/k2-fsa/sherpa-onnx/releases/download/v.../` 的 Android 语音运行库归档，`https://github.com/metasequoiaime/msime/releases/download/voice-runtime-macos-v.../` 的 macOS 语音运行库归档（上游库用本项目 Developer ID 重签后发布），下载时会被重定向到 GitHub 的文件存储域名）与 `https://raw.githubusercontent.com/metasequoiaime/msime-engine/<固定提交>/...`（手写模型）；配置了镜像时先从镜像地址下载，镜像失败再回到上面的原地址 |
+| 目的地 | GitHub Releases（`https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v.../` 的词库，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/` 的桌面神经联想模型，`https://github.com/metasequoiaime/chinese-ime-lm/releases/download/offline-glosses-.../` 的离线释义，`https://github.com/k2-fsa/sherpa-onnx/releases/download/v.../` 的 Android 语音运行库归档，`https://github.com/metasequoiaime/msime/releases/download/voice-runtime-macos-v.../` 的 macOS 语音运行库归档（上游库用本项目 Developer ID 重签后发布），下载时会被重定向到 GitHub 的文件存储域名）与 `https://raw.githubusercontent.com/metasequoiaime/msime-engine/<固定提交>/...`（手写模型）。每个文件依次尝试：配置了镜像时先从你的镜像下载，然后是本项目的镜像 `https://dl.msime.app/gh/` 加原地址（Cloudflare R2 前面的缓存，只放行本项目和上面这几个上游的发布文件），都失败再回到上面的原地址 |
 | 发送内容 | 对固定文件的 HTTPS GET 请求，User-Agent 为 `msime/<版本号>`；中断后接着下载时带 `Range` 头，只说明从第几个字节开始。不携带任何输入内容、账号或设备标识 |
 | 需要凭据 | 否 |
-| 偏好字段 | 沿用 `voice_input.asr_model_mirror`，默认空字符串，表示直接访问 GitHub；下载失败时资源包那一行和手写面板都提供「设置下载镜像」 |
+| 偏好字段 | 沿用 `voice_input.asr_model_mirror`，默认空字符串，表示不用你自己的镜像，先走本项目的镜像 `https://dl.msime.app/gh/`、再直连 GitHub；下载失败时资源包那一行和手写面板都提供「设置下载镜像」 |
 | 存放位置 | 偏好目录下的 `resource-packs/<资源包>/`：macOS 是 `~/Library/Application Support/app.msime.macos/resource-packs/`，Windows 是输入法服务的数据目录，Linux 是运行时选项记录的状态目录，Android 是应用私有目录 `files/bootstrap/state/resource-packs/`（没下完的部分留在同一目录下的 `.partial-<资源包>/`，下次接着下载）；许可证文本放在数据旁边 |
-| 代码 | `crates/client-providers/src/resource_packs.rs`、`apps/desktop/src-tauri/src/platform/desktop/desktop_resource_packs.rs`，Android 经 `crates/host-api/src/ffi/pack_downloads.rs` 调用同一份实现；地址、长度和 SHA-256 固定在 `resources/desktop-dictionary.lock.json`、`resources/language-dictionaries.lock.json`、`resources/offline-glosses.lock.json`、`resources/voice-runtime.lock.json` 与 `resources/voice-runtime-android.lock.json`（语音运行库归档和从中取出的两个库）、`resources/voice-runtime-macos.lock.json`（重签的 macOS 语音运行库归档和其中的库）、`resources/handwriting-model.lock.json` 和 `resources/settled-model.lock.json` |
+| 代码 | `crates/client-providers/src/resource_packs.rs`、`apps/desktop/src-tauri/src/platform/desktop/desktop_resource_packs.rs`，Android 经 `crates/host-api/src/ffi/pack_downloads.rs` 调用同一份实现；地址、长度和 SHA-256 固定在 `resources/desktop-dictionary.lock.json`、`resources/language-dictionaries.lock.json`、`resources/offline-glosses.lock.json`、`resources/pronunciations.lock.json`、`resources/voice-runtime.lock.json` 与 `resources/voice-runtime-android.lock.json`（语音运行库归档和从中取出的两个库）、`resources/voice-runtime-macos.lock.json`（重签的 macOS 语音运行库归档和其中的库）、`resources/handwriting-model.lock.json` 和 `resources/settled-model.lock.json` |
 
 镜像规则和下面本地语音模型的相同：必须是 `https://` 地址，镜像运营方能看到你的 IP 和你下载的是哪个资源包，但下载内容按固定的 SHA-256 校验，镜像无法替换文件，校验不过就换下一个来源。不需要这些功能就不会发生这些请求；缺少资源包时对应的方案或手写面板显示为不可用，桌面神经联想保持现有候选；Android 上缺少的语言不出现在键盘里，离线释义只有英文，本地语音识别不可用，中文输入不受影响。
 
@@ -215,6 +216,8 @@ Android 的手写识别使用 ML Kit，**首次使用需要联网下载识别模
 
 社区里看别人发布的皮肤、候选窗口皮肤、插件、词库和回复模板时，每一项都有「举报」入口。只有你选择理由并提交时，才会向 `POST https://api.msime.app/v1/community/reports` 发送 `{kind, item_id, reason, detail}`：`reason` 是固定的六个理由之一（侵权/抄袭、色情低俗、违法违规、垃圾广告、恶意插件、其他），`detail` 是你自己填写的可选说明（最多 1000 字）。请求带账号令牌，已登录用登录账号，否则用本机匿名账号。共享实现在 `crates/client-services/src/community/report.rs`。
 
+iOS、Android、HarmonyOS 以及 macOS 与 Linux 设置应用的作品详情里另有「屏蔽作者」，要先登录水杉账号（不用本机匿名账号）。确认屏蔽时才向 `POST https://api.msime.app/v1/community/blocks` 发送 `{kind, item_id}`，服务端据此找到作品的作者并记在你的账号下，之后你的账号浏览社区目录时不再列出这位作者的作品；服务端不把作者的账号编号返回给客户端，只返回这条屏蔽的编号、作者的显示名和屏蔽时间。「我的 › 隐私 › 已屏蔽的作者」（macOS、Linux 与 HarmonyOS 2in1 在「关于 › 许可与隐私」里）打开时读取 `GET /v1/community/blocks`，取消屏蔽发 `DELETE /v1/community/blocks/{id}`。注销账号时屏蔽记录一并删除。共享实现在 `crates/client-services/src/community/block.rs`。
+
 社区采用先发布后审核：发布的内容立即公开，管理员可以下架。查看「我的作品」或自己作品详情时，请求带 `fields=moderation`，只用来在被下架的作品上显示「已下架」；不会显示下架理由，也没有待审核状态。
 
 ## 留在本地的东西
@@ -222,6 +225,7 @@ Android 的手写识别使用 ML Kit，**首次使用需要联网下载识别模
 - **输入历史与学习数据**由输入引擎（`crates/engine`）管理，写在宿主提供的用户目录里，默认不上传。例外是个人词库：在 Android 上打开云同步后，记为用户词的词条会以服务端读得到的形式上传，其中包括打字时自动造的词和它们学到的权重，见[账号与同步](#账号与同步需要登录)。内置词的调频、删除记录、固定位置、置顶、选词计数和整句联想学到的上下文不上传。
 - **剪贴板历史默认关闭**（`clipboard_history` 默认 `false`）。开启后写入状态目录下的 `clipboard_history.json`，仅本地；关闭时会清空该文件。Android 上开启后，水杉作为当前输入法时会在你每次复制文字后自动记下一条（隐私模式、密码类输入框和系统标记为敏感的内容除外），不再需要手动点「保存当前」。
 - **@ 名单**：用户在设置页「插件」里手动添加的名字和地点写在状态目录下的 `plugins/mentions.json`，仅本地，不读取通讯录或位置。它不在 `preferences.json` 里，所以宿主拷贝偏好和账号同步都不会带上它。「@ 名字与地点」模式默认关闭（`local_modes.mention` 默认 `false`）；从这个模式以及 V、/ 模式上屏的文字不进学习数据，也不计入打字统计。
+- **生词本**：从候选释义加进来、或者从文本导入的生词，连同背单词的复习进度，都写在应用数据目录的 `vocabulary-wordbooks/personal.json` 和 `vocabulary-progress.json` 里，只在本机。生词本不进账号同步、云词库或输入习惯同步，也不上传；词头是候选旁显示的外文释义，释义是你选中的那个中文候选。最多 5000 个词。在背单词里删掉「生词本」这本书就清空了它；导出是你自己选的位置，导出以后那份文件归你处理。代码在 `crates/client-services/src/vocabulary/library.rs`。
 - **导入的辅助码表**：Android 在「输入 › 辅助码方案」里导入的 `.txt` 码表只在本机校验后复制到状态目录下的 `plugins/helpcode/`，不联网、不上传；应用只读你在系统文件选择器里选中的那一个文件，不申请存储权限。
 - **设置**保存在应用数据目录的 `preferences.json`，可用绝对路径环境变量 `MSIME_CLIENT_STATE_DIR` 指向隔离目录。
 

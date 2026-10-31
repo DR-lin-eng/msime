@@ -22,9 +22,10 @@ permissions:
 jobs:
   device:
     name: Android device (API ${{ matrix.api }})
-    # 模拟器要 KVM。2026-10-29 实测（见 .agents/notes/implemented/process/2026-10-29-android-device-on-depot.md），depot-ubuntu-24.04-8 上 /dev/kvm 可用、`emulator -accel-check` 通过，API 35 开机 21 秒（GitHub 的 ubuntu-24.04 是 45 秒），所以跑在 Depot 上，不再占组织共用的 GitHub 托管名额。这个 job 不碰任何 secrets，APK 用开发密钥签名（scripts/signing.sh）。
-    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
-    timeout-minutes: 90
+    # 模拟器需要 KVM；普通 Depot GitHub Actions runner 不提供 /dev/kvm，不能用单台探测结果代替平台能力保证。见 .agents/notes/implemented/process/2026-10-30-android-device-kvm-runner.md。此 job 不接触 secrets，APK 使用开发密钥。
+    runs-on: ubuntu-24.04
+    # 冷构建后整套验收已接近 90 分钟；验收步骤单独限时，给日志上传和退出留出余量。
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -42,8 +43,11 @@ jobs:
       - name: Enable KVM for the emulator
         run: |
           set -euo pipefail
-          test -c /dev/kvm
-          # Depot 已开放设备权限，但容器的 udev 不一定能枚举宿主透传的设备。
+          if [[ ! -c /dev/kvm ]]; then
+            echo "::error::Android 设备验收需要 /dev/kvm 字符设备，请检查 runner 的 KVM 支持。"
+            exit 1
+          fi
+          # 设备已可访问时直接使用，否则由 udev 规则开放当前 runner 的权限。
           if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
             echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
             sudo udevadm control --reload-rules
@@ -96,22 +100,27 @@ jobs:
           resource_dir="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
           bash platforms/android/build-apk.sh "$resource_dir"
       - name: Install, prepare resources and accept input on the AVD
-        run: bash platforms/android/tests/device/smoke.sh "$SERIAL" ${{ matrix.smoke }}
+        timeout-minutes: 90
+        run: |
+          set -euo pipefail
+          mkdir -p target/android
+          bash platforms/android/tests/device/smoke.sh "$SERIAL" ${{ matrix.smoke }} 2>&1 | tee target/android/device-smoke.log
       - name: Collect device logs
-        if: failure() && env.SERIAL != ''
+        if: (failure() || cancelled()) && env.SERIAL != ''
         run: |
           mkdir -p target/android
           adb="$ANDROID_SDK_ROOT/platform-tools/adb"
           timeout 30 "$adb" -s "$SERIAL" logcat -d > target/android/logcat.txt 2>&1 || true
           timeout 30 "$adb" -s "$SERIAL" logcat -d -b crash > target/android/crash.txt 2>&1 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
+        if: failure() || cancelled()
         with:
           name: android-device-api${{ matrix.api }}-logs
           path: |
             target/android/emulator.log
             target/android/logcat.txt
             target/android/crash.txt
+            target/android/device-smoke.log
           if-no-files-found: ignore
       - name: Stop the AVD
         if: always() && env.SERIAL != ''

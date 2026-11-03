@@ -27,11 +27,6 @@ public class KeyboardPressButton extends Button {
         return touchFeedbackPlayed || pendingTouchFeedback > 0;
     }
 
-    /** 候选词块可关闭过渡，按压样式与输入时机保持不变。 */
-    public void setAnimatesPressFeedback(boolean value) {
-        animatesPressFeedback = value;
-        updatePressFeedback();
-    }
     private KeyboardSkin faceSkin;
     private KeyboardKeyRole faceRole;
     private boolean faceSelected;

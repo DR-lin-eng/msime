@@ -17,11 +17,21 @@ pub(crate) struct LoadMonitor {
     shed_until: Option<Instant>,
     external_pressure: bool,
     last_sample: Option<Instant>,
+    /// 断言模型行为的测试用它固定负载状态：并行测试随时可能把一次真实引擎的派发
+    /// 拖过一帧预算，触发与被测行为无关的自适应降级。见 `ignore_load_for_test`。
+    #[cfg(test)]
+    hermetic: bool,
 }
 
 impl LoadMonitor {
     /// 在一个输入动作开始时取样。系统负载探针有节流，不会为每个按键打开文件。
     pub(crate) fn begin(&mut self) {
+        #[cfg(test)]
+        {
+            if self.hermetic {
+                return;
+            }
+        }
         let now = Instant::now();
         if self
             .last_sample
@@ -37,6 +47,12 @@ impl LoadMonitor {
 
     /// 记录输入动作耗时。超过一帧时，下一小段时间让可选模型让路。
     pub(crate) fn finish(&mut self, elapsed: Duration) {
+        #[cfg(test)]
+        {
+            if self.hermetic {
+                return;
+            }
+        }
         if elapsed > INPUT_FRAME_BUDGET {
             self.shed_until = Some(Instant::now() + SHED_WINDOW);
         }
@@ -50,6 +66,16 @@ impl LoadMonitor {
     pub(crate) fn force_shed(&mut self) {
         self.shed_until = Some(Instant::now() + SHED_WINDOW);
         self.external_pressure = false;
+    }
+
+    /// 固定负载状态：探针不再取样，派发耗时也不再触发降级，`should_shed` 从此恒为
+    /// 假。与 `force_shed` 二选一；专为上游新增的、假设模型必定运行的裁决测试而设，
+    /// 不改变非测试构建的行为。
+    #[cfg(test)]
+    pub(crate) fn ignore_load_for_test(&mut self) {
+        self.hermetic = true;
+        self.external_pressure = false;
+        self.shed_until = None;
     }
 
     #[cfg(all(test, target_os = "linux"))]

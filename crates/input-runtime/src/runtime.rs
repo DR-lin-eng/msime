@@ -3346,6 +3346,13 @@ impl<E: InputEngine> Runtime<E> {
         self.load_monitor.force_shed();
     }
 
+    /// 断言模型必定运行的测试（上游九键裁决等）用它固定负载状态：并行测试里一次
+    /// 真实引擎的派发随时可能超出一帧预算，触发与被测行为无关的降级。
+    #[cfg(test)]
+    pub(crate) fn ignore_load_shedding_for_test(&mut self) {
+        self.load_monitor.ignore_load_for_test();
+    }
+
     /// 旁路与字符动作由 Host API 在同一次会话调用内设置、派发并清除。
     pub fn set_touch_point(&mut self, point: Option<(u8, msime_engine::TouchPoint)>) {
         self.pending_touch = point;

@@ -117,6 +117,10 @@ fn only_the_keystroke_model_settles_a_contest() {
             5,
         )
         .unwrap();
+        // 断言模型必定运行的测试固定负载状态：并行测试把派发拖过一帧预算会触发
+        // 输入负载降级（.agents/notes/implemented/bug-fix/2026-10-28-input-load-shedding.md），
+        // 让模型让路，与这里的被测行为无关。
+        runtime.ignore_load_shedding_for_test();
         if keystroke {
             runtime.set_reranker(Some(model(&['乙'])));
         } else {
@@ -175,6 +179,8 @@ fn a_manual_pin_stays_first_when_the_keystroke_model_prefers_another_word() {
             )
             .unwrap();
         let mut runtime = Runtime::new(Engine::new(&options).unwrap(), 5).unwrap();
+        // 同上：断言模型必定运行的测试固定负载状态，不让并行测试的耗时抖动触发降级。
+        runtime.ignore_load_shedding_for_test();
         runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(favouring_model(
             &['能', '恁', '嫩'],
             &['恁'],

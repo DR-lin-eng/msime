@@ -4,11 +4,11 @@ Status: implemented
 
 ## Problem
 
-分叉 `develop` 在固定基线 `fd4ada8bc2c6b736b4a027b00b82c30710948bf1` 保留神经排序、候选画布缓存、充电夜间学习、跨平台验证码入口、搜狗词库订阅及 Android 触点概率纠错。上游祖先最初固定在 `ac76aeca3357ad142a6803f15a8df50d1106bc80`，依次前进到 `c8c3c883c5a768f4409b75984a3cb07622f88c4a`、`a33e619f80b83d01b98d4ce4820910bd119dbe06`（2026-10-25 审计合入 431 个提交）、`4618b12010` 与 `2e851f3c0f`（2026-10-29 上半天合入 164 个提交、15 项主线 PR），本轮再前进到当前上游 `de5d51623a`，新增 193 个上游提交；总同步范围相对上一版再前进到该固定提交。同步期间分叉侧自 PR #19 合并后没有新的功能分支，本轮只做上游追赶。直接选择任一侧会丢掉另一侧的排序、原生画布或生命周期能力。
+分叉 `develop` 在固定基线 `fd4ada8bc2c6b736b4a027b00b82c30710948bf1` 保留神经排序、候选画布缓存、充电夜间学习、跨平台验证码入口、搜狗词库订阅及 Android 触点概率纠错。上游祖先最初固定在 `ac76aeca3357ad142a6803f15a8df50d1106bc80`，依次前进到 `c8c3c883c5a768f4409b75984a3cb07622f88c4a`、`a33e619f80b83d01b98d4ce4820910bd119dbe06`（2026-10-25 审计合入 431 个提交）、`4618b12010` 与 `2e851f3c0f`（2026-10-29 上半天合入 164 个提交、15 项主线 PR）、`de5d51623a`（PR #20，2026-10-31 合并，193 个提交、23 个冲突文件），本轮再前进到当前上游 `5e33ca8407`，新增 134 个上游提交、15 个冲突文件。同步期间分叉侧自 PR #19 合并后没有新的功能分支，两轮都只做上游追赶。直接选择任一侧会丢掉另一侧的排序、原生画布或生命周期能力。
 
 ## Decision
 
-先独立合入本机功能，再从已更新的 develop 集成固定上游提交，保留双方祖先，后续同步只处理新的上游范围。上一轮的 39 个冲突文件已按既有边界固定；本轮追到 `2e851f3c0f` 又出现 7 个内容冲突，按下述边界继续合并：
+先独立合入本机功能，再从已更新的 develop 集成固定上游提交，保留双方祖先，后续同步只处理新的上游范围。上一轮的 39 个冲突文件已按既有边界固定；追到 `2e851f3c0f` 出现 7 个内容冲突、追到 `de5d51623a` 出现 23 个（PR #20）、本轮（2026-11-01）追到 `5e33ca8407` 出现 15 个，均按下述边界合并：
 
 - **逐键重排**：本机 `rerank_plan` 与上游 `rerank_pick` 共享同一 `choose_rerank` 决策，前者多排次选，是后者的超集，保留本机版本并继续喂 `prediction_context`；吸收上游的光标后编辑门槛（`caret_edit_suffix`）、触点支持元数据列（`candidate_touch_supported` 随全排列同步移动）和换引擎时的 `set_key_geometry` 重发。上游 AI 上下文继续经 QueryOptions 走云端管线，不占引擎的重排上下文槽。
 - **触点纠错双轨**：会话里本机 `touch_points` 非空时走本机概率纠错（中心门控 + 替换代价），否则上游的按键触点 + 键位几何计价路径照常启用，两份数据都没有时走平面表。全拼自动纠错在本机中心门控之外吸收上游「两字母错键落在输入末尾按简拼尾读」的跳过条件。宿主 FFI 两套入口并存：`msime_client_character_with_touch`（52 浮点中心）与 `msime_client_set_key_geometry` + `msime_client_touch_character`（注册几何 + geometry_id）。
@@ -29,6 +29,15 @@ Status: implemented
 - **词库与许可证**：上游把跨进程词库维护锁搬进引擎（`access.rs` 大幅收缩）、同步失败后文件检查退避（#10265）、清空学习数据后丢弃过期读（#10255）、更新请求未决时等待再轮询（#10250）、时钟回拨后有界调度（#10281）随自动合并进入，搜狗订阅模块（`dictionary/sogou.rs`）不在上游改动范围。引擎以 MPL-2.0 再许可（#10193），macOS/Windows 的声明渠道清单在取上游全集的同时保留本机 `adaptive-inference-NOTICES.txt`；engine-capi（#10240 系列）是新增 crate，不触碰本机 host-api 导出。
 - **CI**：`ci-platforms.yml` 保留本机的 runner 回退表达式（fork 无 Depot runner），吸收上游更新的注释；上游 Android KVM 初始化修复（#10289）只涉上游自设环境。上游新增的 `release-engine-capi.yml`（#10240 系列）四处裸 `runs-on` 与矩阵三处 Depot 标签按同一规范补上 `${{ github.repository_owner == 'metasequoiaime' && 'depot-…' || '同架构 GitHub 托管' }}` 回退——不加的后果在本轮 CI 上实际发生了：`version` 与三个 Engine C ABI 作业在 fork 上永远排队（Depot 标签无对应 runner）。矩阵项改块式写法，因为流式映射 `{...}` 里内嵌 `${{ }}` 不是合法 YAML。
 
+本轮（2026-11-01，上游 `5e33ca8407`，134 个提交）的 15 个冲突文件继续按上述边界融合，新增边界如下：
+
+- **逐键重排（续）**：上游给 `rerank` 加 `contests` 形参，把九宫格窄裁决点（`candidate_contest`）接进 `choose_rerank`。裁决路径返回单行提升，包成 `RerankPlan::promote` 后仍走本机 `apply_rerank_plan` 的全排列应用，裁决列随 `plan.apply` 一起移动——本机 `rerank_plan` 因此免费获得裁决决策。逐键路径带 contests，落定模型照旧不带（裁决 margin 只在随包的键盘模型上调过）；负载降级门控保留在 `order_presentation`。
+- **个人上下文重排**：上游给 `personal_context_rerank_order` 加 `SchemeType`，收紧「完整读音首选不与其它读音混排」，并把调用门槛改为「提交链起点没有上下文就不重排」。本机吸收 scheme 收紧并穿透 `with_history`；门槛保留本机版——没有新鲜提交链时仍可用宿主长上下文（云预测 PR 的设计）。九键调用点传 `SchemeType::Quanpin`，沿用上游提升的 `journal`/`position_context` 定义。
+- **iOS**：吸收 #10322——几何的保存、镜像、恢复默认都不再读写 `touch_voice_shortcut`，`voiceShortcutEnabled` 连同镜像、恢复列表里的条目一并删除；保留本机 `widthPercent` 与 0…12/0…16 的键距/行距钳位。隐私页取并集：本机充电夜间学习与验证码开关 + 上游登录态与「已屏蔽的作者」入口。
+- **macOS**：吸收 #10330 移除候选栏过渡动画，dealloc 去掉 `stopCandidateFrameAnimation`；保留本机 `_inputAssistance` 清理。
+- **Android**：`KeyboardPressButton` 取并集——本机触点按下反馈字段与上游 `animatesPressFeedback`（候选块关闭过渡）并存，`updatePressFeedback` 同时尊重本机 `animatesPress()` 覆写与上游的三参反馈；`KeyboardOptionsPage` 文档注释取并集（本机 `touch_keyboard_width_percent` + 上游 `touch_nine_key_swipe_digits`）。
+- **CI**：`android-device.yml` 取上游的 GitHub 托管 runner 与 120 分钟超时（fork 的 Depot 表达式在本仓本就回落到 ubuntu-24.04，120 分钟也回应了 nightly 设备 job 被取消的问题）；`release-linux.yml` 的 arch-bin 取上游「非发布运行失败不阻断」的 `continue-on-error`，runs-on 保留 owner 条件表达式——本仓没有上游组织的 depot runner 标签，写死会排队挂起。
+
 本轮新增边界：商业云预测沿用显式权限、最多三条后缀和生成代次校验；普通云候选仍是单条，在线结果不绕过隐私开关。共享 Rust 热路径采用上游的内存快照、WAL、文件身份与 `data_version` 失效判断，候选条沿用 `candidate_range`，没有再叠加第二套缓存或全量复制。Android 触点接线保留旧 `characterWithTouch` 兼容入口，同时使用上游 `setKeyGeometry`/`touchCharacter`；键盘空隙路由、触点清理和滑出点击恢复合并为同一生命周期。
 
 **上游开放 PR 差异台账**（只合上游默认分支固定提交，开放 PR 不合；已落地项关闭台账，避免下轮重复分析）：#10135（26 键双拼按下点与键位几何定稿）已随上游 `8e73e3fd0e` 合入，并与本机中心坐标入口保留双轨；#10064（共享 Rust 层去掉每次上屏/建会话/空闲的整份读写与 fsync）已随上游 `50bab97f3a` 合入，已对照本机闲置会话上限并保留各自边界；#10084（安卓 9/14/18 键辅助码筛选）仍为 draft/open experiment，本轮不合；#10048（崩溃采集与构建符号）仍 open，本轮不合。
@@ -46,6 +55,8 @@ Status: implemented
 ## Consequences
 
 两套触点纠错并存：本机宿主走概率路径，上报几何的宿主走计价 + 学习路径，两者都写同一份学习档案但互不读取对方的偏好；后续若统一，以先落地 #10135 定稿参数的那套为准。**上游 PR 差异台账（2026-10-29 重审）**：#10135（26 键双拼按下点定稿）与 #10064（共享 Rust 层去掉整份读写与 fsync）已随上游主线合入，差异关闭，不再重复实现；#10084（安卓 9/14/18 键辅助码筛选）与 #10048（崩溃采集与构建符号）经查仍为上游 open draft，本轮不合，下轮继续按台账重审。本轮范围内上游落地的性能改动（#10197 摘除引擎层键盘模型、#10280 统计批写、#10250/#10265 词库同步有界等待与退避）经审查均为纯收益或与本机能力正交，不需要在本侧重构或重设计；键盘预览一类上游结构重做按「整文件取上游、本机语义叠加」处理，不留双实现。PR #12 关闭后，QQ 复现场景的最终确认依赖 #10012 的 windows-shuangpin-paged-selection 回归与真机复测。逐键重排多同步一列元数据（每次 O(n)，与既有八列同阶）。
+
+**台账续审（2026-11-01，PR #20 已于 2026-10-31 合并）**：#10084 与 #10048 重查仍为上游 open draft，继续不合。本轮性能审查结论：上游 4 个热路径提交（`set_first_page_rows` 建会话时一次性下发、九键裁决 O(1) 交换、#10425/#10419 两个五笔正确性修复）与 #10414 的展开候选分批建格子（上游侧的性能改进）都无回退，无需重构或重新设计；九宫格窄裁决点进入 `choose_rerank` 后只多一次 O(裁决行数) 的模型打分，仍在逐键预算内。
 
 ## Verification
 
@@ -85,3 +96,15 @@ Status: implemented
 - Android（msime-android-docker 镜像 + 既有 gradle 缓存卷）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。首跑报 1 个错误——本机「尺寸」组的 `setKeyboard` 旧签名（九键布尔参数）在上游 #10245 的 `KeyLayoutStylesPolicy.Preview` 重做后已不存在，改用上游静态 `KeyboardPreview.layout(context, preferences)`（同一存储方案推导，涵盖旧布尔参数）后通过；ImeFrame 宽度并入上游 `applied` 缓存串的融合由该编译验证。
 - 笔记门禁（`pnpm run verify-notes` 的三个 node 脚本）通过：归档笔记封印与格式校验 ok。
 - 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；Android host 契约、设备套件与 iOS Swift 测试交给远端 CI，构建产物 workflow 不带发布开关。
+
+
+本轮（2026-11-01 起，固定上游 `5e33ca8407`，11-04 完成验证）全部照旧在 Docker 内完成：
+
+- `Dockerfile.desktop-check` 镜像：`cargo fmt --all -- --check`、`cargo check --locked --workspace --all-targets --exclude msime-desktop` 与全 workspace（含 `msime-desktop`）的 `cargo clippy --locked --workspace --all-targets -- -D warnings` 全部通过。
+- Docker `cargo test -p msime-input-runtime --no-fail-fast`：432 项通过、1 项按设计忽略。上游新增的九键裁决测试假设模型必定运行，与本机负载降级冲突：并行测试把一次真实引擎派发拖过 16ms 帧预算会触发降级，整包跑红、单跑绿。修法是 `LoadMonitor` 增加仅测试可见的 `ignore_load_for_test`（探针停采样、派发耗时不再触发降级），`Runtime::ignore_load_shedding_for_test` 供该文件的会话构造点固定负载状态；非测试构建行为不变，`force_shed` 路径与 Docker 压力专项不受影响。
+- 合并补一处类型错：上游 `choose_rerank` 的裁决分支返回单行下标，包成 `RerankPlan::promote` 后仍走本机 `apply_rerank_plan` 的全排列应用。
+- Docker `cargo test -p msime-engine --lib --no-fail-fast`：2938 项通过、57 项忽略、3 项失败，全部是 root 容器绕过普通权限的 symlink/只读夹具（两个 symlink 拒绝夹具与 Wubi 副本只读索引夹具 `generations_get_the_wubi_reverse_index_and_resources_stay_untouched`）；按同一 `runuser -u nobody` 行程重跑 `user_dictionary::` 全量 208 项通过，与上一轮同类容器环境问题，不是本次合并引入。
+- `scripts/test-input-load-docker.sh` 通过（退出 0）：基础降级 2 项、真实 cgroup 系统压力探针 1 项。`scripts/test-commercial-prediction-docker.sh` 通过（退出 0）：云候选 15 项、prediction 过滤两组 15+8 项、host-api FFI 组通过；合成事务探针输出本地后续词「饭」与云后缀「米饭」，实际只提交选中的后缀。
+- UI（browser-gate 镜像）：`tsc --noEmit` 通过；882 个文件、5856 项测试全部通过。
+- Android（msime-android-docker 镜像 + 既有 gradle 缓存卷）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。首跑 1 错——`setAnimatesPressFeedback` 在合并结果里重复定义（解冲突并集时加了一份、上游版本又在文件后段自动合入一份），去重后通过。
+- 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；本轮照旧把设备工作流交给远端 CI。

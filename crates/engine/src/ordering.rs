@@ -480,7 +480,9 @@ fn choose_rerank<'a, R: OrderRowSource<'a> + ?Sized>(
     }
     let mut contested = [0; CONTEST_LIMIT];
     if let Some((count, margin)) = contest_rows(scheme, rows, &mut contested) {
-        return pick_contest(reranker, context, rows, &contested[..count], margin);
+        // 窄裁决点只决定首选：margin 在随包的键盘模型上调出，次选不参与这次比较。
+        return pick_contest(reranker, context, rows, &contested[..count], margin)
+            .map(RerankPlan::promote);
     }
     let answers_key = |row: OrderRow<'a>| row_answers_key(scheme, row);
     let corrected_key = any_corrected_key(scheme, rows);

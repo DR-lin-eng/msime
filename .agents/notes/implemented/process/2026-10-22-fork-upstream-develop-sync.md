@@ -133,5 +133,6 @@ Status: implemented
 - Docker `cargo test -p msime-engine --lib --no-fail-fast`：3028 项通过、58 项忽略、3 项失败，全部是 root 容器绕过普通权限的 symlink/只读夹具（`generations_get_the_wubi_reverse_index_and_resources_stay_untouched`、`user_and_cache_roots_reject_symlinked_directories`、`opening_a_journal_rejects_a_symlinked_parent`，与上一轮同类）；按同一 `runuser -u nobody` 行程重跑 `user_dictionary::` 全量 210 项通过，不是本次合并引入。
 - `scripts/test-input-load-docker.sh` 通过（退出 0）：基础降级 2 项、真实 cgroup 系统压力探针 1 项。`scripts/test-commercial-prediction-docker.sh` 通过（退出 0）：云候选 15 项、prediction 27 项、FFI 组通过；合成事务探针输出本地后续词「饭」与云后缀「米饭」，实际只提交选中的后缀。
 - UI（browser-gate 镜像）：`tsc --noEmit` 通过；889 个文件、5918 项测试全部通过。
+- PR CI 抓出第六处：自动合并把 `next_word_prediction` 偏好字段在本机旧位置（`cloud_candidates` 旁）与上游新位置（`next_word_prediction_buttons` 旁）各留了一份，`@msime/harmony` 的 `tsc` 报重复标识符，HarmonyOS host 与 Shared settings UI 两个作业因此红；删本机旧位置的声明（上游的带文档注释且紧邻同组字段）后 `@msime/harmony build` 与 harmony 契约脚本本地复跑通过。apps/desktop 的 `tsc` 覆盖不到 packages/ui 的这个文件——它是 `@msime/harmony` 的构建才发现的，本机验证时已补跑该构建。
 - Android（msime-android-docker 镜像 + `msime-android-gradle` 缓存卷，工程根在 `platforms/android/gradle-app`）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。
 - 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；本轮照旧把设备工作流交给远端 CI。

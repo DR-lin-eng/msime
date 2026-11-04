@@ -108,3 +108,4 @@ Status: implemented
 - UI（browser-gate 镜像）：`tsc --noEmit` 通过；882 个文件、5856 项测试全部通过。
 - Android（msime-android-docker 镜像 + 既有 gradle 缓存卷）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。首跑 1 错——`setAnimatesPressFeedback` 在合并结果里重复定义（解冲突并集时加了一份、上游版本又在文件后段自动合入一份），去重后通过。
 - 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；本轮照旧把设备工作流交给远端 CI。
+- 最后一个提交（`pulldown-cmark 0.13.6` 的 RUSTSEC-2026-0433 补丁升级，只动 Cargo.lock 两行）之后在最终 HEAD 复跑门禁确认：fmt/check/clippy 全绿，input-runtime 432 通过 0 失败，engine 结论不变（2938 通过、同样的 3 项环境失败、nobody 重跑 208 通过）。Dependabot 仍开着的 `glib` 告警（GHSA-wrw7-89jp-8q8g，moderate）补丁在 0.20.0，需要 gtk-rs 0.18→0.20 整栈移植，上游同样锁 0.18.5，不随本轮处理，等上游升级。

@@ -28,10 +28,10 @@ enum KeyboardLayoutPreference {
     set { defaults.set(newValue, forKey: hideLanguageKeyKey) }
   }
   static let oneHandedKey = "keyboard.oneHanded"
-  static let widthPercentKey = "keyboard.width.percent"
+  static let keyboardWidthPercentKey = "keyboard.width.percent"
   static var widthPercent: Double {
-    get { spacing(key: widthPercentKey, fallback: 100, range: 75...100) }
-    set { defaults.set(SharedNumber.clamped(newValue.rounded(), to: 75...100), forKey: widthPercentKey) }
+    get { spacing(key: keyboardWidthPercentKey, fallback: 100, range: 75...100) }
+    set { defaults.set(SharedNumber.clamped(newValue.rounded(), to: 75...100), forKey: keyboardWidthPercentKey) }
   }
   /// 单手模式以前只在手机形态的键盘上画（iPhone、iPad 浮动键盘和窄窗口），全宽的 iPad 键盘一律不画；全宽键盘补上单手模式（#10203）之后，升级前存下的值不能直接带过去，否则在浮动键盘上开过单手的人一升级，停靠的全宽键盘就缩成单手块。用户之后每次切换单手模式都会打上这个标记；没有标记时，全宽键盘第一次画单手之前把存下的值改成关闭（`adoptOneHandedOnDockedTablet`）。
   static let oneHandedDockedTabletKey = "keyboard.oneHandedDockedTablet"
@@ -66,7 +66,7 @@ enum KeyboardLayoutPreference {
   }
 
   static func resetToDefaults() {
-    for stored in [widthPercentKey, keySpacingKey, rowSpacingKey, heightAdjustmentKey] {
+    for stored in [keyboardWidthPercentKey, keySpacingKey, rowSpacingKey, heightAdjustmentKey] {
       defaults.removeObject(forKey: stored)
     }
   }

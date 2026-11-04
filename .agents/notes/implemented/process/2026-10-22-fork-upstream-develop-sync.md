@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-先独立合入本机功能，再从已更新的 develop 集成固定上游提交，保留双方祖先，后续同步只处理新的上游范围。上一轮的 39 个冲突文件已按既有边界固定；追到 `2e851f3c0f` 出现 7 个内容冲突、追到 `de5d51623a` 出现 23 个（PR #20）、本轮（2026-11-01）追到 `5e33ca8407` 出现 15 个，均按下述边界合并：
+先独立合入本机功能，再从已更新的 develop 集成固定上游提交，保留双方祖先，后续同步只处理新的上游范围。上一轮的 39 个冲突文件已按既有边界固定；追到 `2e851f3c0f` 出现 7 个内容冲突、追到 `de5d51623a` 出现 23 个（PR #20）、追到 `5e33ca8407` 出现 15 个（PR #21）、本轮（2026-11-05）追到 `2e3a0e2665` 出现 21 个，均按下述边界合并：
 
 - **逐键重排**：本机 `rerank_plan` 与上游 `rerank_pick` 共享同一 `choose_rerank` 决策，前者多排次选，是后者的超集，保留本机版本并继续喂 `prediction_context`；吸收上游的光标后编辑门槛（`caret_edit_suffix`）、触点支持元数据列（`candidate_touch_supported` 随全排列同步移动）和换引擎时的 `set_key_geometry` 重发。上游 AI 上下文继续经 QueryOptions 走云端管线，不占引擎的重排上下文槽。
 - **触点纠错双轨**：会话里本机 `touch_points` 非空时走本机概率纠错（中心门控 + 替换代价），否则上游的按键触点 + 键位几何计价路径照常启用，两份数据都没有时走平面表。全拼自动纠错在本机中心门控之外吸收上游「两字母错键落在输入末尾按简拼尾读」的跳过条件。宿主 FFI 两套入口并存：`msime_client_character_with_touch`（52 浮点中心）与 `msime_client_set_key_geometry` + `msime_client_touch_character`（注册几何 + geometry_id）。
@@ -37,6 +37,18 @@ Status: implemented
 - **macOS**：吸收 #10330 移除候选栏过渡动画，dealloc 去掉 `stopCandidateFrameAnimation`；保留本机 `_inputAssistance` 清理。
 - **Android**：`KeyboardPressButton` 取并集——本机触点按下反馈字段与上游 `animatesPressFeedback`（候选块关闭过渡）并存，`updatePressFeedback` 同时尊重本机 `animatesPress()` 覆写与上游的三参反馈；`KeyboardOptionsPage` 文档注释取并集（本机 `touch_keyboard_width_percent` + 上游 `touch_nine_key_swipe_digits`）。
 - **CI**：`android-device.yml` 取上游的 GitHub 托管 runner 与 120 分钟超时（fork 的 Depot 表达式在本仓本就回落到 ubuntu-24.04，120 分钟也回应了 nightly 设备 job 被取消的问题）；`release-linux.yml` 的 arch-bin 取上游「非发布运行失败不阻断」的 `continue-on-error`，runs-on 保留 owner 条件表达式——本仓没有上游组织的 depot runner 标签，写死会排队挂起。
+
+本轮（2026-11-05，上游 `2e3a0e2665`，303 个提交）的 21 个冲突文件继续按上述边界融合，新增边界如下：
+
+- **逐键重排（续）**：上游把逐键模型抽成 `CandidateScorer` trait（随包 `Reranker` 与 ONNX Runtime 后端同一套规则），新增整句池（`sentence_pool`：26 键引擎多解读法整池比较、键位网格照九条）、词网格/模型混合权重（`static_evidence_weight`）与「只差他/她/它的读法交给模型」（`differs_only_in_third_person`）。本机 `rerank_plan` 超集保留：三者（`rerank_pick`/`rerank_pick_within`/`rerank_plan`）共用 `rerank_plan_within` 决策体，本机路径由 `rank_runner_ups` 产出完整次选排列，`RerankPlanKind::Scored` 数组加宽到 `MAX_SENTENCE_POOL` 以承载整句池排序；上游两个入口保留为薄包装，上游测试与调用面不动。第三人称覆盖只作用于首选决策（上游原样），次选排列仍按混合分全排。句首语气词让位（`lift_opening_particle` + `promote_row`）进 `order_presentation`，在本机负载降级门内（挂着打分器时它也是模型工作）。
+- **落定重排**：`SettledRerankRequest.reranker` 随上游换成 `Box<dyn CandidateScorer>`，本机评分仍走 `rerank_plan`（整句池随打分器报的取）；上游「逐键打分器强于落定模型时跳过落定重排」（`supersedes_settled_rerank`）随自动合并进入 `settled_rerank_blocked`。
+- **上屏后预测**：上游重做候选池（`personal/spare/pending` 字段 + 模型 `order()`，池 32 条排序后截 8 行），本机云预测的 `local_rows/local_seeds/context/request` 与其并存：`clear()` 双清，`show()` 先上游的 pending 判定再本机 `remember_local()`，本机 `active/query/clear_cloud/apply` 与上游 `order()` 共存；云候选关时按本机快照恢复。
+- **ONNX 后端**：上游新增 `msime-onnx-rerank`（钉 `ort =2.0.0-rc.15`），与本机 engine `device-inference` 的 `ort =2.0.0-rc.11` 在同一依赖图里冲突。本机钉版本升到 rc.15（`load-dynamic` 特性保留，两处 API 面在 ort 2.0-rc 内一致，编译验证）；上下文预编码（`CandidateScorer::context_changed`）喂本机 `prediction_context` 而非上游的 `ai_context`，与本机 512 字窗口边界一致。
+- **Android**：`ImeLetterRows` 取上游 `candidateTapsOnly()`（包住本机原条件并感知上屏后联想），保留本机 `directLetterOnRelease` 复位；`MSIMEInputService` 取并集——本机触点样本字段与 `typeWithTouch`、上游 `timedEngineCall` 计时包装共存，本机触点路径也计时；`TypingPage` 云候选说明保留本机动态版（区分是否发送联想文本）；`PageId` 搜索关键词并集（上游新增「键盘底部高度」等 + 本机「尺寸」「按键区域宽度」「恢复默认宽度与间距」「数字行」）；`verify-native.sh` 导出清单取上游全集（语音标点、遥测同意、生词本、朗读等新导出）后补回 `msime_client_character_with_touch`/`characterWithTouchRaw`。
+- **iOS**：键盘控制器保留本机 `applyCustomKeyboardWidth()` 与按宽度比例折算的行宽算式（上游 `keyRowWidth` 重构在其余自动合并区域生效）；工程文件并集（本机 `AppleInputAssistance.swift` + 上游 `AsynchronousLetterInputTests.swift`）。
+- **macOS**：上屏后联想双轨并存——本机预测锚点（点击守卫）原样保留，上游 `trackPredictionAfterTransition`（鼠标监听）照常调用；`selectCandidate:` 先本机锚点守卫再上游的带诊断日志守卫；CMake 并集（本机 input-assistance 测试 + 上游 #10728 测试主目录隔离）。
+- **CI**：`ci-platforms.yml` 的 windows-scripts 取上游更新的注释与步骤说明，runs-on 保留 owner 条件表达式（同前几轮）。
+- **Cargo.lock**：取上游后重放 `pulldown-cmark 0.13.6`（RUSTSEC-2026-0433），ort 随本机钉版本统一到 rc.15。
 
 本轮新增边界：商业云预测沿用显式权限、最多三条后缀和生成代次校验；普通云候选仍是单条，在线结果不绕过隐私开关。共享 Rust 热路径采用上游的内存快照、WAL、文件身份与 `data_version` 失效判断，候选条沿用 `candidate_range`，没有再叠加第二套缓存或全量复制。Android 触点接线保留旧 `characterWithTouch` 兼容入口，同时使用上游 `setKeyGeometry`/`touchCharacter`；键盘空隙路由、触点清理和滑出点击恢复合并为同一生命周期。
 
@@ -109,3 +121,15 @@ Status: implemented
 - Android（msime-android-docker 镜像 + 既有 gradle 缓存卷）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。首跑 1 错——`setAnimatesPressFeedback` 在合并结果里重复定义（解冲突并集时加了一份、上游版本又在文件后段自动合入一份），去重后通过。
 - 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；本轮照旧把设备工作流交给远端 CI。
 - 最后一个提交（`pulldown-cmark 0.13.6` 的 RUSTSEC-2026-0433 补丁升级，只动 Cargo.lock 两行）之后在最终 HEAD 复跑门禁确认：fmt/check/clippy 全绿，input-runtime 432 通过 0 失败，engine 结论不变（2938 通过、同样的 3 项环境失败、nobody 重跑 208 通过）。Dependabot 仍开着的 `glib` 告警（GHSA-wrw7-89jp-8q8g，moderate）补丁在 0.20.0，需要 gtk-rs 0.18→0.20 整栈移植，上游同样锁 0.18.5，不随本轮处理，等上游升级。
+
+
+本轮（2026-11-05，固定上游 `2e3a0e2665`，303 个提交）全部照旧在 Docker 内完成：
+
+- `Dockerfile.desktop-check` 镜像：`cargo fmt --all -- --check`、`cargo check --locked --workspace --all-targets --exclude msime-desktop` 与全 workspace（含 `msime-desktop`）的 `cargo clippy --locked --workspace --all-targets -- -D warnings` 全部通过。
+- Docker `cargo test -p msime-input-runtime --no-fail-fast`：467 项通过、1 项按设计忽略、0 失败。上游新增的 candidate_scorer、prediction_rerank、sentence_pool、sentence_start 四组测试与本机 `rerank_plan` 次选排列共存于同一套件。
+- 合并集成本轮修了五处语义冲突（编译与 clippy 抓出）：上游裁决/整句池/第三人称覆盖与本机 `rerank_plan` 的融合（`rerank_plan_within` 决策体、`Scored` 计划装箱过 `large_enum_variant`）；本机 engine `ort` 钉版本从 rc.11 升到 rc.15（上游 `msime-onnx-rerank` 与本机 `device-inference` 在同一依赖图里各钉一个版本不能共存），执行提供方在 rc.15 要显式开特性（`coreml`/`nnapi`/`openvino`/`cuda`/`directml`，load-dynamic 下只编译绑定），环境改为显式传给会话；本机 `resolve_series_query` 恢复 `#[cfg(test)]`（正文仍走 `resolve_series_query_with_touch`，上游测试子模块经 `use super::*` 依赖旧入口）；wasm host 的 `rerank_plan` 调用补整句池参数（`CandidateScorer` 进作用域，池随打分器）。
+- Docker `cargo test -p msime-engine --lib --no-fail-fast`：3028 项通过、58 项忽略、3 项失败，全部是 root 容器绕过普通权限的 symlink/只读夹具（`generations_get_the_wubi_reverse_index_and_resources_stay_untouched`、`user_and_cache_roots_reject_symlinked_directories`、`opening_a_journal_rejects_a_symlinked_parent`，与上一轮同类）；按同一 `runuser -u nobody` 行程重跑 `user_dictionary::` 全量 210 项通过，不是本次合并引入。
+- `scripts/test-input-load-docker.sh` 通过（退出 0）：基础降级 2 项、真实 cgroup 系统压力探针 1 项。`scripts/test-commercial-prediction-docker.sh` 通过（退出 0）：云候选 15 项、prediction 27 项、FFI 组通过；合成事务探针输出本地后续词「饭」与云后缀「米饭」，实际只提交选中的后缀。
+- UI（browser-gate 镜像）：`tsc --noEmit` 通过；889 个文件、5918 项测试全部通过。
+- Android（msime-android-docker 镜像 + `msime-android-gradle` 缓存卷，工程根在 `platforms/android/gradle-app`）：`:app` 的 `compileFullDebugJavaWithJavac` BUILD SUCCESSFUL。
+- 未在本机声明 Android 真机、Apple 原生宿主或 HarmonyOS HAP 验收；本轮照旧把设备工作流交给远端 CI。

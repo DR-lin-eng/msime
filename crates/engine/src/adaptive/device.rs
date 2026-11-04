@@ -93,18 +93,12 @@ mod onnx {
             }
             // 禁止设备会话把不支持的节点静默交给 CPU，失败后再试下一个后端。
             let attempt = || -> ort::Result<Session> {
-                Session::builder(&environment)
-                    .map_err(ort::Error::<()>::from)?
-                    .with_intra_threads(1)
-                    .map_err(ort::Error::<()>::from)?
-                    .with_parallel_execution(false)
-                    .map_err(ort::Error::<()>::from)?
-                    .with_memory_pattern(false)
-                    .map_err(ort::Error::<()>::from)?
-                    .with_config_entry("session.disable_cpu_ep_fallback", "1")
-                    .map_err(ort::Error::<()>::from)?
-                    .with_execution_providers([provider.error_on_failure()])
-                    .map_err(ort::Error::<()>::from)?
+                Session::builder(&environment)?
+                    .with_intra_threads(1)?
+                    .with_parallel_execution(false)?
+                    .with_memory_pattern(false)?
+                    .with_config_entry("session.disable_cpu_ep_fallback", "1")?
+                    .with_execution_providers([provider.error_on_failure()])?
                     .commit_from_memory(include_bytes!("model.onnx"))
             };
             if let Ok(session) = attempt() {

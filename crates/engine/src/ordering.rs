@@ -517,8 +517,8 @@ pub struct RerankPlan {
 enum RerankPlanKind {
     Promote(usize),
     Scored {
-        positions: [usize; MAX_SENTENCE_POOL],
-        order: [usize; MAX_SENTENCE_POOL],
+        positions: Box<[usize; MAX_SENTENCE_POOL]>,
+        order: Box<[usize; MAX_SENTENCE_POOL]>,
         count: usize,
     },
 }
@@ -728,8 +728,7 @@ fn rerank_plan_within<'a, R: OrderRowSource<'a> + ?Sized>(
                     }
                 }
                 if rank_runner_ups && (0..count).all(|index| !combined(index).is_nan()) {
-                    let mut order: [usize; MAX_SENTENCE_POOL] =
-                        std::array::from_fn(|index| index);
+                    let mut order: [usize; MAX_SENTENCE_POOL] = std::array::from_fn(|index| index);
                     order[..count].sort_by(|&left, &right| {
                         combined(right)
                             .partial_cmp(&combined(left))
@@ -744,8 +743,8 @@ fn rerank_plan_within<'a, R: OrderRowSource<'a> + ?Sized>(
                     }
                     return Some(RerankPlan {
                         kind: RerankPlanKind::Scored {
-                            positions: considered,
-                            order,
+                            positions: Box::new(considered),
+                            order: Box::new(order),
                             count,
                         },
                     });

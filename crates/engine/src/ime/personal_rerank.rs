@@ -129,9 +129,7 @@ pub(crate) fn personal_context_rerank_with_history(
             index,
         );
     }
-    let Some(indices) = order_scores(group, &mut scored[..group_len], is_pinned) else {
-        return None;
-    };
+    let indices = order_scores(group, &mut scored[..group_len], is_pinned)?;
     Some(PersonalContextRerankOrder {
         group_len,
         seats,

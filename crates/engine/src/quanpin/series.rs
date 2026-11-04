@@ -39,6 +39,7 @@ pub struct SeriesResolution {
 }
 
 /// QD:110-215, before memoisation.
+#[cfg(test)]
 pub fn resolve_series_query(
     raw: &str,
     segments: &[String],

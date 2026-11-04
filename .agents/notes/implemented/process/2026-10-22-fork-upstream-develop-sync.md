@@ -70,6 +70,8 @@ Status: implemented
 
 **台账续审（2026-11-01，PR #20 已于 2026-10-31 合并）**：#10084 与 #10048 重查仍为上游 open draft，继续不合。本轮性能审查结论：上游 4 个热路径提交（`set_first_page_rows` 建会话时一次性下发、九键裁决 O(1) 交换、#10425/#10419 两个五笔正确性修复）与 #10414 的展开候选分批建格子（上游侧的性能改进）都无回退，无需重构或重新设计；九宫格窄裁决点进入 `choose_rerank` 后只多一次 O(裁决行数) 的模型打分，仍在逐键预算内。
 
+**台账续审（2026-11-05，PR #21 已于 2026-11-04 合并）**：#10084 与 #10048 第三次重查仍为上游 open draft，继续不合。本轮性能审查结论：上游热路径提交（rerank-v2 模型替换 #10811、逐键模型进束搜索 #10759/#10764、只差他/她/它交给模型、句首语气词让位、`CandidateScorer` 抽象与 ONNX 后端 #10540）都带上游自己量过的预算数字（逐键 p95、加载内存），随原样吸收，无回退；本机 `rerank_plan` 次选排列骑同一比较体，整句池打开时比较面从九条放宽到池上限（≤32 行的排序与全列应用，O(n) 同阶），挂随包 `Reranker`（`sentence_pool` 默认 0）时行为与上一轮完全一致，无需重构或重新设计。ort 统一到 rc.15 后同一依赖图只装一份，本机 `device-inference` 在没提供运行时库时照旧回退纯 Rust CPU，不引入下载。
+
 ## Verification
 
 - Linux aarch64 Docker（`Dockerfile.desktop-check` 镜像）：`cargo test --locked --workspace --no-fail-fast` 82 个套件通过；仅剩的 8 项失败（引擎 4、client-providers 2、mcp-server 2）全部是符号链接拒绝类，在合并前提交 `7f70172def` 的独立检出上逐字节复现同样失败（`opening_a_journal_rejects_a_symlinked_parent`：0 通过 / 1 失败），判定为容器文件系统的既有环境问题，不是本次合并引入；`cargo clippy --locked --workspace --all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 通过。

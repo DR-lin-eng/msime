@@ -54,7 +54,6 @@ grep -Eq "GLOBAL +DEFAULT +[0-9]+ +JNI_OnLoad$" <<< "$symbols" || { echo "Missin
 nm_tool="${readelf_tool%/llvm-readelf}/llvm-nm"
 [[ -x "$nm_tool" ]] || { echo "llvm-nm is required beside llvm-readelf" >&2; exit 1; }
 host_symbols=$("$nm_tool" -C --defined-only "$library_dir/libmsime_host_api.so")
-host_dynamic_symbols=$("$readelf_tool" --dyn-syms --wide "$library_dir/libmsime_host_api.so")
 # The candidate ordering policy of msime-engine's handwriting module is shared with Android; the model-backed recognizer and its zinnia port (the recognizer, model and features submodules) are compiled out there. The ordering policy has to be present, or the symbols were stripped and the exclusion below would prove nothing.
 if ! grep -q 'msime_engine::handwriting::order_handwriting_candidates' <<< "$host_symbols"; then
   echo "libmsime_host_api.so carries no msime-engine symbol names; the recognizer exclusion cannot be checked" >&2; exit 1
@@ -63,8 +62,11 @@ if grep -Eq 'handwriting_recognize|msime_engine::handwriting::(recognizer|model|
   echo "Android host unexpectedly contains the Engine handwriting recognizer" >&2; exit 1
 fi
 echo "libmsime_host_api.so: Engine handwriting recognizer excluded for Android"
-# 整句联想「增强」的逐键重排要能用上 ONNX Runtime（build-native.sh 开着 onnx-rerank）。上游把它静态链进 host 库；本机的设备推理按 load-dynamic 加载随包的 libonnxruntime.so（对齐与依赖白名单检查在上面），ort 在同一构建里两处共用一份，onnx-rerank 也走这份动态加载。两种形态都算接上了：静态链入时 OrtGetApiBase 有定义，动态加载时它是未定义引入，运行时由随包的库提供。
-if ! grep -q 'OrtGetApiBase' <<< "$host_symbols" && ! grep -q 'OrtGetApiBase' <<< "$host_dynamic_symbols"; then
-  echo "libmsime_host_api.so neither links nor dynamically loads ONNX Runtime; build it with --features onnx-rerank" >&2; exit 1
+# 整句联想「增强」的逐键重排后端要编进 host 库（build-native.sh 开着 onnx-rerank）。上游形态把精简的 ORT 静态链入，OrtGetApiBase 有定义；本机的设备推理按 load-dynamic 与它共用一份 ort，C 符号在运行时由随包的 libonnxruntime.so（对齐与依赖白名单检查在上面）经 dlsym 解析，编译期只看得到 onnx-rerank 自己的 Rust 符号。两种形态分别验证。
+if grep -q 'OrtGetApiBase' <<< "$host_symbols"; then
+  echo "libmsime_host_api.so: ONNX Runtime linked for the keystroke reranker"
+elif grep -q 'msime_onnx_rerank' <<< "$host_symbols"; then
+  echo "libmsime_host_api.so: ONNX rerank backend compiled in; the runtime is loaded from the bundled libonnxruntime.so"
+else
+  echo "libmsime_host_api.so contains no ONNX rerank backend; build it with --features onnx-rerank" >&2; exit 1
 fi
-echo "libmsime_host_api.so: ONNX Runtime reachable for the keystroke reranker"

@@ -2776,6 +2776,40 @@ test("utility mode switches preserve defaults and drafts across pages", async ()
   });
 });
 
+test("HarmonyOS phones and tablets hide the shortcut-mode settings while 2-in-1 keeps them", async () => {
+  render(
+    <SettingsPage
+      client={{
+        load: vi.fn().mockResolvedValue(initial),
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: true }),
+      }}
+    />,
+  );
+  await openInputSettings();
+  expect(screen.queryByRole("region", { name: "快捷模式" })).toBeNull();
+  expect(screen.queryByText("Shift+字母进入快捷模式")).toBeNull();
+  // 日期时间混入候选作用于普通打字，手机和平板上仍要能关；快捷模式的开关一个都不列。
+  const dateTime = screen.getByRole("region", { name: "日期时间候选" });
+  expect(within(dateTime).getAllByRole("switch")).toHaveLength(2);
+  expect(within(dateTime).getByRole("switch", { name: "日期时间混入候选" })).toBeTruthy();
+  expect(within(dateTime).getByRole("switch", { name: "日期格式入口" })).toBeTruthy();
+  expect(screen.queryByRole("switch", { name: /T 模式/ })).toBeNull();
+
+  cleanup();
+  render(
+    <SettingsPage
+      client={{
+        load: vi.fn().mockResolvedValue(initial),
+        save: vi.fn(),
+        host: testHost({ platform: "harmony", mobile_settings: false }),
+      }}
+    />,
+  );
+  await openInputSettings("进阶");
+  expect(screen.getByRole("region", { name: "快捷模式" })).toBeDefined();
+});
+
 test("macOS offers every local mode switch, downloaded catalogs included", async () => {
   const save = vi.fn().mockImplementation(async (_revision, preferences) => ({
     ...initial,
@@ -4322,7 +4356,7 @@ test("the iPad digit row and Tab key switch appears only where the plugin report
   await screen.findByLabelText("键盘高度", undefined, { timeout: 3000 });
   await waitFor(() => expect(screen.queryByLabelText("按键音")).not.toBeNull());
   expect(screen.queryByLabelText("数字行与 Tab 键")).toBeNull();
-  expect(screen.queryByLabelText("横屏分离式键盘")).toBeNull();
+  expect(screen.queryByLabelText("分离式键盘")).toBeNull();
   phone.unmount();
 
   const save = vi.fn().mockImplementation(async (settings) => settings);
@@ -4357,9 +4391,9 @@ test("the iPad digit row and Tab key switch appears only where the plugin report
   );
   // 横屏分离式键盘同样存进原生 App Group，不写共享文档。
   await waitFor(() =>
-    expect((screen.getByLabelText("横屏分离式键盘") as HTMLInputElement).disabled).toBe(false),
+    expect((screen.getByLabelText("分离式键盘") as HTMLInputElement).disabled).toBe(false),
   );
-  const split = screen.getByLabelText("横屏分离式键盘") as HTMLInputElement;
+  const split = screen.getByLabelText("分离式键盘") as HTMLInputElement;
   expect(split.checked).toBe(false);
   fireEvent.click(split);
   await waitFor(() =>

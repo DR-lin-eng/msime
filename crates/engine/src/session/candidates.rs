@@ -152,6 +152,7 @@ impl InputSession {
                     &model,
                     self.chain.earlier.as_deref(),
                     self.chain.previous.as_deref(),
+                    self.scheme(),
                     &self.prediction_context,
                     &mut |leader: &str| {
                         is_pinned_candidate(journal, &context, leader)

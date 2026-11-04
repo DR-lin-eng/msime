@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-引擎要做成给其他输入法嵌入的库（PR #10167 的提案 `proposed/architecture/2026-10-29-embeddable-engine-library.md`，P3「ABI 稳定之前引擎侧要修的硬点」；本分支的基点早于它合入）。[核心会话收尾与日志连接的线程归属](2026-10-29-core-session-lifecycle-and-journal-threads.md) 修完了生命周期和线程那几项，剩下四项与对外契约有关：
+引擎要做成给其他输入法嵌入的库（PR #10167 的提案 `implemented/architecture/2026-10-29-embeddable-engine-library.md`，P3「ABI 稳定之前引擎侧要修的硬点」；本分支的基点早于它合入）。[核心会话收尾与日志连接的线程归属](2026-10-29-core-session-lifecycle-and-journal-threads.md) 修完了生命周期和线程那几项，剩下四项与对外契约有关：
 
 - 两套默认值。核心 `SessionOptions::new` 照参照实现默认辅助码开、表名 `lantian`、学习开；host 门面的 `prepare_options` 默认 `ziranma`、学习关，`session_options` 再从 `SessionOptions::new` 出发改写大部分字段，没写到的字段（`personal_context`）悄悄继承核心默认值。核心默认值一改，产品就跟着变。另外随仓库的七张辅助码表里只有 `wubi86` 写明了来源与许可，`lantian` 和 `ziranma` 都没有再分发授权（`resources/helpcodes/NOTICE.md`），引擎库默认去读它们不合适。
 - 错误只有字符串。`EngineError` 四个变体都只给说明文字，`KeyResult.diagnostic` 是 `diagnostics.rs` 常量的自由文本，C ABI 要按数字返回。
@@ -46,7 +46,7 @@ golden 基准按参照实现录制，`tests/golden_support/replay.rs` 的 `refer
 - **门面继续从 `SessionOptions::new` 出发，只把核心默认值改成产品值** — 改动最小，一套默认值也成立。否掉是因为产品值（`ziranma`、学习关）恰好是引擎库不该有的默认值：`ziranma` 没有再分发授权，学习关会让嵌入方以为学习坏了；而且门面继承默认值的写法下次改核心默认值还会悄悄改到产品。
 - **辅助码默认关，表名保留 `lantian`** — 和参照实现差得最少。否掉是因为表名决定建会话时读哪张表，关着也读；默认读一张没有授权的表，和数据许可证的结论相悖。
 - **`KeyResult` 加一个 `diagnostic_code` 字段** — 取码不用查表。否掉是因为所有构造 `KeyResult` 的地方和 golden 快照都要改，按文字查 25 行的表只在出诊断时发生。
-- **日志出口带级别（`Fn(Level, &str)`）** — C ABI 的回调通常带级别。现在四条日志都是警告，加一个只有一个取值的枚举没有用处；以后真有别的级别时 Rust 侧加一个新的设置函数，C ABI 的回调签名到时再定。
+- **日志出口带级别（`Fn(Level, &str)`）** — C ABI 的回调通常带级别。现在四条日志都是警告，加一个只有一个取值的枚举没有用处；以后真有别的级别时 Rust 侧加一个新的设置函数。C ABI 1.1 的回调同样不带级别，取舍见 [引擎 C ABI 1.1 补上的缺口](2026-10-30-engine-capi-abi-1-1-additions.md)。
 - **只在 ABI 里写明「有会话打开时不调用维护接口」，锁留在 client-services** — 草案给的另一条路，不用搬代码。否掉是因为采用方和 msime 自己的宿主可能用同一份数据目录（同一台机器上的另一个前端），只有同一把文件锁能让它们互斥。
 - **`client-services` 直接 `pub use msime_engine::DictionaryAccess`，去掉 `directory`** — 少一层包装。`directory` 现在只有它自己的测试在用，但它是这个类型对外的一部分，返回的 `PrivateDirectory` 属于 client-base，引擎不能依赖 client-base；包一层能保住签名，不必顺手删接口。
 - **核心层的编辑接口也不取锁，只给采用方一个 `DictionaryAccess` 自己取** — 和门面的做法一致。否掉是因为采用方最容易忘的就是这一步，任务本身也要求引擎层的维护接口自己取锁；需要跨多次编辑持锁的调用方（host-api）用门面的 `_with` 版本。

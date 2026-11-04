@@ -10,7 +10,7 @@ ArkTS 宿主与 NAPI 原生边界是完整实现：键盘扩展、设置应用�
 
 ## 社区投稿目前不提供
 
-华为应用市场（中国大陆）要求「信息发布」类服务先做实名认证，鸿蒙版的邮箱和华为账号登录都不核验手机号，所以实名认证到位之前，社区里只能浏览、搜索、看详情、获取和试用皮肤、安装插件、收藏、导入词包和存取回复模板，以及下架或删除自己的作品；不提供发布皮肤、词包、短语、回复模板和插件，修改已发布作品的分类，发布新版本，评分和举报。
+华为应用市场（中国大陆）要求「信息发布」类服务先做实名认证，鸿蒙版的邮箱和华为账号登录都不核验手机号，所以实名认证到位之前，社区里只能浏览、搜索、看详情、获取和试用皮肤、安装插件、收藏、导入词包和存取回复模板，以及下架或删除自己的作品；不提供发布皮肤、词包、短语、回复模板和插件，修改已发布作品的分类，发布新版本，评分和举报。屏蔽作者不是投稿（不公开任何内容，只让本账号看不到那位作者的作品），照常提供，见下文「社区页仍是共享界面」一段。
 
 总闸是 Rust 的 `HostCapabilities.community_contribution`（`crates/client-core/src/host_surface.rs`），鸿蒙为 false。共享设置页按它派生 `showCommunityContribution`，社区页据此不画这些入口；`apps/harmony` 的社区客户端对这些操作直接拒绝、不给举报；设置进程启动时把它交给 `keyboard/CommunityContributionGate.ts`，设置桥的 `startRequest` 在分发社区请求之前问它。
 
@@ -135,6 +135,8 @@ Apple 的首页（`KeyboardHomeView`）也由 Harmony 承载，但是按本平�
 公告在设置窗口打开或回到前台时取（client-services 一分钟内直接用缓存），显示为设置页上方一张可关闭的卡片，关闭按公告 id 记在本地。正文是 client-services 用 pulldown-cmark 渲染、原始 HTML 已转义的 HTML，放进一个禁用脚本、CSP 为 `default-src 'none'` 的小 Web 组件里；点链接一律交给系统浏览器或邮件应用。这里没有用 RichText：它没有拦截链接点击的入口，链接会在卡片里打开，而 Web 组件的 `onLoadIntercept` 可以把它拦下来交出去。
 
 社区页仍是共享界面，请求都是 Rust `msime_client_community` 的：「我的作品」带作品自身的 `moderation` 字段，由页面只对 removed 显示「已下架」；`report`（皮肤 `skins`、词库 `dictionaries`、回复 `replies`）按固定的六个理由举报，没有登录时用本机匿名账号；422 `blocked_content`、503 `screening_unavailable`、403 `account_banned` 分别报成 `community_blocked_content`、`community_screening_unavailable`、`community_account_banned`，与桌面端同名。
+
+屏蔽作者也是 `msime_client_community` 的操作：`block`（`{kind,id}`，kind 与举报相同，id 是作品的）、`block_list` 和 `unblock`（`{id}`，屏蔽记录的 id）。页面经设置桥自己的 `community_block` 请求发它们，名单在 `HarmonyAccountRequests.ts` 的 `communityBlockRequest`，与三条图库通道的名单不相交；它要隐私政策的授权（`PrivacyConsentPolicy`），社区投稿类功能的总闸不拦它（`CommunityContributionGate` 只管三条图库通道）。三项只认登录的水杉账号，Rust 不退回本机匿名账号，没有登录时答 `community_unauthorized`：社区目录按列表请求带的令牌过滤，用匿名账号屏蔽的作者重装后就没了，也不会跟到别的设备上。列表请求有登录会话时本来就带登录账号的令牌，屏蔽之后刷新列表，服务端就不再列出那位作者的作品，客户端不另做过滤。
 
 `registerJavaScriptProxy` 的名单现在由 `scripts/test-harmony-bridge-parity.py` 守着。ArkTS 对注入对象暴露什么有两处决定——类上的方法，和交给 `registerJavaScriptProxy` 的名字——而页面看得见的只有后者。一个名字只加了一处仍然能通过类型检查、能编译、能打包，然后在真机上以 `msimeHarmony.<name> is not a function` 的形式失败，表现是某一块功能就是不工作，而那恰好在这里谁也跑不了的那个平台上。具名皮肤库那一片就是这么漏的：方法写了，名字没注册，三道绿灯什么都没说。
 
@@ -302,9 +304,13 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 「按键布局」页（共享 React 设置页）还有两项（#10056，共享偏好、随账号同步，同步键 `platform.harmony.twenty_six_symbol_first` / `platform.harmony.number_pad_space`）：26 键分段卡片里、当前样式说明下面的「26 键「符」与「123」互换」（`touch_twenty_six_symbol_first`，默认关）把 26 键一族设计底行的 符 排到 123 左边（`TouchLayoutStylePolicy.symbolFirst`，长空格和表情键没有 符、不变），从它借来的数字九宫格带上 符、按九键一族的次序排（`KeyboardView.letterRowSymbolLeads`）；「数字键盘」一组（`touch_number_pad_space`）选空格在右列、在 0 右边或 0 左边，缺键或 `platform_default` 是鸿蒙原来的「空格在 0 左边」（`NineKeyLayout.actionRow` 的 `space`）。空格在右列时网格右列最下面一格从 ！ 换成空格（`touchNineKeyGrid`），右侧大回车不受影响。见 `.agents/notes/implemented/feature/2026-10-29-touch-symbol-first-and-number-pad-space.md`。
 
-九键左侧符号栏可以自定义（#10223，共享偏好、随账号同步，同步键 `platform.harmony.nine_key_symbols` / `platform.harmony.nine_key_digit_symbols`，值是空格分隔的写法，空串是出厂表）：「按键布局」9 键分段卡片里的「九键左侧符号」改字母层那张表（`touch_nine_key_sidebar_symbols`，拼音九键、九键双拼和笔画共用），「数字键盘」一组里的「数字键盘左侧符号」改所有九宫格数字键盘 #+= 上面那张表（`touch_nine_key_digit_sidebar_symbols`，九键一族的数字层和 26 键、14/18 键、手写借来的数字九宫格都读）。空表是鸿蒙出厂表，键盘照原来的画法：字母层 `, . ?`（显示与编辑器里写作 ，。？，点按交给 Engine 的标点处理），右侧大回车接 !，笔画的标点栏四格，数字层四则运算加 #+= 五格等高。用户的表画成可滚动的等高栈（`NineKeyLayout.sidebarItems`）：字母层一屏最多 3 项（右侧大回车也不再接 !），数字层是四格高的滚动区加最下面一格 #+=、一屏最多 4 项，每项不矮于 28 vp。自定义项点按先按首选结束组字再字面上屏，不做全半角转换，`（）`、`()` 这类整对符号光标停在中间（`KeyboardSession.insertSidebarSymbol`、`PairedPunctuationPolicy.literalPairClosing`，配对表照 Android）；统计仍记 `SoftPunctuation`。长按左列任一项打开设置的「屏幕键盘」页（键盘只能按页打开设置，开不到「按键布局」里的编辑页）。英文九键、2in1 屏幕键盘不读这两张表。
+九键左侧符号栏可以自定义（#10223，共享偏好、随账号同步，同步键 `platform.harmony.nine_key_symbols` / `platform.harmony.nine_key_digit_symbols`，值是空格分隔的写法，空串是出厂表）：「按键布局」9 键分段卡片里的「九键左侧符号」改字母层那张表（`touch_nine_key_sidebar_symbols`，拼音九键、九键双拼和笔画共用），「数字键盘」一组里的「数字键盘左侧符号」改所有九宫格数字键盘 #+= 上面那张表（`touch_nine_key_digit_sidebar_symbols`，九键一族的数字层和 26 键、14/18 键、手写借来的数字九宫格都读）。空表是鸿蒙出厂表，键盘照原来的画法：字母层 `, . ?`（显示与编辑器里写作 ，。？，点按交给 Engine 的标点处理），右侧大回车接 !，笔画的标点栏四格，数字层四则运算加 #+= 五格等高。用户的表画成可滚动的等高栈（`NineKeyLayout.sidebarItems`）：字母层一屏最多 3 项（右侧大回车也不再接 !），数字层是四格高的滚动区加最下面一格 #+=、一屏最多 4 项，每项不矮于 28 vp。自定义项点按先按首选结束组字再字面上屏，不做全半角转换，`（）`、`()` 这类整对符号光标停在中间（`KeyboardSession.insertSidebarSymbol`、`PairedPunctuationPolicy.literalPairClosing`，配对表照 Android）；统计仍记 `SoftPunctuation`。长按左列任一项打开设置「屏幕键盘」页的「按键布局」，直接进入这一张表的编辑页（字母层和笔画进字母表并切到 9 键分段，数字层进数字表）：键盘打开设置的 Want 除 `page` 外带一个可选的 `target`，值是那张表的共享偏好名，与 Android 的 `edit_sidebar_key` 相同（`SettingsPageLink.SCREEN_KEYBOARD_TARGETS`）；只带 `page` 的链接照旧只打开页面，`target` 不属于这一页或认不得时丢掉。英文九键、2in1 屏幕键盘不读这两张表。
+
+每个分段的样式卡片里还有「中/英键放在空格左边」（#10228，共享偏好 `touch_language_key_side`，`right` 默认、`left` 时打开，同步键 `platform.harmony.language_key_side`，26 键分段里排在互换开关之后）：样式和互换排完之后把 中/英 左边紧挨着的那一串空格、0、逗号和句号整串右移一格，中/英 挪到这一串最左边，份额不变（`TouchLayoutStylePolicy.languageBeforeSpace`、`NineKeyLayout.actionRow` 的 `languageLeft`）。空格左边没有标点的行 中/英 紧挨空格（`123 | 符 | 中/英 | 空格 | ， | 回车`、`符 | 123 | 中/英 | 空格 | 回车`），有标点的行标点仍紧挨空格（`123 | 符 | 中/英 | ， | 空格 | 。 | 回车`）。设计底行（26 键一族、14/18 键、大千注音）、九键外框和它的数字层、借来的数字九宫格、右侧大回车网格下方那一段和手写底行都算，2in1 底行和假名网格不动；中/英 离开回车后回车不再让出键帽，密码框和数字框不退回。见 `.agents/notes/implemented/feature/2026-10-29-language-key-left-of-space.md`。
 
 拼音网格左上角的 @#（1 键）不打开符号面板：短按把当前模式的常用标点放进候选条，就是逗号长按的那一组（`QuickPunctuationPolicy.entries`，中文模式是 `， 。 ？ ！ 、 ； ：`），组字中也一样。点选一个与侧栏标点一样交给 Engine 的标点处理（组字中先上屏首选），候选条随即清空；Engine 下一次回报候选（`onChanged`）或打开别的界面时换回 Engine 的候选。长按仍输入 1。
+
+「九键滑动输入数字」（#10229，共享偏好 `touch_nine_key_swipe_digits`，`off` / `up` / `down`，默认 `off`，同步键 `platform.harmony.nine_key_swipe`）在设置页「屏幕键盘 › 手势」里、紧跟 26 键的「滑动方向」，只在触屏宿主且版本提供全拼九键时列出。选了方向后，拼音九键字母层 1–9 键（`nineKeyHoldKey`，两处网格都经它）沿这个方向滑过 24 vp 的那一刻键面换成这个键的数字、角标藏起来，松手按长按选数字的同一条路径上屏（先结束组字再字面上屏），按键音、振动和键位统计与点按这一格相同；反方向滑过 24 vp 弹出和长按相同的数字和字母（1 键没有字母，反方向什么也不做）。判定在 `input/NineKeySwipePolicy.ts`，与 Android `NineKeySwipePolicy.gesture` 逐条相同：只看纵向位移、严格大于阈值、一次触摸只判定一次，滑出去之后点击和长按都不再做事，长按先弹出时不再判定，系统取消时什么也不输入。阈值固定 24 vp；Android 的阈值是本机「九键滑动距离」（14–48 dp，默认 24），鸿蒙和 iOS 没有这个滑块，这是三端唯一的差异。数字层、九键双拼、笔画和借来的数字九宫格不受影响；2in1 没有这项设置，同步过来的值也不在 2in1 上判定。
 
 ## 大屏单手侧边数字键盘
 
@@ -317,9 +323,23 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 - 设置桥的能力位（`SettingsFormFactorCapabilities.resolve(deviceType, foldable)` 的 `oneHandedSidePanel`，报给共享设置页的 `touch_one_handed_side_panel`）：平板为真，手机在 `display.isFoldable()` 为真时为真（折叠状态下也列出，展开后生效），直板手机和 2in1 为假；`isFoldable` 出错时按不可折叠并记日志。鸿蒙平板走设置页的手机排法，这一行照样带说明，标题和说明与 Android、iOS 逐字相同。
 - 测试：`tests/keyboard-logic.test.ts` 覆盖宽度、取值、显示条件、键序、读屏名称和能力位，`tests/run.sh` 钉住接线；共享设置页的 `apps/desktop/tests/settings/harmony-one-handed-side-panel.test.tsx`。
 
+## 大屏分离式键盘
+
+平板和折叠屏内屏横屏时，26 键一族（全拼、双拼、五笔、英文、日文罗马字、粤拼、越南语、藏文）和韩文的键盘可以分成左右两半（#10224），规则逐条移植自 Android 的 `SplitKeyboardPolicy`（`keyboard/SplitKeyboardPolicy.ts`）。开关在共享 React 设置页「屏幕键盘 › 布局」，四行与 Android 原生设置页逐字相同：「分离式键盘」（共享偏好 `touch_keyboard_split`，默认关，随账号同步，同步键 `platform.harmony.split_keyboard`，与 Android 的 `platform.android.split_keyboard` 各管各的设备）、「竖屏也分离」（`touch_keyboard_split_portrait`，与 Android 共用这个共享偏好）、「分离启用宽度」（`touch_keyboard_split_threshold`，480–1000vp、步进 20、默认 600）、「分离中间空隙」（`touch_keyboard_split_gap`，10–40%、步进 5、默认 25）。后三项只留本机，主开关关着时不可调。
+
+- 什么时候分（`SplitKeyboardPolicy.drawn`）：主开关打开，屏幕最短边不小于启用宽度，横屏或竖屏选项打开，不是 2in1，键盘没有浮动，正在画的键面能分（`KeyboardView.splitsFace`）。九键、14/18 键、笔画、注音、手写、假名九键不分，它们的符号页和借来的数字九宫格也不分。`readOrientation` 在转屏、折叠屏展开和折叠时记下屏幕宽高，分离与否随之重算，偏好不动。
+- 怎么分：字母三排、数字行、补充行、123 / #+= 层和两种底行都在键边界上断开，中间插一段不接触摸、读屏跳过的空隙（`splitGap`）。空隙至少占整行的「分离中间空隙」，两侧原始键区合计不超过 720vp，更宽的屏幕把多出来的宽度留在中间。字母第二、三排在右半边内侧重复 G、V（asdfg | ghjkl、⇧zxcv | vbnm⌫），重复的键从空隙借一个键宽，三排键宽不变；重复的键输入与左边那个相同，但不记滑行键位。底行的空格拆成两个，左边那个的份额让空隙落在整行中间，每一半至少保留原宽度的 15%。键盘高度不变。
+- 单手模式在分离时让位（`oneHandActive`），存着的值不变，功能面板的单手磁贴置灰。
+- 浮动键盘优先：浮动时不分离，分离设置不变，停靠后按原样回来；分离画着时浮动磁贴照常可用。与 Android `splitKeyboardDrawn` 在 `floatingDrawn()` 时返回 false 相同。
+- 两个空格共用同一套空格手势状态（光标拖动、长按语音）：两根拇指同时按住两个空格时后按下的会接管，与 Android 每个空格各自一份状态不同。
+- 设置桥的能力位（`SettingsFormFactorCapabilities` 的 `splitKeyboard`，报给共享设置页的 `touch_keyboard_split`）与侧边数字键盘相同：平板和可折叠手机为真，直板手机和 2in1 为假。
+- 测试：`tests/split-keyboard.test.ts` 覆盖读法、启用条件、几何和能力位，`tests/run.sh` 钉住接线；共享设置页的 `apps/desktop/tests/settings/harmony-split-keyboard.test.tsx`。见 `.agents/notes/implemented/feature/2026-10-30-split-keyboard-iphone-harmony.md`。
+
 ## 全拼九键的三栏展开面板
 
 候选条末尾的 ∨ 此前在手机和平板上打不开任何东西：surface 改成单值（#2503）之后，它只取了完整候选列表，却没有切到展开面板。现在它打开面板，再点一次收起；面板开着时每次 `onChanged` 都重取候选，不再是打开那一刻的一份拷贝。
+
+网格分批建格子（`ExpandedCandidateBatchPolicy`，与 Android 的 `CandidateGridBatchPolicy` 规则相同）：一个字母常有几百个候选，一次全建成 ArkUI 格子会让打开面板和面板里每次换候选都明显卡顿。打开时先建 48 格，滚到离已建内容底边不到一屏、或第一批没填够一屏多时再追加一批。重取到同一代候选（`KeyboardSession.candidateListIdentity` 相同，比如释义晚到）建回已建的数量；换了一代从第一批建起并滚回顶部。完整候选仍由 `allCandidates()` 一次取回，只有格子是分批建的。
 
 全拼九键组字时面板画成三栏，占满键区（`nineKeyExpandedFace`，判断在 `NineKeyPanelPolicy.threeColumn`）：左栏是引擎给的 `nine_key_spellings`（完整拼音、下一个数字键上的大写字母、未锁定时的数字本身，读屏分别说「选择拼音」「选择字母」「输入数字」），可切成横竖撇点折五个笔画键；中栏是可滚动的全部候选；右栏是返回、⌫、重输、拼音/笔画、全部/单字。选拼音、⌫、改筛选都不关面板；选了只覆盖前面一段的候选时也不关，换上剩余组字的全部候选（#9193，与 Android、iOS 相同，判断在 `CandidatePanelSelectionPolicy`），单字筛选留着、笔画筛选清空；点返回或组字结束（含选词后整句上屏）才收起。普通候选网格在部分选词后同样留着。筛选把候选滤空时面板仍开着，好让用户撤掉那一笔。
 
@@ -337,7 +357,7 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 触屏方案 `QUANPIN_EIGHTEEN_KEY` 使用 `Q WE RT Y U IO P` / `A SD FG H JK L` / `Z XC V BN M` 三排组码键，编号为共享 C ABI 的 `KeyGrid::EighteenKey`（4）。它与 14 键共用候选、读音选择、拼音条、三栏展开面板和长按字母行为；键表与引擎分组、`Eighteen*` 统计键位由 `scripts/test-harmony-eighteen-key-table.py` 核对。18 键同样只在手机和平板提供，2in1、英文、密码框、网址框和本地模式回落到 26 键。
 
-18 键的布局偏好是 `eighteen_key`，默认不启用；鸿蒙新版本可正常同步，旧版遇到未知值时只跳过该键。打字统计来源为 `eighteenKey`，键面第三排左端保留分词/符号键，右端为删除。
+18 键的布局偏好是 `eighteen_key`，默认不启用；鸿蒙新版本可正常同步，旧版遇到未知值时只跳过该键。打字统计来源为 `eighteenKey`，键面第三排左端保留分词/符号键，右端为删除。三排从同一左右边界铺开：第二排六个键平分整行，`A`、`L` 分别与首排 `Q`、`P` 对齐，与 Android、iOS 相同。
 
 ## 双拼 14/18 键
 
@@ -377,7 +397,9 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 共享偏好 `touch_shuangpin_key_hints` 为 `false` 时（设置页「屏幕键盘 › 布局」的「双拼键位提示」），26 键双拼的字母键不再画底部的声母/韵母提示，提示行不占高度；缺省和旧文档都按开。账号同步键是 `platform.harmony.shuangpin_key_hints`。
 
-共享偏好 `touch_quanpin_shift`（设置页「屏幕键盘 › 布局」的「组字时保留 Shift」）打开后，全拼 26 键组字时第三排左端保留 ⇧，点一下臂辅助码（Shift+字母），不再换成「分词」键；缺省和旧文档都按关（分词），九键、14 键和 18 键自带的分词键不受它影响。键盘在 `KeyboardSession` 准备偏好时以 `=== true` 读它（缺键、类型错都按关），`KeyboardView` 的 `usesQuanpinSeparator()` 和键面 `faceKey()` 都按它分支，开关变化即重画。账号同步键是 `platform.harmony.quanpin_shift`。
+共享偏好 `touch_quanpin_shift`（设置页「屏幕键盘 › 布局」的「组字时保留 Shift」）默认开启，全拼 26 键组字时第三排左端保留 ⇧，点一下臂辅助码（Shift+字母），不再换成「分词」键；明确写 `false` 后改为分词，九键、14 键和 18 键自带的分词键不受它影响。键盘在 `KeyboardSession` 准备偏好时按 `!== false` 读它（缺键、类型错都按开），`KeyboardView` 的 `usesQuanpinSeparator()` 和键面 `faceKey()` 都按它分支，开关变化即重画。账号同步键是 `platform.harmony.quanpin_shift`。
+
+全拼或双拼组字时，Shift 加字母以大写字母交给 Engine（`ChineseHelpcodePolicy.letterInput`）：Engine 只把组字中的大写字母当辅助码，不看 Shift 标志。双拼「末尾间接触发（大写字母）」和「句中触发键（大写字母）」也走这条路。分号、反引号、`/` 和「辅助码触发键」这些间接触发键在符号层里按：它们此刻会开一段辅助码时，Engine 把它们列进 `spelling_symbols`，2in1 符号行的 `tapSymbol` 按 `HardwareKeyRouter.touchSpells` 当字符送进去，外接键盘同样如此；触屏 123 层（画成「；」的分号键）和数字九宫格经 `typeHelpcodeTrigger`（`ChineseHelpcodePolicy.layerTrigger`）先交给 Engine，收下就回到字母层接着打辅助码字母，不收才照常上屏键面。全拼和双拼的「辅助码触发键」在设置页「输入 › 辅助码 › 更多选项」，宿主能力 `helpcode_trigger_key` 在 HarmonyOS 和 Linux 上打开。
 
 振动三档以前只差时长（10/20/35 ms）、强度固定，摸不出差别。现在每档用一个预置效果加拉开的强度（`KeyboardFeedback.plan`：轻 `haptic.effect.soft` 35、中 `haptic.effect.sharp` 70、强 `haptic.effect.hard` 100），设备不支持该效果（`isSupportEffectSync`，结果按效果缓存）时退回 8/20/40 ms。新增「跟随系统」（`system`）：用 `usage: 'touch'` 和 `haptic.clock.timer`、不带强度，振不振、多强由系统的触感反馈设置决定。按键反馈文件每次聚焦都重读，设置页改了档位不必等输入法重启。这些强度是按 SDK 6.1.1（API 24）的类型声明写的，还没在真机上逐档摸过。
 

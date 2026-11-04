@@ -33,9 +33,9 @@ use crate::nine_key::{KeyGrid, NineKeySession};
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::touch::{KeyGeometry, KeyTouch, TouchTuning};
 use crate::types::{
-    CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery, KeyResult,
-    LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery, QuickPhraseEntry,
-    SchemeType, WordItem,
+    CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery,
+    FrequencyAdjustmentOptions, KeyResult, LocalInputMode, MentionEntry, OnlineQuery,
+    PluginCommand, PluginCommandQuery, QuickPhraseEntry, SchemeType, WordItem,
 };
 use crate::user_dictionary::journal::{release_thread_journal, JournalUse};
 use crate::user_dictionary::ngram_store::{flush_journal, note_settled};
@@ -711,12 +711,27 @@ impl Session {
         self.nine_key.set_rescoring_context(context);
     }
 
-    /// 首页行数只决定词库要不要并入补全词。`Runtime::set_page_size` 在宿主改每页候选数时调它，
-    /// 因此引擎的首屏门槛和分页始终同源，不必等下一次因别的偏好变化重建引擎。
+    /// 首页行数只决定词库要不要并入补全词。`Runtime` 建立、换引擎和宿主改每页候选数（`Runtime::set_page_size`）时都调它，因此引擎的首屏门槛和分页始终同源，不必等下一次因别的偏好变化重建引擎。
     pub fn set_first_page_rows(&mut self, rows: FirstPageRows) {
         self.candidates_may_change();
         self.input.set_first_page_rows(rows);
         self.nine_key.set_first_page_rows(rows);
+    }
+
+    /// 调频方式（`SessionOptions::frequency`），不重建会话就换掉；26 键和九宫格一起换。从下一次选择起按新方式学，已经学下的排序照旧生效，眼前的候选不重排。`trigger_count` 或 `linear_step` 不在 1..=10 时是 `INVALID_SESSION_OPTIONS`（建会话时同样的检查），什么也不改。
+    pub fn set_frequency_adjustment(&mut self, options: FrequencyAdjustmentOptions) -> Result<()> {
+        if !input::frequency_options_valid(options) {
+            return Err(EngineError::invalid(diagnostics::INVALID_SESSION_OPTIONS));
+        }
+        self.candidates_may_change();
+        self.input.frequency = options;
+        self.nine_key.set_frequency(options);
+        Ok(())
+    }
+
+    /// 当前的调频方式：建会话时给的，或之后 [`Self::set_frequency_adjustment`] 换上的。
+    pub fn frequency_adjustment(&self) -> FrequencyAdjustmentOptions {
+        self.input.frequency
     }
 
     /// Hand over the candidates withheld from a single-letter query; whether the list grew.
@@ -793,12 +808,18 @@ impl Session {
                 ..SessionSnapshot::default()
             };
         }
-        if self.nine_key.active() {
-            return self.nine_key.snapshot();
-        }
         let hide_helpcode = !show_helpcode
             && self.input.helpcode_enabled()
             && !self.input.local_mode.annotates_rows();
+        if self.nine_key.active() {
+            let mut snapshot = self.nine_key.snapshot();
+            snapshot.candidate_annotations = self.input.candidate_helpcode_annotations(
+                &snapshot.candidates,
+                hide_helpcode,
+                snapshot.scheme,
+            );
+            return snapshot;
+        }
         let input = &self.input;
         let mut candidates = input.candidates().to_vec();
         for item in &mut candidates {
@@ -865,6 +886,7 @@ impl Session {
                         && input.selection_completes_composition(item)
                 })
                 .collect(),
+            candidate_contest: Vec::new(),
             candidate_list_open: input.candidate_list_open(),
             conversion: input
                 .conversion

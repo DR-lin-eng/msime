@@ -118,6 +118,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private let schemeButton = KeyboardToolbarButton(icon: .toolbarScheme, accessibilityLabel: "选择输入方案")
   private let shortcutBar = UIStackView()
   private var candidateContent: UIStackView?
+  /// 工具栏的语音按钮。iOS 的语音入口是长按空格和功能菜单的「语音输入」，工具栏不放语音按钮；按钮仍排在栏里但保持隐藏，与下面的高情商回复一样，按标识符查找它的地方不会找到别的控件。
   private let scriptShortcut = UIButton()
   /// 高情商回复已移进功能菜单；按钮仍排在栏里但保持隐藏，按标识符查找它的地方不会找到别的控件。
   private let replyShortcut = UIButton()
@@ -224,6 +225,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let numberHint: UILabel?
   }
   private var nineKeyGridKeys: [NineKeyGridKey] = []
+  /// 「九键滑动输入数字」（共享偏好 `touch_nine_key_swipe_digits`，#10229），键盘出现时从共享文档同步；九宫格的键每次判定时经 `activeNineKeySwipeDigits` 读它。
+  private var nineKeySwipeDigits = NineKeySwipeDigits.mirrored
   /// 26 键双拼画不画键位提示（共享偏好 `touch_shuangpin_key_hints`），键盘出现时从共享文档同步，绘制键面时不再读 App Group。
   private var shuangpinKeyHintsEnabled = KeyboardLayoutPreference.shuangpinKeyHints
 
@@ -274,11 +277,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 横屏分离式键盘每一排中间的中缝（见 `KeyboardSplitLayout`）。不分离时隐藏，stack view 不给它宽度也不给它两侧的键距；分离时它是一块普通视图，落在上面的触摸由它接住后丢掉，不会被 `KeyAreaStackView` 当成键距交给旁边的键。
   private var splitGaps: [UIView] = []
   private var splitGapWidths: [NSLayoutConstraint] = []
+  /// 第三排字母的中缝只给一种键面用：iPad 键面这一排末尾有 ，。，九个字符键从 b 后面分（zxcvb | nm，。）；手机键面 ，。 隐藏，七个字母从 v 后面分（zxcv | bnm）。两段中缝都插好，按键面只显示其中一段。
+  private var tabletOnlySplitGap: UIView?
+  private var phoneOnlySplitGap: UIView?
   /// 分离时右半最里面的第二个空格键，和 `spaceButton` 做同样的事。
   private weak var splitSpaceButton: UIButton?
   /// 上一次 `updateKeyboardLayout` 画的是不是分离式键盘；旋转或改设置后与 `wantsSplitKeyboard` 不同就重新布局。
   private var splitKeyboardShown = false
-  /// 共用的每排十键符号行，现在只有大千布局还拿它做符号层（`drawsSymbolLayer`）。
+  /// 共用的每排十键符号行：大千注音的 #+= 页。大千的 123 与别的键面一样打开数字九宫格，从它左列的 #+= 进这一页，底行的切换键印 123、回到数字九宫格（`toggleLayout`）；其他键面的 #+= 是设计稿的符号层（`drawsSymbolLayer`）。按键经 `handleSymbol` 的注音分支原样写出，不当作注音键。
   private var symbolRowViews: [UIView] = []
   /// 设计稿 123 / #+= 层的三排按键（`SymbolLayerLayout`）；底行是为该层排好的功能行。
   private var symbolLayerRowViews: [UIStackView] = []
@@ -302,7 +308,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var zhuyinRowViews: [UIView] = []
   /// 全拼 14 键的三排键（`FourteenKeyLayout`），中文模式下代替三排字母。
   private var fourteenKeyRowViews: [UIView] = []
-  /// 18 键的三排键（`EighteenKeyLayout`），与 14 键一样代替三排字母；第二排两侧的半键空白由 `updateLetterRowInsets` 按键距设好。
+  /// 18 键的三排键（`EighteenKeyLayout`），与 14 键一样代替三排字母；三排从同一左右边界铺开，第二排六个键平分整行。
   private var eighteenKeyRowViews: [UIView] = []
   /// 14 键和 18 键的各键和它代表的那一组字母，长按和横滑时据此找出这一键的字母。
   private var letterGridButtons: [(button: UIButton, key: FourteenKeyLayout.Key)] = []
@@ -452,6 +458,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   /// 两张符号表此刻画在左列上的样子（空表是出厂表），变了才重建按键。
   private var builtLetterSidebar: [String] = []
   private var builtDigitSidebar: [String] = []
+  /// 数字层左列此刻是否画着半角语境追加的符号（`NineKeySidebar.asciiDigitExtras`）。
+  private var builtDigitSidebarExtras = false
   private let numberPadSidebar = UIStackView()
   private let numberPadOperators = UIStackView()
   /// 九键右列的 ⌫：数字九宫格左列每一项与它同高。
@@ -865,6 +873,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     TouchWubiLayoutPreference.mirror(session.sharedPreferences)
     TouchKeyLayoutStyle.mirror(session.sharedPreferences)
     keyLayoutStyle = TouchKeyLayoutStyle.mirrored
+    NineKeySwipeDigits.mirror(session.sharedPreferences)
+    nineKeySwipeDigits = NineKeySwipeDigits.mirrored
     // 输入习惯（学习、调频、离线释义、候选翻译与语言）同理以文档为准。镜像里没写过释义开关时读作开启，而文档默认关闭（`candidate_english_gloss` 是 opt-in）；不先抄过来，下面按镜像算出的顶栏会多留一行释义，键盘高 4pt，等后台重载把文档抄进镜像后又缩回去，文档没有更新时重载不抄，就一直按镜像显示释义。
     InputHabitPreference.mirror(InputHabitPreference.settings(in: session.sharedPreferences))
     shuangpinLayout = TouchShuangpinLayoutPreference.layout
@@ -1701,7 +1711,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var cursorSwipeAllowed: Bool {
     cursorSwipeEnabled && !cursorSwipeHadMultipleTouches && !hasComposition && !isInLocalMode && !replyKeyboardShown
       && !glideTypingArmed && !glideActive
-      && !(isChineseMode && inputScheme == .japaneseNineKey)
+      // 假名网格的横滑是选假名，所以假名九键的字母层不挂横滑光标；它的数字九宫格和 #+= 页与别的键面一样可以。
+      && !(isChineseMode && inputScheme == .japaneseNineKey && !showsSymbols)
   }
 
   private func cancelCursorSwipeIfDocumentChanged() {
@@ -1841,6 +1852,13 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         }
       }
       insertSplitGap(into: row, after: characterKeys[KeyboardSplitLayout.leftKeyCount(characterKeys.count) - 1], root: root)
+      // 第三排字母：手机键面没有 ，。，按看得见的七个字母另插一段中缝（见 `tabletOnlySplitGap`）。
+      if let comma = letterRowPunctuationKeys.first, characterKeys.contains(where: { $0 === comma }) {
+        tabletOnlySplitGap = splitGaps.last
+        let letters = characterKeys.filter { key in !letterRowPunctuationKeys.contains { $0 === key } }
+        insertSplitGap(into: row, after: letters[KeyboardSplitLayout.leftKeyCount(letters.count) - 1], root: root)
+        phoneOnlySplitGap = splitGaps.last
+      }
     }
     if let space = spaceButton {
       insertSplitGap(into: actionRow, after: space, root: root)
@@ -1985,7 +2003,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
           guard let self else { return }
           self.countKeyPress(self.numberPadKeyID(digit))
           if self.showsSymbols {
-            self.insertNumberPadLiteral(String(digit))
+            self.typeNumberPadText(String(digit))
           }
           else if letters == nil && self.inputScheme != .nineKeyShuangpin { self.showNineKeyQuickSymbols() }
           else { self.handleCharacter(String(digit)) }
@@ -2026,6 +2044,16 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         hold.delegate = self
         button.addGestureRecognizer(hold)
         button.accessibilityHint = letters.map { "长按输入 \(digit) 或 \($0)" } ?? "长按输入 1"
+        if let key = button as? KeyboardKeyButton {
+          key.nineKeySwipeDigit = digit
+          key.nineKeySwipeHasLetters = letters != nil
+          key.nineKeySwipeHint = number
+          key.nineKeySwipeMode = { [weak self] in self?.activeNineKeySwipeDigits ?? .off }
+          key.onNineKeySwipe = { [weak self, weak key] gesture in
+            guard let self, let key else { return }
+            self.handleNineKeySwipe(gesture, from: key, digit: digit)
+          }
+        }
         nineKeyGridKeys.append(
           NineKeyGridKey(button: button, digit: digit, letters: letters, numberHint: number))
         row.addArrangedSubview(button)
@@ -2052,10 +2080,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     nineKeyMiddleButton = middle
     controls.addArrangedSubview(middle)
     let closing = Self.nineKeyClosingMark
+    // 写出的是此刻的键面：英文和写 ASCII 标点的方案借来的数字九宫格上是 !（`nineKeyClosingFace`，`updateKeyboardLayout` 换键面）。
     let exclamation = makeKey(title: closing, accessibilityLabel: "符号 \(closing)", function: true) { [weak self] in
       guard let self else { return }
       countKeyPress(TypingKeyID.punctuation)
-      handleSymbol(closing)
+      handleSymbol(nineKeyClosingFace)
     }
     exclamation.configuration?.contentInsets = .zero
     exclamation.accessibilityIdentifier = "nineKeyClosingMark"
@@ -2073,12 +2102,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return nineKeyContainer
   }
 
-  /// 数字九宫格左列的一项。出厂表（`custom` 为 false）照原来的运算符键：读作「运算符 +」，按数字页的字面路径上屏（`insertNumberPadLiteral`）；自定义表的项读作「符号 …」，按 `insertSidebarLiteral` 上屏，标识是 `numberPadSidebarSymbol` 加下标。
-  private func makeDigitSidebarKey(_ symbol: String, index: Int, custom: Bool) -> UIButton {
-    let button = makeKey(title: symbol, accessibilityLabel: custom ? "符号 \(symbol)" : "运算符 \(symbol)") { [weak self] in
+  /// 数字九宫格左列的一项。出厂表（`custom` 为 false）照原来的运算符键：读作「运算符 +」，按数字页的路径上屏（`typeNumberPadText`）；半角语境在出厂表后追加的符号（`extra`，`NineKeySidebar.asciiDigitExtras`）走同一条路径，读作「符号 @」；自定义表的项读作「符号 …」，按 `insertSidebarLiteral` 上屏，标识是 `numberPadSidebarSymbol` 加下标。
+  private func makeDigitSidebarKey(_ symbol: String, index: Int, custom: Bool, extra: Bool = false) -> UIButton {
+    let button = makeKey(title: symbol, accessibilityLabel: custom || extra ? "符号 \(symbol)" : "运算符 \(symbol)") { [weak self] in
       guard let self else { return }
       countKeyPress(TypingKeyID.punctuation)
-      if custom { insertSidebarLiteral(symbol, digits: true) } else { insertNumberPadLiteral(symbol) }
+      if custom { insertSidebarLiteral(symbol, digits: true) } else { typeNumberPadText(symbol) }
     }
     Self.drawBareInSidebar(button)
     if custom { button.accessibilityIdentifier = "numberPadSidebarSymbol\(index)" }
@@ -2099,7 +2128,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return button
   }
 
-  /// 按两张符号表换左列的键，表没变时不做事。字母层：空表时左列是原来的 ，。？（`punctuationStack`，右侧大回车时末尾接 ！），自定义表换成 `customSidebarScroll`。数字层：空表是原来的四个运算符，自定义表换成用户的表；两种都在同一个滚动栈里、#+= 总在最后，每项与右列的 ⌫ 同高。
+  /// 按两张符号表换左列的键，表和语境没变时不做事。字母层：空表时左列是原来的 ，。？（`punctuationStack`，右侧大回车时末尾接 ！），自定义表换成 `customSidebarScroll`。数字层：空表是原来的四个运算符，半角语境（数字九宫格右列是 ASCII `!` 的那些，`symbolLayerIsChinese` 为 false）再按 `@ : ; ( ) ' " $` 的顺序追加还没有的半角符号；自定义表换成用户的表，不追加（`TouchKeyLayoutStyle.numberPadSidebarSymbols`）。几种都在同一个滚动栈里、#+= 总在最后，每项与右列的 ⌫ 同高；切中英文、进出本地模式或换方案时随 `updateKeyboardLayout` 重建。
   private func applySidebarSymbols(_ style: TouchKeyLayoutStyle) {
     if !NineKeySidebar.same(style.nineKeySidebar, builtLetterSidebar) {
       builtLetterSidebar = style.nineKeySidebar
@@ -2111,14 +2140,18 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       }
       customSidebarScroll.setContentOffset(.zero, animated: false)
     }
-    if !NineKeySidebar.same(style.digitSidebar, builtDigitSidebar), let delete = nineKeyDeleteKey {
+    let custom = !style.digitSidebar.isEmpty
+    let extras = !custom && !symbolLayerIsChinese
+    if !NineKeySidebar.same(style.digitSidebar, builtDigitSidebar) || extras != builtDigitSidebarExtras,
+       let delete = nineKeyDeleteKey {
       builtDigitSidebar = style.digitSidebar
+      builtDigitSidebarExtras = extras
       for key in numberPadOperators.arrangedSubviews where key.accessibilityIdentifier != "numberPadMoreSymbols" {
         key.removeFromSuperview()
       }
-      let custom = !style.digitSidebar.isEmpty
-      for (index, symbol) in style.sidebarSymbols(.digit).enumerated() {
-        let key = makeDigitSidebarKey(symbol, index: index, custom: custom)
+      let defaultCount = NineKeySidebar.defaultDigitSymbols.count
+      for (index, symbol) in style.numberPadSidebarSymbols(ascii: extras).enumerated() {
+        let key = makeDigitSidebarKey(symbol, index: index, custom: custom, extra: extras && index >= defaultCount)
         numberPadOperators.insertArrangedSubview(key, at: index)
         key.heightAnchor.constraint(equalTo: delete.heightAnchor).isActive = true
       }
@@ -2282,7 +2315,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       handleCharacter("'")
     case .period:
       countKeyPress(TypingKeyID.character("."))
-      insertNumberPadLiteral(".")
+      typeNumberPadText(".")
     case .rewrite:
       playInputClick()
       if hasComposition { render(discardComposition()) }
@@ -2302,6 +2335,27 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     // 长按替代点按，只统计一次；菜单选项经字面输入路径上屏，1 不进入拼音引擎。
     countKeyPress(TypingKeyID.nineKey(key.tag))
     showKeyHoldOptions(from: key, options: Self.nineKeyHoldOptions(key.tag))
+  }
+
+  /// 九宫格的键此刻按哪种「九键滑动输入数字」判定：只在拼音九键的字母层生效；数字层（包括别的键面借来的数字九宫格）、九键双拼、长按菜单已经弹出、横滑移光标接管了触摸、读屏开着时一律按关闭，点按和长按照旧。
+  var activeNineKeySwipeDigits: NineKeySwipeDigits {
+    guard nineKeySwipeDigits != .off, !showsSymbols, inputScheme == .nineKey, nineKeyHoldPopup == nil,
+          !cursorSwipeActive, !isVoiceOverRunning() else { return .off }
+    return nineKeySwipeDigits
+  }
+
+  /// 九键滑动的结果（#10229）。沿设定方向松手：记一次这个键（与点按同一个统计 id），按长按菜单里选数字的同一条路径上屏（先结束组字再原样上屏，按键反馈也在那里出）。反方向滑过：与长按一样记一次这个键，弹出同样的数字和字母，之后从菜单里选的不再记。
+  private func handleNineKeySwipe(_ gesture: NineKeySwipePolicy.Gesture, from key: UIButton, digit: Int) {
+    switch gesture {
+    case .digit:
+      countKeyPress(numberPadKeyID(digit))
+      commitNineKeyHoldOption(String(digit))
+    case .letters:
+      countKeyPress(TypingKeyID.nineKey(digit))
+      showKeyHoldOptions(from: key, options: Self.nineKeyHoldOptions(digit))
+    case .none:
+      break
+    }
   }
 
   static func nineKeyHoldOptions(_ digit: Int) -> [String] {
@@ -2707,11 +2761,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
     moreShortcut.apply(skin: skin)
     moreShortcut.accessibilityLabel = "功能"
-    // 语音入口只在「顶部语音入口」打开时显示；简繁是设一次就很少再动的开关，和其他开关一起放在功能菜单里。
+    // iOS 的语音入口是长按空格，工具栏不放语音按钮：共享文档里的 `touch_voice_shortcut` 是 Android 的「启动方式」，iOS 设置里没有对应的开关，按它显示就成了关不掉的按钮。关掉长按空格时从功能菜单的「语音输入」开始说话。简繁是设一次就很少再动的开关，和其他开关一起放在功能菜单里。
     configure(scriptShortcut, title: nil, symbol: "waveform", label: "语音输入", id: "layoutVoiceShortcut")
     scriptShortcut.isEnabled = true
     scriptShortcut.accessibilityValue = nil
-    scriptShortcut.isHidden = !KeyboardLayoutPreference.voiceShortcutEnabled
+    scriptShortcut.isHidden = true
     configure(replyShortcut, title: nil, symbol: "bubble.left.and.text.bubble.right",
       label: "高情商回复", id: "replyShortcut")
     replyShortcut.accessibilityValue = replyPanel != nil ? "已打开" : nil
@@ -2945,9 +2999,6 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         self?.closeKeyboardPicker(); self?.resetCandidateCache()
       },
     ]
-    if !toolbarRowHidden && !scriptShortcut.isHidden {
-      tools.removeAll { $0.id == "voiceInput" }
-    }
     return tools
   }
 
@@ -3116,7 +3167,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return row
   }
 
-  /// 14 键或 18 键的一排（`FourteenKeyLayout`、`EighteenKeyLayout`）。点一下把这一组的组码交给引擎（`handleLetterGridKey`），长按弹出这一键的字母；18 键两个字母的键还挂着双拼横滑（`handleEighteenKeySwipe`）。键都用 `makeKey` 建，不进 `letterButtons` 和滑行的 `glideLetterKeys`，所以 Shift 的大小写、双拼键位提示、角标滑动和滑行输入都碰不到它们。第三排两端是分词键和 ⌫。14 键第二排不缩进，两端键与 26 键的 ⇧、⌫ 同宽；18 键的每一排都按七个等宽的键排，第二排居中（`updateLetterRowInsets`），第三排两端键也与字母键同宽，与 Android 的七份权重一致。
+  /// 14 键或 18 键的一排（`FourteenKeyLayout`、`EighteenKeyLayout`）。点一下把这一组的组码交给引擎（`handleLetterGridKey`），长按弹出这一键的字母；18 键两个字母的键还挂着双拼横滑（`handleEighteenKeySwipe`）。键都用 `makeKey` 建，不进 `letterButtons` 和滑行的 `glideLetterKeys`，所以 Shift 的大小写、双拼键位提示、角标滑动和滑行输入都碰不到它们。第三排两端是分词键和 ⌫。14 键第二排不缩进，两端键与 26 键的 ⇧、⌫ 同宽；18 键第一排和第三排都是七个等宽的键（第三排两端键与字母键同宽），第二排六个键平分整行，A 与 Q 左对齐、L 与 P 右对齐，与 Android、鸿蒙相同。
   private func makeLetterGridRow(_ keys: [FourteenKeyLayout.Key], grid: LetterKeyGrid, includesEdges: Bool) -> UIStackView {
     let prefix = grid == .eighteenKey ? "eighteenKey" : "fourteenKey"
     let row = makeRow()
@@ -3179,11 +3230,6 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// iPad 上 14 键第三排两端键占这一排的比例：26 键第三排是 ⇧、七个字母、，。、⇧，两个 ⇧ 各 `TabletLetterLayout.shiftWeight` 个键宽，一个 ⇧ 占这一排的这么多。
   static let tabletFourteenKeyEdgeRatio: CGFloat = TabletLetterLayout.shiftWeight / (9 + 2 * TabletLetterLayout.shiftWeight)
-
-  /// 18 键第二排六个键与第一排的七个键同宽时，两侧各留的空白：半个键加半个键距。行内六个键之间已经有五个键距，两侧的空白只补一次第七个键的那一份，不能再把行距重复扣掉（Android #9593 修过的重复扣键距）。`width` 是这一排的宽度，`spacing` 是键距。
-  static func eighteenKeyMiddleRowInset(width: CGFloat, spacing: CGFloat) -> CGFloat {
-    max((width + spacing) / 14, 0)
-  }
 
   /// 字母网格的一键：把这一组的组码交给引擎。设置在键盘开着时被改掉、方案已经不是这种网格时，这次过期的点按什么也不做，组码不会落进别的方案或另一种网格。
   private func handleLetterGridKey(_ key: FourteenKeyLayout.Key) {
@@ -3484,7 +3530,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         let face = symbolExtraRowFaces[column]
         if numberPadShown {
           countKeyPress(TypingKeyID.character(face))
-          insertNumberPadLiteral(face)
+          typeNumberPadText(face)
         } else {
           typeSymbolLayerFace(face)
         }
@@ -3564,36 +3610,58 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     isChineseMode && inputScheme.isJapanese && !isInLocalMode
   }
 
-  /// 哪些界面用设计稿的 123 / #+= 层作为符号层，对应 Android 的 `drawsDesignLayer`：所有方案和英文下的 26 键、手写以及笔画键。九键网格在网格上保留自己的数字层，假名键有自己的符号层，大千各排保留共用的每排十键符号行。不是 private：布局测试会固定它。
-  static func drawsSymbolLayer(symbols: Bool, nineKey: Bool, kana: Bool, dachen: Bool) -> Bool {
-    symbols && !nineKey && !kana && !dachen
+  /// 设计稿的 123 / #+= 层此刻是否画着，对应 Android 的 `drawsDesignLayer`。数字入口在所有键面都打开数字九宫格（`drawsNumberPad`），所以这一层只剩 #+= 那一页，除大千注音外所有键面（含假名九键）的 #+= 都是它。大千的 `， . / ; -` 被注音键占用，它的 #+= 保留原来每排十键的共享符号行（`symbolRowViews`，有 `; : / - ( ) @`），与 Android、HarmonyOS 相同。不是 private：布局测试会固定它。
+  static func drawsSymbolLayer(symbols: Bool, numberPad: Bool, dachen: Bool) -> Bool {
+    symbols && !numberPad && !dachen
   }
 
-  /// 数字页只借用九键显示；独立语言的符号契约、本地模式和英文不变。
-  static func drawsNumberPad(symbols: Bool, moreSymbols: Bool, scheme: ChineseInputScheme,
-                             chinese: Bool, localMode: Bool) -> Bool {
-    symbols && !moreSymbols && chinese && !localMode
-      && !scheme.isJapanese && !scheme.writesAsciiPunctuation && !scheme.isZhuyin
+  /// 数字入口（123）一律打开数字九宫格：中文、英文、本地模式，以及日文（罗马字与假名）、韩文、越南文、藏文、大千注音、笔画、手写、14/18 键和 26 键一族都一样，iPhone 与 iPad 全尺寸键盘都一样；#+= 页仍是完整的符号层（大千注音是共享的每排十键符号行），从那里按 123 回到数字九宫格。这是维护者的产品决定，取代原来「独立语言、本地模式和英文保留各自 123 层」的约定。不是 private：布局测试会固定它。
+  static func drawsNumberPad(symbols: Bool, moreSymbols: Bool) -> Bool {
+    symbols && !moreSymbols
   }
 
-  /// 从其他中文键面借用数字页时返回键的键面，与 Android `KeyboardActionRow.layerTitle(_:_:_:)` 和 HarmonyOS `NineKeyLayout.numberPadReturnTitle` 一致：14 键、18 键和笔画印各自的短名，26 键一族和手写印中文字母页的「拼音」（`SymbolLayerLayout.lettersTitle`）。原拼音九键不走这里，它的数字层仍印「九键」。不是 private：测试会固定它。
-  static func numberPadReturnTitle(_ scheme: ChineseInputScheme) -> String {
+  /// 数字九宫格上回到字母的那个键印什么：键面是进入前的那块键盘，与 Android `KeyboardActionRow.layerTitle` 的短名一致。只用在数字九宫格上，#+= 页的这个键印的字见 `moreSymbolsReturnTitle`。英文和本地模式是英文字母页的「ABC」（`SymbolLayerLayout.lettersTitle(chinese: false)`），日文罗马字、越南文和藏文的字母键也是拉丁字母，同样印「ABC」；韩文印「한」，假名九键印「あいう」，大千注音印「注」；中文里 14 键、18 键（含双拼 18 键，`letterGrid`）和笔画印各自的短名，拼音九键一族印「九键」，26 键一族和手写印中文字母页的「拼音」。不是 private：测试会固定它。
+  static func numberPadReturnTitle(scheme: ChineseInputScheme, chinese: Bool, localMode: Bool,
+                                   letterGrid: LetterKeyGrid? = nil) -> String {
+    guard chinese && !localMode else { return SymbolLayerLayout.lettersTitle(chinese: false) }
+    if let letterGrid { return letterGrid.shortTitle }
     switch scheme {
     case .fourteenKey: return LetterKeyGrid.fourteenKey.shortTitle
     case .eighteenKey: return LetterKeyGrid.eighteenKey.shortTitle
     case .stroke: return "笔"
-    default: return SymbolLayerLayout.lettersTitle(chinese: true)
+    case .nineKey, .nineKeyShuangpin: return "九键"
+    case .japaneseNineKey: return "あいう"
+    case .zhuyin: return "注"
+    default:
+      if scheme.isKorean { return "한" }
+      return SymbolLayerLayout.lettersTitle(chinese: !scheme.isJapanese && !scheme.writesAsciiPunctuation)
     }
   }
 
-  /// 「长空格」的中文 26 键与 Android 一样，数字入口是带空格的 123 层，不借用没有空格的数字九宫格。
-  private var numberPadShown: Bool {
-    Self.drawsNumberPad(symbols: showsSymbols, moreSymbols: showsMoreSymbols,
-                        scheme: inputScheme, chinese: isChineseMode, localMode: isInLocalMode)
-      && !longSpaceActive
+  /// #+= 页底行那个键印什么，保持数字入口改成数字九宫格之前的字样：设计稿的 #+= 层按这一层画中文版还是英文版印「拼音」或「ABC」（`SymbolLayerLayout.lettersTitle`，规则同 `symbolLayerIsChinese`），不按进入前的键面区分，所以 14/18 键、笔画、拼音九键和日文罗马字的中文 #+= 页也印「拼音」，韩文、越南文、藏文、英文和本地模式印「ABC」。假名九键原来没有 #+= 页，沿用它原来符号层的「あいう」。大千注音的 #+= 是共享符号行，这个键回到数字九宫格，印「123」（`SymbolLayerLayout.toggleTitle(more: true)`），与 HarmonyOS 相同。不是 private：测试会固定它。
+  static func moreSymbolsReturnTitle(scheme: ChineseInputScheme, chinese: Bool, localMode: Bool) -> String {
+    guard chinese && !localMode else { return SymbolLayerLayout.lettersTitle(chinese: false) }
+    if scheme == .japaneseNineKey { return "あいう" }
+    if scheme.isZhuyin { return SymbolLayerLayout.toggleTitle(more: true) }
+    return SymbolLayerLayout.lettersTitle(chinese: !scheme.writesAsciiPunctuation)
   }
 
-  /// 手机上画的是中文 26 键字母页（全拼、26 键双拼、五笔 26 键、粤拼），「按键布局」的 26 键样式作用于它和它的 123 层。与 Android `TouchKeyStyle.Styles.forLayout` 和 HarmonyOS 一样只认中文方案：日文罗马字、韩文、越南文和藏文的 26 键保留标准底行（判断与数字九宫格的 `drawsNumberPad` 相同）。英文和本地输入模式画标准的英文底行；九键、14 键、18 键、笔画、手写、假名、大千和 iPad 全尺寸键盘有各自的底行。
+  /// 大千注音的 #+= 页（共享符号行）此刻是否画着：底行的切换键这时回到数字九宫格，不回字母层。
+  private var dachenMoreSymbolsShown: Bool {
+    typesZhuyin && showsSymbols && showsMoreSymbols
+  }
+
+  /// 数字九宫格此刻是否画着。26 键「长空格」也用它：数字九宫格底行（或「空格在右列」时右列）有空格，长按空格语音照常可用。
+  private var numberPadShown: Bool {
+    Self.drawsNumberPad(symbols: showsSymbols, moreSymbols: showsMoreSymbols)
+  }
+
+  /// 数字九宫格右列第三格的结束标点：中文和日文写全角的 ！，英文、本地模式和写 ASCII 标点的方案（韩文、越南文、藏文）写 ASCII 的 !，与 #+= 层选中文版还是英文版是同一条规则（`symbolLayerIsChinese`）。拼音九键一族和笔画自己的字母层只在中文下出现，仍是 ！。
+  private var nineKeyClosingFace: String {
+    symbolLayerIsChinese ? Self.nineKeyClosingMark : "!"
+  }
+
+  /// 手机上画的是中文 26 键字母页（全拼、26 键双拼、五笔 26 键、粤拼），「按键布局」的 26 键样式作用于它和它的 #+= 层。与 Android `TouchKeyStyle.Styles.forLayout` 和 HarmonyOS 一样只认中文方案：日文罗马字、韩文、越南文和藏文的 26 键保留标准底行。英文和本地输入模式画标准的英文底行；九键、14 键、18 键、笔画、手写、假名、大千和 iPad 全尺寸键盘有各自的底行。
   private var drawsChineseTwentySixKey: Bool {
     isChineseMode && chineseTwentySixKeyboard
   }
@@ -3610,7 +3678,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     activeKeyLayoutStyle.twentySixKey == .longSpace && chineseTwentySixKeyboard
   }
 
-  /// 26 键选了「长空格」并且正画着中文 26 键（含它的 123 / #+= 层）：符 移到工具栏，数字入口是 123 层，那两层的表情或符号入口换成逗号，与 Android 原来的 `longSpaceLayoutActive` 相同。
+  /// 26 键选了「长空格」并且正画着中文 26 键（含它的数字九宫格和 #+= 层）：符 移到工具栏，#+= 层的表情或符号入口换成逗号，与 Android 原来的 `longSpaceLayoutActive` 相同。数字入口与其他样式一样是数字九宫格，它自带空格。
   private var longSpaceActive: Bool {
     activeKeyLayoutStyle.twentySixKey == .longSpace && drawsChineseTwentySixKey
   }
@@ -3619,10 +3687,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private var activeKeyLayoutStyle: TouchKeyLayoutStyle {
     guard Self.keepsStandardBottomRows(keyboardType: inputContext.keyboardType, secure: textDocumentProxy.isSecureTextEntry,
                                        contentType: textDocumentProxy.textContentType ?? nil) else { return keyLayoutStyle }
-    // 「符」与「123」互换、数字键盘空格位置和左侧符号栏的两张表是键位习惯，不随输入框退回：标准底行同样有 符，数字框里的数字键盘也按用户选的排法和符号表画。
+    // 「符」与「123」互换、数字键盘空格位置、左侧符号栏的两张表和中/英键在空格哪一边是键位习惯，不随输入框退回：标准底行同样有 符 和中/英，数字框里的数字键盘也按用户选的排法和符号表画。
     return TouchKeyLayoutStyle(numberRow: keyLayoutStyle.numberRow, symbolFirst: keyLayoutStyle.symbolFirst,
                                numberPadSpace: keyLayoutStyle.numberPadSpace, nineKeySidebar: keyLayoutStyle.nineKeySidebar,
-                               digitSidebar: keyLayoutStyle.digitSidebar)
+                               digitSidebar: keyLayoutStyle.digitSidebar, languageKeySide: keyLayoutStyle.languageKeySide)
   }
 
   /// 输入框是否保留标准底行：安全输入或内容类型标成密码的框，以及数字键盘、小数键盘和电话键盘这些只收数字的框，对应 Android 的 `EditorPolicy.password` 与 `numberInput`。系统通常不在安全输入框和电话键盘里调用第三方键盘，宿主仍然调用时也按这条退回。不是 private：测试会固定它。
@@ -3637,9 +3705,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     !(traitCollection.userInterfaceIdiom == .phone && isLandscape)
   }
 
-  /// 借用网格不改变统计布局：两种拼音九键记 Nine，其余中文入口仍记 Digit。
+  /// 借用网格不改变统计布局：拼音九键一族自己的网格记 Nine，从其他键面（含拼音九键切到英文或本地模式时的 26 键）进来的数字九宫格记 Digit。
   private func numberPadKeyID(_ digit: Int) -> String? {
-    [.nineKey, .nineKeyShuangpin].contains(inputScheme)
+    isChineseMode && inputScheme.isMandarinNineKey && !isInLocalMode
       ? TypingKeyID.nineKey(digit) : TypingKeyID.character(String(digit))
   }
 
@@ -3695,6 +3763,31 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       noteOwnEdit()
     }
     if !isChineseMode { refreshEnglishSuggestions() }
+  }
+
+  /// 数字九宫格上的数字、0、小数点、左列出厂项（运算符和半角语境追加的 `@ : ; ( ) ' " $`）和补充行的键。本地模式和越南文、藏文里，Engine 此刻把这个键列为拼写符号时（U 模式的十六进制数字，计算、网址模式的数字与符号，VNI 越南文正在拼的词的声调数字，藏文威利转写正在拼时的 `+ - . /`），与原来的 123 层一样作为字符交给会话，这些输入不能因为换成数字九宫格就被截断。藏文的 `'`（achung，如 `'od`）没有组字时也能开头一个音节，所以不看拼写符号表，总是先交给会话，与原来 123 页经 `handleSymbol` 的藏文分支相同：会话收下就留在组字里，不先上屏组字。会话不收时，以及其余所有情况（中文各方案、日文、韩文、大千注音和英文），按 `insertNumberPadLiteral` 原样结束组字再写出这个键：中文拼写里的 `$ %`、`www` 后的 `.` 在数字九宫格上仍按字面，大千把 1–0 列为拼写符号是因为它的数字行就是注音键，数字九宫格上的数字只是数字。
+  private func typeNumberPadText(_ text: String) {
+    if isInLocalMode || typesCasedLetters {
+      // 拼写符号看的是会话此刻的组字，先画完此前异步投递的按键，与 `handleSymbol` 一样。
+      session.flushPendingCharacters()
+      flushDeferredInputSnapshot()
+      if typesTibetan && text == "'" {
+        let snapshot = session.handleCharacter(text)
+        if snapshot.isHandled {
+          playInputClick()
+          render(snapshot)
+          return
+        }
+      } else if session.engineSpellsWhileComposing(text) {
+        let snapshot = session.handleCharacter(text)
+        if snapshot.isHandled || snapshot.commitText?.isEmpty == false {
+          playInputClick()
+          render(snapshot)
+          return
+        }
+      }
+    }
+    insertNumberPadLiteral(text)
   }
 
   /// 数字页原样结束组字，与 Android、鸿蒙一致；普通符号页仍沿用选词后插入的路径。
@@ -3894,7 +3987,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       guard let self else { return }
       countKeyPress(numberPadKeyID(0))
       if inputScheme == .nineKeyShuangpin && !showsSymbols { handleCharacter("0") }
-      else { insertNumberPadLiteral("0") }
+      else { typeNumberPadText("0") }
     }
     zero.configuration?.contentInsets = .zero
     zero.configuration?.titleTextAttributesTransformer = Self.functionLabelTransformer
@@ -5829,6 +5922,9 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       quanpinShiftEnabled = KeyboardLayoutPreference.quanpinShift
       updateLetterCaseControls()
     }
+    // 「九键滑动输入数字」不改键面，下一次触摸判定时就用新值，不用重画。
+    NineKeySwipeDigits.mirror(preferences)
+    nineKeySwipeDigits = NineKeySwipeDigits(in: preferences)
     // 「按键布局」：样式或数字行变了，下面的 `updateKeyboardLayoutIfNeeded` 当场重排底行和数字行。只动键面，不碰会话，正在组的字照常继续。
     TouchKeyLayoutStyle.mirror(preferences)
     keyLayoutStyle = TouchKeyLayoutStyle(in: preferences)
@@ -5930,18 +6026,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
   }
 
-  /// 候选网格关闭时箭头朝下，打开时朝上，翻转用时 .2s。
-  private func updateExpandRotation(animated: Bool) {
+  /// 候选网格关闭时箭头朝下，打开时立即朝上。
+  private func updateExpandRotation() {
     let transform: CGAffineTransform = candidatePanel != nil ? CGAffineTransform(rotationAngle: .pi) : .identity
     expandCandidatesButton.accessibilityLabel = candidatePanel != nil ? "收起候选" : "展开全部候选"
     guard expandCandidatesButton.transform != transform else { return }
-    guard animated, expandCandidatesButton.window != nil, !UIAccessibility.isReduceMotionEnabled else {
-      expandCandidatesButton.transform = transform
-      return
-    }
-    UIView.animate(withDuration: 0.2, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
-      self.expandCandidatesButton.transform = transform
-    }
+    expandCandidatesButton.transform = transform
   }
 
   private func showCandidatePanel() {
@@ -5982,7 +6072,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       nineKeyPanelColumns = columns
       // 九键三栏面板和普通候选网格一样装在键区：上面的候选栏和读音留着，用户看得到选拼音、筛选之后读音和首选怎么变。
       installPanel(panel)
-      updateExpandRotation(animated: true)
+      updateExpandRotation()
       updateNineKeyPanelColumns()
       // 收起时候选条只查了自己那一页的释义，网格里其余候选的释义在打开时补查，用的就是上面刚读出的这份完整列表。
       if visibleEmailSuffixes.isEmpty {
@@ -6131,7 +6221,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let wasNineKeyPanel = nineKeyPanelColumns != nil
     nineKeyPanelColumns = nil
     nineKeyPanelStrokeMode = false
-    updateExpandRotation(animated: true)
+    updateExpandRotation()
     UIAccessibility.post(notification: .layoutChanged, argument: expandCandidatesButton)
     if wasNineKeyPanel && clearingNineKeyFilter { clearNineKeyFilter() }
   }
@@ -6291,6 +6381,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   private func toggleLayout() {
+    // 大千注音 #+= 页（共享符号行）底行的这个键印 123，回到数字九宫格，与设计稿 #+= 层第三排的 123 相同。
+    if dachenMoreSymbolsShown {
+      toggleMoreSymbols()
+      return
+    }
     playInputClick()
     showsSymbols.toggle()
     updateKeyboardLayout()
@@ -6327,16 +6422,6 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   private func updateLetterRowInsets() {
-    if eighteenKeyRowViews.count > 1, let middle = eighteenKeyRowViews[1] as? UIStackView {
-      // 18 键第二排的六个键与第一排同宽：两侧各空出半个键加半个键距，按这一排自己的宽度算，单手和浮动时一样成立。
-      let width = middle.bounds.width > 0 ? middle.bounds.width : (eighteenKeyRowViews[0].bounds.width)
-      let inset = Self.eighteenKeyMiddleRowInset(width: width, spacing: middle.spacing)
-      let margins = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
-      if middle.layoutMargins != margins || !middle.isLayoutMarginsRelativeArrangement {
-        middle.isLayoutMarginsRelativeArrangement = true
-        middle.layoutMargins = margins
-      }
-    }
     guard letterRowViews.count > 1, let row = letterRowViews[1] as? UIStackView else { return }
     // 手机的中间一排两侧各缩进半个键，显示 `;` 键时（微软双拼、粤语双拼的中文模式，见 `showsSemicolonKey`）用它填上这块空位，`;` 藏起来时缩进回来；iPad 的中间一排缩进 2.5% 开始，以回车结尾（`TabletLetterLayout`）。
     // 这个比例按按键区域本身的宽度计算，单手模式会把它收窄（iPad 单手时收到手机大小的一块里的按键宽度）；键面形态决定是 iPad 的缩进还是手机的半键缩进。
@@ -6390,8 +6475,6 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     for row in keyRows {
       (row as? UIStackView)?.spacing = layout.keySpacing
     }
-    // 18 键第二排的两侧空白含半个键距，键距一变就重算。
-    updateLetterRowInsets()
     actionRow.spacing = layout.keySpacing
     for width in splitGapWidths { width.constant = -2 * layout.keySpacing }
     nineKeyContainer.spacing = layout.keySpacing
@@ -6469,12 +6552,18 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     view.window?.windowScene?.interfaceOrientation.isLandscape ?? (traitCollection.verticalSizeClass == .compact)
   }
 
-  /// 此刻该不该画横屏分离式键盘：平板形态、横屏、开关打开，而且当前显示的是会分开的字母布局。开关放在最后读，手机和竖屏不读 App Group。
+  /// 此刻该不该画横屏分离式键盘：iPad（平板形态、横屏、iPad 的开关打开）或 iPhone（横屏、屏幕够宽、iPhone 的开关打开，`KeyboardSplitLayout.phoneIsActive`），而且当前显示的是会分开的字母布局。开关放在最后读，竖屏不读 App Group。
   private var wantsSplitKeyboard: Bool {
-    guard !numberPadShown, !typesLetterGrid,
-          KeyboardSplitLayout.isActive(
-            formFactor: formFactor, landscape: isLandscape, enabled: KeyboardLayoutPreference.tabletSplit)
-    else { return false }
+    guard !numberPadShown, !typesLetterGrid else { return false }
+    let formFactor = formFactor
+    let landscape = isLandscape
+    let active = KeyboardSplitLayout.isActive(
+      formFactor: formFactor, landscape: landscape, enabled: KeyboardLayoutPreference.tabletSplit)
+      || KeyboardSplitLayout.phoneIsActive(
+        idiom: traitCollection.userInterfaceIdiom, formFactor: formFactor, landscape: landscape,
+        rowWidth: view.bounds.width - formFactor.padding.leading - formFactor.padding.trailing,
+        keySpacing: CGFloat(KeyboardLayoutPreference.keySpacing), enabled: KeyboardLayoutPreference.phoneLandscapeSplit)
+    guard active else { return false }
     return KeyboardSplitLayout.splitsLayout(scheme: inputScheme, chinese: isChineseMode, localMode: isInLocalMode)
   }
 
@@ -6545,7 +6634,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 大千注音、14 键和 18 键的各排第一次要画时才建，建好后一直留着。首次出现的键盘原来把每种方案的键都建好再藏起来，两百多个按键里这三种占了将近八十个，挡在第一帧前面，而大多数人从来不用它们。
   ///
-  /// 在 `updateKeyboardLayout` 的最前面调用，后面的键距、iPad 宽度、18 键第二排缩进和显隐都照常落到新建的行上。
+  /// 在 `updateKeyboardLayout` 的最前面调用，后面的键距、iPad 宽度和显隐都照常落到新建的行上。
   private func ensureAlternateLetterRows() {
     guard actionRow != nil, isChineseMode, !isInLocalMode, !showsSymbols else { return }
     if inputScheme.isZhuyin && zhuyinRowViews.isEmpty {
@@ -6596,9 +6685,10 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     applyOneHanded()
     standardRowHeights.forEach { $0.1.isActive = false }
     microsoftFinalKey?.isHidden = !showsSemicolonKey
-    let kana = isChineseMode && inputScheme == .japaneseNineKey && !isInLocalMode
+    // 假名九键的键面（`kanaFace`）只在字母层画假名网格（`kana`）；123 和别的键面一样打开数字九宫格，#+= 是设计稿的符号层，两者都用底行，假名网格自己的数字层不再出现。
+    let kanaFace = isChineseMode && inputScheme == .japaneseNineKey && !isInLocalMode
+    let kana = kanaFace && !showsSymbols
     japaneseKeys?.isHidden = !kana
-    japaneseKeys?.setDigits(showsSymbols)
     japaneseHeight?.constant = Self.japaneseKeyBlockHeight
     japaneseHeight?.isActive = kana
     japaneseKeys?.applyLayout()
@@ -6611,7 +6701,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     handwriting.isHidden = !writes
     if writes { handwriting.activate() }
     handwritingActionHeight?.isActive = writes
-    // Dachen takes the digit row and four punctuation keys for bopomofo, so Zhuyin draws its own four rows in place of the letter rows and the number row.
+    // 大千把数字行和四个标点键都用作注音键，所以注音在字母层画自己的四排，代替字母行和数字行；123 与别的键面一样打开数字九宫格，#+= 是原来每排十键的共享符号行（`symbolRowViews`），不是设计稿的符号层。
     let dachen = isChineseMode && inputScheme.isZhuyin && !isInLocalMode
     zhuyinRowViews.forEach { $0.isHidden = !dachen || showsSymbols }
     // 笔画字母层沿用九键外框，数字入口与其他中文方案共用数字九宫格。
@@ -6631,7 +6721,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     }
     let numberPad = numberPadShown
     let nineKeyFrame = (nineKey && !showsSymbols) || strokePad || numberPad
-    let symbolLayer = Self.drawsSymbolLayer(symbols: showsSymbols, nineKey: numberPad, kana: kana, dachen: dachen)
+    let symbolLayer = Self.drawsSymbolLayer(symbols: showsSymbols, numberPad: numberPad, dachen: dachen)
     let letterRowsShown = !(showsSymbols || nineKeyFrame || writes || kana || dachen || fourteenKey)
     letterRowViews.forEach { $0.isHidden = !letterRowsShown }
     keyColumn.spacing = keyRowSpacing
@@ -6646,7 +6736,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let numberRowShown = !showsSymbols
       && ((letterRowsShown && (fullKeyNumberRow || touchNumberRow)) || (fourteenKeyRows && touchNumberRow))
     if numberRowView?.isHidden == numberRowShown { numberRowView?.isHidden = !numberRowShown }
-    let extraRowShown = showsSymbols && !nineKey && !sourceHandwriting && !kana && !dachen && !strokes
+    let extraRowShown = showsSymbols && !nineKey && !sourceHandwriting && !kanaFace && !dachen && !strokes
       && (fourteenKey ? touchNumberRow : fullKeyNumberRow || touchNumberRow)
     if symbolExtraRowView?.isHidden == extraRowShown { symbolExtraRowView?.isHidden = !extraRowShown }
     // 上下留白按排数算，要等数字行和补充行这一趟的显隐定下来再算，否则数字行刚出现或刚收起时会沿用上一趟的排数。
@@ -6656,7 +6746,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     for key in letterRowPunctuationKeys where key.isHidden == rowPunctuation { key.isHidden = !rowPunctuation }
     // 横屏分离式键盘：每排的中缝和右半的第二个空格一起显示或隐藏。九键、笔画、假名、大千和手写不分（wantsSplitKeyboard），它们的符号页也跟着不分。
     let split = splitKeyboardShown
-    for gap in splitGaps where gap.isHidden == split { gap.isHidden = !split }
+    let tabletFace = keyFaceFormFactor == .tablet
+    for gap in splitGaps {
+      let shown = split && !(gap === tabletOnlySplitGap && !tabletFace) && !(gap === phoneOnlySplitGap && tabletFace)
+      if gap.isHidden == shown { gap.isHidden = !shown }
+    }
     if splitSpaceButton?.isHidden == split { splitSpaceButton?.isHidden = !split }
     // 数字页复用三列网格，原方案与 Engine 的组码布局不变。
     let nineKeyDigits = numberPad
@@ -6673,13 +6767,14 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let columnSpace = numberPad && !tallReturn && numberPadSpace == .rightColumn
     applyNumberPadColumnSpace(columnSpace)
     applyNineKeyClosingCovered(tallReturn || columnSpace)
-    // 「符」与「123」互换后 26 键字母层以 符 打头，从它借来的数字九宫格按九键一族的次序排（符 | 返回），返回键仍在字母层 123 那一格。
-    let symbolFirstSource = numberPad && !nineKey && !strokes && activeKeyLayoutStyle.symbolFirst
-      && chineseTwentySixKeyboard && [.standard, .commaPeriod].contains(activeKeyLayoutStyle.twentySixKey)
-    // 同一条规则用在 123 / #+= 层：字母层是互换过的手机 26 键底行（英文、本地模式和写 ASCII 标点的方案，以及中文 26 键标准和逗号句号在空格两侧的 #+= 层）时，这一层的返回键排在字母层 123 那一格（😀 或 符号 | 返回）。长空格和表情键样式没有 符，14/18 键、手写、九键和笔画的字母层底行不以 123 | 符 打头，这一层不变。
-    let symbolLayerSymbolFirst = symbolLayer && keyFaceFormFactor == .phone && activeKeyLayoutStyle.symbolFirst
-      && !nineKey && !strokes && !fourteenKey && !sourceHandwriting
+    // 「符」与「123」互换过的字母层底行：手机 26 键底行原来以 123 | 符 打头，换后 符 | 123。英文、本地模式、日文罗马字和写 ASCII 标点的方案的 26 键都是这样，中文 26 键只有标准和逗号句号在空格两侧两种样式是；长空格和表情键样式没有 符，14/18 键、手写、九键、笔画、假名和大千的字母层底行不以 123 | 符 打头。
+    let letterFaceSymbolFirst = keyFaceFormFactor == .phone && activeKeyLayoutStyle.symbolFirst
+      && !nineKey && !strokes && !fourteenKey && !sourceHandwriting && !kanaFace && !dachen
       && (!drawsChineseTwentySixKey || [.standard, .commaPeriod].contains(activeKeyLayoutStyle.twentySixKey))
+    // 从这样的字母层借来的数字九宫格按九键一族的次序排（符 | 返回），返回键仍在字母层 123 那一格。
+    let symbolFirstSource = numberPad && letterFaceSymbolFirst
+    // 同一条规则用在 #+= 层：这一层的返回键排在字母层 123 那一格（😀 或 符号 | 返回）。
+    let symbolLayerSymbolFirst = symbolLayer && letterFaceSymbolFirst
     updateNineKeyMiddleKey()
     applySidebarSymbols(activeKeyLayoutStyle)
     updateNineKeySidebar()
@@ -6690,9 +6785,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       let style: ActionRowStyle = symbolLayer ? .symbolLayer : nineKeyFrame ? .nineKey : tabletRow ? .tablet : phoneRow ? .phone : .standard
       phoneBottomRowShown = style == .phone
       nineKeyHeight.isActive = nineKeyFrame
+      let showsLanguage = KeyboardLayoutPreference.geometry.showsBottomLanguage
       let styledRow = styledBottomRow(style: style, letterRows: letterRowsShown, letterGrid: fourteenKeyRows,
                                       numberPad: numberPad, nineKeyDigits: numberPad && (nineKey || strokes || symbolFirstSource),
-                                      tallReturn: tallReturn, language: KeyboardLayoutPreference.geometry.showsBottomLanguage)
+                                      tallReturn: tallReturn, language: showsLanguage)
+      // 「中/英键放在空格左边」（`touch_language_key_side`）：手机底行（26 键一族、14/18 键、大千、手写）和九键外框（字母层、数字层、借来的数字九宫格、右侧大回车）在其余排法之后把中/英排到空格左边；iPad 全尺寸底行、123 / #+= 层不动，隐藏了中/英键时不起作用。
+      let languageLeft = activeKeyLayoutStyle.languageKeySide == .left && showsLanguage && (style == .phone || style == .nineKey)
       let styledSlots = Set(styledRow?.map(\.slot) ?? [])
       // 数字层底行带 符 时（拼音九键、九键双拼和笔画的数字层，含右侧大回车），符号栏里不再放第二个 符；借来的数字九宫格仍在符号栏第三排放 符。
       let sidebarSymbols = !(numberPad && styledSlots.contains(.symbols))
@@ -6700,7 +6798,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       nineKeyPunctuationRowShown = style == .nineKey && styledSlots.contains(.comma)
       arrangeActionRow(style, commaSecondary: style == .phone && letterRowsShown, numberPad: numberPad, styled: styledRow,
                        tallReturn: tallReturn, symbolFirst: symbolLayer ? symbolLayerSymbolFirst : activeKeyLayoutStyle.symbolFirst,
-                       numberPadSpace: numberPadSpace)
+                       numberPadSpace: numberPadSpace, languageLeft: languageLeft)
       NSLayoutConstraint.deactivate(activeStyledActionWidths)
       activeStyledActionWidths = []
       NSLayoutConstraint.deactivate(standardActionWidths + nineKeyActionWidths + phoneActionWidths + layerActionWidths
@@ -6827,7 +6925,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         } : nil
         key.accessibilityHint = handwritingRow ? "轻点输入句号，长按输入叹号" : nil
       }
-      // 底行的 ⌫ 是大千符号行唯一的 ⌫；123 / #+= 层和九键外框在各自的行里带 ⌫。
+      // 底行的 ⌫ 只给大千 #+= 页的每排十键共享符号行用；设计稿的 #+= 层和九键外框（含数字九宫格）在各自的行里带 ⌫。
       actionDeleteButton.isHidden = !showsSymbols || kana || symbolLayer || nineKeyFrame
       symbolDeleteWidth?.isActive = !actionDeleteButton.isHidden && style == .standard
       // 「按键布局」的非标准样式：样式会增减的几个键按 `TouchBottomRowLayout` 显示或隐藏，宽度也按它约束。
@@ -6873,15 +6971,24 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     if symbolLayer || symbolExtraRowView?.isHidden == false { updateSymbolLayerFaces() }
     updateSymbolKeyFaces()
     for (row, height) in standardRowHeights { height.isActive = !row.isHidden }
-    // 借用的数字页接替了这些键面原来的 123 层，返回键沿用那一层的读法；原拼音九键的数字层仍印「九键」。
+    // 数字九宫格回到字母的键印进入前那块键盘的名字（`numberPadReturnTitle`）：从其他键面借来的数字九宫格与拼音九键一族自己的数字层（「九键」）同一条规则。#+= 页保持原来的字样（`moreSymbolsReturnTitle`），大千 #+= 页的这个键回到数字九宫格、印 123。
     let borrowedNumberPad = numberPad && !nineKey
     if var configuration = layoutToggleButton?.configuration {
-      configuration.title = symbolLayer ? SymbolLayerLayout.lettersTitle(chinese: symbolLayerIsChinese)
-        : borrowedNumberPad ? (letterGrid?.shortTitle ?? Self.numberPadReturnTitle(inputScheme))
-        : showsSymbols ? (kana ? "あいう" : (nineKey ? "九键" : "ABC")) : "123"
+      configuration.title = numberPad
+        ? Self.numberPadReturnTitle(scheme: inputScheme, chinese: isChineseMode, localMode: isInLocalMode,
+                                    letterGrid: typesLetterGrid ? letterGrid : nil)
+        : showsSymbols ? Self.moreSymbolsReturnTitle(scheme: inputScheme, chinese: isChineseMode, localMode: isInLocalMode)
+        : "123"
       layoutToggleButton?.configuration = configuration
     }
-    layoutToggleButton?.accessibilityLabel = symbolLayer || borrowedNumberPad
+    // 右列第三格的结束标点跟着语言换键面，按下写出的就是键面（`nineKeyClosingFace`）。
+    let closingFace = nineKeyClosingFace
+    if let closing = nineKeyClosingButton, closing.configuration?.title != closingFace {
+      closing.configuration?.title = closingFace
+      closing.accessibilityLabel = "符号 \(closingFace)"
+    }
+    layoutToggleButton?.accessibilityLabel = dachenMoreSymbolsShown ? SymbolLayerLayout.toggleLabel(more: true)
+      : symbolLayer || borrowedNumberPad
       ? (strokes ? "切换到笔画" : "切换到字母键盘") : showsSymbols ? "切换到字母" : "切换到数字和符号"
     // The kana layout keeps this key on its own Japanese punctuation menu rather than the symbol
     // panel, which carries no kana marks. Everywhere else the key opens the panel, so the menu has
@@ -6904,9 +7011,18 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     updatePreferredKeyboardHeight()
   }
 
-  /// 「按键布局」选了非标准样式、当前底行正是它作用的那一行时，按 `TouchBottomRowLayout` 排出的键；标准样式、借来的数字九宫格和其他底行为 nil，照原来的约束画，默认底行因此与以前完全相同。26 键样式只作用于手机的中文 26 键字母层（`drawsChineseTwentySixKey`），14 键样式作用于 14 键和 18 键字母层，九键样式作用于拼音九键、九键双拼和笔画的字母层，其中「右侧大回车」（`tallReturn`）连同它们的数字层一起换成自己的外框。拼音九键、九键双拼和笔画自己的数字层（`nineKeyDigits`）不论样式都按 `TouchBottomRowLayout.nineKeyDigits` 排，符 和切换键与字母层同一格（#10061，与 Android #9113 相同）。密码框和只收数字的框按标准样式画（`activeKeyLayoutStyle`）。
+  /// 「按键布局」选了非标准样式、当前底行正是它作用的那一行时，按 `TouchBottomRowLayout` 排出的键；标准样式、借来的数字九宫格和其他底行为 nil，照原来的约束画，默认底行因此与以前完全相同。中/英键放在空格左边时表最后再过一遍 `TouchBottomRowLayout.languageBeforeSpace`；为 nil 的那些行由 `arrangeActionRow` 对按键视图套同一条规则，宽度约束不看次序，仍是原来那一组。26 键样式只作用于手机的中文 26 键字母层（`drawsChineseTwentySixKey`），14 键样式作用于 14 键和 18 键字母层，九键样式作用于拼音九键、九键双拼和笔画的字母层，其中「右侧大回车」（`tallReturn`）连同它们的数字层一起换成自己的外框。拼音九键、九键双拼和笔画自己的数字层（`nineKeyDigits`）不论样式都按 `TouchBottomRowLayout.nineKeyDigits` 排，符 和切换键与字母层同一格（#10061，与 Android #9113 相同）。密码框和只收数字的框按标准样式画（`activeKeyLayoutStyle`）。
   private func styledBottomRow(style: ActionRowStyle, letterRows: Bool, letterGrid: Bool, numberPad: Bool,
                                nineKeyDigits: Bool, tallReturn: Bool, language: Bool) -> [TouchBottomRowLayout.Key]? {
+    let row = styleTableRow(style: style, letterRows: letterRows, letterGrid: letterGrid, numberPad: numberPad,
+                            nineKeyDigits: nineKeyDigits, tallReturn: tallReturn, language: language)
+    guard let row, activeKeyLayoutStyle.languageKeySide == .left else { return row }
+    return TouchBottomRowLayout.languageBeforeSpace(row)
+  }
+
+  /// 样式本身（连同「符」与「123」互换和数字键盘空格位置）排出的表，还没管中/英在哪一边。
+  private func styleTableRow(style: ActionRowStyle, letterRows: Bool, letterGrid: Bool, numberPad: Bool,
+                             nineKeyDigits: Bool, tallReturn: Bool, language: Bool) -> [TouchBottomRowLayout.Key]? {
     let globe = needsInputModeSwitchKey
     let keyStyle = activeKeyLayoutStyle
     switch style {
@@ -7034,7 +7150,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     shortcutBar.isHidden = stripShowsCandidates || inlineHeightBar != nil || toolbarRowHidden
   }
 
-  /// 底行是否为设计稿的手机底行（123 | ， | space | 。 | 中 | return；手写在 中 与 return 之间多出「重写」和 ⌫，空格让窄）：手机键盘显示字母或大千符号行时是，任一设备形态上的手写板和全拼 14 键也是，与 Android 的 designEntries 给手写和 14 键共用底行一致（iPad 26 键底行的回车在第二排字母上，14 键没有那个位置）。九键外框和假名键保留自己的底行，123 / #+= 层自带一行（`ActionRowStyle.symbolLayer`），iPad 的字母也有自己的（`usesTabletBottomRow`）。
+  /// 底行是否为设计稿的手机底行（123 | ， | space | 。 | 中 | return；手写在 中 与 return 之间多出「重写」和 ⌫，空格让窄）：手机键盘显示字母、大千注音各排或大千 #+= 页的共享符号行时是，任一设备形态上的手写板和全拼 14 键也是，与 Android 的 designEntries 给手写和 14 键共用底行一致（iPad 26 键底行的回车在第二排字母上，14 键没有那个位置）。九键外框和假名键保留自己的底行，123 / #+= 层自带一行（`ActionRowStyle.symbolLayer`），iPad 的字母也有自己的（`usesTabletBottomRow`）。
   static func usesPhoneBottomRow(formFactor: KeyboardFormFactor, nineKeyFrame: Bool, handwriting: Bool, kana: Bool,
                                  fourteenKey: Bool = false) -> Bool {
     !nineKeyFrame && !kana && (handwriting || fourteenKey || formFactor == .phone)
@@ -7074,7 +7190,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
 
   /// 屏幕上当前界面画哪种底行。
   private enum ActionRowStyle {
-    /// 手机底行：26 键是 123 | 符 | space | ， | 中 | return，逗号长按输入句号；英文 26 键在空格左边多一个句点（123 | 符 | . | space | , | 中 | return）；14 键和手写保留独立逗号句号。中/英 紧挨回车左边。
+    /// 手机底行：26 键是 123 | 符 | space | ， | 中 | return，逗号长按输入句号；英文 26 键在空格左边多一个句点（123 | 符 | . | space | , | 中 | return）；14 键和手写保留独立逗号句号。中/英 紧挨回车左边；「中/英键放在空格左边」时排到空格和贴着空格的标点左边。
     case phone
     /// 九键外框：符 | 123 | space | 中 | return；拼音九键、九键双拼和笔画的数字层为 符 | 九键 | 0 | 空格 | 中 | return（`TouchBottomRowLayout.nineKeyDigits`），借来的数字九宫格为 返回 | 0 | 空格 | 中 | return、符 在左侧栏。
     case nineKey
@@ -7087,10 +7203,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   /// 按布局画出的顺序排列底行的键。按键是重新插入而不是从行里移除，所以它们的宽度约束一直保持安装；每种顺序都列出全部按键，隐藏的放在最后。
-  /// `symbolFirst`（`touch_twenty_six_symbol_first`）把手机 26 键底行的 符 排到 123 左边，在 123 / #+= 层（`.symbolLayer`）上把返回键排到 😀 或 符号 后面，调用方只在字母层底行确实互换时传真；`numberPadSpace`（`touch_number_pad_space`）决定借来的数字九宫格里 0 和空格的次序，空格在右列时底行的空格隐藏、排在最后。
+  /// `symbolFirst`（`touch_twenty_six_symbol_first`）把手机 26 键底行的 符 排到 123 左边，在 123 / #+= 层（`.symbolLayer`）上把返回键排到 😀 或 符号 后面，调用方只在字母层底行确实互换时传真；`numberPadSpace`（`touch_number_pad_space`）决定借来的数字九宫格里 0 和空格的次序，空格在右列时底行的空格隐藏、排在最后。`languageLeft`（`touch_language_key_side` 为 `left`，调用方只在手机底行和九键外框、中/英显示着时传真）让没有表的那几种排法也照 `TouchBottomRowLayout.languageBeforeSpace` 把中/英排到空格左边：中缝和第二个空格算作空格，隐藏着的逗号、句号、0 也算在这一串里（它们不占宽度，越过它们不改变看得见的次序）；有表的行已经在表里排好。
   private func arrangeActionRow(_ style: ActionRowStyle, commaSecondary: Bool, numberPad: Bool,
                                 styled: [TouchBottomRowLayout.Key]? = nil, tallReturn: Bool = false,
-                                symbolFirst: Bool = false, numberPadSpace: TouchNumberPadSpace = .platformDefault) {
+                                symbolFirst: Bool = false, numberPadSpace: TouchNumberPadSpace = .platformDefault,
+                                languageLeft: Bool = false) {
     guard let toggle = layoutToggleButton, let language = bottomLanguageButton, let gap = actionSplitGap,
           let space = spaceButton, let splitSpace = splitSpaceButton, let enter = enterButton else { return }
     let symbols: UIView = nineKeySymbolsButton, globe: UIView = actionGlobeButton, delete: UIView = actionDeleteButton
@@ -7141,6 +7258,15 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
       }
       if style != .symbolLayer { order.append(layerComma) }
       order.append(tallSlot)
+      if languageLeft {
+        order = TouchBottomRowLayout.languageBeforeSpace(order) { view -> TouchBottomRowLayout.Slot? in
+          if view === space || view === gap || view === splitSpace { return .space }
+          if view === zero { return .zero }
+          if view === comma { return .comma }
+          if view === period { return .period }
+          return view === language ? .language : nil
+        }
+      }
     }
     guard actionRow.arrangedSubviews != order else { return }
     for (index, key) in order.enumerated() where actionRow.arrangedSubviews.firstIndex(of: key) != index {
@@ -7522,13 +7648,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     return TypingSource(rawValue: inputScheme.rawValue) ?? .unknown
   }
 
-  /// `replacingComposition` is the runtime's commit, which takes the place of the letters 行内预编辑 marked; anything else inserted mid-composition goes in beside them, and the next render marks the composition again.
+  /// 运行时上屏替换行内预编辑；其他直接插入先撤下组字，下一次渲染再标记剩余内容。
   private func insertOwnText(_ text: String, source: TypingSource? = nil, replacingComposition: Bool = false) {
     if replacingComposition && !inlineMarkedText.isEmpty {
-      // Turning the marked letters into the committed text and unmarking it is one change to the document, where removing them and then inserting would be two.
+      // 直接提交替换标记区；先重标记再 unmark 的跨进程调用会让随后的剩余组字覆盖已选汉字。
       inlineMarkedText = ""
-      textDocumentProxy.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0))
-      textDocumentProxy.unmarkText()
+      textDocumentProxy.insertText(text)
       noteOwnEdit()
     } else {
       showInlineComposition("")
@@ -8137,10 +8262,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   private func synchronizeTranslationRoute() -> Bool {
     var route = TranslationProviderPreference.route(in: session.sharedPreferences)
     if case let .ai(provider, endpoint, model, _) = route,
-       let configuration = KeyboardAIService.configuration(),
-       let configuredURL = try? configuration.validatedURL(allowsLocalHTTP: true),
-       configuredURL.absoluteString == endpoint,
-       let token = try? KeyboardAIService.token(for: configuration) {
+       let token = KeyboardAIService.translationToken(endpoint: endpoint) {
       route = .ai(provider: provider, endpoint: endpoint, model: model, token: token)
     }
     translationRouteGeneration &+= 1
@@ -8436,7 +8558,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         self.playInputClick()
         self.selectCandidate(at: index)
       })
-    // 词块按住时变淡，而不是像按键那样缩小。
+    // 词块按住时立即变淡，松手立即恢复。
+    button.animatesPressFeedback = false
     button.pressFeedback = .opacity(0.6)
     button.setContentCompressionResistancePriority(.required, for: .horizontal)
     let minimumWidth = button.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.candidateChipMinimumSize.width)
@@ -9093,8 +9216,11 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   /// 26 键收紧键帽后，键区面板也要停在实际按键的底边，不能盖住补偿留白。留白按此刻的排数算（`KeyboardFormFactor.phoneLetterVerticalPadding(rows:)`），顶部数字行打开时多一排。
+  ///
+  /// 九键一族（拼音九键、九键双拼、笔画，`TouchKeyLayoutOffering.nineKeySchemes`）切到英文或本地模式时不留白：字母行和底行一样由按键列均分，默认行距下键帽从 44pt 长到 49pt，排距仍是紧凑的 11pt，字母区上下边界与九宫格重合，切换时按键区不缩一截。其他方案的 26 键保持 44pt 键帽和上下留白。
   private var phoneLetterVerticalInset: CGFloat {
-    guard showsPhoneLetterRows && !isLandscape else { return 0 }
+    guard showsPhoneLetterRows && !isLandscape,
+          !TouchKeyLayoutOffering.nineKeySchemes.contains(inputScheme) else { return 0 }
     return KeyboardFormFactor.phoneLetterVerticalPadding(
       rows: formFactor.keyRows(numberRow: false, phoneNumberRow: showsPhoneNumberRow))
   }
@@ -9115,8 +9241,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let saved = session.persistTouchKeyboardGeometry(
       keySpacing: KeyboardLayoutPreference.keySpacing,
       rowSpacing: KeyboardLayoutPreference.rowSpacing,
-      heightAdjustment: KeyboardLayoutPreference.heightAdjustment,
-      voiceEnabled: KeyboardLayoutPreference.voiceShortcutEnabled)
+      heightAdjustment: KeyboardLayoutPreference.heightAdjustment)
     guard !saved else { return }
     // 共享文档没写成（多半是和设置 App 同时写、比较交换输了）。原先不声不响：App Group 和这个键盘用着新值，文档里还是旧值，下次键盘出现时被文档盖回去，看起来就是「调的高度自己变回去了」。现在记一笔日志，并按文档把 App Group 和键盘对齐，用户当场看到的就是实际留下的值。
     DiagnosticLog.shared.write("touch_geometry_not_persisted")

@@ -5,6 +5,21 @@
 use super::*;
 
 #[test]
+fn quanpin_touch_shift_defaults_on_and_legacy_false_remains_off() {
+    let defaults = Preferences::default();
+    assert!(defaults.touch_quanpin_shift);
+    let document = serde_json::to_value(&defaults).unwrap();
+    assert!(document.get("touch_quanpin_shift").is_none());
+    let restored: Preferences = serde_json::from_value(document).unwrap();
+    assert!(restored.touch_quanpin_shift);
+
+    let mut explicitly_off = serde_json::to_value(&defaults).unwrap();
+    explicitly_off["touch_quanpin_shift"] = serde_json::Value::Bool(false);
+    let restored_off: Preferences = serde_json::from_value(explicitly_off).unwrap();
+    assert!(!restored_off.touch_quanpin_shift);
+}
+
+#[test]
 fn adaptive_candidate_settings_defaults_round_trip_and_validate() {
     let mut value = serde_json::to_value(Preferences::default()).unwrap();
     for key in [
@@ -669,7 +684,14 @@ fn android_layout_migration_moves_custom_nine_key_sidebars_only_into_absent_tabl
         }
         fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
         let saved = store
-            .migrate_android_key_layout(1, false, false, &custom, &digits)
+            .migrate_android_key_layout(
+                1,
+                false,
+                false,
+                &custom,
+                &digits,
+                TouchNineKeySwipeDigits::Off,
+            )
             .unwrap();
         let absent = |value: &Option<serde_json::Value>| {
             value
@@ -700,7 +722,14 @@ fn android_layout_migration_moves_custom_nine_key_sidebars_only_into_absent_tabl
         if absent(&letter_on_disk) && absent(&digit_on_disk) {
             assert_eq!(
                 store
-                    .migrate_android_key_layout(saved.revision, false, false, &custom, &digits)
+                    .migrate_android_key_layout(
+                        saved.revision,
+                        false,
+                        false,
+                        &custom,
+                        &digits,
+                        TouchNineKeySwipeDigits::Off
+                    )
                     .unwrap()
                     .revision,
                 saved.revision
@@ -717,14 +746,21 @@ fn android_layout_migration_moves_custom_nine_key_sidebars_only_into_absent_tabl
     fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
     let before = fs::read(store.path()).unwrap();
     let saved = store
-        .migrate_android_key_layout(1, false, false, &[], &[])
+        .migrate_android_key_layout(1, false, false, &[], &[], TouchNineKeySwipeDigits::Off)
         .unwrap();
     assert_eq!(saved.revision, 1);
     assert_eq!(fs::read(store.path()).unwrap(), before);
 
     // 宿主传来的表也按规范化写入。
     let saved = store
-        .migrate_android_key_layout(1, false, false, &strings(&[" ， ", "，", "toolong"]), &[])
+        .migrate_android_key_layout(
+            1,
+            false,
+            false,
+            &strings(&[" ， ", "，", "toolong"]),
+            &[],
+            TouchNineKeySwipeDigits::Off,
+        )
         .unwrap();
     assert_eq!(
         saved.preferences.touch_nine_key_sidebar_symbols,
@@ -807,6 +843,169 @@ fn one_handed_side_panel_wire_strings_are_pinned_and_unknown_strings_are_kept() 
     store.save(revision, read).unwrap();
     let written = serde_json::to_value(store.load().unwrap().preferences).unwrap();
     assert_eq!(written["touch_one_handed_side_panel"], "text_edit");
+}
+
+#[test]
+fn language_key_side_defaults_to_the_right_and_is_not_written() {
+    let defaults = Preferences::default();
+    assert_eq!(
+        defaults.touch_language_key_side,
+        TouchLanguageKeySide::Right
+    );
+    let written = serde_json::to_value(&defaults).unwrap();
+    assert!(written.get("touch_language_key_side").is_none());
+
+    // 没有这个键的旧文档读出右边，读完不改写文件。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let legacy = serde_json::to_vec(&PreferencesSnapshot::default()).unwrap();
+    fs::write(store.path(), &legacy).unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(loaded.touch_language_key_side, TouchLanguageKeySide::Right);
+    assert_eq!(fs::read(store.path()).unwrap(), legacy);
+
+    // 选左边照写法存取；改回右边时这个键从文档里消失。
+    let mut revision = store.load().unwrap().revision;
+    let left = Preferences {
+        touch_language_key_side: TouchLanguageKeySide::Left,
+        ..Preferences::default()
+    };
+    revision = store.save(revision, left.clone()).unwrap().revision;
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(loaded, left);
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap()["touch_language_key_side"],
+        "left"
+    );
+    store.save(revision, Preferences::default()).unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(loaded, Preferences::default());
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert!(
+        !on_disk.to_string().contains("touch_language_key_side"),
+        "{on_disk}"
+    );
+}
+
+#[test]
+fn language_key_side_wire_strings_are_pinned_and_unknown_strings_read_as_the_right() {
+    for (side, wire) in [
+        (TouchLanguageKeySide::Right, "right"),
+        (TouchLanguageKeySide::Left, "left"),
+    ] {
+        assert_eq!(serde_json::to_value(side).unwrap(), wire);
+        assert_eq!(side.as_str(), wire);
+        assert_eq!(TouchLanguageKeySide::parse(wire), Some(side));
+        assert_eq!(
+            serde_json::from_value::<TouchLanguageKeySide>(wire.into()).unwrap(),
+            side
+        );
+    }
+    for unknown in ["before_space", "Left", ""] {
+        assert_eq!(TouchLanguageKeySide::parse(unknown), None, "{unknown}");
+    }
+
+    // 写 `right` 的文档与默认相同；不认识的位置按右边读，不让整份文档失败。
+    let legacy = serde_json::to_value(Preferences::default()).unwrap();
+    for stored in ["right", "before_space"] {
+        let mut document = legacy.clone();
+        document["touch_language_key_side"] = stored.into();
+        assert_eq!(
+            serde_json::from_value::<Preferences>(document).unwrap(),
+            Preferences::default(),
+            "{stored}"
+        );
+    }
+    let mut document = legacy.clone();
+    document["touch_language_key_side"] = "left".into();
+    assert_eq!(
+        serde_json::from_value::<Preferences>(document)
+            .unwrap()
+            .touch_language_key_side,
+        TouchLanguageKeySide::Left
+    );
+    for wrong_type in [serde_json::json!(true), serde_json::json!(1)] {
+        let mut wrong = legacy.clone();
+        wrong["touch_language_key_side"] = wrong_type;
+        assert!(serde_json::from_value::<Preferences>(wrong).is_err());
+    }
+}
+
+#[test]
+fn nine_key_swipe_digits_defaults_to_off_is_not_written_and_round_trips() {
+    let defaults = Preferences::default();
+    assert_eq!(
+        defaults.touch_nine_key_swipe_digits,
+        TouchNineKeySwipeDigits::Off
+    );
+    let written = serde_json::to_value(&defaults).unwrap();
+    assert!(written.get("touch_nine_key_swipe_digits").is_none());
+
+    // 没有这个键的旧文档读出关闭，读完不改写文件。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let legacy = serde_json::to_vec(&PreferencesSnapshot::default()).unwrap();
+    fs::write(store.path(), &legacy).unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(
+        loaded.touch_nine_key_swipe_digits,
+        TouchNineKeySwipeDigits::Off
+    );
+    assert_eq!(fs::read(store.path()).unwrap(), legacy);
+
+    // 选过的方向照写法存取，关回默认后不再写进文档。
+    let mut revision = store.load().unwrap().revision;
+    for swipe in [TouchNineKeySwipeDigits::Up, TouchNineKeySwipeDigits::Down] {
+        let configured = Preferences {
+            touch_nine_key_swipe_digits: swipe,
+            ..Preferences::default()
+        };
+        revision = store.save(revision, configured.clone()).unwrap().revision;
+        let loaded = store.load().unwrap().preferences;
+        assert_eq!(loaded, configured);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(
+            raw["preferences"]["touch_nine_key_swipe_digits"],
+            swipe.as_str()
+        );
+    }
+    store.save(revision, Preferences::default()).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert!(raw["preferences"]
+        .get("touch_nine_key_swipe_digits")
+        .is_none());
+}
+
+#[test]
+fn nine_key_swipe_digits_wire_strings_are_pinned_and_unknown_strings_read_as_off() {
+    for (swipe, wire) in [
+        (TouchNineKeySwipeDigits::Off, "off"),
+        (TouchNineKeySwipeDigits::Up, "up"),
+        (TouchNineKeySwipeDigits::Down, "down"),
+    ] {
+        assert_eq!(serde_json::to_value(swipe).unwrap(), wire);
+        assert_eq!(swipe.as_str(), wire);
+        assert_eq!(TouchNineKeySwipeDigits::parse(wire), Some(swipe));
+        assert_eq!(
+            serde_json::from_value::<TouchNineKeySwipeDigits>(wire.into()).unwrap(),
+            swipe
+        );
+    }
+    assert_eq!(TouchNineKeySwipeDigits::parse("left"), None);
+    assert_eq!(TouchNineKeySwipeDigits::parse("Up"), None);
+
+    let legacy = serde_json::to_value(Preferences::default()).unwrap();
+    let mut document = legacy.clone();
+    document["touch_nine_key_swipe_digits"] = "both_ways".into();
+    assert_eq!(
+        serde_json::from_value::<Preferences>(document).unwrap(),
+        Preferences::default()
+    );
+    let mut wrong = legacy;
+    wrong["touch_nine_key_swipe_digits"] = true.into();
+    assert!(serde_json::from_value::<Preferences>(wrong).is_err());
 }
 
 #[test]
@@ -6624,6 +6823,159 @@ fn smart_punctuation_recovery_migrates_only_a_legacy_document() {
     assert!(!snapshot.preferences.smart_punctuation);
 }
 
+/// 统一成「AI 辅助翻译要显式选择」之前手机上写下的文档：AI 联想开着、配置齐全，没选任何翻译服务（腾讯是默认的「启用但没有凭据」），没有 `translation_ai` 的选择，也没有迁移标记。
+fn implicit_ai_translation_legacy_document() -> serde_json::Value {
+    let mut legacy = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    let preferences = legacy["preferences"].as_object_mut().unwrap();
+    preferences.insert(
+        "ai_assistant".into(),
+        serde_json::json!({
+            "enabled": true,
+            "provider": "deepseek",
+            "endpoint": "https://api.deepseek.com/chat/completions",
+            "model": "deepseek-v4-flash",
+        }),
+    );
+    preferences.insert(
+        "tencent_tmt".into(),
+        serde_json::json!({ "enabled": true, "secret_id": "", "secret_key": "" }),
+    );
+    preferences.remove("translation_ai");
+    assert_eq!(
+        preferences.remove("translation_ai_migrated"),
+        Some(true.into())
+    );
+    legacy
+}
+
+// 新文档从一开始就带着标记，AI 联想开着也不会被当成以前的隐式 AI 翻译。
+#[test]
+fn a_new_document_carries_the_translation_ai_marker() {
+    let defaults = Preferences::default();
+    assert!(defaults.translation_ai_migrated);
+    assert!(!defaults.translation_ai);
+    let mut enabled = defaults;
+    enabled.ai_assistant.enabled = true;
+    enabled.settle_translation_ai_selection(true);
+    assert!(!enabled.translation_ai);
+}
+
+// 迁移本身与平台无关地验证：以前隐式用 AI 翻译的平台把那种情形写成显式选择（连同关掉没有凭据的腾讯），其余平台不动；两种都标上标记，用户之后改选别的服务不会再被改回来。
+#[test]
+fn translation_ai_settle_selects_ai_only_where_it_was_implicit() {
+    let legacy: Preferences =
+        serde_json::from_value(implicit_ai_translation_legacy_document()["preferences"].clone())
+            .unwrap();
+    assert!(!legacy.translation_ai_migrated);
+
+    let mut mobile = legacy.clone();
+    mobile.settle_translation_ai_selection(true);
+    assert!(mobile.translation_ai);
+    assert!(!mobile.tencent_tmt.enabled);
+    assert!(mobile.translation_ai_migrated);
+    mobile.translation_ai = false;
+    mobile.settle_translation_ai_selection(true);
+    assert!(!mobile.translation_ai);
+
+    let mut other = legacy.clone();
+    other.settle_translation_ai_selection(false);
+    assert!(!other.translation_ai);
+    assert!(other.tencent_tmt.enabled);
+    assert!(other.translation_ai_migrated);
+
+    // 以前在这些情形下手机上本来就不用 AI 翻译，或者用户明确不要在线翻译：AI 联想关着或配置不全，选了水杉账号、小牛、自定义，腾讯有可用凭据，或者在旧版「翻译服务」页选过「不使用在线翻译」（腾讯被显式写成关）。迁移照样不选 AI，只标上标记。
+    type Change = fn(&mut Preferences);
+    let unchanged: [(&str, Change); 9] = [
+        ("AI assistant off", |p| p.ai_assistant.enabled = false),
+        ("AI provider missing", |p| p.ai_assistant.provider.clear()),
+        ("AI endpoint missing", |p| {
+            p.ai_assistant.endpoint = "  ".into()
+        }),
+        ("AI model missing", |p| p.ai_assistant.model.clear()),
+        ("online translation explicitly off", |p| {
+            p.tencent_tmt.enabled = false
+        }),
+        ("account chosen", |p| p.translation_account = true),
+        ("NiuTrans chosen", |p| p.niutrans.enabled = true),
+        ("custom chosen", |p| p.custom_translation.enabled = true),
+        ("usable Tencent", |p| {
+            p.tencent_tmt.secret_id = "AKIDsynthetic".into();
+            p.tencent_tmt.secret_key = "synthetic".into();
+        }),
+    ];
+    for (name, change) in unchanged {
+        let mut preferences = legacy.clone();
+        change(&mut preferences);
+        let tencent = preferences.tencent_tmt.enabled;
+        preferences.settle_translation_ai_selection(true);
+        assert!(!preferences.translation_ai, "{name}");
+        assert_eq!(preferences.tencent_tmt.enabled, tencent, "{name}");
+        assert!(preferences.translation_ai_migrated, "{name}");
+    }
+}
+
+// 经过存储的完整路径：旧文档读入时迁移（Android、iOS 选上 AI 辅助，其余平台不动），文件在下一次真正的保存之前保持原样；用户随后改选「不使用」，保存下来的文档带着标记，再读还是不选。
+#[test]
+fn translation_ai_migration_runs_once_and_a_later_choice_sticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = implicit_ai_translation_legacy_document();
+    legacy["revision"] = 3.into();
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+
+    let selected = TRANSLATION_AI_WAS_IMPLICIT;
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.revision, 3);
+    assert_eq!(loaded.preferences.translation_ai, selected);
+    assert_eq!(loaded.preferences.tencent_tmt.enabled, !selected);
+    assert!(loaded.preferences.translation_ai_migrated);
+    assert_eq!(store.load().unwrap(), loaded);
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+
+    // 写入方的偏好里没有标记时保存也带上，否则下一次读会把刚改选的「不使用」又改回 AI 辅助。
+    let mut none = serde_json::to_value(&loaded.preferences).unwrap();
+    none.as_object_mut().unwrap().remove("translation_ai");
+    none["tencent_tmt"]["enabled"] = false.into();
+    none["candidate_translation_single_sense"] = true.into();
+    none.as_object_mut()
+        .unwrap()
+        .remove("translation_ai_migrated")
+        .unwrap();
+    let none: Preferences = serde_json::from_value(none).unwrap();
+    assert!(!none.translation_ai_migrated);
+    let saved = store.save(3, none).unwrap();
+    assert!(saved.preferences.translation_ai_migrated);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        on_disk["preferences"]["translation_ai_migrated"],
+        serde_json::Value::Bool(true)
+    );
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded, saved);
+    assert!(!reloaded.preferences.translation_ai);
+}
+
+// 修复损坏文档时，没有标记的旧文档照样迁移一次。
+#[test]
+fn translation_ai_recovery_migrates_a_legacy_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = implicit_ai_translation_legacy_document();
+    legacy["preferences"]["learning"] = serde_json::json!("yes");
+    fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(store.load().is_err());
+    let (snapshot, _, salvaged) = expect_recovered(store.recover().unwrap());
+    assert!(salvaged);
+    assert_eq!(
+        snapshot.preferences.translation_ai,
+        TRANSLATION_AI_WAS_IMPLICIT
+    );
+    assert!(snapshot.preferences.translation_ai_migrated);
+    assert_eq!(store.load().unwrap(), snapshot);
+}
+
 // The source ships muting, DDC and text polishing on; `config.default.toml` says so for Windows, and macOS follows the desktop product it ports. Each is a plain voice switch, so no platform reason keeps them off there. The other hosts keep what they have shipped, and a stored value is never reinterpreted.
 #[test]
 fn voice_first_run_follows_the_source_on_desktop_ports() {
@@ -7882,6 +8234,101 @@ fn android_portrait_split_defaults_and_validates_without_changing_legacy_documen
     }
 }
 
+#[test]
+fn harmony_split_keyboard_defaults_off_and_is_not_written() {
+    let defaults = Preferences::default();
+    assert!(!defaults.touch_keyboard_split);
+    assert_eq!(defaults.touch_keyboard_split_threshold, 600);
+    assert_eq!(defaults.touch_keyboard_split_gap, 25);
+    let written = serde_json::to_value(&defaults).unwrap();
+    for key in [
+        "touch_keyboard_split",
+        "touch_keyboard_split_threshold",
+        "touch_keyboard_split_gap",
+    ] {
+        assert!(written.get(key).is_none(), "{key}");
+    }
+
+    // 没有这三个键的旧文档读出默认值，读完不改写文件。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let legacy = serde_json::to_vec(&PreferencesSnapshot::default()).unwrap();
+    fs::write(store.path(), &legacy).unwrap();
+    assert_eq!(store.load().unwrap().preferences, Preferences::default());
+    assert_eq!(fs::read(store.path()).unwrap(), legacy);
+
+    // 打开并调过阈值和空隙后照原值存取；改回默认值时三个键都从文档里去掉。
+    let revision = store.load().unwrap().revision;
+    let configured = Preferences {
+        touch_keyboard_split: true,
+        touch_keyboard_split_threshold: 720,
+        touch_keyboard_split_gap: 35,
+        ..Preferences::default()
+    };
+    let revision = store.save(revision, configured.clone()).unwrap().revision;
+    let loaded = store.load().unwrap().preferences;
+    assert_eq!(loaded, configured);
+    let written = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(written["touch_keyboard_split"], true);
+    assert_eq!(written["touch_keyboard_split_threshold"], 720);
+    assert_eq!(written["touch_keyboard_split_gap"], 35);
+    store.save(revision, Preferences::default()).unwrap();
+    let written = serde_json::to_value(store.load().unwrap().preferences).unwrap();
+    assert!(written.get("touch_keyboard_split").is_none());
+    assert!(written.get("touch_keyboard_split_threshold").is_none());
+    assert!(written.get("touch_keyboard_split_gap").is_none());
+
+    // 类型不对的值整份拒绝，与其他触屏键相同。
+    let mut wrong = serde_json::to_value(Preferences::default()).unwrap();
+    wrong["touch_keyboard_split"] = serde_json::json!("true");
+    assert!(serde_json::from_value::<Preferences>(wrong).is_err());
+}
+
+#[test]
+fn harmony_split_keyboard_threshold_and_gap_follow_the_android_bounds() {
+    for threshold in [480, 600, 620, 1000] {
+        let valid = Preferences {
+            touch_keyboard_split_threshold: threshold,
+            ..Preferences::default()
+        };
+        assert!(valid.validate().is_ok(), "{threshold}");
+    }
+    for gap in [10, 25, 40] {
+        let valid = Preferences {
+            touch_keyboard_split_gap: gap,
+            ..Preferences::default()
+        };
+        assert!(valid.validate().is_ok(), "{gap}");
+    }
+    // 范围外和不在步进上的值都不收。
+    for threshold in [0, 460, 490, 1020] {
+        let invalid = Preferences {
+            touch_keyboard_split_threshold: threshold,
+            ..Preferences::default()
+        };
+        assert!(
+            matches!(
+                invalid.validate(),
+                Err(PreferencesError::InvalidTouchKeyboardSplit)
+            ),
+            "{threshold}"
+        );
+    }
+    for gap in [0, 5, 12, 45] {
+        let invalid = Preferences {
+            touch_keyboard_split_gap: gap,
+            ..Preferences::default()
+        };
+        assert!(
+            matches!(
+                invalid.validate(),
+                Err(PreferencesError::InvalidTouchKeyboardSplit)
+            ),
+            "{gap}"
+        );
+    }
+}
+
 /// 偏好里键名像凭据、但确实不是凭据的字段。新字段名含 token|key|secret|password 时，要么进 `Preferences::credential_slots`，要么在这里说明它不是凭据。
 const NOT_CREDENTIALS: &[&str] = &[
     "custom_theme.keyboard",
@@ -7903,7 +8350,10 @@ const NOT_CREDENTIALS: &[&str] = &[
     "touch_keyboard_height_adjustment",
     "touch_keyboard_layout",
     "touch_keyboard_schemes",
+    "touch_keyboard_split",
+    "touch_keyboard_split_gap",
     "touch_keyboard_split_portrait",
+    "touch_keyboard_split_threshold",
     "touch_number_keypad_order",
     "touch_shuangpin_key_hints",
     "touch_twenty_six_key_number_layout",
@@ -9892,7 +10342,14 @@ fn android_layout_migration_checks_original_style_and_preserves_newer_styles() {
             document["preferences"]["touch_nine_key_style"] = "future_nine".into();
             fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
             let saved = store
-                .migrate_android_key_layout(1, true, number_row, &[], &[])
+                .migrate_android_key_layout(
+                    1,
+                    true,
+                    number_row,
+                    &[],
+                    &[],
+                    TouchNineKeySwipeDigits::Off,
+                )
                 .unwrap();
             let raw: serde_json::Value =
                 serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
@@ -9910,16 +10367,93 @@ fn android_layout_migration_checks_original_style_and_preserves_newer_styles() {
             let before = fs::read(store.path()).unwrap();
             assert_eq!(
                 store
-                    .migrate_android_key_layout(saved.revision, true, number_row, &[], &[])
+                    .migrate_android_key_layout(
+                        saved.revision,
+                        true,
+                        number_row,
+                        &[],
+                        &[],
+                        TouchNineKeySwipeDigits::Off
+                    )
                     .unwrap()
                     .revision,
                 saved.revision
             );
             assert!(matches!(
-                store.migrate_android_key_layout(0, true, true, &[], &[]),
+                store.migrate_android_key_layout(
+                    0,
+                    true,
+                    true,
+                    &[],
+                    &[],
+                    TouchNineKeySwipeDigits::Up
+                ),
                 Err(PreferencesError::Conflict)
             ));
             assert_eq!(fs::read(store.path()).unwrap(), before);
         }
+    }
+}
+
+#[test]
+fn android_layout_migration_moves_the_nine_key_swipe_only_over_off_or_a_missing_key() {
+    use TouchNineKeySwipeDigits::{Down, Off, Up};
+    // (共享文档里原来的写法, 本机旧值, 迁移后文档里的写法；None 表示不写这个键)
+    let cases: [(Option<&str>, TouchNineKeySwipeDigits, Option<&str>); 9] = [
+        (None, Up, Some("up")),
+        (None, Down, Some("down")),
+        (Some("off"), Up, Some("up")),
+        (Some("off"), Down, Some("down")),
+        // 别的设备同步来的方向不被本机旧值覆盖。
+        (Some("down"), Up, Some("down")),
+        (Some("up"), Down, Some("up")),
+        // 较新版本写的方向原样留着，不被宽松读出来的关闭覆盖。
+        (Some("both_ways"), Up, Some("both_ways")),
+        (Some("both_ways"), Off, Some("both_ways")),
+        // 本机旧值是关闭（或没有、不认识）时什么也不写。
+        (None, Off, None),
+    ];
+    for (shared, local, expected) in cases {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferencesStore::new(directory.path());
+        let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+        document["revision"] = 1.into();
+        if let Some(shared) = shared {
+            document["preferences"]["touch_nine_key_swipe_digits"] = shared.into();
+        }
+        fs::write(store.path(), serde_json::to_vec(&document).unwrap()).unwrap();
+        let saved = store
+            .migrate_android_key_layout(1, false, false, &[], &[], local)
+            .unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(
+            raw["preferences"].get("touch_nine_key_swipe_digits"),
+            expected.map(serde_json::Value::from).as_ref(),
+            "{shared:?} {local:?}"
+        );
+        assert_eq!(
+            saved.preferences.touch_nine_key_swipe_digits,
+            expected
+                .and_then(TouchNineKeySwipeDigits::parse)
+                .unwrap_or_default(),
+            "{shared:?} {local:?}"
+        );
+        // 两项旧开关都没开，迁移九键滑动不碰底行样式和数字行。
+        assert!(!saved.preferences.touch_number_row);
+        assert_eq!(
+            saved.preferences.touch_twenty_six_key_style,
+            TouchTwentySixKeyStyle::Standard
+        );
+        // 再迁一次不增加修订号，文件不变。
+        let before = fs::read(store.path()).unwrap();
+        assert_eq!(
+            store
+                .migrate_android_key_layout(saved.revision, false, false, &[], &[], local)
+                .unwrap()
+                .revision,
+            saved.revision
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), before);
     }
 }

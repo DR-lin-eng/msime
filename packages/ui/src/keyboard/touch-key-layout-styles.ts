@@ -174,6 +174,13 @@ export const nineKeySidebarPreference: Readonly<
   digit: "touch_nine_key_digit_sidebar_symbols",
 };
 
+/** 共享偏好名是哪张表的；不是这两个名字时为 undefined。键盘长按符号栏打开「按键布局」时带的就是偏好名（鸿蒙链接的 `target`，Android 的 `edit_sidebar_key`），设置页按它决定打开哪张表的编辑页。 */
+export function nineKeySidebarKindForPreference(name: string): NineKeySidebarKind | undefined {
+  return (Object.keys(nineKeySidebarPreference) as NineKeySidebarKind[]).find(
+    (kind) => nineKeySidebarPreference[kind] === name,
+  );
+}
+
 /** 设置页 9 键预览的左列一屏画几项，与鸿蒙键盘 `NineKeyLayout.LETTER_SIDEBAR_VISIBLE_ROWS` 相同。 */
 export const nineKeySidebarVisibleRows = 3;
 
@@ -257,6 +264,34 @@ export function withSymbolFirst<T extends { code?: string }>(
   const moved = [...row];
   const [panel] = moved.splice(symbol, 1);
   moved.splice(layer, 0, panel);
+  return moved;
+}
+
+/** 共享偏好 `touch_language_key_side` 开关的标题和说明，三端逐字相同（Android `TouchKeyStyle.LANGUAGE_LEFT_TITLE`、iOS `TouchKeyLayoutOffering.languageLeftTitle`）。 */
+export const languageKeyLeftTitle = "中/英键放在空格左边";
+export const languageKeyLeftDescription = "中/英 排到空格左边，逗号、句号仍紧挨空格。";
+
+/** 「中/英键放在空格左边」是否打开：只有值恰好是 `left` 时算左，缺键、`right` 和不认识的值都按右，与键盘的 `TouchLayoutStylePolicy.languageKeyLeft` 相同。 */
+export function languageKeyLeft(preferences: Preferences): boolean {
+  return preferences.touch_language_key_side === "left";
+}
+
+/** 中/英 挪到左边时跟着整串右移一格的键：空格、0 和紧贴空格的逗号、句号。 */
+const languageRunCodes: readonly string[] = ["Space", "Digit0", "Comma", "Period"];
+
+/** 「中/英键放在空格左边」打开时把 中/英 左边紧挨着的那一串空格、0、逗号和句号整串右移一格，中/英 挪到这一串的最左边，份额不变，只换次序，与键盘的 `TouchLayoutStylePolicy.languageBeforeSpace`、`NineKeyLayout.languageBeforeSpace` 相同；在样式和「符」与「123」互换之后套。行里没有 中/英，或它左边紧挨的不是这几种键时原样返回。 */
+export function withLanguageKeyLeft<T extends { code?: string }>(
+  row: readonly T[],
+  enabled: boolean,
+): T[] {
+  const moved = [...row];
+  const language = moved.findIndex((item) => item.code === "SoftLanguage");
+  if (!enabled || language < 0) return moved;
+  let start = language;
+  while (start > 0 && languageRunCodes.includes(moved[start - 1].code ?? "")) start--;
+  if (start === language) return moved;
+  const [languageKey] = moved.splice(language, 1);
+  moved.splice(start, 0, languageKey);
   return moved;
 }
 
@@ -387,12 +422,13 @@ export function nineKeyStyle(preferences: Preferences): NineKeyStyle {
   return value && known(nineKeyBottomRows, value) ? value : "standard";
 }
 
-/** 统计热力图要照着画的那几项：两种键盘的底行样式、数字行和「符」与「123」互换（缺省为关）。 */
+/** 统计热力图要照着画的那几项：两种键盘的底行样式、数字行、「符」与「123」互换和「中/英键放在空格左边」（后两项缺省为关）。 */
 export type TouchKeyLayoutStyle = {
   twentySixKeyStyle: TwentySixKeyStyle;
   nineKeyStyle: NineKeyStyle;
   numberRow: boolean;
   twentySixSymbolFirst?: boolean;
+  languageKeyLeft?: boolean;
 };
 
 export function touchKeyLayoutStyle(preferences: Preferences): TouchKeyLayoutStyle {
@@ -401,5 +437,6 @@ export function touchKeyLayoutStyle(preferences: Preferences): TouchKeyLayoutSty
     nineKeyStyle: nineKeyStyle(preferences),
     numberRow: preferences.touch_number_row === true,
     twentySixSymbolFirst: preferences.touch_twenty_six_symbol_first === true,
+    languageKeyLeft: languageKeyLeft(preferences),
   };
 }

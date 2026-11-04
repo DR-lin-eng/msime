@@ -406,7 +406,7 @@ public final class KeyboardSkin {
     /**
      * 这张皮肤在应用主题种子 `seed` 下实际画出来的样子的键，用来判断偏好重读后键盘要不要重画。
      *
-     * <p>不能直接比 {@link #key()}：服务每次按偏好重建的跟随系统皮肤是 classic 基础色，渲染时才被 `ImeStyler.themed` 换成当季配色并写回，于是重读前后两个 `key()` 一个是当季色、一个是 classic 色，永远不相等，偏好每秒轮询一次就整页重画一次。跟随系统皮肤的颜色只由明暗和种子决定，这里只取这两样；种子的 id 和季节对所有皮肤都算进去，因为工具栏品牌键的 logo 色不论哪张皮肤都取应用主题的季节色（`ImeToolbar.styleTopRow`）。
+     * <p>不能直接比 {@link #key()}：服务每次按偏好重建的跟随系统皮肤是 classic 基础色，渲染时才被 `ImeStyler.themed` 换成当季配色并写回，于是重读前后两个 `key()` 一个是当季色、一个是 classic 色，永远不相等，偏好每秒轮询一次就整页重画一次。跟随系统皮肤的颜色只由明暗和种子决定，这里只取这两样；种子的 id 和季节仍计入身份，供宿主刷新依赖应用主题的回车键和开启态底色；品牌键由当前皮肤配色推导。
      */
     public String displayKey(AppThemePalette.Seed seed) {
         String surface = followsAppTheme() ? id + ":" + dark : key();
@@ -419,6 +419,13 @@ public final class KeyboardSkin {
     public String secondary() { return secondary; }
     /** The selected strip candidate's text and the theme's own accent (drawn with no fill). */
     public String accent() { return accent; }
+    /** 工具栏品牌键 logo 标志的填充色（设计稿的 `logoBg`）：这张皮肤自己的强调色占 82%，其余混入黑色，与鸿蒙 `AppThemePalette.logoBackground`、iOS `KeyboardTheme.logoMark` 同一公式；不取应用主题的季节色。 */
+    public int logoMark() { return AppThemePalette.mix(ColorPolicy.parseHex(accent, 0xFF000000), 82, 0xFF000000); }
+    /** 品牌键 logo 背后的圆盘（设计稿的 `logoCirc`）：这张皮肤自己的强调色按 14%（浅色）或 22%（深色）混入键盘底色，与鸿蒙 `AppThemePalette.logoDisc`、iOS `KeyboardTheme.logoCircle` 同一公式。 */
+    public int logoDisc() {
+        return AppThemePalette.mix(ColorPolicy.parseHex(accent, 0xFF000000), dark ? 22 : 14,
+            ColorPolicy.parseHex(background, 0xFFFFFFFF));
+    }
     /** Text on anything filled with {@link #accent()}. */
     public String onAccent() { return onAccent; }
     /**

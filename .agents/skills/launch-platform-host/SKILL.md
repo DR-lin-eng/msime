@@ -92,6 +92,7 @@ cargo run --quiet -p msime-client-core --example install_resources --locked -- t
 - `xcodegen generate` 会做 spec 校验，缺 `target/ios/EngineResources` 及其中的 `msime-dictionary-manifest.json` 直接失败——先 stage 再生成工程。
 - 改了 `App/Sources`、`SharedUI`、`KeyboardTests` 下的文件要 `xcodegen generate` 并提交 `project.pbxproj`：它逐个列出源文件，不重新生成，新文件不会被编译。
 - Xcode 27 的模拟器界面是 `DeviceHub.app`，`Simulator.app` 已不存在；`xcrun simctl` 一切照常，设备状态以 `xcrun simctl list devices` 为准。
+- 验收系统键盘与主应用的共享设置时，模拟器构建使用 `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=YES`。`CODE_SIGNING_ALLOWED=NO` 的产物能启动，但没有 Xcode 链入的 `*-Simulated.xcent` 权限，主应用添加的方案可能传不到扩展；事后仅用 `codesign --entitlements` 重签也不能补回这段链接输入。安装并打开主应用后，用 `xcrun simctl get_app_container <设备> app.msime.ios groups` 确认有 `group.app.msime.ios`，再开始跨进程验收。进程内构造键盘控制器的测试不能代替这一步。
 
 ## Android
 
@@ -164,7 +165,7 @@ bash platforms/windows/build-cross.sh x64    # MinGW 交叉编译，不需要 Wi
 - **恢复之前先停掉设备端的输入注入，确认停了再动设置。** Android 的 `monkey`、HarmonyOS 的 `uitest` 跑在设备上，杀掉本机的 adb / hdc 不会结束它们（脚本没有终端时 adb 不分配 PTY）。不先停，剩下的点击会落到正在恢复的设置页上误切别的开关，键盘重新起来后打进去的字又会被学进词库。Android 用 `adb shell pidof com.android.commands.monkey` 找到进程逐个 `kill`，再查一次确认没有了；还在就别动设置，记录留着待恢复。
 - **记录写明是谁持有的。** 记录里写持有它的进程号；另一个脚本遇到持有者还活着的记录，不接管也不恢复，否则它结束时会把别人还在用的隔离提前撤掉。
 - **先关云同步，最后再开。** 记忆新词随账号同步（Android 的 `input.learning`，iOS 的 `platform.ios.dictionary_learning`），云同步开着时先关学习，会把「关」传到用户的其他设备上。用水杉账号翻译候选（`translation_account`）不在同步字段里，关它不受同步影响。重新打开云同步会把全部分类标成待上传并马上比对一次；如果弹出「合并 / 使用云端」，停下来交给用户选，不要替用户点。这个对话框可能晚几秒才出来：每次读屏后都查一遍，恢复期间冷启动设置应用之前也先看一眼，否则 force-stop 会把它关掉，用户看不到这个选择。
-- **同样会外发或学习输入的开关一并看一眼：** 云候选（`cloud_candidates`，把当前拼写发给所选的云候选服务；旧偏好文档缺这个键时按开启处理，用户手机上很可能开着）、AI 候选（`ai_assistant`，把拼音和前文发给用户配置的 AI 服务）、AI 辅助翻译（`translation_ai`，选中时把候选交给 `ai_assistant` 里配置的服务翻译，不看 `ai_assistant.enabled`，只关 AI 候选挡不住它）、用小牛 / 腾讯 / 自定义服务的候选翻译（`candidate_translations` 加 `niutrans` / `tencent_tmt` / `custom_translation`）、「我的词条」的 WebDAV 词库同步。测试不是在测它们，就同样记录、关闭、恢复。匿名使用统计（`usage_reporting`）只发当天是否使用、会话是否正常结束和崩溃摘要，打字统计的「上传到云端」只传每日计数，都不含输入内容，不用为隔离去动。但测试打的字会计入用户本机的打字统计（字数、活跃时长、候选位次），开着「上传到云端」时还会合进账号的统计，显示在 QQ 群助手的 `/stats` 里：测试期间关掉上传并按原值恢复，或者在报告里说明哪几天的统计被测试污染了。
+- **同样会外发或学习输入的开关一并看一眼：** 云候选（`cloud_candidates`，把当前拼写发给所选的云候选服务；旧偏好文档缺这个键时按开启处理，用户手机上很可能开着）、AI 候选（`ai_assistant`，把拼音和前文发给用户配置的 AI 服务）、AI 辅助翻译（把候选交给 `ai_assistant` 里配置的服务翻译；各端的开关不同：桌面与 HarmonyOS 走 host-api 的 `selected_translation_services`，看的是 `translation_ai`、不看 `ai_assistant.enabled`，只关 AI 候选挡不住它；Android 的 `CandidateTranslationPolicy.route` 与 iOS 的 `TranslationProviderPreference` 在没选别的翻译服务时按 `ai_assistant.enabled` 走 AI 翻译、不看 `translation_ai`，只关 `translation_ai` 挡不住它。所以两项都关）、用小牛 / 腾讯 / 自定义服务的候选翻译（`candidate_translations` 加 `niutrans` / `tencent_tmt` / `custom_translation`）、「我的词条」的 WebDAV 词库同步。测试不是在测它们，就同样记录、关闭、恢复。匿名使用统计（`usage_reporting`）只发当天是否使用、会话是否正常结束和崩溃摘要，打字统计的「上传到云端」只传每日计数，都不含输入内容，不用为隔离去动。但测试打的字会计入用户本机的打字统计（字数、活跃时长、候选位次），开着「上传到云端」时还会合进账号的统计，显示在 QQ 群助手的 `/stats` 里：测试期间关掉上传并按原值恢复，或者在报告里说明哪几天的统计被测试污染了。
 - **能用测试账号就用测试账号**，最好是没登录账号的专用设备或模拟器；用户的手机只在必须真机时借用。
 - **不要把测试文本写进用户的个人数据。** 词库、常用语、剪贴板、皮肤都不往里加东西；已经学进去的，报告给用户并说明范围，不要自己去删用户的词。
 

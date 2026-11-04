@@ -731,6 +731,9 @@ impl<E: InputEngine> Runtime<E> {
             if snapshot.candidate_static_evidence.len() == order.len() {
                 snapshot.candidate_static_evidence.swap(left, right);
             }
+            if snapshot.candidate_contest.len() == order.len() {
+                snapshot.candidate_contest.swap(left, right);
+            }
             if snapshot.candidate_touch_supported.len() == order.len() {
                 snapshot.candidate_touch_supported.swap(left, right);
             }
@@ -1084,18 +1087,21 @@ impl<E: InputEngine> Runtime<E> {
         self.refresh()
     }
 
+    /// `page_size` 既是分页，也作为首屏门槛交给引擎（`InputEngine::set_first_page_rows`），见 [`Self::set_page_size`]。
     pub fn new(engine: E, page_size: u8) -> Result<Self, RuntimeError> {
         Self::new_with_touch_layout(engine, page_size, TouchKeyboardLayout::default())
     }
 
     pub fn new_with_touch_layout(
-        engine: E,
+        mut engine: E,
         page_size: u8,
         touch_keyboard_layout: TouchKeyboardLayout,
     ) -> Result<Self, RuntimeError> {
         if !(1..=MAX_CANDIDATE_PAGE_SIZE).contains(&page_size) {
             return Err(RuntimeError::InvalidPageSize);
         }
+        // 引擎的首屏门槛和分页同源，建立时就交给它，不靠调用方在引擎选项里另设一份：只在 `set_page_size` 下发时，直接 `Runtime::new` 的示例、测试和评测工具分页是 9，引擎却停在 `prepare_options` 的默认 6 行，有 6 到 8 个精确同音词的输入首页和任何宿主都不一样。
+        engine.set_first_page_rows(page_size.into());
         let session = NEXT_SESSION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| RuntimeError::IdentityExhausted)?;
@@ -1223,8 +1229,8 @@ impl<E: InputEngine> Runtime<E> {
         self.snapshot_settled_seats();
         let marked = self.settled_highlight();
         std::mem::swap(&mut self.reranker, &mut self.settled_reranker);
-        // 使用快速重排相同的后处理，保留固定席位。
-        let moved = self.rerank();
+        // 使用快速重排相同的后处理，保留固定席位。九宫格的裁决标记不交给落定模型，见 `rerank`。
+        let moved = self.rerank(false);
         std::mem::swap(&mut self.reranker, &mut self.settled_reranker);
         self.finish_settled_presentation(moved, marked)
     }
@@ -2054,21 +2060,22 @@ impl<E: InputEngine> Runtime<E> {
         }
         self.advance()?;
         self.page_size = page_size.into();
-        // 引擎的首屏门槛问的是「首页放得下几行」，和分页同源。不在这里下发，它会一直停在重建引擎时那一份：
-        // 每页从 6 改成 9 时，有 6 到 8 个精确同音词的输入整组补全词都被丢掉，而窗口其实有 9 个座位。
+        // 引擎的首屏门槛问的是「首页放得下几行」，和分页同源。建立和换引擎时都下发过，这里改了分页不跟着下发，它就停在旧的那一份：每页从 6 改成 9 时，有 6 到 8 个精确同音词的输入整组补全词都被丢掉，而窗口其实有 9 个座位。
         self.engine.set_first_page_rows(page_size.into());
         Ok(())
     }
 
     /// Preserve the host handle/focus while invalidating every old candidate ID.
     /// Validate the replacement before changing any live state.
+    ///
+    /// `page_size` 同 [`Self::new`]：既是分页，也是交给新引擎的首屏门槛。
     pub fn replace_engine(&mut self, engine: E, page_size: u8) -> Result<(), RuntimeError> {
         self.replace_engine_with_touch_layout(engine, page_size, self.touch_keyboard_layout)
     }
 
     pub fn replace_engine_with_touch_layout(
         &mut self,
-        engine: E,
+        mut engine: E,
         page_size: u8,
         touch_keyboard_layout: TouchKeyboardLayout,
     ) -> Result<(), RuntimeError> {
@@ -2078,6 +2085,8 @@ impl<E: InputEngine> Runtime<E> {
         if !self.is_idle() {
             return Err(RuntimeError::CompositionActive);
         }
+        // 新引擎的首屏门槛同样跟着这一次的分页，理由见 `new_with_touch_layout`。
+        engine.set_first_page_rows(page_size.into());
         let cached = engine.snapshot()?;
         self.advance()?;
         self.engine = engine;
@@ -2812,14 +2821,15 @@ impl<E: InputEngine> Runtime<E> {
         let mut moved = if self.load_monitor.should_shed() {
             false
         } else {
-            self.rerank()
+            self.rerank(true)
         };
         moved |= self.demote_runner_up_readings();
         moved |= self.normalize_online_slots();
         moved
     }
 
-    fn rerank(&mut self) -> bool {
+    /// `contests` 为真时把九宫格标的窄裁决点（`EngineSnapshot::candidate_contest`）交给排序决策，只有逐键模型这样调：裁决点的 margin 是在随包的键盘模型上调出来的，落定模型（`rerank_settled`、`score_settled_rerank`）没有量过，照旧按 `trusted_leader` 不越过可信的词典首选。
+    fn rerank(&mut self, contests: bool) -> bool {
         // 整句改字的候选是光标处一段的替换，按读音长短排好，不参与整句的重排。光标后编辑的首选接着固定的那段，必须留在首位。
         if !self.cached.conversion.is_empty() || self.cached.caret_edit_suffix {
             return false;
@@ -2840,12 +2850,19 @@ impl<E: InputEngine> Runtime<E> {
             {
                 return false;
             }
+            // 方案、五笔表码和上文窗口的判断都在 `rerank_plan` 里，这里同步旋转候选元数据和引擎座位映射。逐键路径把九宫格窄裁决点交给排序决策；裁决点的 margin 只在随包的键盘模型上调过，落定模型照旧不越过可信的词典首选。
+            let rows = order_rows(snapshot);
+            let rows = if contests {
+                rows.with_contests(&snapshot.candidate_contest)
+            } else {
+                rows
+            };
             rerank_plan(
                 reranker,
                 &self.prediction_context,
                 snapshot.scheme,
                 snapshot.answered_by_pinyin_fallback,
-                &order_rows(snapshot),
+                &rows,
             )
         };
         plan.is_some_and(|plan| self.apply_rerank_plan(plan))
@@ -2876,6 +2893,9 @@ impl<E: InputEngine> Runtime<E> {
         plan.apply(&mut snapshot.candidate_answers_key);
         if snapshot.candidate_static_evidence.len() == count {
             plan.apply(&mut snapshot.candidate_static_evidence);
+        }
+        if snapshot.candidate_contest.len() == count {
+            plan.apply(&mut snapshot.candidate_contest);
         }
         if snapshot.candidate_touch_supported.len() == count {
             plan.apply(&mut snapshot.candidate_touch_supported);
@@ -3003,6 +3023,7 @@ impl<E: InputEngine> Runtime<E> {
                     candidate_corrected: Vec::new(),
                     candidate_answers_key: Vec::new(),
                     candidate_static_evidence: Vec::new(),
+                    candidate_contest: Vec::new(),
                     candidate_touch_supported: Vec::new(),
                     candidate_confident_correction: Vec::new(),
                     candidate_list_open: false,
@@ -3057,6 +3078,7 @@ impl<E: InputEngine> Runtime<E> {
                 && self.cached.candidate_corrected == previous.candidate_corrected
                 && self.cached.candidate_answers_key == previous.candidate_answers_key
                 && self.cached.candidate_static_evidence == previous.candidate_static_evidence
+                && self.cached.candidate_contest == previous.candidate_contest
                 && self.cached.candidate_touch_supported == previous.candidate_touch_supported
                 && self.cached.candidate_confident_correction
                     == previous.candidate_confident_correction;
@@ -3324,6 +3346,13 @@ impl<E: InputEngine> Runtime<E> {
         self.load_monitor.force_shed();
     }
 
+    /// 断言模型必定运行的测试（上游九键裁决等）用它固定负载状态：并行测试里一次
+    /// 真实引擎的派发随时可能超出一帧预算，触发与被测行为无关的降级。
+    #[cfg(test)]
+    pub(crate) fn ignore_load_shedding_for_test(&mut self) {
+        self.load_monitor.ignore_load_for_test();
+    }
+
     /// 旁路与字符动作由 Host API 在同一次会话调用内设置、派发并清除。
     pub fn set_touch_point(&mut self, point: Option<(u8, msime_engine::TouchPoint)>) {
         self.pending_touch = point;
@@ -3579,7 +3608,7 @@ impl<E: InputEngine> Runtime<E> {
                 pick = Some((SelectionHow::Finish, self.highlighted));
                 self.finish_seat(self.highlighted)
             }
-            // The key that tops the code is never lost: what the Engine commits for it goes out after the word, and a key it lets go (a capital that opens no mode, Shift+K with the K mode off) goes out as the literal letter, as `literal_mark` sends a mark behind a held phrase, since the host has already been told the key was handled.
+            // 顶字键不能丢：引擎提交的候选先上屏，再把这一键交给下一组组字；引擎放开的字母则按字面接在候选后面。
             Action::Character { value, shift } if wubi_top_commit => {
                 let first = self.first_engine_seat();
                 pick = Some((SelectionHow::WubiTop, first));
@@ -3986,7 +4015,7 @@ pub(crate) struct WubiTopCommitRequest {
 ///
 /// 关掉只在混输打开时生效：那时字母并进混输串，用户想继续打拼音。混输关掉时引擎会把码裁回四位，
 /// 字母无处容纳，宿主已经按下的键不能丢，所以仍按顶字上屏——与来源 `ShouldCommitCompleteWubiCodeOnNextKey`
-/// 的 `(top_commit_enabled || !mixed_pinyin_enabled)` 是同一个条件。
+/// 的 `(top_commit_enabled || !mixed_pinyin_enabled)` 是同一个条件。`!pinyin_continues` 是水杉自己加的（#8619）：字母能继续混输拼音的读音时，无论开关如何都保留组字，否则 `guiyi` 这类首四码碰上五笔整码的拼音打不出来。
 pub(crate) fn wubi_top_commit_on_next_key(request: &WubiTopCommitRequest) -> bool {
     (request.top_commit_enabled || !request.mixed_pinyin)
         && request.four_code_is_complete

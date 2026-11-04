@@ -104,6 +104,7 @@ export class FunctionPanelPolicy {
   static readonly KEY_SOUND: string = "key_sound";
   static readonly VIBRATION: string = "vibration";
   static readonly ONE_HAND: string = "one_hand";
+  static readonly FLOATING: string = "floating";
   static readonly PRIVACY: string = "privacy";
   static readonly FEEDBACK: string = "feedback";
   static readonly ABOUT: string = "about";
@@ -162,6 +163,8 @@ export class FunctionPanelPolicy {
       "振动强度",
       KeyboardIconPaths.VIBRATION_STRENGTH,
     ),
+    // 浮动键盘（#10225），名称与 Android 的 `FunctionPanelModel.Id.FLOATING` 相同。设计稿的十四格之后是鸿蒙自己的额外项，新增的排在最后，不挪动用户熟悉的位置。
+    toggleIcon(FunctionPanelPolicy.FLOATING, "浮动键盘", KeyboardIconPaths.FLOATING, "浮动键盘"),
   ];
 
   /** 三行一页时满尺寸的行距（vp）。 */
@@ -223,8 +226,24 @@ export class FunctionPanelPolicy {
       (item: FunctionPanelItem) => !FunctionPanelPolicy.AI_GENERATION_TILES.includes(item.id),
     );
 
-  /** 所有格子，按页面顺序。`aiGeneration` 为 false（鸿蒙版拿到 AI 生成类资质之前）时去掉高情商回复和 AI 润色。 */
-  static items(aiGeneration: boolean = true): FunctionPanelItem[] {
+  /** 手机和平板不显示「本地输入」入口；2in1 仍保留实体键盘对应的设置和入口。 */
+  private static readonly ITEMS_WITHOUT_LOCAL_INPUT: FunctionPanelItem[] =
+    FunctionPanelPolicy.ITEMS.filter(
+      (item: FunctionPanelItem) => item.id !== FunctionPanelPolicy.LOCAL_INPUT,
+    );
+
+  private static readonly ITEMS_WITHOUT_AI_OR_LOCAL_INPUT: FunctionPanelItem[] =
+    FunctionPanelPolicy.ITEMS_WITHOUT_AI_GENERATION.filter(
+      (item: FunctionPanelItem) => item.id !== FunctionPanelPolicy.LOCAL_INPUT,
+    );
+
+  /** 所有格子，按页面顺序。手机和平板隐藏本地输入入口；`aiGeneration` 为 false 时去掉 AI 生成类磁贴。 */
+  static items(aiGeneration: boolean = true, localInputModes: boolean = true): FunctionPanelItem[] {
+    if (!localInputModes) {
+      return aiGeneration
+        ? FunctionPanelPolicy.ITEMS_WITHOUT_LOCAL_INPUT
+        : FunctionPanelPolicy.ITEMS_WITHOUT_AI_OR_LOCAL_INPUT;
+    }
     return aiGeneration
       ? FunctionPanelPolicy.ITEMS
       : FunctionPanelPolicy.ITEMS_WITHOUT_AI_GENERATION;

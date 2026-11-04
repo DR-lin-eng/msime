@@ -145,6 +145,15 @@ void rows_and_glosses() {
   assert(gloss.text == "reading\nhello\nnote" && gloss.translation_start == 8 && gloss.script_start == 14);
   const auto stacked = host::measure_native_canvas(cr, *assets, content, 1600);
   assert(stacked.rows[0].translation.below && stacked.items[0].height > plain.items[0].height + 30);
+  // 读音在它那一行释义下面单独一行，排在插件注释之前，位置记下来减淡画；释义行的格子跟着多一行高。
+  content.items[0].pronunciation = "/h\xC9\x99\xCB\x88l\xC9\x99\xCA\x8A/";
+  const auto spoken = host::native_canvas_gloss(content.items[0]);
+  assert(spoken.text == "reading\nhello\n" + content.items[0].pronunciation + "\nnote" && spoken.translation_start == 8);
+  assert(spoken.translation.readings.size() == 1 &&
+         spoken.text.substr(spoken.translation_start + spoken.translation.readings[0].first,
+                            spoken.translation.readings[0].second) == content.items[0].pronunciation);
+  assert(host::measure_native_canvas(cr, *assets, content, 1600).items[0].height > stacked.items[0].height + 8);
+  content.items[0].pronunciation.clear();
   host::paint_native_canvas(cr, *assets, content, stacked, kPalette);
   // 序号和释义（没有皮肤色时用序号色，灰）只画在各自的行框里；首行的「1 / 3」也是这个颜色，不在这里数。
   for (int y = static_cast<int>(stacked.rows_area.y); y < stacked.height; ++y) for (int x = 0; x < stacked.width; ++x) {
@@ -460,6 +469,14 @@ void placement() {
 
 // 动效采样：进场从 0 到完整，退场回到 0；只有 fade_scale、slide_up 错峰，延迟有上限；待机动效位移不超过余量；减弱动态效果的来源。
 void motion() {
+  host::NativeCanvasAssets static_assets;
+  const Json declared_animation = {
+      {"enter", "fade_scale"}, {"exit", "fade"}, {"selection", "spring"},
+      {"durationMs", 180}, {"staggerMs", 14},
+      {"declared", {{"enter", true}, {"exit", true}, {"selection", true}}}};
+  host::read_native_canvas_animation(static_assets, Json{{"animation", declared_animation}});
+  assert(static_assets.enter == shared::MotionPreset::none && static_assets.exit == shared::MotionPreset::none
+      && static_assets.selection == shared::MotionPreset::none && static_assets.duration_ms == 0 && static_assets.stagger_ms == 0);
   for (const auto preset : {shared::MotionPreset::fade, shared::MotionPreset::fade_scale, shared::MotionPreset::slide_up,
                             shared::MotionPreset::spring}) {
     const auto start = shared::EnterFrame(preset, 0), end = shared::EnterFrame(preset, 1);

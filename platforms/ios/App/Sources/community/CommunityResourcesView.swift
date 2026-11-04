@@ -119,6 +119,7 @@ struct CommunityResourcesView: View {
       await load()
     }
     .refreshable { await refreshInstalled(); await load() }
+    .onReceive(NotificationCenter.default.publisher(for: CommunityBlocks.didChange)) { _ in startLoad() }
     // 每次回到列表都重读：详情页里导入词库、添加或移除回复模板后，返回时胶囊按钮跟着变。
     .trackViewRequest(request: $request, pending: $pending, onAppear: {
       Task { await refreshInstalled() }
@@ -500,7 +501,10 @@ struct CommunityResourceDetail: View {
                 .accessibilityLabel("\(stars) 星").disabled(busy || !item.saved)
             }
           }
-          CommunityReportButton(kind: item.kind == .dictionary ? "dictionaries" : "replies", itemID: item.id)
+          HStack(spacing: 20) {
+            CommunityReportButton(kind: item.kind == .dictionary ? "dictionaries" : "replies", itemID: item.id)
+            CommunityBlockAuthorButton(kind: item.kind == .dictionary ? "dictionaries" : "replies", itemID: item.id, author: item.author)
+          }
         } else {
           Button("编辑并发布新版本") { editing = true }.disabled(busy)
           Button("下架作品", role: .destructive) { confirmDelete = true }.disabled(busy)
@@ -574,7 +578,7 @@ struct CommunityResourceEditor: View {
   @State private var request = ViewRequestGeneration()
   @Environment(\.dismiss) private var dismiss
   var body: some View {
-    NavigationView {
+    NavigationStack {
       Form {
         Section("作品信息") {
           TextField("名称（最多 32 字）", text: $name)
@@ -616,6 +620,8 @@ struct CommunityResourceEditor: View {
             .font(.caption).foregroundStyle(.secondary)
         }
       }.disabled(busy)
+        .designPage()
+        .fittedSheet()
         .navigationTitle(existing == nil ? "发布\(kind.title)" : "更新作品")
         .toolbar {
           ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(busy) }
@@ -659,7 +665,6 @@ struct CommunityResourceEditor: View {
           Button("好", role: .cancel) {}
         } message: { Text(message ?? "") }
     }
-    .navigationViewStyle(.stack)
     .trackViewRequest(request: $request, pending: $pending, onDisappear: {
       busy = false
     })

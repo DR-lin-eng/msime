@@ -38,6 +38,8 @@ struct Fixture {
     remaining_after_select: Option<String>,
     /// The seat each candidate is fixed to, parallel to `words`: 1-based, 0 for unfixed. Empty means nothing is fixed.
     positions: Vec<u8>,
+    /// 九宫格标的窄裁决点（`ordering::CONTEST_*`），与 `words` 同序；空的是一行都没标。
+    contests: Vec<u8>,
     /// What the Engine reports as the reading, which the Japanese scheme sets to the converted kana. Empty means no reading.
     reading: String,
     /// What the Engine reports it takes as characters rather than punctuation.
@@ -1082,6 +1084,11 @@ impl InputEngine for Fixture {
             },
             candidate_corrected: vec![false; self.words.len()],
             candidate_answers_key: vec![true; self.words.len()],
+            candidate_contest: if self.contests.len() == self.words.len() {
+                self.contests.clone()
+            } else {
+                Vec::new()
+            },
             candidate_list_open: false,
             microsoft_shuangpin: self.microsoft_shuangpin,
             shuangpin_profile: "xiaohe".into(),
@@ -1790,6 +1797,7 @@ fn runtime() -> Runtime<Fixture> {
             sources: Vec::new(),
             remaining_after_select: None,
             positions: Vec::new(),
+            contests: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
             microsoft_shuangpin: false,
@@ -1849,6 +1857,7 @@ fn several_candidates_from_one_provider_take_their_seat_as_a_group() {
                 sources,
                 remaining_after_select: None,
                 positions: Vec::new(),
+                contests: Vec::new(),
                 reading: String::new(),
                 spelling_symbols: String::new(),
                 microsoft_shuangpin: false,
@@ -2099,6 +2108,7 @@ fn promoted_english_candidate_keeps_the_first_seat_with_cloud_and_ai() {
                 sources,
                 remaining_after_select: None,
                 positions: Vec::new(),
+                contests: Vec::new(),
                 reading: String::new(),
                 spelling_symbols: String::new(),
                 microsoft_shuangpin: false,
@@ -2438,6 +2448,7 @@ fn a_chosen_phrase_piece_waits_for_the_rest_of_the_phrase() {
                 sources: Vec::new(),
                 remaining_after_select: remaining.map(str::to_owned),
                 positions: Vec::new(),
+                contests: Vec::new(),
                 reading: String::new(),
                 spelling_symbols: String::new(),
                 microsoft_shuangpin: false,
@@ -2545,6 +2556,7 @@ fn a_phrase_piece_survives_the_reading_being_deleted() {
             sources: Vec::new(),
             remaining_after_select: Some("p".into()),
             positions: Vec::new(),
+            contests: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
             microsoft_shuangpin: false,
@@ -3423,6 +3435,7 @@ fn candidate_codes_follow_candidates_in_page_and_complete_snapshots() {
             sources: Vec::new(),
             remaining_after_select: None,
             positions: Vec::new(),
+            contests: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
             microsoft_shuangpin: false,
@@ -6735,17 +6748,35 @@ fn page_size_accepts_one_to_ten() {
     ));
 }
 
-/// 引擎的首屏门槛问的是「首页放得下几行」，和分页同源。宿主在 fcitx5 的「9 个候选」这类菜单里改了每页候选数
-/// 时不会重建引擎，不在这里下发，门槛就一直是重建时那一份：每页从 6 改成 9，有 6 到 8 个精确同音词的输入
-/// 整组补全词都被丢掉，而窗口其实有 9 个座位。
+/// 引擎的首屏门槛问的是「首页放得下几行」，和分页同源。宿主在 fcitx5 的「9 个候选」这类菜单里改了每页候选数时不会重建引擎，不在这里下发，门槛就一直是重建时那一份：每页从 6 改成 9，有 6 到 8 个精确同音词的输入整组补全词都被丢掉，而窗口其实有 9 个座位。
 #[test]
 fn resizing_the_page_tells_the_engine_its_first_page_gate() {
     let mut runtime = Runtime::new(Fixture::default(), 6).unwrap();
-    assert_eq!(runtime.engine.first_page_rows, 0, "the gate starts unset");
+    assert_eq!(runtime.engine.first_page_rows, 6);
     runtime.set_page_size(9).unwrap();
     assert_eq!(runtime.engine.first_page_rows, 9);
     runtime.set_page_size(3).unwrap();
     assert_eq!(runtime.engine.first_page_rows, 3);
+}
+
+/// 建立 runtime 和换引擎时同样要把分页交给引擎，不靠调用方在引擎选项里另设一份。原先只有 `set_page_size` 下发：直接 `Runtime::new(engine, 9)` 的示例、测试和评测工具（`convert_eval`、`parity.rs`）分页是 9，引擎的门槛却停在 `prepare_options` 的默认 6 行，有 6 到 8 个精确同音词的输入首页和任何宿主都不一样。
+#[test]
+fn constructing_or_replacing_the_engine_tells_it_the_first_page_gate() {
+    let runtime = Runtime::new(Fixture::default(), 9).unwrap();
+    assert_eq!(runtime.engine.first_page_rows, 9);
+    let mut runtime =
+        Runtime::new_with_touch_layout(Fixture::default(), 7, TouchKeyboardLayout::NineKey)
+            .unwrap();
+    assert_eq!(runtime.engine.first_page_rows, 7);
+    runtime.replace_engine(Fixture::default(), 5).unwrap();
+    assert_eq!(runtime.engine.first_page_rows, 5);
+    runtime
+        .replace_engine_with_touch_layout(Fixture::default(), 8, TouchKeyboardLayout::TwentySixKey)
+        .unwrap();
+    assert_eq!(runtime.engine.first_page_rows, 8);
+    // 页数和原来相同时 `set_page_size` 什么也不做，换上来的引擎照样不能留在 0。
+    runtime.replace_engine(Fixture::default(), 8).unwrap();
+    assert_eq!(runtime.engine.first_page_rows, 8);
 }
 
 /// A digit the Engine already answered with a commit is not also a page selection: selecting would replace the commit, and the text it carried - a Korean syllable - would be lost.
@@ -7300,6 +7331,56 @@ fn mixed_wubi_continues_a_pinyin_reading_past_a_native_four_code() {
     }
 }
 
+/// Android 设备验收「26 键五笔第五码顶字（混输开）」在运行时的对应：`wqiy` 的简拼前缀不挡顶字，`a` 选掉「你」并开始下一组编码。宿主开着 `phrase_preedit`（安卓、现代 Windows）时「你」留在暂存词段、不立即上屏，下一段选词时连同它一起上屏。
+#[test]
+fn a_fifth_letter_after_wqiy_holds_the_topped_word_with_phrase_preedit() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.scheme = 2;
+    options.wubi_mixed_pinyin = true;
+    options.mixed_english = false;
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(
+        "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
+            INSERT INTO wubi86 VALUES('wqiy','你',100),('aaaa','工',100);
+            CREATE TABLE tbl_2_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+            INSERT INTO tbl_2_w VALUES('wan''qi','wq','晚期',1000);",
+    )
+    .unwrap();
+    let mut runtime = Runtime::new(msime_engine::host::Session::new(&options).unwrap(), 1).unwrap();
+    runtime.set_phrase_preedit(true);
+    runtime.set_wubi_fifth_code_top_commit(true);
+    runtime.focus(true).unwrap();
+    for value in b"wqiy" {
+        let typed = runtime
+            .dispatch(Action::Character {
+                value: *value,
+                shift: false,
+            })
+            .unwrap();
+        assert!(typed.commit.is_none());
+    }
+    assert_eq!(runtime.view().candidates[0].text, "你");
+    let topped = runtime
+        .dispatch(Action::Character {
+            value: b'a',
+            shift: false,
+        })
+        .unwrap();
+    assert!(topped.commit.is_none(), "{topped:?}");
+    assert_eq!(topped.view.phrase_prefix, "你");
+    assert_eq!(topped.view.editing_text, "a");
+    assert_eq!(topped.view.candidates[0].text, "工");
+    let id = topped.view.candidates[0].id;
+    let selected = runtime.dispatch(Action::Select(id)).unwrap();
+    assert_eq!(selected.commit.as_deref(), Some("你工"));
+    assert_eq!(selected.view.phrase_prefix, "");
+    assert_eq!(selected.view.editing_text, "");
+}
+
 #[test]
 fn a_capital_after_a_complete_wubi_code_commits_the_word_and_keeps_the_letter() {
     let directory = tempfile::tempdir().unwrap();
@@ -7740,6 +7821,7 @@ fn withholding_runtime(offered: usize, withheld: usize, page_size: u8) -> Runtim
             sources: Vec::new(),
             remaining_after_select: None,
             positions: Vec::new(),
+            contests: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
             microsoft_shuangpin: false,
@@ -10739,6 +10821,8 @@ mod parallel_order_allocations;
 mod static_evidence;
 
 mod rerank_declined;
+
+mod model_contests;
 
 mod settled_async;
 

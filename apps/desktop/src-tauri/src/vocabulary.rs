@@ -77,10 +77,20 @@ pub async fn load_vocabulary_review(
 pub async fn answer_vocabulary_card(
     app: tauri::AppHandle,
     state: tauri::State<'_, VocabularyState>,
+    wordbook: String,
     word: String,
     known: bool,
 ) -> Result<ReviewStatus, CommandError> {
-    run(app, state, ReviewAction::Answer { word, known }).await
+    run(
+        app,
+        state,
+        ReviewAction::Answer {
+            wordbook,
+            word,
+            known,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -120,6 +130,29 @@ pub async fn remove_vocabulary_wordbook(
     wordbook: String,
 ) -> Result<ReviewStatus, CommandError> {
     run(app, state, ReviewAction::Remove { wordbook }).await
+}
+
+#[tauri::command]
+pub async fn remove_personal_vocabulary_word(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, VocabularyState>,
+    word: String,
+) -> Result<ReviewStatus, CommandError> {
+    run(app, state, ReviewAction::RemovePersonalWord { word }).await
+}
+
+/// 「导出生词本」：生词本的 CSV 文本，还没有生词本时是 `None`。页面交给宿主的保存对话框或下载链接。
+#[tauri::command]
+pub async fn export_personal_vocabulary(
+    state: tauri::State<'_, VocabularyState>,
+) -> Result<Option<String>, CommandError> {
+    let directory = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        msime_client_services::vocabulary::personal::export(&directory)
+            .map_err(|error| session::ReviewSessionError::from(error).into())
+    })
+    .await
+    .map_err(|_| CommandError { code: "storage" })?
 }
 
 #[tauri::command]

@@ -7,6 +7,7 @@ import {
 } from './KeyboardSession';
 import { KeyboardScheme, KeyGrid, SchemeDefinition } from './KeyboardScheme';
 import { KeyIdPolicy } from './KeyIdPolicy';
+import { SettingsPageLink } from './SettingsPageLink';
 import { VoiceHotkeyAction } from './input/VoiceHotkeyPolicy';
 import { BusinessErrorPolicy } from './BusinessErrorPolicy';
 import { VoiceRecordingBehaviourPolicy } from './input/VoiceRecordingBehaviourPolicy';
@@ -21,6 +22,7 @@ import { CorrectionMarkPolicy, CorrectionSurfaceColors } from './candidate/Corre
 import { CandidatePresentationPolicy } from './candidate/CandidatePresentationPolicy';
 import { KeyboardLayoutDragPolicy } from './input/KeyboardLayoutDragPolicy';
 import { ExpandedCandidateCell, ExpandedCandidateLayout } from './candidate/ExpandedCandidateLayout';
+import { ExpandedCandidateBatchPolicy } from './candidate/ExpandedCandidateBatchPolicy';
 import { CandidatePanelSelectionPolicy } from './candidate/CandidatePanelSelectionPolicy';
 import { ShuangpinKeyHintPolicy } from './input/ShuangpinKeyHintPolicy';
 import { ReturnDispatch, ReturnKeyAction } from './input/ReturnKeyAction';
@@ -61,9 +63,11 @@ import {
 } from './TypingEffectPolicy';
 import { HitOffset, KeyboardGeometry } from './KeyboardGeometry';
 import {
-  NineKeyAction, NineKeyActionItem, NineKeyActionKind, NineKeyLayout, NineKey, NineKeySidebarItem
+  NineKeyAction, NineKeyActionItem, NineKeyActionKind, NineKeyLayout, NineKey, NineKeySidebarItem, NumberPadOrigin,
+  NumberPadPunctuation
 } from './input/NineKeyLayout';
 import { NineKeyShuangpinFace, nineKeyShuangpinFace, nineKeyShuangpinLabel } from './input/NineKeyShuangpinKeypad';
+import { NineKeySwipe, NineKeySwipeGesture, NineKeySwipePolicy } from './input/NineKeySwipePolicy';
 import { FourteenKey, FourteenKeyLayout } from './input/FourteenKeyLayout';
 import { EighteenKeyLayout } from './input/EighteenKeyLayout';
 import { EighteenKeySwipeGesture, EighteenKeyTap } from './input/EighteenKeySwipePolicy';
@@ -136,6 +140,8 @@ import { PagedTiles } from './faces/PagedTiles';
 import { PanelTile } from './faces/PanelTile';
 import { OneHandRail } from './faces/OneHandRail';
 import { OneHandedMode, OneHandedPolicy, OneHandedSidePanel } from './OneHandedPolicy';
+import { FloatingKeyboardPolicy } from './FloatingKeyboardPolicy';
+import { SplitKeyboardPolicy, SplitKeyboardSettings, SplitRow, SplitSpace } from './SplitKeyboardPolicy';
 import { PrivacyGate } from './PrivacyGate';
 import { AiGenerationGate } from './AiGenerationGate';
 import { PhraseList, PHRASE_LIST_ERROR, PHRASE_LIST_LOADING, PHRASE_LIST_READY } from './faces/PhraseList';
@@ -194,6 +200,8 @@ interface KeyOptions {
   letter?: string;
   /** 双拼 18 键上这一键的字母（`FourteenKey.letters`）。设了它，横滑选中这一键的某个字母时键面在绘制时改画那个字母，与 `letter` 同理不进 `ForEach` 的键标识，正按着的键不会被重建。 */
   swipeLetters?: string;
+  /** 拼音九键字母层 1–9 键的输入字符（`NineKey.input`）。设了它，这一键滑动输入数字时键面在绘制时改画那个数字（`nineKeySwipeFace`），与 `swipeLetters` 同理不进 `ForEach` 的键标识。 */
+  nineKeyInput?: string;
   size: number;
   /** 用操作色填充：2in1 上按住的 Shift，或有组合串时的回车键（在触屏键盘的设计行上则始终填充）。 */
   emphasized: boolean;
@@ -211,6 +219,8 @@ interface KeyOptions {
   fontWeight?: number;
   /** 触摸区；不设即 `keyHitRegion`，向四周空隙各扩出一半。紧挨的中/英键和回车键用它把两者的分界挪进回车键帽，见 `KeyboardGeometry.RETURN_YIELD_VP`。 */
   hitRegion?: Rectangle[];
+  /** 分离式键盘右半边内侧重复的 G、V（`SplitKeyboardPolicy.duplicatesInnerKey`）：输入和左边那个键相同，但不记进滑行输入的键位，滑行仍按左边那个键算。 */
+  duplicate?: boolean;
   action: () => void;
 }
 
@@ -295,7 +305,6 @@ const CHIP_WORD_LINE_HEIGHT: number = 1.2;
 const BAR_DIVIDER_HEIGHT_VP: number = 22;
 const BAR_BUTTON_VP: number = 40;
 const BAR_BUTTON_PRESSED_OPACITY: number = 0.55;
-const CHEVRON_TURN_MS: number = 200;
 // 触屏按键：字母 22fp，Shift 和删除键占 1.4 份并用 22vp 线性图标，功能键标签 15fp、字重 500，按下时在 60ms 内变暗到 .86 并缩到 .96。
 const TOUCH_LETTER_FONT_SIZE: number = 22;
 const KEY_ICON_VP: number = 22;
@@ -306,6 +315,11 @@ const KEY_PRESSED_SCALE: number = 0.96;
 const KEY_PRESS_MS: number = 60;
 const LETTER_EDGE_SHARE: number = 1.4;
 const SECOND_ROW_INDENT_SHARE: number = 0.5;
+// 分离式键盘一排字母里的占位符（`splitLetterItems`），不会和任何字母或 `;` 撞上。
+const SPLIT_INDENT_START: string = 'split:indent-start';
+const SPLIT_INDENT_END: string = 'split:indent-end';
+const SPLIT_SHIFT: string = 'split:shift';
+const SPLIT_DELETE: string = 'split:delete';
 // 设计稿的底行（123 1.25 | ， 1 | space 4 | 。 1 | 中 1.05 | return 1.9）和各底行样式的份额在 `TouchLayoutStylePolicy`。
 const SPACE_LABEL_FONT_SIZE: number = 13;
 const SPACE_LABEL_GAP_VP: number = 4;
@@ -632,6 +646,13 @@ struct KeyboardView {
   /** The local history entry a long press offered to send to the cloud clipboard, or empty. */
   @State clipSendTarget: string = '';
   @State expanded: ExpandedCandidate[] = [];
+  /** 展开网格已经建了 `expanded` 开头的多少格，规则在 `ExpandedCandidateBatchPolicy`。 */
+  @State expandedBuilt: number = 0;
+  /** `expanded` 来自哪个会话的哪一代候选（`KeyboardSession.candidateListIdentity`）；面板关着时为空。 */
+  private expandedListIdentity: string = '';
+  private expandedScroller: Scroller = new Scroller();
+  private expandedViewportHeight: number = 0;
+  private expandedContentHeight: number = 0;
   /** Which row of the expanded panel is showing its gloss, or -1. Its own index space. */
   @State expandedGloss: number = -1;
   /** 全拼九键展开面板的左栏放拼音还是笔画；关闭面板时回到拼音。 */
@@ -705,6 +726,11 @@ struct KeyboardView {
   @State oneHandSidePadVp: number = 0;
   /** 共享偏好 `touch_one_handed_side_panel`：大屏单手模式空出来的一侧放什么（#10203）。 */
   @State oneHandedSidePanel: OneHandedSidePanel = KeyboardSession.shared.preferences().oneHandedSidePanel;
+  /** 共享偏好里分离式键盘的四项（#10224，`SplitKeyboardPolicy`）。 */
+  @State splitKeyboard: SplitKeyboardSettings = KeyboardSession.shared.preferences().splitKeyboard;
+  /** 屏幕此刻的宽和高（vp，转屏后互换）：分离式键盘按它判断方向和启用宽度，按它算中间空隙。转屏时随屏幕重读。 */
+  @State screenWidthVp: number = 0;
+  @State screenHeightVp: number = 0;
   private readonly displayChanged: (id: number) => void = (_id: number): void => this.readOrientation();
   /** 共享偏好 `touch_shuangpin_key_hints`：关掉时 26 键双拼的字母键不画声母/韵母提示。 */
   @State shuangpinKeyHints: boolean = KeyboardSession.shared.preferences().shuangpinKeyHints;
@@ -726,6 +752,8 @@ struct KeyboardView {
   @State nineKeySidebarSymbols: string[] = KeyboardSession.shared.preferences().nineKeySidebarSymbols;
   /** 共享偏好 `touch_nine_key_digit_sidebar_symbols`：九宫格数字键盘左列 #+= 上面的表，空表画出厂的四则运算（`NineKeyLayout.digitSidebar`）。 */
   @State nineKeyDigitSidebarSymbols: string[] = KeyboardSession.shared.preferences().nineKeyDigitSidebarSymbols;
+  /** 共享偏好 `touch_language_key_side` 为 `left`：设计底行、九键外框、数字九宫格和手写底行的 中/英 排到空格左边（`TouchLayoutStylePolicy.languageBeforeSpace`、`NineKeyLayout.actionRow` 的 `languageLeft`）。 */
+  @State languageKeyLeft: boolean = KeyboardSession.shared.preferences().languageKeyLeft;
   /** 「右侧大回车」外框（`tallReturnNineKeyFrame`）量到的宽度，网格下方那一段底行按它定 123、中/英 和数字层空格的绝对宽度（`NineKeyLayout.tallReturnRow`）；量到之前和外框消失后为 0，按份额排。 */
   @State tallReturnFaceWidth: number = 0;
   /** 共享偏好 `touch_number_row`：26/14/18 键字母上方画 1 到 0，键盘高一行（`numberRowExtraRows`）。 */
@@ -834,8 +862,15 @@ struct KeyboardView {
   /** 横滑正选中字母的那个 18 键（`FourteenKey.letters`）和选中的大写字母；没有时都为空串。 */
   @State eighteenSwipeKey: string = '';
   @State eighteenSwipeLetter: string = '';
+  /** 拼音九键字母层 1–9 键的上滑或下滑（共享偏好 `touch_nine_key_swipe_digits`，`NineKeySwipePolicy`）。 */
+  private nineKeySwipes: NineKeySwipeGesture = new NineKeySwipeGesture();
+  /** 正滑动输入数字的那个九键（`NineKey.input`）和它的数字：键面临时画这个数字、角标藏起来；没有时都为空串。 */
+  @State nineKeySwipeKey: string = '';
+  @State nineKeySwipeDigit: string = '';
   private glideContext: CanvasRenderingContext2D =
     new CanvasRenderingContext2D(new RenderingContextSettings(true));
+  /** 浮动键盘拖动条按下时手指在屏幕上的位置（vp）。 */
+  private floatingTouchOrigin: [number, number] = [0, 0];
 
   aboutToAppear(): void {
     // 扩展能力按上次记下的键面定了第一帧的高度（`TouchLayoutStylePolicy.firstPanel`）；从那个高度出发核对，键面与记下的不同时 `syncStripHeight` 再改高度。要在下面任何一个带 @Watch 的状态被赋值之前定下。
@@ -1365,11 +1400,48 @@ struct KeyboardView {
       || (this.strokeFace() && !this.symbols);
   }
 
-  /** 中文数字入口复用现有九宫格，扩展符号页和独立语言仍走各自的键面。日文按键盘自己的方案判定，26 键罗马字也算独立语言；`this.japanese` 只指假名网格。中文 26 键的长空格样式与 Android 长空格布局一样进带空格的数字符号层，不借用九宫格。 */
+  /** 触屏键盘的 123 一律打开数字九宫格（`NineKeyLayout.opensNumberPad`）：英文、本地模式、中文 26 键的长空格样式、日语（罗马字和假名网格）、韩文、越南语、藏文、注音、笔画、手写、14/18 键都在内；#+= 仍是完整的扩展符号页。数字九宫格底行有空格，长空格样式的用户在这一页照样有空格。2in1 的屏幕键盘不打开，理由见 `opensNumberPad`。 */
   private numberPadShowing(): boolean {
-    return this.touchDesign() && !this.longSpaceActive() && NineKeyLayout.opensNumberPad(this.symbols, this.moreSymbols,
-      this.english, this.localMode, this.scheme.engineScheme === 'japanese' || this.koreanFace() || this.vietnameseFace()
-        || this.tibetanFace() || this.zhuyinFace());
+    return NineKeyLayout.opensNumberPad(this.symbols, this.moreSymbols, this.touchDesign());
+  }
+
+  /** 九宫格是这块键盘自己的字母层：拼音九键、九键双拼和英文九键，123 只是把网格重新标注成数字，返回键印「九键」，底行留着 符。假名网格虽然也是九键布局，数字九宫格对它是借来的。 */
+  private ownsNineKeyGrid(): boolean {
+    return KeyboardScheme.usesNineKeyFace(this.nineKey, this.localMode) && !this.japanese;
+  }
+
+  /** 此刻画的是假名网格：字母层，以及 2in1 上假名网格自己的数字层。触屏上 123 打开借来的数字九宫格、#+= 是扩展符号页，都不是假名网格。 */
+  private kanaGridShowing(): boolean {
+    return this.japanese && (!this.symbols || !this.touchDesign());
+  }
+
+  /** 借出数字九宫格的字母层（`NumberPadOrigin`），按 `typingFace` 的分支次序判断：假名网格最先，笔画先于 14/18 键。 */
+  private numberPadOrigin(): NumberPadOrigin {
+    if (this.japanese) {
+      return NumberPadOrigin.KANA;
+    }
+    if (this.zhuyinFace()) {
+      return NumberPadOrigin.ZHUYIN;
+    }
+    if (this.strokeFace()) {
+      return NumberPadOrigin.STROKE;
+    }
+    if (this.drawsEighteenKey()) {
+      return NumberPadOrigin.EIGHTEEN_KEY;
+    }
+    if (this.drawsFourteenKey()) {
+      return NumberPadOrigin.FOURTEEN_KEY;
+    }
+    return this.koreanFace() ? NumberPadOrigin.KOREAN : NumberPadOrigin.LETTERS;
+  }
+
+  /** 数字九宫格底行返回键的键面：自己的九键网格印「九键」，借来的按借出它的字母层印（`NineKeyLayout.numberPadReturnTitle`）。26 键一族按 123 层的字母页读法印「拼音」或「ABC」（`designLayerChinese`），日语罗马字的字母是拉丁字母，印「ABC」。 */
+  private numberPadReturnTitle(): string {
+    if (this.ownsNineKeyGrid()) {
+      return '九键';
+    }
+    return NineKeyLayout.numberPadReturnTitle(this.numberPadOrigin(),
+      this.designLayerChinese() && this.scheme.engineScheme !== 'japanese');
   }
 
   /** `touch` 是这一键的按下点（键盘根区域坐标），没有时为 null：无障碍点击、没有被记下的触摸。 */
@@ -1414,8 +1486,7 @@ struct KeyboardView {
     const automatic: boolean = this.letterCase.isAutomatic();
     const shifted: boolean = KeyboardSession.shared.entersHelpcode(held)
       || (this.english && held);
-    // 英文组合按实际字符保留大小写，Shift 标志本身不会把小写 ASCII 改为大写。
-    const input: string = this.english && held ? letter.toUpperCase() : letter;
+    const input: string = ChineseHelpcodePolicy.letterInput(letter, shifted);
     const touchKey: TouchKey | null = this.touchKey(touch, shifted);
     if (touchKey !== null) {
       KeyboardSession.shared.pressTouch(input.charCodeAt(0), shifted, touchKey);
@@ -1713,6 +1784,9 @@ struct KeyboardView {
     this.eighteenSwipes.clear();
     this.eighteenSwipeKey = '';
     this.eighteenSwipeLetter = '';
+    this.nineKeySwipes.clear();
+    this.nineKeySwipeKey = '';
+    this.nineKeySwipeDigit = '';
     this.keyPreview = null;
     this.keyPreviewFinger = -1;
   }
@@ -1903,7 +1977,7 @@ struct KeyboardView {
           })
         } else {
           Text($$.letter !== undefined ? this.letterFace($$.letter)
-            : this.eighteenSwipeFace($$.swipeLetters, $$.face))
+            : this.nineKeySwipeFace($$.nineKeyInput, this.eighteenSwipeFace($$.swipeLetters, $$.face)))
             .fontSize($$.size)
             .minFontSize(KEY_HINT_FONT_SIZE)
             .maxFontSize($$.size)
@@ -1971,7 +2045,11 @@ struct KeyboardView {
     .stateStyles({ normal: this.keyIdleStyle, pressed: this.keyPressedStyle })
     .animation({ duration: KEY_PRESS_MS })
     .responseRegion(this.keyHitRegion())
-    .onAreaChange((_old: Area, now: Area): void => this.recordGlideKey($$.letter, now))
+    .onAreaChange((_old: Area, now: Area): void => {
+      if ($$.duplicate !== true) {
+        this.recordGlideKey($$.letter, now);
+      }
+    })
     .onTouch((event: TouchEvent): void => {
       this.recordLetterTouch($$.letter, event);
       this.letterHintTouch($$.letter, $$.cornerHint, event);
@@ -2789,6 +2867,8 @@ struct KeyboardView {
     }
     if (surface !== SURFACE_EXPANDED) {
       this.expanded = [];
+      this.expandedBuilt = 0;
+      this.expandedListIdentity = '';
       this.expandedGloss = -1;
     }
     if (surface === SURFACE_TOOLS) {
@@ -2812,12 +2892,31 @@ struct KeyboardView {
     this.refreshExpanded();
   }
 
-  /** 重新取完整候选列表；长按释义指的那一行没了就收起释义条。 */
+  /** 重新取完整候选列表；长按释义指的那一行没了就收起释义条。同一代候选的重取建回已建的格子，换了一代从第一批建起并回到顶部。 */
   private refreshExpanded(): void {
+    const previous: string = this.expandedListIdentity;
     this.expanded = KeyboardSession.shared.allCandidates();
+    this.expandedListIdentity = KeyboardSession.shared.candidateListIdentity();
+    const sameGeneration: boolean = previous.length > 0 && previous === this.expandedListIdentity;
+    this.expandedBuilt = ExpandedCandidateBatchPolicy.initialCount(this.expanded.length, this.expandedBuilt,
+      sameGeneration);
+    if (previous.length > 0 && !sameGeneration) {
+      // 面板开着时换了候选（选掉前一段、选拼音、退格、改筛选）：新列表从头建，留着旧的滚动位置会落在第一批之外。刚打开的面板本来就在顶部。
+      this.expandedScroller.scrollTo({ xOffset: 0, yOffset: 0 });
+    }
     if (this.expandedGloss >= this.expanded.length) {
       this.expandedGloss = -1;
     }
+  }
+
+  /** 滚到离已建格子底边不到一屏，或第一批没填够一屏多时，追加下一批。 */
+  private appendExpandedIfNeeded(): void {
+    if (this.surface !== SURFACE_EXPANDED || !ExpandedCandidateBatchPolicy.shouldAppend(this.expandedBuilt,
+      this.expanded.length, this.expandedScroller.currentOffset().yOffset, this.expandedViewportHeight,
+      this.expandedContentHeight)) {
+      return;
+    }
+    this.expandedBuilt = ExpandedCandidateBatchPolicy.nextCount(this.expandedBuilt, this.expanded.length);
   }
 
   /**
@@ -3087,7 +3186,7 @@ struct KeyboardView {
         && KeyboardSession.shared.convertJapanese()) {
       return;
     }
-    KeyboardSession.shared.press(0x20, false);
+    KeyboardSession.shared.pressSpace();
   }
 
   /** Which of the two English cards is current is the grid, English itself being common to both. */
@@ -3123,6 +3222,8 @@ struct KeyboardView {
     this.nineKeySidebarSymbols = this.settings.nineKeySidebarSymbols;
     this.nineKeyDigitSidebarSymbols = this.settings.nineKeyDigitSidebarSymbols;
     this.oneHandedSidePanel = this.settings.oneHandedSidePanel;
+    this.splitKeyboard = this.settings.splitKeyboard;
+    this.languageKeyLeft = this.settings.languageKeyLeft;
     // 取会话持有的副本而不是再读一次磁盘：会话在构建和每次获得焦点时读取，读不到时保留上次的值，视图跟着它就不会因一次读取失败把隐私模式等显示成关闭。
     this.feedback = KeyboardSession.shared.feedbackSettings();
     this.traditional = KeyboardSession.shared.usesTraditional();
@@ -3362,7 +3463,7 @@ struct KeyboardView {
     return `${this.english}:${this.localMode}:${this.shuangpinProfile}:${this.shuangpinKeyHints}:`
       + `${this.quanpinShift}:${this.engineScheme}:${this.scheme.preferenceId}:${this.symbols}:${this.moreSymbols}:`
       + `${this.twentySixKeyStyle}:${this.fourteenKeyStyle}:${this.nineKeyStyle}:${this.numberRow}:`
-      + `${this.twentySixSymbolFirst}:${this.numberPadSpace}:`
+      + `${this.twentySixSymbolFirst}:${this.numberPadSpace}:${this.languageKeyLeft}:`
       + `${this.standardRowsField}:${this.skin.key()}`;
   }
 
@@ -3575,12 +3676,6 @@ struct KeyboardView {
   private candidateCardColor(colour: string): string {
     return KeyboardFormFactor.isDesktop()
       ? GlobalTheme.withOpacity(colour, this.settings.candidateWindowOpacity) : colour;
-  }
-
-  /** 皮肤动效只使用清单允许的时长；禁用动效或系统尚未提供清单时不改变候选布局。 */
-  private candidateMotionDuration(): number {
-    const duration: number = this.settings.candidateAnimation.durationMs;
-    return Number.isFinite(duration) && duration > 0 ? duration : 0;
   }
 
   private candidateTextColor(): string {
@@ -4282,10 +4377,6 @@ struct KeyboardView {
         this.touchCandidateMenu = false;
         this.managing = index;
       })
-      .transition(this.candidateMotionDuration() > 0
-        ? TransitionEffect.OPACITY.animation({ duration: this.candidateMotionDuration() })
-        : TransitionEffect.IDENTITY)
-      .animation({ duration: this.candidateMotionDuration() })
   }
 
   /**
@@ -4816,7 +4907,6 @@ struct KeyboardView {
         })
       }
       .rotate({ angle: this.surface === SURFACE_EXPANDED ? 180 : 0 })
-      .animation({ duration: CHEVRON_TURN_MS })
     }
     .width(BAR_BUTTON_VP)
     .height(this.toolbarSized(BAR_BUTTON_VP))
@@ -4857,7 +4947,7 @@ struct KeyboardView {
    * 九键样式「右侧大回车」的外框（`tallReturnFrame`），拼音九键、九键双拼、笔画键盘和它们的数字层共用，三列与普通网格同宽（`NineKeyLayout.SIDE_SHARE`、`GRID_SHARE`）：
    *
    * - 左列：跨网格三行的标点栏（拼音九键是 ，。？！、组字时的读音、数字层的四则运算和 #+=；笔画是标点栏），栏下方底行放与它同宽的 符，数字层也在这里。
-   * - 中间：3×3 网格（笔画是笔画键），格下方是恰好与网格同宽的底行 `nineKeyActionRow`：123 | 空格 | 中/英，数字层 切换键 | 0 | 空格 | 中/英。123、中/英 和数字层的空格与标准九键底行里同宽，空格（数字层是 0）占剩下的部分；外框量到自己的宽度（`tallReturnFaceWidth`）后按 `NineKeyLayout.tallReturnRow` 定宽，之前按 `NineKeyLayout.actionRow` 的份额排。
+   * - 中间：3×3 网格（笔画是笔画键），格下方是恰好与网格同宽的底行 `nineKeyActionRow`：123 | 空格 | 中/英，数字层 切换键 | 0 | 空格 | 中/英（「中/英键放在空格左边」时是 123 | 中/英 | 空格、切换键 | 中/英 | 0 | 空格）。123、中/英 和数字层的空格与标准九键底行里同宽，空格（数字层是 0）占剩下的部分；外框量到自己的宽度（`tallReturnFaceWidth`）后按 `NineKeyLayout.tallReturnRow` 定宽，之前按 `NineKeyLayout.actionRow` 的份额排。
    * - 右列：与中间网格逐行对齐（`tallReturnGridRowHeight`），回车跨网格最后一行和底行、两倍高中间无缝。拼音九键 ⌫ 在第一行，第二行是拼音分词（数字层小数点），回车跨第三行和底行；原来第三行的 ！ 接到左列末尾。笔画网格只有两行（`StrokeLayout.ROWS`），⌫ 占第一行，回车跨第二行和底行。
    *
    * 中/英 与回车不在同一行，回车不让出键帽，两键都是普通的触摸区。
@@ -4992,11 +5082,11 @@ struct KeyboardView {
   /**
    * 触屏网格左列：数字层是四则运算和 #+=，组字时是这串数字可能代表的读音，其余时候是标点（「右侧大回车」时末尾多一个 !，`NineKeyLayout.sideMarks`）。普通网格和「右侧大回车」外框共用。
    *
-   * 用户自定义了左列（共享偏好 `touch_nine_key_sidebar_symbols` / `touch_nine_key_digit_sidebar_symbols`，#10223）时字母层换成可滚动的等高栈（`customLetterSidebar`），数字层换成滚动区加最下面的 #+=（`customDigitSidebar`）；空表时照原来的等分画法，画面不变。长按任一项打开设置。
+   * 用户自定义了左列（共享偏好 `touch_nine_key_sidebar_symbols` / `touch_nine_key_digit_sidebar_symbols`，#10223）时字母层换成可滚动的等高栈（`customLetterSidebar`），数字层换成滚动区加最下面的 #+=（`customDigitSidebar`）；半角语境的出厂数字左列在四则运算后面多出 @ : ; ( ) ' " $（`NineKeyLayout.digitSidebar`），一屏放不下，也画成这个滚动区（`NineKeyLayout.digitSidebarScrolls`）；其余空表时照原来的等分画法，画面不变。长按任一项打开设置。
    */
   @Builder
   touchNineKeySidebar() {
-    if (this.symbols && NineKeyLayout.customSidebar(this.digitSidebarTable())) {
+    if (this.symbols && NineKeyLayout.digitSidebarScrolls(this.digitSidebarTable(), this.numberPadPunctuation())) {
       this.customDigitSidebar()
     } else if (this.symbols) {
       ForEach(NineKeyLayout.digitSidebar(), (symbol: string) => {
@@ -5005,7 +5095,7 @@ struct KeyboardView {
         }
         .layoutWeight(1)
         .width('100%')
-        .gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))
+        .gesture(LongPressGesture().onAction(() => this.openSidebarSettings(true)))
       }, (symbol: string) => symbol + this.faceKey())
       Column() {
         this.fixedKey(this.moreSymbolsOptions());
@@ -5042,7 +5132,7 @@ struct KeyboardView {
         }
         .layoutWeight(1)
         .width('100%')
-        .gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))
+        .gesture(LongPressGesture().onAction(() => this.openSidebarSettings(false)))
       }, (symbol: string) => symbol + this.faceKey())
     }
   }
@@ -5058,7 +5148,7 @@ struct KeyboardView {
           }
           .width('100%')
           .height(item.height)
-          .gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))
+          .gesture(LongPressGesture().onAction(() => this.openSidebarSettings(false)))
         }, (item: NineKeySidebarItem) => item.key)
       }
       .width('100%')
@@ -5068,18 +5158,18 @@ struct KeyboardView {
     .height('100%')
   }
 
-  /** 数字层左列的自定义表：上面四格高的滚动区放用户的表（一屏最多 `DIGIT_SIDEBAR_VISIBLE_ROWS` 项），最下面一格仍是 #+=，与出厂五格等高时同一位置、同一高度（`NineKeyLayout.digitSidebarScrollHeight`、`digitSidebarCellHeight`）。 */
+  /** 数字层左列的滚动画法：上面四格高的滚动区放用户的表，或半角语境的出厂项加半角符号（一屏最多 `DIGIT_SIDEBAR_VISIBLE_ROWS` 项），最下面一格仍是 #+=，与出厂五格等高时同一位置、同一高度（`NineKeyLayout.digitSidebarScrollHeight`、`digitSidebarCellHeight`）。每一项怎么输入见 `digitSidebarOptions`。 */
   @Builder
   customDigitSidebar() {
     Scroll() {
       Column({ space: this.rowSpacing() }) {
         ForEach(this.digitSidebarItems(), (item: NineKeySidebarItem) => {
           Column() {
-            this.fixedKey(this.customSidebarOptions(item.symbol, true));
+            this.fixedKey(this.digitSidebarOptions(item.symbol));
           }
           .width('100%')
           .height(item.height)
-          .gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))
+          .gesture(LongPressGesture().onAction(() => this.openSidebarSettings(true)))
         }, (item: NineKeySidebarItem) => item.key)
       }
       .width('100%')
@@ -5127,7 +5217,7 @@ struct KeyboardView {
       action: () => {
         if (this.symbols) {
           KeyboardSession.shared.softKeyPress(KeyIdPolicy.character('.'));
-          this.insertNumberPadLiteral('.');
+          this.typeNumberPadText('.');
           return;
         }
         KeyboardSession.shared.softKeyPress(KeyIdPolicy.character(NineKeyLayout.separator().input));
@@ -5221,9 +5311,21 @@ struct KeyboardView {
     return this.english ? [] : this.nineKeySidebarSymbols;
   }
 
-  /** 九宫格数字键盘左列读的表：九键一族的数字层和 26 键、14/18 键、手写借来的数字九宫格都读，英文九键的数字层不读。 */
+  /** 九宫格数字键盘左列读的表：九键一族的数字层和其余键面借来的数字九宫格都读，表里的标点按当前语言换写法（`NineKeyLayout.numberPadSymbols`）；英文下的数字九宫格（英文九键和英文 26 键借来的）不读，照出厂的 ASCII 运算符加半角符号（`NineKeyLayout.digitSidebar`）。读这张表的半角语境（本地模式、韩文、越南语、藏文、关掉中文标点的中文）自定义过就照用户的表，不接半角符号。 */
   private digitSidebarTable(): string[] {
-    return this.english ? [] : this.nineKeyDigitSidebarSymbols;
+    return this.english ? [] : NineKeyLayout.numberPadSymbols(this.nineKeyDigitSidebarSymbols,
+      this.numberPadPunctuation());
+  }
+
+  /** 数字九宫格上的标点此刻按哪种写法出现（`NumberPadPunctuation`）：本地模式和英文是半角；日语方案（罗马字和假名网格）是日语写法；其余跟着中文标点的键面写法（`chinesePunctuationFaces`），韩文、越南语、藏文和关掉中文标点时是半角。 */
+  private numberPadPunctuation(): NumberPadPunctuation {
+    if (this.localMode !== 'none' || this.english) {
+      return NumberPadPunctuation.ASCII;
+    }
+    if (this.scheme.engineScheme === 'japanese') {
+      return NumberPadPunctuation.JAPANESE;
+    }
+    return this.chinesePunctuationFaces() ? NumberPadPunctuation.CHINESE : NumberPadPunctuation.ASCII;
   }
 
   /** 字母层自定义左列逐项的高度和 ForEach 键：左列与网格同高（`gridHeight`）。 */
@@ -5232,9 +5334,10 @@ struct KeyboardView {
       NineKeyLayout.LETTER_SIDEBAR_VISIBLE_ROWS, this.rowSpacing(), this.faceKey());
   }
 
-  /** 数字层自定义左列逐项的高度和 ForEach 键：滚动区是 #+= 上面那四格加三道行距。 */
+  /** 数字层滚动左列逐项的高度和 ForEach 键：表是 `NineKeyLayout.digitSidebar`（用户的表原样；空表在半角语境是出厂运算符加半角符号），滚动区是 #+= 上面那四格加三道行距。 */
   private digitSidebarItems(): NineKeySidebarItem[] {
-    return NineKeyLayout.sidebarItems(this.digitSidebarTable(),
+    return NineKeyLayout.sidebarItems(
+      NineKeyLayout.digitSidebar(this.digitSidebarTable(), this.numberPadPunctuation()),
       NineKeyLayout.digitSidebarScrollHeight(this.gridHeight(), this.rowSpacing()),
       NineKeyLayout.DIGIT_SIDEBAR_VISIBLE_ROWS, this.rowSpacing(), this.faceKey());
   }
@@ -5261,13 +5364,22 @@ struct KeyboardView {
     };
   }
 
-  /** 长按九键左侧符号栏任一项（#10223）：给一下按键反馈，再打开设置应用的「屏幕键盘」页，两张表在那一页的「按键布局」里改。键盘只能按页打开设置（`SettingsPageLink`），开不到「按键布局」子页里的编辑页；英文九键不读这两张表，长按不做事。 */
-  private openSidebarSettings(): void {
+  /** 长按九键左侧符号栏任一项（#10223）：给一下按键反馈，再打开设置应用「屏幕键盘」页的「按键布局」，直接进入这一张表的编辑页（`digits` 为真时是数字表，否则是字母表），与 Android 带 `edit_sidebar_key` 打开「按键布局」相同。子目标是那张表的共享偏好名（`SettingsPageLink.NINE_KEY_SIDEBAR_TARGET` / `NINE_KEY_DIGIT_SIDEBAR_TARGET`），设置页认不得时停在「屏幕键盘」页；英文九键不读这两张表，长按不做事。 */
+  private openSidebarSettings(digits: boolean): void {
     if (this.english) {
       return;
     }
     KeyboardSession.shared.holdFeedback();
-    KeyboardSession.shared.openSettings('screen-keyboard');
+    KeyboardSession.shared.openSettings('screen-keyboard',
+      digits ? SettingsPageLink.NINE_KEY_DIGIT_SIDEBAR_TARGET : SettingsPageLink.NINE_KEY_SIDEBAR_TARGET);
+  }
+
+  /**
+   * 数字层滚动左列的一项：用户的表按自定义项上屏（`customSidebarOptions`，先结束组字再按字面上屏，藏文里也是）；出厂项和半角符号与出厂运算符同一条路（`numberPadMarkOptions` → `typeNumberPadText`），按 `NineKeyLayout.numberPadToSession` 交给会话或按字面上屏。藏文的 `'` 因此与原来藏文 123 层一样交给会话（achung，如 'od），不先上屏组合，也不按字面上屏。
+   */
+  private digitSidebarOptions(symbol: string): KeyOptions {
+    return NineKeyLayout.customSidebar(this.digitSidebarTable())
+      ? this.customSidebarOptions(symbol, true) : this.numberPadMarkOptions(symbol);
   }
 
   private numberPadMarkOptions(symbol: string): KeyOptions {
@@ -5280,7 +5392,7 @@ struct KeyboardView {
       width: '100%',
       action: () => {
         KeyboardSession.shared.softKeyPress(KeyIdPolicy.SOFT_PUNCTUATION);
-        this.insertNumberPadLiteral(symbol);
+        this.typeNumberPadText(symbol);
       }
     };
   }
@@ -5291,9 +5403,22 @@ struct KeyboardView {
     KeyboardSession.shared.insert(text);
   }
 
-  /** 到这里结束的键面是否用触屏九键外框的底行（`nineKeyActionRow`）：拼音九键网格，或不在符号层的笔画键盘。假名网格也是九键布局，但保留共享底行。 */
+  /** 数字九宫格上的数字、0、小数点、左列出厂项和半角符号、顶部补充行怎么输入（键位已由调用方记过），规则与 Android、iOS 相同（`NineKeyLayout.numberPadToSession`）：本地模式、越南语和藏文里引擎此刻列为拼写符号的字符，以及藏文的 `'`，交给会话（`press`）；其余一律按字面上屏（`insertNumberPadLiteral`），日语、韩文和大千注音的数字和标点也是。 */
+  private typeNumberPadText(text: string): void {
+    if (this.typeHelpcodeTrigger(text)) {
+      return;
+    }
+    if (NineKeyLayout.numberPadToSession(text, this.localMode !== 'none', this.vietnameseFace(), this.tibetanFace(),
+      KeyboardSession.shared.hardwareSpelling())) {
+      KeyboardSession.shared.press(text.charCodeAt(0), false);
+      return;
+    }
+    this.insertNumberPadLiteral(text);
+  }
+
+  /** 到这里结束的键面是否用触屏九键外框的底行（`nineKeyActionRow`）：拼音九键网格、数字九宫格，或不在符号层的笔画键盘。假名网格的字母层也是九键布局，但保留共享底行；它借来的数字九宫格用九键外框的底行。 */
   private touchNineKeyRow(): boolean {
-    return this.touchDesign() && !this.japanese && this.gridActionRow();
+    return this.touchDesign() && !this.kanaGridShowing() && this.gridActionRow();
   }
 
   /**
@@ -5314,10 +5439,10 @@ struct KeyboardView {
     KeyboardSession.shared.insert('0');
   }
 
-  /** 数字按字面上屏；常规键面借用网格时记普通数字键，原九键记 Nine。 */
+  /** 数字九宫格上的一个数字（`typeNumberPadText`）；借来的数字九宫格记普通数字键，自己的九键网格（`ownsNineKeyGrid`）记 Nine。 */
   private typeNineKeyDigit(digit: string): void {
-    KeyboardSession.shared.softKeyPress(this.nineKey ? KeyIdPolicy.nineKey(digit) : KeyIdPolicy.character(digit));
-    this.insertNumberPadLiteral(digit);
+    KeyboardSession.shared.softKeyPress(this.ownsNineKeyGrid() ? KeyIdPolicy.nineKey(digit) : KeyIdPolicy.character(digit));
+    this.typeNumberPadText(digit);
   }
 
   /** 拼音网格的 1 键（@#）：候选条换成当前模式的常用标点（与逗号长按的「常用标点」同一组），组字中也一样，Engine 下一次回报时换回它的候选。 */
@@ -5332,19 +5457,19 @@ struct KeyboardView {
     KeyboardSession.shared.punctuation(mark.input.charCodeAt(0));
   }
 
-  /** 触屏九键外框的底行：英文九键的字母层在空格两侧多出句点和逗号，中文九键的字母层按 `touch_nine_key_style` 排（`NineKeyLayout.actionRow`），「右侧大回车」时是网格下方那一段。拼音九键、九键双拼和笔画的数字层带着 符，符 和切换键与字母层同一格（#10061）；借来的数字九宫格不带。 */
+  /** 触屏九键外框的底行：英文九键的字母层在空格两侧多出句点和逗号，中文九键的字母层按 `touch_nine_key_style` 排（`NineKeyLayout.actionRow`），「右侧大回车」时是网格下方那一段。拼音九键、九键双拼、英文九键和笔画的数字层带着 符，符 和切换键与字母层同一格（#10061）；其余键面（含假名网格）借来的数字九宫格不带。「中/英键放在空格左边」时每一种排法（含右侧大回车和数字层）的 中/英 都挪到空格左边（`NineKeyLayout.actionRow` 的 `languageLeft`）。 */
   private nineKeyActions(): NineKeyAction[] {
     // 「符」与「123」互换后 26 键字母层以 符 打头，从它借来的数字九宫格也按九键一族的次序排（符 | 返回），返回键仍在字母层 123 那一格（#10056）。
     const nineKeyDigits: boolean = this.symbols
-      && (KeyboardScheme.usesNineKeyFace(this.nineKey, this.localMode) || this.strokeFace()
+      && (this.ownsNineKeyGrid() || this.strokeFace()
         || this.letterRowSymbolLeads());
     return NineKeyLayout.actionRow(this.symbols, this.english, this.nineKeyFrameStyle(), nineKeyDigits,
-      this.numberPadSpace);
+      this.numberPadSpace, this.languageKeyLeft);
   }
 
-  /** 这块键面字母层的设计底行是否以 符 打头：只有打开「符」与「123」互换、字母层是 26 键一族、底行样式里有 符（标准、逗号句号在空格两侧）时才是。不看此刻在不在数字层，借来的数字九宫格按它排前两键。手写、14/18 键、大千注音的字母层底行没有 符。 */
+  /** 这块键面字母层的设计底行是否以 符 打头：只有打开「符」与「123」互换、字母层是 26 键一族、底行样式里有 符（标准、逗号句号在空格两侧）时才是。不看此刻在不在数字层，借来的数字九宫格按它排前两键。手写、14/18 键、大千注音的字母层底行没有 符，假名网格用共享底行、不跟这一项互换。 */
   private letterRowSymbolLeads(): boolean {
-    if (!this.twentySixSymbolFirst
+    if (!this.twentySixSymbolFirst || this.japanese
       || KeyboardScheme.usesHandwritingFace(this.scheme, this.english, false, this.localMode)) {
       return false;
     }
@@ -5358,12 +5483,12 @@ struct KeyboardView {
   }
 
   /**
-   * 九键外框此刻按哪种样式排：密码框和只收数字的编辑框里是标准（`TouchLayoutStylePolicy.fieldRowStyle`）；「右侧大回车」只给中文九键一族的键面（拼音九键、九键双拼的网格，笔画键盘，以及它们的数字层），其他中文键面借用数字九宫格时仍是原来的数字层。
+   * 九键外框此刻按哪种样式排：密码框和只收数字的编辑框里是标准（`TouchLayoutStylePolicy.fieldRowStyle`）；「右侧大回车」只给中文九键一族的键面（拼音九键、九键双拼的网格，笔画键盘，以及它们的数字层），其他键面（含假名网格）借用数字九宫格时仍是原来的数字层。
    */
   private nineKeyFrameStyle(): string {
     const style: string = TouchLayoutStylePolicy.fieldRowStyle(this.nineKeyStyle, this.standardRowsField);
     if (style === TouchLayoutStylePolicy.TALL_RETURN
-      && !KeyboardScheme.usesNineKeyFace(this.nineKey, this.localMode) && !this.strokeFace()) {
+      && !this.ownsNineKeyGrid() && !this.strokeFace()) {
       return TouchLayoutStylePolicy.STANDARD;
     }
     return style;
@@ -5381,7 +5506,8 @@ struct KeyboardView {
    */
   private nineKeyActionItems(): NineKeyActionItem[] {
     const fixed: NineKeyAction[] = this.tallReturnFrame() && this.tallReturnFaceWidth > 0
-      ? NineKeyLayout.tallReturnRow(this.symbols, this.tallReturnFaceWidth, this.keySpacing()) : [];
+      ? NineKeyLayout.tallReturnRow(this.symbols, this.tallReturnFaceWidth, this.keySpacing(), this.languageKeyLeft)
+      : [];
     return NineKeyLayout.actionItems(this.nineKeyActions(), fixed, NineKeyLayout.tallReturnFill(this.symbols));
   }
 
@@ -5449,7 +5575,7 @@ struct KeyboardView {
   }
 
   /**
-   * 触屏九键外框（拼音九键和笔画键盘）的底行，键序和份额见 `NineKeyLayout.actionRow`：符 | 123 | space | 中 | return，中/英键紧挨回车，与字母键面的底行一致。中文时标点在网格两侧的列里，所以这里没有逗号和句号，与 Android 一致；英文九键的字母层在空格左边加句点、右边加逗号，与三端英文 26 键底行一致。123 把网格重新标注为数字，在数字层上该键显示「九键」，即 Android 中这个网格的 `KeyboardActionRow.layerTitle`；其他中文键面借用这个数字页时，该键按原键面印「拼音」、「14键」或「笔」（`NineKeyLayout.numberPadReturnTitle`），与 Android 和 iOS 相同。数字层的网格只有 1-9，0 排在底行空格右边：拼音九键、九键双拼和笔画的数字层保留 符，符 和切换键与字母层同一格，0 的一份从空格让出（#10061）；借来的数字九宫格没有 符，0 占 符 让出的那一份。
+   * 触屏九键外框（拼音九键和笔画键盘）的底行，键序和份额见 `NineKeyLayout.actionRow`：符 | 123 | space | 中 | return，中/英键紧挨回车，与字母键面的底行一致。中文时标点在网格两侧的列里，所以这里没有逗号和句号，与 Android 一致；英文九键的字母层在空格左边加句点、右边加逗号，与三端英文 26 键底行一致。123 把网格重新标注为数字，在数字层上该键显示「九键」，即 Android 中这个网格的 `KeyboardActionRow.layerTitle`；其他键面借用这个数字页时，该键按原键面印「拼音」「ABC」「14键」「18键」「笔」「注」「한」或「あいう」（`numberPadReturnTitle`），与 Android 和 iOS 相同。数字层的网格只有 1-9，0 排在底行空格右边：拼音九键、九键双拼、英文九键和笔画的数字层保留 符，符 和切换键与字母层同一格，0 的一份从空格让出（#10061）；借来的数字九宫格没有 符，0 占 符 让出的那一份。
    */
   @Builder
   nineKeyActionRow() {
@@ -5472,7 +5598,7 @@ struct KeyboardView {
       Column() {
         this.fixedKey({
           face: this.symbols
-            ? (this.nineKey ? '九键' : NineKeyLayout.numberPadReturnTitle(this.strokeFace(), this.drawsFourteenKey()))
+            ? this.numberPadReturnTitle()
             : '123',
           label: KeyAccessibilityPolicy.layoutToggle(this.symbols),
           size: KeyboardMetrics.SMALL_KEY_FONT_SIZE,
@@ -5647,6 +5773,8 @@ struct KeyboardView {
       size: !this.touchDesign() ? KeyboardMetrics.SMALL_KEY_FONT_SIZE
         : (this.symbols ? TOUCH_LETTER_FONT_SIZE : NINE_KEY_FONT_SIZE),
       fontWeight: this.touchDesign() && !this.symbols ? NINE_KEY_LETTER_WEIGHT : undefined,
+      // 只有拼音九键字母层带这个标记，数字层和九键双拼的键不会被滑动输入数字换掉键面。
+      nineKeyInput: this.symbols || shuangpin ? undefined : key.input,
       emphasized: false,
       width: 0,
       // A digit is inserted, not spelled: the same call the twenty-six key symbol row makes for
@@ -5687,6 +5815,8 @@ struct KeyboardView {
           .maxLines(1)
           .margin({ top: CORNER_HINT_TOP_VP, right: CORNER_HINT_RIGHT_VP })
           .hitTestBehavior(HitTestMode.Transparent)
+          // 滑动输入数字时键面已经画着这个数字，角标暂时藏起来，松手或取消后回来。
+          .visibility(this.nineKeySwipeKey === key.input ? Visibility.Hidden : Visibility.Visible)
       }
     }
     .accessibilityText(this.nineKeyLabel(key))
@@ -5703,7 +5833,12 @@ struct KeyboardView {
     .stateStyles({ normal: this.keyIdleStyle, pressed: this.keyPressedStyle })
     .animation({ duration: KEY_PRESS_MS })
     .responseRegion(this.keyHitRegion())
+    .onTouch((event: TouchEvent): void => this.nineKeySwipeTouch(key, event))
     .onClick(() => {
+      if (this.nineKeySwipes.swallows(key.input)) {
+        // 这次触摸已经滑出去，输入了数字或弹出了选项，点击不再输入字母。
+        return;
+      }
       KeyboardSession.shared.softKeyPress(KeyIdPolicy.nineKey(key.input));
       if (NineKeyLayout.showsQuickMarks(key)) {
         this.showNineKeyQuickMarks();
@@ -5712,10 +5847,80 @@ struct KeyboardView {
       }
     })
     .gesture(LongPressGesture().onAction(() => {
+      if (!this.nineKeySwipes.hold(key.input)) {
+        // 滑动已经接管这次触摸，长按不再弹出选项。
+        return;
+      }
       // 长按仍算这格的一次按键，选项通过字面输入路径上屏。
       KeyboardSession.shared.softKeyPress(KeyIdPolicy.nineKey(key.input));
       this.openKeyHold(NineKeyLayout.holdOptions(key));
     }))
+  }
+
+  /**
+   * 拼音九键字母层 1–9 键上的一次触摸（`NineKeySwipePolicy`，#10229，与 Android `ImeLayoutRows.bindNineKeySwipe` 相同）：按下时读共享偏好 `touch_nine_key_swipe_digits`，沿设定方向滑过 24 vp 的那一刻键面换成这个键的数字、角标藏起来，松手按长按选数字的同一条路径上屏（先结束组字再字面上屏）；反方向滑过 24 vp 的那一刻算这一格按了一次，弹出和长按相同的数字和字母。判定成立后点击和长按都不再做事；系统取消时还原键面，什么也不输入。2in1 没有这项设置，只在触屏键盘上判定。
+   */
+  private nineKeySwipeTouch(key: NineKey, event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      if (event.changedTouches.length > 0) {
+        const touch: TouchObject = event.changedTouches[0];
+        // 每次按下读当前的设置：键盘开着时在设置页改了，下一次触摸就生效。
+        const mode: string = this.touchDesign() ? this.settings.nineKeySwipeDigits : NineKeySwipePolicy.OFF;
+        // 1 键（@#）长按只有 1，没有字母可弹。
+        const hasLetters: boolean = NineKeyLayout.holdOptions(key).length > 1;
+        this.endNineKeySwipeFace(key.input);
+        this.nineKeySwipes.down(key.input, touch.id, touch.windowY, mode, hasLetters);
+      }
+    } else if (event.type === TouchType.Move) {
+      const moved: TouchObject[] = event.changedTouches.length > 0 ? event.changedTouches : event.touches;
+      for (const touch of moved) {
+        const swipe: NineKeySwipe = this.nineKeySwipes.move(key.input, touch.id, touch.windowY);
+        if (swipe === NineKeySwipe.DIGIT) {
+          this.nineKeySwipeDigit = NineKeyLayout.digitHint(key);
+          this.nineKeySwipeKey = key.input;
+        } else if (swipe === NineKeySwipe.LETTERS) {
+          // 与长按相同：这一格算按了一次，之后从弹窗里选的不再计。
+          KeyboardSession.shared.softKeyPress(KeyIdPolicy.nineKey(key.input));
+          this.openKeyHold(NineKeyLayout.holdOptions(key));
+        }
+      }
+    } else if (event.type === TouchType.Up) {
+      if (event.changedTouches.length > 0) {
+        const touch: TouchObject = event.changedTouches[0];
+        if (this.nineKeySwipes.up(key.input, touch.id) === NineKeySwipe.DIGIT) {
+          this.endNineKeySwipeFace(key.input);
+          this.typeNineKeySwipeDigit(key);
+        }
+      }
+    } else if (event.type === TouchType.Cancel) {
+      this.nineKeySwipes.cancel(key.input);
+      this.endNineKeySwipeFace(key.input);
+    }
+  }
+
+  /** 滑出来的数字：按键音、振动和键位统计与点按这一格相同，上屏走长按选数字的同一条路径（`selectNineKeyHoldOption`：先结束组字再字面上屏）。 */
+  private typeNineKeySwipeDigit(key: NineKey): void {
+    const digit: string = NineKeyLayout.digitHint(key);
+    if (digit.length === 0) {
+      return;
+    }
+    KeyboardSession.shared.softKeyPress(KeyIdPolicy.nineKey(key.input));
+    KeyboardSession.shared.holdFeedback();
+    KeyboardSession.shared.finishComposition();
+    KeyboardSession.shared.insert(digit);
+  }
+
+  private endNineKeySwipeFace(input: string): void {
+    if (this.nineKeySwipeKey === input) {
+      this.nineKeySwipeKey = '';
+      this.nineKeySwipeDigit = '';
+    }
+  }
+
+  /** 键面文字：这一键正滑动输入数字时画那个数字，否则画原来的键面。 */
+  private nineKeySwipeFace(input: string | undefined, face: string): string {
+    return input !== undefined && input === this.nineKeySwipeKey && this.nineKeySwipeDigit.length > 0
+      ? this.nineKeySwipeDigit : face;
   }
 
   /**
@@ -5766,7 +5971,7 @@ struct KeyboardView {
     this.actionRow()
   }
 
-  /** 全拼 18 键的三排组码键面；第二排居中半个键距，第三排两端留给分词和删除。 */
+  /** 全拼 18 键的三排组码键面；三排从同一左右边界铺开，第二排六个键平分整行（A 与 Q 左对齐、L 与 P 右对齐，与 Android、iOS 相同），第三排两端留给分词和删除。 */
   @Builder
   eighteenKeyFace() {
     Row({ space: this.keySpacing() }) {
@@ -5777,11 +5982,9 @@ struct KeyboardView {
     .width('100%').height(this.rowHeight(0))
 
     Row({ space: this.keySpacing() }) {
-      Column().layoutWeight(0.5).height('100%')
       ForEach(EighteenKeyLayout.rows()[1], (key: FourteenKey) => {
         this.eighteenKeyButton(key)
       }, (key: FourteenKey) => key.letters + this.faceKey())
-      Column().layoutWeight(0.5).height('100%')
     }
     .width('100%').height(this.rowHeight(1))
 
@@ -6185,7 +6388,7 @@ struct KeyboardView {
       this.standardRowsField);
   }
 
-  /** 中文 26 键处在长空格样式（`TouchLayoutStylePolicy.longSpaceActive`）：符号入口在工具栏，123 进带空格的数字符号层；密码框和只收数字的编辑框里不算，与 Android 一致。 */
+  /** 中文 26 键处在长空格样式（`TouchLayoutStylePolicy.longSpaceActive`）：符号入口在工具栏，123 与其他键面一样打开底行带空格的数字九宫格；密码框和只收数字的编辑框里不算，与 Android 一致。 */
   private longSpaceActive(): boolean {
     return TouchLayoutStylePolicy.longSpaceActive(this.chineseTwentySixFace(), this.twentySixKeyStyle,
       this.standardRowsField);
@@ -6223,11 +6426,13 @@ struct KeyboardView {
       : TouchLayoutStylePolicy.STANDARD;
   }
 
-  /** 设计底行的键序与份额（`TouchLayoutStylePolicy.designRow`）；打开「符」与「123」互换时 26 键一族的 符 排到 123 左边（`TouchLayoutStylePolicy.symbolFirst`）。 */
+  /** 设计底行的键序与份额（`TouchLayoutStylePolicy.designRow`）；打开「符」与「123」互换时 26 键一族的 符 排到 123 左边（`TouchLayoutStylePolicy.symbolFirst`），之后「中/英键放在空格左边」再把 中/英 挪到空格（和紧贴空格的标点）左边（`TouchLayoutStylePolicy.languageBeforeSpace`）。密码框和数字框里样式退回标准，这两项不退回。 */
   private designRowEntries(): DesignRowEntry[] {
     const styled: StyledFace = this.designRowStyledFace();
-    return TouchLayoutStylePolicy.symbolFirst(TouchLayoutStylePolicy.designRow(this.designCommaSecondaryPeriod(),
-      this.designEnglishPeriod(), styled, this.designRowStyle(styled)), this.twentySixSymbolFirst);
+    const row: DesignRowEntry[] = TouchLayoutStylePolicy.symbolFirst(TouchLayoutStylePolicy.designRow(
+      this.designCommaSecondaryPeriod(), this.designEnglishPeriod(), styled, this.designRowStyle(styled)),
+      this.twentySixSymbolFirst);
+    return TouchLayoutStylePolicy.languageBeforeSpace(row, this.languageKeyLeft);
   }
 
   /**
@@ -6312,29 +6517,59 @@ struct KeyboardView {
   @Builder
   designActionRow() {
     Row({ space: this.keySpacing() }) {
-      ForEach(this.designRowItems(), (item: DesignRowItem) => {
-        this.designRowKey(item)
-      }, (item: DesignRowItem): string => TouchLayoutStylePolicy.designRowItemKey(item))
+      if (this.splitDrawn() && this.designRowSpaceIndex() >= 0) {
+        // 分离式键盘：空格拆成两个，左边那个的份额让空隙落在整行中间（`SplitKeyboardPolicy.leftSpaceWeight`），两边的键照原样排。
+        ForEach(this.designRowItems().slice(0, this.designRowSpaceIndex()), (item: DesignRowItem) => {
+          this.designRowKey(item)
+        }, (item: DesignRowItem): string => TouchLayoutStylePolicy.designRowItemKey(item))
+        this.spaceKey(true, this.designRowSplitSpace().left, 0);
+        this.splitGap(this.designRowSplitSpace().gap)
+        this.spaceKey(true, this.designRowSplitSpace().right, 0);
+        ForEach(this.designRowItems().slice(this.designRowSpaceIndex() + 1), (item: DesignRowItem) => {
+          this.designRowKey(item)
+        }, (item: DesignRowItem): string => TouchLayoutStylePolicy.designRowItemKey(item))
+      } else {
+        ForEach(this.designRowItems(), (item: DesignRowItem) => {
+          this.designRowKey(item)
+        }, (item: DesignRowItem): string => TouchLayoutStylePolicy.designRowItemKey(item))
+      }
     }
     .width('100%')
     .height(this.rowHeight(3))
+  }
+
+  /** 设计底行里空格的下标，没有空格时为 -1（那时不拆）。 */
+  private designRowSpaceIndex(): number {
+    return this.designRowItems().findIndex((item: DesignRowItem): boolean => item.slot === DesignRowSlot.SPACE);
+  }
+
+  /** 分离式键盘里设计底行拆开的两个空格和中间空隙。 */
+  private designRowSplitSpace(): SplitSpace {
+    return this.splitSpace(this.designRowItems().map((item: DesignRowItem): number => item.share),
+      this.designRowSpaceIndex());
   }
 
   /** 设计底行上的一个键（`designRowItems` 的一项）：份额和让位按值收下，它们在 ForEach 的键里，变了这个键整个重建；其余内容都在属性里直接读状态。 */
   @Builder
   designRowKey(item: DesignRowItem) {
     if (item.slot === DesignRowSlot.LAYER) {
-      // 长按 123 直接打开符号面板，不必再经过 #+= 层；符号层里这个键是返回，长按不做事。
+      // 长按 123 直接打开符号面板，不必再经过 #+= 层；符号层里这个键是返回，长按不做事。注音（鸿蒙只有大千一种注音键面）的 #+= 是共享符号行（`designLayerShowing`），那一页没有自己的切换键，这一格印 123、点按回到数字九宫格，与设计稿 #+= 层的 123 相同（`NumberSymbolLayout.layerKeyFace`）。
       Column() {
         this.fixedKey({
-          face: this.symbols ? '返回' : '123',
-          label: KeyAccessibilityPolicy.layoutToggle(this.symbols),
+          face: NumberSymbolLayout.layerKeyFace(this.symbols, this.moreSymbols),
+          label: KeyAccessibilityPolicy.layoutToggle(this.symbols && !this.moreSymbols),
           size: KeyboardMetrics.SMALL_KEY_FONT_SIZE,
           fontWeight: FUNCTION_LABEL_WEIGHT,
           emphasized: false,
           special: true,
           width: '100%',
-          action: () => this.toggleSymbolLayer()
+          action: () => {
+            if (this.moreSymbols) {
+              this.toggleMoreSymbols();
+              return;
+            }
+            this.toggleSymbolLayer();
+          }
         });
       }
       .layoutWeight(item.share)
@@ -6464,6 +6699,8 @@ struct KeyboardView {
    * 触屏手写的底行：123 1.25 | ， 1 | space 2.4 | 。 1 | 中 1.05 | 重写 1.25 | ⌫ 1.25 | return 1.6，即 Android 的 `KeyboardActionRow.designEntries(HANDWRITING_LAYOUT)` 和 iOS 的手写底行。书写区铺满整行，原来它右侧的「重写」和 ⌫ 排在中/英与回车之间；原来左侧的 ？ ！ 由 ， 和 。 的长按输入，两键都画角标。
    *
    * ⌫ 有笔迹时撤回一笔、没有时删除光标前的字符（`deleteHandwriting`），紧挨回车，所以回车不让出键帽（`besideLanguage` 为假）。
+   *
+   * 「中/英键放在空格左边」（`languageKeyLeft`）时 中/英 排到 ， 左边：123 | 中 | ， | 空格 | 。 | 重写 | ⌫ | 回车，与设计底行同一条规则（`TouchLayoutStylePolicy.languageBeforeSpace`），份额不变。右边时那一格照原样写在 。 后面，`scripts/test-mobile-handwriting-pad-parity.py` 按它读三端的默认键序；左边时画 `handwritingLeftLanguageKey`。
    */
   @Builder
   handwritingActionRow() {
@@ -6483,6 +6720,9 @@ struct KeyboardView {
       .layoutWeight(HANDWRITING_LAYER_SHARE)
       .height('100%')
       .gesture(LongPressGesture().onAction(() => this.openSymbolsFromLayerKey()))
+      if (this.languageKeyLeft) {
+        this.handwritingLeftLanguageKey()
+      }
       Column() {
         this.fixedKey({
           face: this.chinesePunctuationFaces() ? '，' : ',',
@@ -6519,20 +6759,22 @@ struct KeyboardView {
         KeyboardSession.shared.softKeyPress(KeyIdPolicy.character('.'));
         KeyboardSession.shared.punctuation(0x21);
       }))
-      this.fixedKey({
-        face: this.languageFace(),
-        label: KeyAccessibilityPolicy.language(),
-        size: KeyboardMetrics.SMALL_KEY_FONT_SIZE,
-        fontWeight: FUNCTION_LABEL_WEIGHT,
-        emphasized: false,
-        special: true,
-        width: 0,
-        share: HANDWRITING_LANGUAGE_SHARE,
-        action: () => {
-          KeyboardSession.shared.softKeyPress(KeyIdPolicy.SOFT_LANGUAGE);
-          this.toggleTouchLanguage();
-        }
-      });
+      if (!this.languageKeyLeft) {
+        this.fixedKey({
+          face: this.languageFace(),
+          label: KeyAccessibilityPolicy.language(),
+          size: KeyboardMetrics.SMALL_KEY_FONT_SIZE,
+          fontWeight: FUNCTION_LABEL_WEIGHT,
+          emphasized: false,
+          special: true,
+          width: 0,
+          share: HANDWRITING_LANGUAGE_SHARE,
+          action: () => {
+            KeyboardSession.shared.softKeyPress(KeyIdPolicy.SOFT_LANGUAGE);
+            this.toggleTouchLanguage();
+          }
+        });
+      }
       this.fixedKey({
         face: '重写',
         label: '清空手写',
@@ -6562,6 +6804,25 @@ struct KeyboardView {
     }
     .width('100%')
     .height(this.rowHeight(3))
+  }
+
+  /** 「中/英键放在空格左边」时手写底行排在 123 和 ， 之间的 中/英，与右边时 。 后面那一格同一个键：同样的份额、点按、读屏文字和统计 id（`handwritingActionRow`）。 */
+  @Builder
+  handwritingLeftLanguageKey() {
+    this.fixedKey({
+      face: this.languageFace(),
+      label: KeyAccessibilityPolicy.language(),
+      size: KeyboardMetrics.SMALL_KEY_FONT_SIZE,
+      fontWeight: FUNCTION_LABEL_WEIGHT,
+      emphasized: false,
+      special: true,
+      width: 0,
+      share: HANDWRITING_LANGUAGE_SHARE,
+      action: () => {
+        KeyboardSession.shared.softKeyPress(KeyIdPolicy.SOFT_LANGUAGE);
+        this.toggleTouchLanguage();
+      }
+    });
   }
 
   /** 触屏键盘的回车键，无论显示什么都用操作色：回车箭头、编辑框的动作词，或有组合时的「确认」。`besideLanguage` 为真时它左边紧挨中/英键，两者的触摸分界挪进回车键帽（`returnKeyHitRegion`）。 */
@@ -7543,7 +7804,10 @@ struct KeyboardView {
       swipeSymbols: current.swipeSymbols,
       swipeSymbolsDirection: current.swipeSymbolsDirection,
       oneHanded: current.oneHanded,
-      incognito: current.incognito
+      incognito: current.incognito,
+      floating: current.floating,
+      floatingX: current.floatingX,
+      floatingY: current.floatingY
     };
     return next;
   }
@@ -7564,7 +7828,10 @@ struct KeyboardView {
       swipeSymbols: current.swipeSymbols,
       swipeSymbolsDirection: current.swipeSymbolsDirection,
       oneHanded: mode,
-      incognito: current.incognito
+      incognito: current.incognito,
+      floating: current.floating,
+      floatingX: current.floatingX,
+      floatingY: current.floatingY
     };
     this.setFeedback(next);
   }
@@ -7577,7 +7844,60 @@ struct KeyboardView {
 
   /** 按键是否在单手侧栏旁收窄绘制。 */
   private oneHandActive(): boolean {
-    return OneHandedPolicy.active(this.feedback.oneHanded, KeyboardFormFactor.isDesktop());
+    // 分离式键盘画着或浮动键盘生效时单手模式让位，存着的值不变，回到不分离的方向或键面、停靠键盘时单手自动回来，与 Android 的 `ImeFrame.effectiveOneHanded` 相同。
+    return OneHandedPolicy.active(this.feedback.oneHanded, KeyboardFormFactor.isDesktop()) && !this.splitDrawn() && !this.floatingDrawn();
+  }
+
+  /** 浮动键盘此刻是否生效（`FloatingKeyboardPolicy.active`）：面板缩窄悬在应用上面，顶部画拖动条。 */
+  private floatingDrawn(): boolean {
+    return FloatingKeyboardPolicy.active(this.feedback.floating, KeyboardFormFactor.isDesktop());
+  }
+
+  /** 功能面板「浮动键盘」磁贴和拖动条的停靠键：经会话存下开关，会话再让扩展能力换面板。 */
+  private setFloating(on: boolean): void {
+    KeyboardSession.shared.setFloatingKeyboard(on);
+    this.feedback = KeyboardSession.shared.feedbackSettings();
+  }
+
+  /**
+   * 正在画的键面能不能分离：26 键一族（含英文、日文罗马字、粤拼、越南语、藏文）和韩文的字母层，以及它们的 #+= 层。123 打开的数字九宫格不分，不管是从哪个键面借来的；日文假名、手写、九键、注音、笔画、14/18 键也不分，它们的 #+= 页同样不分，免得同一个方案在两页之间来回变形；2in1 不画触摸按键。
+   */
+  private splitsFace(): boolean {
+    return this.touchDesign() && !this.japanese && !this.numberPadShowing()
+      && !KeyboardScheme.usesHandwritingFace(this.scheme, this.english, false, this.localMode)
+      && !KeyboardScheme.usesNineKeyFace(this.nineKey, this.localMode)
+      && !this.zhuyinFace() && !this.strokeFace() && !this.drawsFourteenKey();
+  }
+
+  /** 此刻是否画分离式键盘（`SplitKeyboardPolicy.drawn`）：开关、大屏、方向和启用宽度都满足，正在画的键面可以分离，并且键盘没有浮动。 */
+  private splitDrawn(): boolean {
+    return SplitKeyboardPolicy.drawn(this.splitKeyboard, this.screenWidthVp, this.screenHeightVp,
+      KeyboardFormFactor.isDesktop(), this.splitsFace(), this.floatingDrawn());
+  }
+
+  /** 按键这一行的宽度：屏幕宽减去键盘根的左右内边距，空隙比例按它算。 */
+  private splitRowWidthVp(): number {
+    return this.screenWidthVp - 2 * KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP;
+  }
+
+  /** 一行怎么断开；`letterRow` 是字母层的行下标，数字行和符号层传 -1，只断开不重复。 */
+  private splitRow(weights: number[], letterRow: number): SplitRow {
+    return SplitKeyboardPolicy.row(weights, letterRow, LETTER_ROWS.length, this.splitRowWidthVp(),
+      this.splitKeyboard.gapPercent);
+  }
+
+  /** 拆开的底行空格；`weights` 是底行各键的份额，空格按整份计。 */
+  private splitSpace(weights: number[], spaceIndex: number): SplitSpace {
+    return SplitKeyboardPolicy.space(weights, spaceIndex, this.splitRowWidthVp(), this.splitKeyboard.gapPercent);
+  }
+
+  /** 每个键都占一份的行（数字行、补充行）怎么断开。 */
+  private splitEvenRow(count: number): SplitRow {
+    const weights: number[] = [];
+    for (let index: number = 0; index < count; index++) {
+      weights.push(1);
+    }
+    return this.splitRow(weights, -1);
   }
 
   /** Candidate translations on or off; the session re-derives the gloss line and the reload it announces resizes the keyboard. */
@@ -8441,6 +8761,8 @@ struct KeyboardView {
       const heightVp: number = screen.height / screen.densityPixels;
       this.phoneLandscape = KeyboardFormFactorPolicy.phoneLandscape(widthVp, heightVp);
       this.landscape = screen.width > screen.height;
+      this.screenWidthVp = widthVp;
+      this.screenHeightVp = heightVp;
       const largeScreen: boolean = KeyboardFormFactorPolicy.largeScreen(widthVp, heightVp);
       this.oneHandBlockVp = OneHandedPolicy.blockWidthVp(widthVp, largeScreen);
       // 按键这一行的宽度是屏幕宽减去键盘根的左右内边距，侧边数字键盘按它算才不会把这一行撑出屏幕。
@@ -8988,10 +9310,11 @@ struct KeyboardView {
     .borderColor(this.menuColors.border)
   }
 
-  /** 绘制哪些展开格：引擎列出的每个候选，按索引。触屏工具条只滚动当前页，所以网格是触屏键盘查看列表其余部分的唯一途径，从不截断。 */
+  /** 绘制哪些展开格：引擎列出的候选按索引，已建到 `expandedBuilt`。触屏工具条只滚动当前页，所以网格是触屏键盘查看列表其余部分的唯一途径，往下滚会接着建，从不截断。 */
   private expandedIndices(): number[] {
     const indices: number[] = [];
-    for (let index: number = 0; index < this.expanded.length; index++) {
+    const built: number = Math.min(this.expandedBuilt, this.expanded.length);
+    for (let index: number = 0; index < built; index++) {
       indices.push(index);
     }
     return indices;
@@ -9083,7 +9406,6 @@ struct KeyboardView {
             .fontColor(this.skin.keyLabelColor(false, true))
             .textAlign(TextAlign.Center)
             .stateStyles({ normal: this.keyIdleStyle, pressed: this.keyPressedStyle })
-            .animation({ duration: KEY_PRESS_MS })
             .accessibilityText(KeyAccessibilityPolicy.expandCandidates(true))
             .onClick(() => {
               this.show(SURFACE_NONE);
@@ -9105,7 +9427,7 @@ struct KeyboardView {
     CandidateCanvasFrame({ scene: this.settings.candidateCanvas, fixedContent: true,
       fallbackColor: this.settings.candidateColors.surface,
       onPanelReady: (key: string, ready: boolean): void => this.canvasReady('expanded', key, ready) }) {
-    Scroll() {
+    Scroll(this.expandedScroller) {
       Column({ space: EXPANDED_GAP_VP }) {
         ForEach(this.expandedRows(), (row: ExpandedCandidateCell[]) => {
           Row({ space: EXPANDED_GAP_VP }) {
@@ -9152,13 +9474,22 @@ struct KeyboardView {
       }
       .width('100%')
       .padding(EXPANDED_PADDING_VP)
+      .onAreaChange((_old: Area, now: Area): void => {
+        this.expandedContentHeight = Number(now.height);
+        this.appendExpandedIfNeeded();
+      })
     }
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.None)
     .align(Alignment.Top)
     .width('100%')
     .height('100%')
-    .onAreaChange((_old: Area, now: Area): void => { this.canvasExpandedWidth = Number(now.width); })
+    .onDidScroll((): void => this.appendExpandedIfNeeded())
+    .onAreaChange((_old: Area, now: Area): void => {
+      this.canvasExpandedWidth = Number(now.width);
+      this.expandedViewportHeight = Number(now.height);
+      this.appendExpandedIfNeeded();
+    })
     }
     }
     .layoutWeight(1)
@@ -9267,6 +9598,8 @@ struct KeyboardView {
         return this.feedback.haptics;
       case FunctionPanelPolicy.ONE_HAND:
         return this.feedback.oneHanded !== OneHandedMode.OFF;
+      case FunctionPanelPolicy.FLOATING:
+        return this.feedback.floating;
       case FunctionPanelPolicy.PRIVACY:
         return this.feedback.incognito;
       case FunctionPanelPolicy.TRANSLATION:
@@ -9298,7 +9631,10 @@ struct KeyboardView {
       case FunctionPanelPolicy.VIBRATION_STRENGTH:
         return this.feedback.haptics;
       case FunctionPanelPolicy.ONE_HAND:
-        // 2in1 不绘制可收窄的触屏按键，所以该磁贴在那里不起作用；Android 在绘制分体键盘时也同样把它置灰。
+        // 2in1 不绘制可收窄的触屏按键，所以该磁贴在那里不起作用；分离式键盘画着或键盘浮动时单手模式也不生效，同样置灰，免得点了没有反应，与 Android 相同。
+        return this.touchDesign() && !this.splitDrawn() && !this.floatingDrawn();
+      case FunctionPanelPolicy.FLOATING:
+        // 2in1 的面板是跟随光标的候选窗，不浮动。分离式键盘画着时照常可用：打开浮动后分离式键盘不再画（`splitDrawn`），与 Android 相同。
         return this.touchDesign();
       default:
         return true;
@@ -9347,6 +9683,9 @@ struct KeyboardView {
         break;
       case FunctionPanelPolicy.ONE_HAND:
         this.setOneHanded(OneHandedPolicy.toggled(this.feedback.oneHanded));
+        break;
+      case FunctionPanelPolicy.FLOATING:
+        this.setFloating(!this.feedback.floating);
         break;
       case FunctionPanelPolicy.PRIVACY:
         this.togglePrivacyMode();
@@ -9465,7 +9804,8 @@ struct KeyboardView {
                 }
               }, (mode: LocalInputModeDefinition) => mode.id)
             }
-            .columnsTemplate('1fr 1fr')
+            .columnsTemplate(LocalInputMode.touchColumns(this.localInputModes.length) === 4
+              ? '1fr 1fr 1fr 1fr' : '1fr 1fr 1fr')
             .width('100%')
           }
           .width('100%')
@@ -9475,22 +9815,30 @@ struct KeyboardView {
         .layoutWeight(1)
       } else {
         PagedTiles({
-          count: FunctionPanelPolicy.items(AiGenerationGate.enabled()).length,
+          count: this.functionPanelItems().length,
           pageSize: this.tilePageSize(),
-          rowHeight: this.tileRowHeight(FunctionPanelPolicy.items(AiGenerationGate.enabled()).length),
+          rowHeight: this.tileRowHeight(this.functionPanelItems().length),
           rowsGap: this.tileGrid().rowsGap,
           topPadding: TILE_TOP_PADDING_VP,
           resetToken: this.panelResetToken,
           accent: this.skin.toggleForeground,
           hair: this.skin.hair,
           tile: (index: number): void => {
-            this.functionTile(FunctionPanelPolicy.items(AiGenerationGate.enabled())[index])
+            this.functionTile(this.functionPanelItems()[index])
           }
         })
       }
     }
     .width('100%')
     .height(this.surfaceHeight())
+  }
+
+  /** 手机和平板不显示本地输入入口；2in1 保留完整的功能面板。 */
+  private functionPanelItems(): FunctionPanelItem[] {
+    const allItems: FunctionPanelItem[] = FunctionPanelPolicy.items(AiGenerationGate.enabled());
+    return KeyboardFormFactor.isDesktop()
+      ? allItems
+      : FunctionPanelPolicy.items(AiGenerationGate.enabled(), false);
   }
 
   /** 「常用语」面板：用户的常用语，点一下即插入。 */
@@ -10520,31 +10868,34 @@ struct KeyboardView {
         .height('100%')
 
         Grid(this.symbolGridScroller) {
-          ForEach(SymbolPanelPolicy.category(this.symbolCategory).symbols
-            .slice(0, SymbolPanelPolicy.maxSymbolsPerCategory()), (symbol: string) => {
+          // 成对符号的前半个落在行尾时留一格空，两半排在同一行（`SymbolPanelPolicy.cells`）；空格子只占位，不画键。
+          ForEach(SymbolPanelPolicy.cells(SymbolPanelPolicy.category(this.symbolCategory).symbols
+            .slice(0, SymbolPanelPolicy.maxSymbolsPerCategory()), SYMBOL_COLUMNS), (symbol: string) => {
             GridItem() {
-              Text(symbol)
-                .fontSize(SYMBOL_FONT_SIZE)
-                .maxFontSize(SYMBOL_FONT_SIZE)
-                .minFontSize(SYMBOL_MIN_FONT_SIZE)
-                .maxLines(1)
-                .fontColor(this.skin.keyLabelColor(false))
-                .fontFamily(this.skin.monospaced ? 'monospace' : undefined)
-                .textAlign(TextAlign.Center)
-                .width('100%')
-                .height('100%')
-                .backgroundColor(this.skin.keySurfaceBackground(false))
-                .linearGradient({ angle: 180,
-                  colors: [[this.skin.materialTop(), 0], [this.skin.materialBottom(), 1]] })
-                .borderRadius(this.skin.keyCornerRadius())
-                .borderWidth(this.skin.borderWidth)
-                .borderColor(this.skin.borderColor)
-                .shadow({ radius: this.skin.shadowRadius, color: this.skin.shadowColor(),
-                  offsetX: 0, offsetY: this.skin.shadowOffset })
-                .accessibilityText(KeyAccessibilityPolicy.symbol(symbol))
-                .stateStyles({ normal: this.keyIdleStyle, pressed: this.keyPressedStyle })
-                .animation({ duration: KEY_PRESS_MS })
-                .onClick(() => this.selectSymbol(symbol))
+              if (symbol.length > 0) {
+                Text(symbol)
+                  .fontSize(SYMBOL_FONT_SIZE)
+                  .maxFontSize(SYMBOL_FONT_SIZE)
+                  .minFontSize(SYMBOL_MIN_FONT_SIZE)
+                  .maxLines(1)
+                  .fontColor(this.skin.keyLabelColor(false))
+                  .fontFamily(this.skin.monospaced ? 'monospace' : undefined)
+                  .textAlign(TextAlign.Center)
+                  .width('100%')
+                  .height('100%')
+                  .backgroundColor(this.skin.keySurfaceBackground(false))
+                  .linearGradient({ angle: 180,
+                    colors: [[this.skin.materialTop(), 0], [this.skin.materialBottom(), 1]] })
+                  .borderRadius(this.skin.keyCornerRadius())
+                  .borderWidth(this.skin.borderWidth)
+                  .borderColor(this.skin.borderColor)
+                  .shadow({ radius: this.skin.shadowRadius, color: this.skin.shadowColor(),
+                    offsetX: 0, offsetY: this.skin.shadowOffset })
+                  .accessibilityText(KeyAccessibilityPolicy.symbol(symbol))
+                  .stateStyles({ normal: this.keyIdleStyle, pressed: this.keyPressedStyle })
+                  .animation({ duration: KEY_PRESS_MS })
+                  .onClick(() => this.selectSymbol(symbol))
+              }
             }
             .height(SYMBOL_CELL_VP)
           }, (symbol: string, index: number) => `${this.symbolCategory}:${index}:${symbol}:${this.faceKey()}`)
@@ -10754,6 +11105,79 @@ struct KeyboardView {
   }
 
   build() {
+    Column() {
+      if (this.floatingDrawn()) {
+        this.floatingBar()
+      }
+      // 浮动时拖动条占去顶部 22vp，键盘这一层分到窗口剩下的高度；停靠时它就是整个窗口，与加拖动条之前相同。
+      Column() {
+        this.keyboardStack()
+      }
+      .width('100%')
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.floatingDrawn() ? this.skin.background : Color.Transparent)
+    .borderRadius(this.floatingDrawn() ? FloatingKeyboardPolicy.CORNER_RADIUS_VP : 0)
+    .clip(this.floatingDrawn())
+  }
+
+  /**
+   * 浮动键盘顶部的拖动条（#10225），移植自 Android 的 `FloatingKeyboardBar`：中间是 36×4 的横条，按住整条拖动移动键盘；右端是「停靠」键（maximize-2 图标，与单手侧栏的退出键同一个），点它回到停靠在底部的完整键盘。
+   *
+   * 拖动报告的是手指在屏幕上的位移（`displayX` / `displayY`），不是条内坐标：面板跟着手指移动，条内坐标会跟着变。面板归扩展能力，位置由它换算、钳制并移动。
+   */
+  @Builder
+  floatingBar() {
+    Row() {
+      Stack() {
+        Column()
+          .width(FloatingKeyboardPolicy.GRIP_WIDTH_VP)
+          .height(FloatingKeyboardPolicy.GRIP_HEIGHT_VP)
+          .borderRadius(FloatingKeyboardPolicy.GRIP_HEIGHT_VP / 2)
+          .backgroundColor(this.skin.keyForeground)
+          .opacity(0.35)
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .accessibilityText(FloatingKeyboardPolicy.DESCRIPTION)
+      .onTouch((event: TouchEvent): void => this.floatingBarTouch(event))
+
+      Stack() {
+        KeyboardLineIcon({
+          d: KeyboardIconPaths.EXIT_ONE_HAND,
+          iconSize: FloatingKeyboardPolicy.DOCK_ICON_VP,
+          stroke: OneHandedPolicy.ICON_STROKE,
+          color: this.skin.keyForeground
+        })
+      }
+      .width(FloatingKeyboardPolicy.DOCK_WIDTH_VP)
+      .height('100%')
+      .accessibilityText(FloatingKeyboardPolicy.DOCK_DESCRIPTION)
+      .onClick((): void => this.setFloating(false))
+    }
+    .width('100%')
+    .height(FloatingKeyboardPolicy.BAR_HEIGHT_VP)
+  }
+
+  /** 拖动条上的手指：按下记起点，移动时把相对起点的屏幕位移交给会话，抬起或取消时结束拖动。 */
+  private floatingBarTouch(event: TouchEvent): void {
+    const touch: TouchObject | undefined = event.touches.length > 0 ? event.touches[0] : undefined;
+    if (event.type === TouchType.Down && touch !== undefined) {
+      this.floatingTouchOrigin = [touch.displayX, touch.displayY];
+      KeyboardSession.shared.beginFloatingDrag();
+    } else if (event.type === TouchType.Move && touch !== undefined) {
+      KeyboardSession.shared.dragFloating(touch.displayX - this.floatingTouchOrigin[0],
+        touch.displayY - this.floatingTouchOrigin[1]);
+    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      KeyboardSession.shared.endFloatingDrag();
+    }
+    event.stopPropagation();
+  }
+
+  @Builder
+  keyboardStack() {
     Stack({ alignContent: Alignment.Top }) {
       // On a desktop candidate window with a mascot the backdrop starts at the card's top edge: the band above it is transparent, so the mascot stands on the card rather than on a slab of keyboard colour.
       Column() {
@@ -11100,20 +11524,48 @@ struct KeyboardView {
   @Builder
   numberKeysRow() {
     Row({ space: this.keySpacing() }) {
-      ForEach(TouchLayoutStylePolicy.NUMBER_ROW, (digit: string) => {
-        this.fixedKey({
-          face: digit,
-          label: digit,
-          size: LAYER_FIRST_ROW_FONT_SIZE,
-          emphasized: false,
-          width: 0,
-          share: 1,
-          action: () => this.typeNumberRowDigit(digit)
-        });
-      }, (digit: string) => `number-row:${digit}:${this.faceKey()}`)
+      if (this.splitDrawn()) {
+        // 分离式键盘：12345 | 67890，中间是不接触摸的空隙。
+        ForEach(TouchLayoutStylePolicy.NUMBER_ROW.slice(0, this.splitEvenRow(TouchLayoutStylePolicy.NUMBER_ROW.length).cut),
+          (digit: string) => {
+            this.numberRowKey(digit)
+          }, (digit: string) => `number-row:${digit}:${this.faceKey()}`)
+        this.splitGap(this.splitEvenRow(TouchLayoutStylePolicy.NUMBER_ROW.length).gapShare)
+        ForEach(TouchLayoutStylePolicy.NUMBER_ROW.slice(this.splitEvenRow(TouchLayoutStylePolicy.NUMBER_ROW.length).cut),
+          (digit: string) => {
+            this.numberRowKey(digit)
+          }, (digit: string) => `number-row:${digit}:${this.faceKey()}`)
+      } else {
+        ForEach(TouchLayoutStylePolicy.NUMBER_ROW, (digit: string) => {
+          this.numberRowKey(digit)
+        }, (digit: string) => `number-row:${digit}:${this.faceKey()}`)
+      }
     }
     .width('100%')
     .height(KeyboardMetrics.ROW_HEIGHT_VP)
+  }
+
+  /** 数字行的一个键。 */
+  @Builder
+  numberRowKey(digit: string) {
+    this.fixedKey({
+      face: digit,
+      label: digit,
+      size: LAYER_FIRST_ROW_FONT_SIZE,
+      emphasized: false,
+      width: 0,
+      share: 1,
+      action: () => this.typeNumberRowDigit(digit)
+    });
+  }
+
+  /** 分离式键盘中间的空隙：不是键、不接触摸，读屏也跳过它；份额由 `SplitKeyboardPolicy` 算，触摸落在这里什么也不按，与 Android 的空隙视图相同。 */
+  @Builder
+  splitGap(share: number) {
+    Column()
+      .layoutWeight(share)
+      .height('100%')
+      .accessibilityLevel('no')
   }
 
   /**
@@ -11122,21 +11574,48 @@ struct KeyboardView {
   @Builder
   symbolExtraKeysRow() {
     Row({ space: this.keySpacing() }) {
-      ForEach(TouchLayoutStylePolicy.symbolExtraRow(this.moreSymbols, this.numberPadShowing(),
-        this.chinesePunctuationFaces()), (text: string) => {
-        this.fixedKey({
-          face: text,
-          label: KeyAccessibilityPolicy.symbol(text),
-          size: LAYER_FIRST_ROW_FONT_SIZE,
-          emphasized: false,
-          width: 0,
-          share: 1,
-          action: () => this.tapLayerCharacter(text)
-        });
-      }, (text: string) => `symbol-extra:${text}:${this.faceKey()}`)
+      if (this.splitDrawn()) {
+        ForEach(this.symbolExtraKeys().slice(0, this.splitEvenRow(this.symbolExtraKeys().length).cut), (text: string) => {
+          this.symbolExtraKey(text)
+        }, (text: string) => `symbol-extra:${text}:${this.faceKey()}`)
+        this.splitGap(this.splitEvenRow(this.symbolExtraKeys().length).gapShare)
+        ForEach(this.symbolExtraKeys().slice(this.splitEvenRow(this.symbolExtraKeys().length).cut), (text: string) => {
+          this.symbolExtraKey(text)
+        }, (text: string) => `symbol-extra:${text}:${this.faceKey()}`)
+      } else {
+        ForEach(this.symbolExtraKeys(), (text: string) => {
+          this.symbolExtraKey(text)
+        }, (text: string) => `symbol-extra:${text}:${this.faceKey()}`)
+      }
     }
     .width('100%')
     .height(KeyboardMetrics.ROW_HEIGHT_VP)
+  }
+
+  private symbolExtraKeys(): string[] {
+    return TouchLayoutStylePolicy.symbolExtraRow(this.moreSymbols, this.numberPadShowing(),
+      this.numberPadPunctuation() !== NumberPadPunctuation.ASCII);
+  }
+
+  /** 补充行的一个键：数字九宫格顶部那一排与数字九宫格上其他键同一条规则（`typeNumberPadText`），#+= 层的 1 到 0 照 123 层字符键（`tapLayerCharacter`）。 */
+  @Builder
+  symbolExtraKey(text: string) {
+    this.fixedKey({
+      face: text,
+      label: KeyAccessibilityPolicy.symbol(text),
+      size: LAYER_FIRST_ROW_FONT_SIZE,
+      emphasized: false,
+      width: 0,
+      share: 1,
+      action: () => {
+        if (this.numberPadShowing()) {
+          KeyboardSession.shared.softKeyPress(KeyIdPolicy.character(text));
+          this.typeNumberPadText(text);
+          return;
+        }
+        this.tapLayerCharacter(text);
+      }
+    });
   }
 
   /** The actual keys, shared by normal input and the transparent adjustment overlay. */
@@ -11150,8 +11629,8 @@ struct KeyboardView {
           this.numberKeysRow()
         }
       }
-      if (this.japanese) {
-        // Including the digit layer: a grid face draws its own digits so the three columns survive.
+      if (this.kanaGridShowing()) {
+        // 假名网格的字母层，以及 2in1 上它自己的数字层；触屏上 123 打开下面的数字九宫格，#+= 是设计稿的扩展符号页。
         this.japaneseFace()
       } else if (KeyboardScheme.usesHandwritingFace(
         this.scheme, this.english, this.symbols, this.localMode)) {
@@ -11172,6 +11651,9 @@ struct KeyboardView {
         }
       } else if (this.designLayerShowing()) {
         this.designLayerFace()
+      } else if (this.splitDrawn()) {
+        this.splitLetterFace()
+        this.actionRow()
       } else {
         Row({ space: this.keySpacing() }) {
           ForEach(this.symbols ? SYMBOL_ROWS[0] : LETTER_ROWS[0], (key: string) => {
@@ -11208,20 +11690,7 @@ struct KeyboardView {
         Row({ space: this.keySpacing() }) {
           if (!this.symbols) {
             // 触屏上开启的 Shift 用字母键的填充色加强调色箭头，与设计稿一致；2in1 屏幕键盘仍用操作色填充。
-            this.fixedKey({
-              face: this.usesQuanpinSeparator() ? '分词'
-                : (this.caseMode === LetterCaseMode.CAPS_LOCK ? '⇪' : '⇧'),
-              label: this.usesQuanpinSeparator() ? '拼音分词' : this.letterCase.accessibilityLabel(this.english),
-              size: this.usesQuanpinSeparator() ? 14 : KeyboardMetrics.KEY_FONT_SIZE,
-              emphasized: !this.touchDesign() && this.caseMode !== LetterCaseMode.LOWERCASE,
-              special: this.usesQuanpinSeparator() || !(this.touchDesign() && this.caseMode !== LetterCaseMode.LOWERCASE),
-              width: KeyboardMetrics.MODIFIER_WIDTH_VP,
-              share: this.touchDesign() ? LETTER_EDGE_SHARE : 0,
-              icon: !this.touchDesign() || this.usesQuanpinSeparator() ? ''
-                : (this.caseMode === LetterCaseMode.CAPS_LOCK ? KeyboardIconPaths.CAPS_LOCK : KeyboardIconPaths.SHIFT),
-              accentIcon: !this.usesQuanpinSeparator() && this.touchDesign() && this.caseMode !== LetterCaseMode.LOWERCASE,
-              action: () => this.tapLetterShift()
-            });
+            this.letterShiftKey()
           }
           ForEach(this.symbols ? SYMBOL_ROWS[2] : LETTER_ROWS[2], (key: string) => {
             this.flexibleKey(this.symbols
@@ -11238,11 +11707,111 @@ struct KeyboardView {
       }
   }
 
+  /** 第三排字母左端的 ⇧（全拼组字时是「分词」），分离与否画法相同。 */
+  @Builder
+  letterShiftKey() {
+    this.fixedKey({
+      face: this.usesQuanpinSeparator() ? '分词'
+        : (this.caseMode === LetterCaseMode.CAPS_LOCK ? '⇪' : '⇧'),
+      label: this.usesQuanpinSeparator() ? '拼音分词' : this.letterCase.accessibilityLabel(this.english),
+      size: this.usesQuanpinSeparator() ? 14 : KeyboardMetrics.KEY_FONT_SIZE,
+      emphasized: !this.touchDesign() && this.caseMode !== LetterCaseMode.LOWERCASE,
+      special: this.usesQuanpinSeparator() || !(this.touchDesign() && this.caseMode !== LetterCaseMode.LOWERCASE),
+      width: KeyboardMetrics.MODIFIER_WIDTH_VP,
+      share: this.touchDesign() ? LETTER_EDGE_SHARE : 0,
+      icon: !this.touchDesign() || this.usesQuanpinSeparator() ? ''
+        : (this.caseMode === LetterCaseMode.CAPS_LOCK ? KeyboardIconPaths.CAPS_LOCK : KeyboardIconPaths.SHIFT),
+      accentIcon: !this.usesQuanpinSeparator() && this.touchDesign() && this.caseMode !== LetterCaseMode.LOWERCASE,
+      action: () => this.tapLetterShift()
+    });
+  }
+
   /**
-   * 触屏键盘的符号层是否为设计稿的 123 / #+= 双层（`NumberSymbolLayout`）而不是共享符号行：所有把符号层交给字母行的键面，即 Android 的 `ImeLetterRows.drawsDesignLayer` 列出的那些，也就是 26 键、韩文、越南语、藏文、手写和笔画键盘。大千行保留共享符号行，注音在那里输入原本会被其注音键占用的标点，与 Android 一致；2in1 屏幕键盘也保留。
+   * 分离式键盘的三排字母（#10224，规则见 `SplitKeyboardPolicy`）：每排在键边界上断开，中间是不接触摸的空隙；第二、三排在右半边内侧重复左半边最内侧的字母（asdfg | ghjkl、⇧zxcv | vbnm⌫），重复的键从空隙借宽，三排键宽不变。键与不分离时同一套：字母、`;`、第二排的半键缩进、⇧ 和 ⌫ 都照原样画，只是排成两段。
+   */
+  @Builder
+  splitLetterFace() {
+    ForEach([0, 1, 2], (row: number) => {
+      Row({ space: this.keySpacing() }) {
+        ForEach(this.splitLetterItems(row).slice(0, this.splitLetterRow(row).cut), (item: string) => {
+          this.splitLetterItem(item)
+        }, (item: string) => `split-left:${item}:${this.faceKey()}`)
+        this.splitGap(this.splitLetterRow(row).gapShare)
+        if (this.splitLetterRow(row).duplicate) {
+          this.flexibleKey(this.duplicateLetterKey(this.splitLetterItems(row)[this.splitLetterRow(row).cut - 1]))
+        }
+        ForEach(this.splitLetterItems(row).slice(this.splitLetterRow(row).cut), (item: string) => {
+          this.splitLetterItem(item)
+        }, (item: string) => `split-right:${item}:${this.faceKey()}`)
+      }
+      .width('100%')
+      .height(this.rowHeight(row))
+      .onTouch((event: TouchEvent): void => this.glideTouch(event))
+    }, (row: number) => `split-row:${row}:${this.faceKey()}`)
+  }
+
+  /** 分离式键盘一排字母里依次画的东西：字母，以及占位符 `SPLIT_INDENT_START` / `SPLIT_INDENT_END`（第二排两端的半键缩进）、`SPLIT_SHIFT`、`SPLIT_DELETE`；微软双拼的 `;` 照原样写成 `;`。 */
+  private splitLetterItems(row: number): string[] {
+    const items: string[] = [];
+    if (row === 1 && this.secondRowIndented()) {
+      items.push(SPLIT_INDENT_START);
+    }
+    if (row === 2) {
+      items.push(SPLIT_SHIFT);
+    }
+    for (const letter of LETTER_ROWS[row]) {
+      items.push(letter);
+    }
+    if (row === 1 && this.secondRowSemicolon()) {
+      items.push(';');
+    }
+    if (row === 1 && this.secondRowIndented()) {
+      items.push(SPLIT_INDENT_END);
+    }
+    if (row === 2) {
+      items.push(SPLIT_DELETE);
+    }
+    return items;
+  }
+
+  /** 分离式键盘一排怎么断开，份额与不分离时各子视图的 `layoutWeight` 相同。 */
+  private splitLetterRow(row: number): SplitRow {
+    const weights: number[] = this.splitLetterItems(row).map((item: string): number => {
+      if (item === SPLIT_INDENT_START || item === SPLIT_INDENT_END) {
+        return SECOND_ROW_INDENT_SHARE;
+      }
+      return item === SPLIT_SHIFT || item === SPLIT_DELETE ? LETTER_EDGE_SHARE : 1;
+    });
+    return this.splitRow(weights, row);
+  }
+
+  @Builder
+  splitLetterItem(item: string) {
+    if (item === SPLIT_INDENT_START || item === SPLIT_INDENT_END) {
+      Column()
+        .layoutWeight(SECOND_ROW_INDENT_SHARE)
+        .height('100%')
+    } else if (item === SPLIT_SHIFT) {
+      this.letterShiftKey()
+    } else if (item === SPLIT_DELETE) {
+      this.deleteKey(KeyboardMetrics.MODIFIER_WIDTH_VP, true, LETTER_EDGE_SHARE);
+    } else {
+      this.flexibleKey(this.letterKey(item));
+    }
+  }
+
+  /** 右半边内侧重复的字母键：输入与左边那个相同，不记滑行键位。 */
+  private duplicateLetterKey(letter: string): KeyOptions {
+    const options: KeyOptions = this.letterKey(letter);
+    options.duplicate = true;
+    return options;
+  }
+
+  /**
+   * 触屏键盘的符号层是否为设计稿的 #+= 层（`NumberSymbolLayout`）而不是共享符号行，规则见 `NumberSymbolLayout.drawsDesignLayer`。触屏的 123 一律是数字九宫格（`numberPadShowing`，`typingFace` 里先于这里判断），所以走到这里的只有 #+=：除注音外的每一种键面都用设计稿的 #+= 层。注音的 #+= 保留共享符号行，注音在那里输入原本会被其注音键占用的标点（， . / ; -），与 Android 一致，那一页底行的切换键印 123、回到数字九宫格（`designRowKey`）。`zhuyinFace` 只看方案的组字规则、不看键面，鸿蒙的注音也只有大千一种键面，所以每一种注音键面的 #+= 都走这里；2in1 屏幕键盘也保留共享符号行。
    */
   private designLayerShowing(): boolean {
-    return this.touchDesign() && this.symbols && !this.zhuyinFace();
+    return NumberSymbolLayout.drawsDesignLayer(this.touchDesign(), this.symbols, this.zhuyinFace());
   }
 
   /** 该层是否带中文标点（全角，返回键为「拼音」）而不是 ASCII 标点（返回键为 ABC）：中文输入时是，英文和标点为 ASCII 的方案不是。 */
@@ -11255,6 +11824,53 @@ struct KeyboardView {
       this.stripIdle());
   }
 
+  /** 123 / #+= 层第三排的字符键（不含两端的层切换键和 ⌫）。 */
+  private designLayerCharacters(): LayerKey[] {
+    return this.designLayerRows()[2].filter((key: LayerKey): boolean => key.kind === LayerKeyKind.CHARACTER);
+  }
+
+  /** 123 / #+= 层前两排怎么断开；不分离时 `cut` 是整排，全部画在第一个 ForEach 里。 */
+  private splitLayerRow(row: number): SplitRow {
+    const keys: LayerKey[] = this.designLayerRows()[row];
+    if (!this.splitDrawn()) {
+      return { cut: keys.length, duplicate: false, gapShare: 0 };
+    }
+    return this.splitRow(keys.map((key: LayerKey): number => key.weight), -1);
+  }
+
+  /** 123 / #+= 层第三排怎么断开：层切换键、字符键、⌫，`cut` 计入左端的层切换键。不分离时字符键全在第一个 ForEach 里。 */
+  private splitLayerThirdRow(): SplitRow {
+    const characters: LayerKey[] = this.designLayerCharacters();
+    if (!this.splitDrawn()) {
+      return { cut: characters.length + 1, duplicate: false, gapShare: 0 };
+    }
+    const weights: number[] = [NumberSymbolLayout.EDGE_WEIGHT];
+    for (const key of characters) {
+      weights.push(key.weight);
+    }
+    weights.push(NumberSymbolLayout.EDGE_WEIGHT);
+    return this.splitRow(weights, -1);
+  }
+
+  /** 123 / #+= 层底行拆开的两个空格：返回、表情或符号、空格、回车。 */
+  private splitLayerSpace(): SplitSpace {
+    return this.splitSpace([NumberSymbolLayout.BACK_WEIGHT, NumberSymbolLayout.EMOJI_WEIGHT,
+      NumberSymbolLayout.SPACE_WEIGHT, NumberSymbolLayout.RETURN_WEIGHT], 2);
+  }
+
+  /**
+   * 组字中按到的辅助码触发键（123 层画成「；」的分号键、`/` 等，`ChineseHelpcodePolicy.layerTrigger`）交给 Engine 开一段辅助码，而不是按原样上屏再插入键面。Engine 收下时回到字母层，接下来要打的是辅助码字母；不收时返回 false，调用方照常输入键面。
+   */
+  private typeHelpcodeTrigger(text: string): boolean {
+    const trigger: string | null = KeyboardSession.shared.helpcodeTrigger(text);
+    if (trigger === null || !KeyboardSession.shared.press(trigger.charCodeAt(0), false)) {
+      return false;
+    }
+    this.symbols = false;
+    this.moreSymbols = false;
+    return true;
+  }
+
   /** 字符键输入它显示的内容；哪些键仍走符号行路径见 `NumberSymbolLayout.route`。 */
   private tapLayerCharacter(text: string): void {
     if (NumberSymbolLayout.route(text, this.designLayerChinese()) === LayerCharacterRoute.SYMBOL_KEY) {
@@ -11262,6 +11878,9 @@ struct KeyboardView {
       return;
     }
     KeyboardSession.shared.softKeyPress(KeyIdPolicy.character(text));
+    if (this.typeHelpcodeTrigger(text)) {
+      return;
+    }
     // 已有组合按原样上屏，与 Android 的 `commitNineKeyLiteral` 一致。
     KeyboardSession.shared.commitRaw();
     KeyboardSession.shared.insert(text);
@@ -11291,17 +11910,30 @@ struct KeyboardView {
   @Builder
   designLayerFace() {
     Row({ space: this.keySpacing() }) {
-      ForEach(this.designLayerRows()[0], (key: LayerKey) => {
+      // 分离式键盘时这一层也从中间断开（`splitLayerRow`），不重复键；不分离时 `cut` 是整排，空隙不画。
+      ForEach(this.designLayerRows()[0].slice(0, this.splitLayerRow(0).cut), (key: LayerKey) => {
         this.fixedKey(this.layerCharacterKey(key, LAYER_FIRST_ROW_FONT_SIZE));
       }, (key: LayerKey) => key.text + this.faceKey())
+      if (this.splitDrawn()) {
+        this.splitGap(this.splitLayerRow(0).gapShare)
+      }
+      ForEach(this.designLayerRows()[0].slice(this.splitLayerRow(0).cut), (key: LayerKey) => {
+        this.fixedKey(this.layerCharacterKey(key, LAYER_FIRST_ROW_FONT_SIZE));
+      }, (key: LayerKey) => `right:${key.text}${this.faceKey()}`)
     }
     .width('100%')
     .height(this.rowHeight(0))
 
     Row({ space: this.keySpacing() }) {
-      ForEach(this.designLayerRows()[1], (key: LayerKey) => {
+      ForEach(this.designLayerRows()[1].slice(0, this.splitLayerRow(1).cut), (key: LayerKey) => {
         this.fixedKey(this.layerCharacterKey(key, LAYER_FONT_SIZE));
       }, (key: LayerKey) => key.text + this.faceKey())
+      if (this.splitDrawn()) {
+        this.splitGap(this.splitLayerRow(1).gapShare)
+      }
+      ForEach(this.designLayerRows()[1].slice(this.splitLayerRow(1).cut), (key: LayerKey) => {
+        this.fixedKey(this.layerCharacterKey(key, LAYER_FONT_SIZE));
+      }, (key: LayerKey) => `right:${key.text}${this.faceKey()}`)
     }
     .width('100%')
     .height(this.rowHeight(1))
@@ -11318,10 +11950,18 @@ struct KeyboardView {
         share: NumberSymbolLayout.EDGE_WEIGHT,
         action: () => this.toggleMoreSymbols()
       });
-      ForEach(this.designLayerRows()[2].filter((key: LayerKey): boolean => key.kind === LayerKeyKind.CHARACTER),
+      // 左端的层切换键总在左半边，所以字符键按断点少一个切开。
+      ForEach(this.designLayerCharacters().slice(0, this.splitLayerThirdRow().cut - 1),
         (key: LayerKey) => {
           this.fixedKey(this.layerCharacterKey(key, LAYER_FONT_SIZE));
         }, (key: LayerKey) => key.text + this.faceKey())
+      if (this.splitDrawn()) {
+        this.splitGap(this.splitLayerThirdRow().gapShare)
+      }
+      ForEach(this.designLayerCharacters().slice(this.splitLayerThirdRow().cut - 1),
+        (key: LayerKey) => {
+          this.fixedKey(this.layerCharacterKey(key, LAYER_FONT_SIZE));
+        }, (key: LayerKey) => `right:${key.text}${this.faceKey()}`)
       this.deleteKey(KeyboardMetrics.MODIFIER_WIDTH_VP, true, NumberSymbolLayout.EDGE_WEIGHT);
     }
     .width('100%')
@@ -11336,7 +11976,13 @@ struct KeyboardView {
         this.designLayerBackKey()
         this.designLayerPanelKey()
       }
-      this.spaceKey(true, NumberSymbolLayout.SPACE_WEIGHT, 0);
+      if (this.splitDrawn()) {
+        this.spaceKey(true, this.splitLayerSpace().left, 0);
+        this.splitGap(this.splitLayerSpace().gap)
+        this.spaceKey(true, this.splitLayerSpace().right, 0);
+      } else {
+        this.spaceKey(true, NumberSymbolLayout.SPACE_WEIGHT, 0);
+      }
       this.designReturnKey(NumberSymbolLayout.RETURN_WEIGHT, false);
     }
     .width('100%')
@@ -11526,7 +12172,7 @@ struct KeyboardView {
               KeyboardSession.shared.softKeyPress(KeyIdPolicy.SOFT_PUNCTUATION);
               KeyboardSession.shared.insertSidebarSymbol(item.symbol);
             })
-            .gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))
+            .gesture(LongPressGesture().onAction(() => this.openSidebarSettings(false)))
           }, (item: NineKeySidebarItem) => item.key)
         }
         .width('100%')
@@ -11552,7 +12198,7 @@ struct KeyboardView {
           KeyboardSession.shared.softKeyPress(KeyIdPolicy.SOFT_PUNCTUATION);
           KeyboardSession.shared.punctuation(symbol.charCodeAt(0));
         })
-        .gesture(LongPressGesture().onAction(() => this.openSidebarSettings()))
+        .gesture(LongPressGesture().onAction(() => this.openSidebarSettings(false)))
       }, (symbol: string) => symbol + this.faceKey())
     }
   }

@@ -118,7 +118,11 @@ class AndroidLocalSettings {
     static final String KEY_ANIMATION = "animation";
     static class Snapshot { String choice(String key) { return "none"; } }
 }
-class KeyboardPressButton extends View { KeyboardKeyRole keyboardRole() { return KeyboardKeyRole.RETURN; } }
+// 本机触点反馈的去重入口（`ImeKeyFeedback.playFeedback` 读它）；桩只补编译面，真实行为在 JVM 冒烟与设备验收里。
+class KeyboardPressButton extends View {
+    KeyboardKeyRole keyboardRole() { return KeyboardKeyRole.RETURN; }
+    boolean touchDownFeedbackPlayed() { return false; }
+}
 enum KeyboardKeyRole { RETURN }
 class DiagnosticEventKind { static final Object CANDIDATE_SELECTED = new Object(); }
 class KeyPressAnimator {

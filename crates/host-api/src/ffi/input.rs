@@ -943,6 +943,8 @@ fn glide_action(bytes: &[u8]) -> Result<Action, String> {
         key_width: f32,
         key_height: f32,
         points: Vec<Vec<f32>>,
+        #[serde(default)]
+        bilingual: bool,
     }
     let request: GlideRequest =
         serde_json::from_slice(bytes).map_err(|_| "invalid glide request")?;
@@ -983,6 +985,7 @@ fn glide_action(bytes: &[u8]) -> Result<Action, String> {
     Ok(Action::Glide {
         keyboard: Box::new(keyboard),
         points,
+        bilingual: request.bilingual,
     })
 }
 

@@ -8,6 +8,7 @@ import { candidateTranslationScope } from "../candidate-translation-options-sect
 import { EnglishSuggestionsSection } from "../english-suggestions-section";
 import { PhonePunctuationSection, PunctuationSection } from "../punctuation-section";
 import { SentenceAssociationLevelRow } from "../sentence-association-section";
+import { NextWordPredictionSection } from "../next-word-prediction-section";
 import { TranslationSettingsContent } from "../translation-settings-content";
 import { useSettingsTabs } from "../use-settings-tabs";
 import { TranslationProviderSettingsSection } from "../translation-provider-settings-section";
@@ -16,6 +17,16 @@ import { createTranslationSettingsBindings } from "../translation-settings-bindi
 import { MobileInputAiNotice } from "../mobile-input-ai-notice";
 import { SettingsPageFieldset } from "../settings-page-fieldset";
 import { expressionTabs } from "../expression-tabs";
+import type { Preferences } from "../../core/preferences-model";
+
+/** 共享层除英文外还有读音表的释义语言，和 `msime_engine::host::PHONETIC_LANGUAGES` 一致。 */
+const TARGET_READING_LANGUAGES: ReadonlySet<string> = new Set(["fr", "ja", "es", "ru", "de", "ko"]);
+
+/** 主目标语言有没有外语读音表要用。Linux 宿主只给主目标语言那一行标读音（Fcitx5 的 `pronunciationTargets`、IBus 的 `ClientEngine` 都只传主目标语言），第二目标语言是外语时下载了也用不上。 */
+function targetReadingLanguage(draft: Partial<Preferences>): boolean {
+  const language = draft.translation_target_language;
+  return typeof language === "string" && TARGET_READING_LANGUAGES.has(language);
+}
 
 /**
  * 标点与翻译页：打出来的内容以什么形式出现——标点、其他语言的候选与释义、翻译服务。混入的英文与表情颜文字是候选来源，模糊音改的是拼音怎么解析，两者都在输入页；AI 功能在「工具」组的「AI 辅助」页。
@@ -67,7 +78,7 @@ export function ExpressionSettingsPage() {
     retrySave,
   } = useSettingsForm();
   const { onPreferencesChange, onVoiceChange } = createSettingsDraftActions({ setDraft });
-  // 只有安装包不带音标表的宿主（Linux）列出「离线英文音标词典」；打开「显示英文音标」时在开关下面给出下载行，不自动下载。其他平台这一行不会出现，不读资源包列表。
+  // 只有安装包不带读音表的宿主（Linux）列出「离线英文音标词典」和「离线外语读音词典」；打开「显示读音」时在开关下面给出下载行，不自动下载，外语那一行只在主目标语言是法、日、西、俄、德、韩语时给出。其他平台这两行不会出现，不读资源包列表。
   const pronunciationDownloadable = linuxPlatform && Boolean(client.candidatePronunciation);
   const resourcePacks = useResourcePacks(
     pronunciationDownloadable ? client.resourcePacks : undefined,
@@ -123,22 +134,33 @@ export function ExpressionSettingsPage() {
     "标点与翻译设置分类",
     !mobilePlatform,
   );
-  // 「显示读音」是释义的子行，画在目标语言之后：没有任何释义来源打开时没有东西可读，这一行不出现，已存的值不动。
+  // 「显示读音」是释义的子行，画在目标语言之后：桌面只给释义标读音，没有任何释义来源打开时没有东西可读，这一行不出现，已存的值不动。鸿蒙键盘给英文候选标音标不看释义开关，这一行一直在，关掉释义后仍能关掉音标。
   const glossCandidate = {
     ...translation.candidate,
-    beforeMore: client.candidatePronunciation && candidateGlossLanguagesEnabled && (
-      <>
-        <CandidatePronunciationSection
-          value={draft.candidate_pronunciation ?? false}
-          japaneseRomaji={!linuxPlatform}
-          downloadable={pronunciationDownloadable}
-          onChange={(candidate_pronunciation) => onPreferencesChange({ candidate_pronunciation })}
-        />
-        {pronunciationDownloadable && draft.candidate_pronunciation && (
-          <ResourcePackRow packs={resourcePacks} id="pronunciations" note="显示英文音标需要它" />
-        )}
-      </>
-    ),
+    beforeMore: client.candidatePronunciation &&
+      (harmonyPlatform || candidateGlossLanguagesEnabled) && (
+        <>
+          <CandidatePronunciationSection
+            value={draft.candidate_pronunciation ?? false}
+            japaneseRomaji={!linuxPlatform && !harmonyPlatform}
+            downloadable={pronunciationDownloadable}
+            englishCandidates={harmonyPlatform}
+            onChange={(candidate_pronunciation) => onPreferencesChange({ candidate_pronunciation })}
+          />
+          {pronunciationDownloadable && draft.candidate_pronunciation && (
+            <ResourcePackRow packs={resourcePacks} id="pronunciations" note="英文读音需要它" />
+          )}
+          {pronunciationDownloadable &&
+            draft.candidate_pronunciation &&
+            targetReadingLanguage(draft) && (
+              <ResourcePackRow
+                packs={resourcePacks}
+                id="target-pronunciations"
+                note="法、日、西、俄、德、韩语释义的读音需要它"
+              />
+            )}
+        </>
+      ),
   };
   const harmonyPhone = harmonyPlatform && mobilePlatform;
   const ariaLabel = mobilePlatform ? "表达" : "标点与翻译";
@@ -156,6 +178,14 @@ export function ExpressionSettingsPage() {
             neuralKeyboard={host?.edition?.neural_keyboard ?? true}
             onChange={(sentence_association) => onPreferencesChange({ sentence_association })}
           />
+          {host?.next_word_prediction && (
+            <NextWordPredictionSection
+              value={draft.next_word_prediction}
+              buttons={draft.next_word_prediction_buttons}
+              showButtons
+              onChange={onPreferencesChange}
+            />
+          )}
           {showEnglishSuggestions && (
             <EnglishSuggestionsSection
               title="英文联想"

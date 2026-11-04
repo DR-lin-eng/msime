@@ -65,6 +65,29 @@ if rg -n 'getLongPressTimeout' "$repo_root/platforms/android/java/app/msime/andr
   echo "The Japanese nine-key flick guide must show on touch-down, not after the long-press timeout" >&2
   exit 1
 fi
+# 日语九键左列始终有 符（#10439）：原来只在工具栏没有表情按钮时多一格 ☺，没有符号面板入口。表情改由 符 的长按承担，左列不再单独放 ☺，不会多出第六格。
+japanese_nine_key_rows=$(sed -n '/    void rebuildJapaneseNineKeyRows() {$/,/^    }$/p' "$repo_root/platforms/android/java/app/msime/android/core/ImeLayoutRows.java")
+japanese_symbol_key=$(sed -n '/    private Button japaneseSymbolPanelKey(boolean emojiLongPress) {$/,/^    }$/p' "$repo_root/platforms/android/java/app/msime/android/core/ImeLayoutRows.java")
+if ! rg_q_stdin -F 'addJapaneseSideKey(modeColumn, japaneseSymbolPanelKey(s.japaneseSideEmojiKey()), 1);' <<< "$japanese_nine_key_rows" \
+  || rg_q_stdin -F '"SoftEmoji"' <<< "$japanese_nine_key_rows" \
+  || ! rg_q_stdin -F 's.imePanels.showSymbolPanel();' <<< "$japanese_symbol_key" \
+  || ! rg_q_stdin -F '}), "SoftSymbol");' <<< "$japanese_symbol_key" \
+  || ! rg_q_stdin -U 'if \(emojiLongPress\) \{\n\s*symbol\.setOnLongClickListener' <<< "$japanese_symbol_key" \
+  || ! rg_q_stdin -F 's.imePanels.showEmojiPicker();' <<< "$japanese_symbol_key"; then
+  echo "The Japanese nine-key left column must always carry the 符 symbol-panel key, with emoji on its long press when the toolbar has no emoji button" >&2
+  exit 1
+fi
+# 打开「交换语言键与数字键」时日语九键的语言键在左列最下一格（#10437）：符 和 切换 在它上面，123 换到右列原语言键的位置；不交换时左列仍是 123、符、切换，右列是语言键。
+if ! awk '
+  /if \(!swapLanguageNumber\) addJapaneseSideKey\(modeColumn, s\.japaneseSymbolsKey, 1\);/ { layer = NR }
+  /addJapaneseSideKey\(modeColumn, japaneseSymbolPanelKey\(s\.japaneseSideEmojiKey\(\)\), 1\);/ { symbol = NR }
+  /addJapaneseSideKey\(modeColumn, globe, 1\);/ { globe = NR }
+  /if \(swapLanguageNumber\) addJapaneseSideKey\(modeColumn, language, 1\);/ { language = NR }
+  /addJapaneseSideKey\(side, swapLanguageNumber \? s\.japaneseSymbolsKey : language, 1\);/ { right = 1 }
+  END { exit !(layer && symbol && globe && language && right && layer < symbol && symbol < globe && globe < language) }' <<< "$japanese_nine_key_rows"; then
+  echo "With the language/number swap on, the Japanese nine-key language key must sit in the bottom cell of the left column, below 符 and the globe key" >&2
+  exit 1
+fi
 # 只改大小写时不重建键行（#6997）：重建出的新键在下一次布局前宽高为 0，Shift 之后立刻按下的字母找不到键而被丢掉。Shift、一次性大写用掉和自动大写都经 refreshLetterCase 就地改键面；字母键的气泡读按下时的键面，不能用建键时记下的那个。触发和重建之间允许夹着 `//` 注释行（Shift 处理里就有一行），不然改回 rebuildKeyRows 时这道检查认不出来。
 if rg -U -n '(consumeLetter\(\)\)\s*\{?|letterCase\.toggle\(SystemClock\.uptimeMillis\(\)\);|applyAutomatic\(next\)\))(\s*//[^\n]*)*\s*imeLetterRows\.rebuildKeyRows\(\)' \
     "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
@@ -127,6 +150,40 @@ if ! rg -q 'KeyboardScheme\.handwritingReturn\(schemeBeforeHandwriting' <<< "$to
   echo "Leaving handwriting from the function panel must return to the scheme and English mode it was entered from" >&2
   exit 1
 fi
+# 剪贴板单条、左滑和多选删除前的系统认证门禁（#10408，.agents/notes/implemented/feature/2026-10-31-android-clipboard-delete-auth.md）。何时要求认证、没有锁屏凭据时何时放行由 ClipboardDeleteAuthenticationPolicySmoke 覆盖；接线在 InputMethodService 和面板里，JVM 冒烟碰不到，这里钉住：两个删除入口都经 authenticateClipboardDelete，它按 ClipboardDeleteAuthenticationPolicy 决定是否认证，并把「设备没有可用认证器」交给 allowsWithoutAuthenticator，拒绝时的提示告诉用户可以关掉开关；设置页开关在认证桥返回 2002 时按 togglesWithoutAuthenticator 只放行关闭，打开开关后又移除锁屏凭据的用户才关得掉它；真正删除的两个方法各只有删除入口一处调用，绕不过门禁；认证桥的 RESULT_UNAVAILABLE（2002）在服务里单独处理，不落到「未通过系统认证」；多选只在删除真正发生后退出选择，取消认证时选择还在；认证 Activity 被直接结束时补发取消，发起方的等待标记才能复位。
+clipboard_service_java="$android_java/core/MSIMEInputService.java"
+clipboard_auth_activity="$android_java/ClipboardAuthenticationActivity.java"
+clipboard_toggle_body=$(sed -n '/^    private void requestClipboardDeleteAuthentication(GroupCard\.Row row, boolean current, boolean next) {$/,/^    }$/p' "$android_java/home/KeyboardOptionsPage.java")
+remove_item_body=$(sed -n '/^    void removeClipboardItem(ClipboardHistory\.Item item) {$/,/^    }$/p' "$clipboard_service_java")
+remove_items_body=$(sed -n '/^    void removeClipboardItems(java\.util\.List<String> texts, Runnable removed) {$/,/^    }$/p' "$clipboard_service_java")
+delete_gate_body=$(sed -n '/^    private void authenticateClipboardDelete(Runnable delete) {$/,/^    }$/p' "$clipboard_service_java")
+clipboard_auth_body=$(sed -n '/^    private void authenticateClipboard(String operation, Runnable after, Runnable whenUnavailable) {$/,/^    }$/p' "$clipboard_service_java")
+auth_activity_destroy_body=$(sed -n '/^    @Override protected void onDestroy() {$/,/^    }$/p' "$clipboard_auth_activity")
+remove_item_calls=$(rg -c 'removeClipboardItemAfterAuthentication\(' "$clipboard_service_java" || true)
+remove_items_calls=$(rg -c 'removeClipboardItemsAfterAuthentication\(' "$clipboard_service_java" || true)
+if ! rg -q 'authenticateClipboardDelete\(\(\) -> removeClipboardItemAfterAuthentication\(item\)\);' <<< "$remove_item_body" \
+  || ! rg -q 'authenticateClipboardDelete\(\(\) -> \{' <<< "$remove_items_body" \
+  || ! rg -q 'removeClipboardItemsAfterAuthentication\(snapshot\);' <<< "$remove_items_body" \
+  || ! rg -q 'removed\.run\(\);' <<< "$remove_items_body" \
+  || [[ "$remove_item_calls" != 2 ]] || [[ "$remove_items_calls" != 2 ]] \
+  || ! rg -q 'ClipboardDeleteAuthenticationPolicy\.requiresAuthentication\(enabled,' <<< "$delete_gate_body" \
+  || ! rg -q 'clipboardMode == ClipboardModePolicy\.Mode\.VISITOR' <<< "$delete_gate_body" \
+  || ! rg -U -q 'ClipboardDeleteAuthenticationPolicy\.allowsWithoutAuthenticator\(enabled\)\n\s+\? delete : \(\) -> notice\(CLIPBOARD_DELETE_UNAVAILABLE_NOTICE\)\);' <<< "$delete_gate_body" \
+  || ! rg -q 'private static final String CLIPBOARD_DELETE_UNAVAILABLE_NOTICE = ".*关闭「剪贴板删除数据验证」";' "$clipboard_service_java" \
+  || ! rg -U -q 'code == ClipboardAuthenticationActivity\.RESULT_UNAVAILABLE\n\s+&& ClipboardDeleteAuthenticationPolicy\.togglesWithoutAuthenticator\(next\)\) \{\n\s+saveLocalSetting\(AndroidLocalSettings\.CLIPBOARD_DELETE_AUTHENTICATION, next\);' <<< "$clipboard_toggle_body" \
+  || ! rg -q 'code == CLIPBOARD_AUTH_SUCCEEDED' <<< "$clipboard_auth_body" \
+  || ! rg -q 'code == CLIPBOARD_AUTH_UNAVAILABLE' <<< "$clipboard_auth_body" \
+  || ! rg -q 'private static final int CLIPBOARD_AUTH_SUCCEEDED = 2001;' "$clipboard_service_java" \
+  || ! rg -q 'private static final int CLIPBOARD_AUTH_UNAVAILABLE = 2002;' "$clipboard_service_java" \
+  || ! rg -q 'public static final int RESULT_AUTHENTICATED = 2001;' "$clipboard_auth_activity" \
+  || ! rg -q 'public static final int RESULT_UNAVAILABLE = 2002;' "$clipboard_auth_activity" \
+  || ! rg -q 'finishWith\(RESULT_UNAVAILABLE\);' "$clipboard_auth_activity" \
+  || ! rg -q 'if \(!sent && isFinishing\(\)\) \{' <<< "$auth_activity_destroy_body" \
+  || ! rg -q 'result\.send\(RESULT_CANCELED, null\);' <<< "$auth_activity_destroy_body" \
+  || ! rg -U -q 's\.removeClipboardItems\(\n\s+new java\.util\.ArrayList<>\(clipboardSelectedTexts\), this::exitClipboardSelection\)\);' "$android_java/core/ImePanels.java"; then
+  echo "Clipboard single, swipe and multi-select delete must go through the delete authentication gate, handle RESULT_UNAVAILABLE (2002) separately (refused deletes point at the toggle, and the settings toggle can always be turned off without an authenticator), and keep the selection until the delete actually happens" >&2
+  exit 1
+fi
 # 引擎会话还在建时工具栏的表情、常用语、皮肤、输入方式和「中」键照常可用（#10086，.agents/notes/implemented/bug-fix/2026-10-29-android-toolbar-before-session.md）。可用性规则由 ToolbarReadinessPolicySmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：五个入口的可用性都经 ToolbarReadinessPolicy；表情面板不再按 session 拦；皮肤和输入方式先问 deferUntilSessionReady；会话建好（startEngineSession）和第一次读到偏好（reloadPreferences）时执行推迟的点按；建会话前从运行时选项填上资源目录和偏好目录；建好会话时记下耗时；常用语在自己的工作线程上读，不排在建会话的偏好读取和词库同步后面；推迟中的皮肤、输入方式再点一次即取消，打开不经 closeToolbarPanels 的功能面板（更多）时作废；开始打字或删字时推迟的面板和记下的「中」键一起作废；收起键盘时作废记下的「中」键；会话建好后再点「中」键时作废记下的那一下，读到偏好时不再补按。
 service_java="$android_java/core/MSIMEInputService.java"
 panels_java="$android_java/core/ImePanels.java"
@@ -161,6 +218,23 @@ if ! rg -q 'setEnabled\(emojiShortcutButton, ToolbarReadinessPolicy\.emojiEnable
   echo "Toolbar emoji, phrases, skin, scheme and the language key must stay usable while the engine session starts" >&2
   exit 1
 fi
+# 符号面板不需要引擎会话（#10517，.agents/notes/implemented/bug-fix/2026-11-02-android-symbol-panel-sessionless-editors.md）。终端类应用把输入框声明成可见密码，这类输入框不建会话，原先点「符」只提示「尚未就绪」、长按 123 没反应。能不能打开、补不补后半个、记不记常用由 SymbolPanelEntryPolicySmoke 覆盖；接线在 InputMethodService 和面板里，JVM 冒烟碰不到，这里钉住：showSymbolPanel、长按 123、文本编辑面板长按回车和两个「符」按钮的可用性都经 SymbolPanelEntryPolicy.opens，showSymbolPanel 只在有会话时才 command(2)；点按的后半个经 pairsClosingMark、常用经 recordsRecent 按输入框类型判断；不建会话的输入框读外观时也填上资源目录，颜文字和各符号分类才读得到。
+symbol_show_body=$(sed -n '/^    void showSymbolPanel() {$/,/^    }$/p' "$panels_java")
+symbol_hold_body=$(sed -n '/^    void bindSymbolPanelHold(Button button) {$/,/^    }$/p' "$service_java")
+if ! rg -q 'SymbolPanelEntryPolicy\.opens\(s\.connection != null, s\.symbolPanel != null\)' <<< "$symbol_show_body" \
+  || rg -q 's\.session == 0 \|\| s\.connection == null \|\| s\.symbolPanel == null' <<< "$symbol_show_body" \
+  || ! rg -U -q 'if \(s\.session != 0\) \{\n(\s*//[^\n]*\n)?\s*s\.command\(2\);' <<< "$symbol_show_body" \
+  || ! rg -q 'SymbolPanelEntryPolicy\.opens\(connection != null, symbolPanel != null\)' <<< "$symbol_hold_body" \
+  || rg -q 'session == 0' <<< "$symbol_hold_body" \
+  || ! rg -q 'setEnabled\(symbolPanelButton, SymbolPanelEntryPolicy\.opens\(' "$service_java" \
+  || ! rg -q 'setEnabled\(symbolShortcutButton, SymbolPanelEntryPolicy\.opens\(' "$service_java" \
+  || ! rg -q 'SymbolPanelEntryPolicy\.opens\(s\.connection != null, s\.symbolPanel != null\)' "$android_java/core/ImeTextEditPanel.java" \
+  || ! rg -q 'SymbolPanelEntryPolicy\.pairsClosingMark\(s\.editorInputType, s\.pairedPunctuation\)' "$panels_java" \
+  || ! sed -n '/^    private void recordSymbolRecent(String symbol) {$/,/^    }$/p' "$panels_java" | rg_q_stdin 'SymbolPanelEntryPolicy\.recordsRecent\(s\.editorInputType, s\.learningSuppressed\(\)\)' \
+  || ! sed -n '/^                if (!engineWanted) {$/,/^                }$/p' "$service_java" | rg_q_stdin 'emojiResources = resources;'; then
+  echo "The Android symbol panel must open without an engine session, and password fields must not pair or remember symbols" >&2
+  exit 1
+fi
 # 没读到实时偏好时按记住的全拼九键建会话（#10389，.agents/notes/implemented/bug-fix/2026-10-31-android-nine-key-first-frame.md）。改哪种组合由 TouchLayoutHintPolicySmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：只在 livePreferences 为 null 时取选项里的偏好副本，用 touchLayoutHint() 经 TouchLayoutHintPolicy.startupTouchKeyboardLayout 算布局，写回副本的 touch_keyboard_layout 在 NativeClient.create 之前；displayedTouchLayout 只在没有视图时用记住的布局，有视图时按视图画，不再经 TouchLayoutHintPolicy 让提示压过视图。
 startup_seed_match=$(rg -n -m 1 'startupPreferences\.put\("touch_keyboard_layout", startupLayout\)' <<< "$start_session_body" || true)
 startup_create_match=$(rg -n -m 1 'String created = NativeClient\.create\(options\.toString\(\)\);' <<< "$start_session_body" || true)
@@ -175,6 +249,27 @@ if ! rg -q 'livePreferences == null \? options\.optJSONObject\("preferences"\) :
   || [ "$(rg -c 'touchLayoutHint\(\)' <<< "$displayed_layout_body")" != 1 ] \
   || rg -q 'TouchLayoutHintPolicy' <<< "$displayed_layout_body"; then
   echo "Android must seed the startup preference copy with the remembered nine-key layout before NativeClient.create when live preferences are missing, and draw from the engine view once it exists (#10389)" >&2
+  exit 1
+fi
+# 首帧布局诊断（#10389，.agents/notes/implemented/bug-fix/2026-11-01-android-first-frame-layout-diagnostics.md）。种类怎么取由 TouchLayoutDiagnosticsSmoke 覆盖，种类清单由 ImePrivacyGateSmoke 和 client-services 的诊断包测试钉住；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：会话到达前画的布局在 NativeClient.create 之前取（focus 可能已经按会话重画键区），窗口没显示时不取（键行是上一个输入框留下的）；会话建好后记偏好来源（是否读到实时偏好、副本是否按提示改过）、会话到达前画的布局和会话给出的布局；实时偏好在建会话时应用上就在建会话里记应用后的布局，否则在 reloadPreferences 里有快照时记，不看重读前有没有快照（键盘里的保存或触控板可能先换上快照），每个会话只记一次、会话结束时清掉标记；不认识的布局不交给日志。
+first_drawn_match=$(rg -n -m 1 'int firstDrawnLayout = imeWindowVisible \? imeLetterRows\.drawnTouchLayout\(\) : -1;' <<< "$start_session_body" || true)
+first_drawn_line=${first_drawn_match%%:*}
+record_touch_layout_body=$(sed -n '/^    private void recordTouchLayout(TouchLayoutDiagnostics\.Stage stage, int layout) {$/,/^    }$/p' "$service_java")
+record_live_layout_body=$(sed -n '/^    private void recordLiveTouchLayout() {$/,/^    }$/p' "$service_java")
+stop_session_state_body=$(sed -n '/^    private void stopSessionState() {$/,/^    }$/p' "$service_java")
+if [ -z "$first_drawn_line" ] || [ "$first_drawn_line" -ge "$startup_create_line" ] \
+  || ! rg -q 'hintedPreferences = true;' <<< "$start_session_body" \
+  || ! rg -q 'imeDebugOverlay\.recordEvent\(TouchLayoutDiagnostics\.sessionPreferences\(livePreferences != null, hintedPreferences\)\);' <<< "$start_session_body" \
+  || ! rg -q 'recordTouchLayout\(TouchLayoutDiagnostics\.Stage\.FIRST_DRAWN, firstDrawnLayout\);' <<< "$start_session_body" \
+  || ! rg -q 'recordTouchLayout\(TouchLayoutDiagnostics\.Stage\.CREATED, displayedTouchLayout\(view\)\);' <<< "$start_session_body" \
+  || ! rg -q 'if \(liveApplied\) recordLiveTouchLayout\(\);' <<< "$start_session_body" \
+  || ! rg -q '^        if \(preferencesSnapshot != null\) recordLiveTouchLayout\(\);$' <<< "$reload_body" \
+  || ! rg -q 'if \(liveTouchLayoutRecorded\) return;' <<< "$record_live_layout_body" \
+  || ! rg -q 'liveTouchLayoutRecorded = true;' <<< "$record_live_layout_body" \
+  || ! rg -q 'recordTouchLayout\(TouchLayoutDiagnostics\.Stage\.LIVE, displayedTouchLayout\(view\)\);' <<< "$record_live_layout_body" \
+  || ! rg -q 'liveTouchLayoutRecorded = false;' <<< "$stop_session_state_body" \
+  || ! rg -q 'if \(kind != null\) imeDebugOverlay\.recordEvent\(kind\);' <<< "$record_touch_layout_body"; then
+  echo "Android must record where the engine session's preferences came from and the touch layout drawn before the session, at creation and once live preferences apply (#10389)" >&2
   exit 1
 fi
 # 键盘弹出各阶段的耗时和「建会话等第一帧」（#9916，.agents/notes/implemented/bug-fix/2026-10-29-android-first-show-session-after-first-frame.md）。等不等、等多久由 InputViewRefreshPolicySmoke 覆盖；接线在 InputMethodService 里，JVM 冒烟碰不到，这里钉住：onStartInputView 一开头就开始等第一帧；工作线程交回的建会话经 startEngineSessionAfterFirstFrame，放行时仍核对启动代次；第一帧在画帧前登记帧提交回调（API 28 退到下一帧回调），交出去后才放行等着的建会话，而不是在画帧前直接 post（API 30 上那样会抢在画完的报告前面）；收起时马上放行等着的建会话；onCreate、onCreateInputView、建会话前的偏好读取与词库同步、主线程建会话的整段和销毁旧会话都记下耗时。
@@ -388,11 +483,13 @@ if ! rg -q 'smartPunctuationArmRaw|smartPunctuationDecideRaw' \
   echo "Android smart punctuation must cross the shared Host API through JNI" >&2
   exit 1
 fi
-# 「自动补全成对标点」曾经只是设置页上的一个开关：这个宿主从不读 paired_punctuation，开着也只上屏半个括号（#5608）。键盘标点键的补全规则与 iOS、HarmonyOS 同一份（PairedPunctuationPolicy.completion），符号面板走 symbolClosing，在面板里轻点自动补上的后半个要跨过它（stepOverPairedSymbol），否则面板里补出（|）再点 ）会多一个；补完书名号要经 JNI 通知 Engine 平衡嵌套。
+# 「自动补全成对标点」曾经只是设置页上的一个开关：这个宿主从不读 paired_punctuation，开着也只上屏半个括号（#5608）。键盘标点键的补全规则与 iOS、HarmonyOS 同一份：宿主经 PairedPunctuationPolicy.punctuationCommit 取整段决定，它再按 completion 决定补哪半个（光标短语模板不补）。符号面板走 symbolClosing，在面板里轻点自动补上的后半个要跨过它（stepOverPairedSymbol），否则面板里补出（|）再点 ）会多一个；补完书名号要经 JNI 通知 Engine 平衡嵌套。
 if ! rg -q 'optBoolean\("paired_punctuation"' \
     "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
-  || ! rg -q 'PairedPunctuationPolicy\.completion\(' \
+  || ! rg -q 'PairedPunctuationPolicy\.punctuationCommit\(' \
     "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'new PunctuationCommit\(landed, completion\(landed' \
+    "$repo_root/platforms/android/java/app/msime/android/keyboard/PairedPunctuationPolicy.java" \
   || ! rg -q 'PairedPunctuationPolicy\.symbolClosing\(' \
     "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
   || ! rg -q 'stepOverPairedSymbol\(' \
@@ -751,13 +848,6 @@ if ! rg -q 'AtomicBoolean REGISTERING' "$identity_source" \
   echo "Android anonymous account registration must be single-flight" >&2
   exit 1
 fi
-# 语音插件销毁时 executor 可能已经拒绝轮询任务；提交失败必须回滚活动请求并取消识别页。
-voice_plugin="$repo_root/platforms/android/java/app/msime/android/voice/VoicePlugin.kt"
-if ! rg -qU 'try \{\s*worker\.execute \{ pollResult\(job\) \}\s*\} catch \(_: RuntimeException\)' "$voice_plugin" \
-    || ! rg -q 'VoiceRecognitionActivity\.clearRequest\(args\.requestId\)' "$voice_plugin"; then
-  echo "Android voice plugin must roll back a rejected result poll" >&2
-  exit 1
-fi
 # Reject an oversized response before JNI obtains a native view of the Java byte array. The shared
 # decoder has the same one-megabyte wire bound, but checking after GetByteArrayElements can briefly
 # duplicate an untrusted oversized WebSocket message.
@@ -841,8 +931,8 @@ if awk '/ (void|LinearLayout) (clearClipboardHistory|renderClipboardHistory|rend
   echo "Android clipboard panel must not raise dialogs or popup menus from the input method" >&2
   exit 1
 fi
-# 单条删除（长按操作行的「删除」、左滑的垃圾桶）和多选删除一样能撤销（#10080）：走 remove_many 拿到删除前的完整条目，交给 holdClipboardUndo 倒数。改回单条的 remove 时拿不到快照，撤销按钮不会出现，撤销也无从恢复时间戳和固定状态。
-if ! rg -A 6 'void removeClipboardItem\(' \
+# 单条删除（长按操作行的「删除」、左滑的垃圾桶）和多选删除一样能撤销（#10080）：走 remove_many 拿到删除前的完整条目，交给 holdClipboardUndo 倒数。改回单条的 remove 时拿不到快照，撤销按钮不会出现，撤销也无从恢复时间戳和固定状态。删除门禁（#10408）之后真正删除的是 removeClipboardItemAfterAuthentication，入口 removeClipboardItem 只经 authenticateClipboardDelete 调它，接线由上方门禁检查钉住。
+if ! rg -A 6 'private void removeClipboardItemAfterAuthentication\(' \
     "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
     | rg_q_stdin 'holdClipboardUndo\(clipboardHistory\.removeMany\('; then
   echo "Android single clipboard deletion must keep an undo snapshot via removeMany (#10080)" >&2
@@ -972,6 +1062,27 @@ if ! rg -q 'ClipboardSelectionPolicy\.canSelect' \
   || ! rg -q 'exportSelectedText' \
     "$repo_root/platforms/android/java/app/msime/android/clipboard/ClipboardHistoryStore.java"; then
   echo "Android clipboard multi-selection must cap at 20 and export the selected records (#9957)" >&2
+  exit 1
+fi
+# 多选「插入」按 ①②③④ 的顺序一次插入 1 到 4 项（#10411）。上限、序号和拼接由 ClipboardSelectionPolicySmoke 覆盖；接线在面板和 InputMethodService 里，JVM 冒烟碰不到，这里钉住：顶行有「插入」并按 canInsert 置灰，选中项的读屏前缀从 ordinal 算出，角标画在承载单列和网格两种排法的左滑格里、并加进卡片自己的浮层（不做兄弟视图，带阴影的皮肤抬高卡片后会把它盖住），每次重画按读出的历史收窄选择（多选中左滑删掉的记录不能再被插入），服务按 canInsert 守住条数、经 insertionText 拼成一次 commitText。
+if ! rg -q 'clipboardAction\(header, "插入"' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -q 'ClipboardSelectionPolicy\.canInsert\(clipboardSelectedTexts\.size\(\)\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -q 'ClipboardSelectionPolicy\.selectedDescription\(ordinal\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -A 40 'private FrameLayout clipboardSwipeCell\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+    | rg_q_stdin 'ClipboardSelectionPolicy\.ordinalLabel\(ordinal\)' \
+  || ! rg -A 40 'private FrameLayout clipboardSwipeCell\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+    | rg_q_stdin 'card\.getOverlay\(\)\.add\(badge\)' \
+  || ! rg -q 'clipboardSelectedTexts\.retainAll\(listed\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -A 6 'void insertClipboardTexts\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+    | rg_q_stdin 'ClipboardSelectionPolicy\.insertionText\(texts\)'; then
+  echo "Android clipboard multi-selection must insert 1 to 4 records in ordinal order with badges (#10411)" >&2
   exit 1
 fi
 # 长按全文预览的「详情」排在「插入」左边，详情页返回时回到这个预览（#9963）。返回到哪一级由 ClipboardDetailPolicySmoke 覆盖；接线在 PopupWindow 和面板里，JVM 冒烟碰不到，这里钉住：预览先加「详情」再加「插入」，本机记录的预览把详情交给 Origin.PREVIEW，返回经 reopensPreview 决定是否重开预览，顶栏和底部操作行的两个「返回」都按来源给读屏说明。
@@ -1225,7 +1336,7 @@ if [[ "$legacy_readers" != "platforms/android/java/app/msime/android/settings/Ke
   echo "Android touch key layout styles must read the shared preferences, migrate the two legacy local keys before any settings export or live read, re-render when they change, and draw the number row on 14/18 keys" >&2
   exit 1
 fi
-# 九键滑动输入数字（#10229）：方向在共享偏好 touch_nine_key_swipe_digits 里、随账号同步，判定规则、宽松读法和迁移的纯逻辑由 NineKeySwipePolicySmoke 和 TouchKeyStyleSmoke 覆盖；接线在 InputMethodService、键盘页和迁移里，JVM 冒烟碰不到，这里钉住：本机旧键 platform.android.nine_key_swipe 只有迁移读（AndroidLocalSettings 声明它、KeyLayoutStyleMigration 把它交给 client-core 后删掉，距离不删）；键盘的两条偏好路径都从共享偏好读，滑动判定读服务上的当前值；键盘页这一行读写共享偏好，不再写本机键。
+# 九键滑动输入数字（#10229）：方向在共享偏好 touch_nine_key_swipe_digits 里、随账号同步，判定规则、宽松读法和迁移的纯逻辑由 NineKeySwipePolicySmoke 和 TouchKeyStyleSmoke 覆盖；接线在 InputMethodService、键盘页和迁移里，JVM 冒烟碰不到，这里钉住：本机旧键 platform.android.nine_key_swipe 只有迁移读（AndroidLocalSettings 声明它、KeyLayoutStyleMigration 把它交给 client-core 后删掉，距离不删）；键盘的两条偏好路径都从共享偏好读，滑动判定读服务上的当前值；键盘页这一行读写共享偏好，不再写本机键；反方向弹出的选项跟着这次按压拖选（#10443），移动、抬手和取消都交给字母选项的拖选入口。
 nine_key_legacy_readers=$(rg -l 'AndroidLocalSettings\.NINE_KEY_SWIPE\b' "$repo_root/platforms/android/java" | sed "s#^$repo_root/##" | LC_ALL=C sort | tr '\n' ' ')
 keyboard_options="$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java"
 if [[ "$nine_key_legacy_readers" != "platforms/android/java/app/msime/android/settings/KeyLayoutStyleMigration.java " ]] \
@@ -1244,12 +1355,17 @@ if [[ "$nine_key_legacy_readers" != "platforms/android/java/app/msime/android/se
   || ! sed -n '/private void bindNineKeySwipe(/,/^    }$/p' "$layout_rows" | rg_q_stdin 's\.nineKeySwipeDigits, downY\[0\],' \
   || ! sed -n '/private void bindNineKeySwipe(/,/^    }$/p' "$layout_rows" \
     | rg_q_stdin 's\.localSettings\.integer\(AndroidLocalSettings\.NINE_KEY_SWIPE_DISTANCE\)' \
+  || ! sed -n '/private void bindNineKeySwipe(/,/^    }$/p' "$layout_rows" | rg_q_stdin 'moveLetterOptions\(keyButton, event\);' \
+  || ! sed -n '/private void bindNineKeySwipe(/,/^    }$/p' "$layout_rows" | rg_q_stdin 'finishLetterOptions\(keyButton, event\)' \
+  || ! sed -n '/private void bindNineKeySwipe(/,/^    }$/p' "$layout_rows" | rg_q_stdin 'cancelLetterOptions\(keyButton\);' \
+  || ! sed -n '/private void bindNineKeySwipe(/,/^    }$/p' "$layout_rows" \
+    | rg_q_stdin 'key\.label\(\)\.toLowerCase\(java\.util\.Locale\.ROOT\), true\);' \
   || ! rg -q 'JsonPolicy\.strictString\(preferences\.opt\(NineKeySwipePolicy\.PREFERENCE\)\)' "$keyboard_options" \
   || ! sed -n '/private void pickNineKeySwipe(/,/^    }$/p' "$keyboard_options" | rg_q_stdin 'savePreference\(NineKeySwipePolicy\.PREFERENCE, value\);' \
   || ! rg -q '"沿所选方向滑动输入数字，反方向弹出字母。"' "$keyboard_options" \
   || ! sed -n '/private static String nineKeySwipeLabel(/,/^    }$/p' "$keyboard_options" \
     | rg_q_stdin '"上滑" : SwipeHintPolicy\.DOWN\.equals\(value\) \? "下滑" : "关闭"'; then
-  echo "Android nine-key swipe digits must read and write the shared touch_nine_key_swipe_digits, read the current value on every touch, and leave the legacy local key to KeyLayoutStyleMigration only" >&2
+  echo "Android nine-key swipe digits must read and write the shared touch_nine_key_swipe_digits, read the current value on every touch, and leave the legacy local key to KeyLayoutStyleMigration only, and let the swipe-opened options be drag-selected (#10443)" >&2
   exit 1
 fi
 # 长空格样式留着的工具栏行看用户的 26 键样式和这块键盘的中文键面，不看此刻的中/英（TouchKeyStyle.Styles.keepsToolbarRow，规则由 TouchKeyStyleSmoke 覆盖）；这里钉住宿主的接线：工具栏行和隐藏工具栏时藏起按钮都读 longSpaceToolbarRowKept，英文模式下中文键面取只在中文时更新的 touchLayoutHint。之前读的是按此刻语言算的 longSpaceLayoutActive，工具栏隐藏时每次切中/英这一行都出没一次，键盘高度跟着跳。自动数字行与共享偏好分开传给 drawsNumberRow，自动数字行不扩到 14/18 键。
@@ -1302,7 +1418,8 @@ if ! rg_q_stdin -U 'if \(!groups\.numberRow\(\)\) return;\n\s*GroupCard numbers 
   || ! rg_q_stdin -F 'KeyboardScheme current = SchemePreferences.storedScheme(preferences, edition);' <<< "$style_render" \
   || ! rg_q_stdin -F 'kind = KeyLayoutStylesPolicy.initialKind(kinds, current, shuangpinLayout, wubiLayout);' <<< "$style_render" \
   || ! rg_q_stdin -F 'eighteen = KeyLayoutStylesPolicy.eighteen(current, shuangpinLayout);' <<< "$style_render" \
-  || ! rg_q_stdin -F 'numbers.toggle("顶部数字行", NUMBER_ROW_NOTE, numberRow, checked -> {' <<< "$style_render" \
+  || ! rg_q_stdin -F 'numbers.toggle("顶部数字行", null, numberRow, checked -> {' <<< "$style_render" \
+  || ! rg_q_stdin -F '}).help(NUMBER_ROW_NOTE);' <<< "$style_render" \
   || ! rg_q_stdin -F 'save(edited -> edited.put(TouchKeyStyle.NUMBER_ROW_PREFERENCE, checked));' <<< "$style_render" \
   || ! rg_q_stdin -F 'if (kinds.size() > 1) {' <<< "$style_section" \
   || ! rg_q_stdin -U 'segments\.setOnSelect\(index -> \{\n\s*kind = kinds\.get\(index\);\n\s*refreshStyles\(\);\n\s*\}\);' <<< "$style_section" \
@@ -1333,7 +1450,7 @@ if ! rg -qF 'static final String LONG_SPACE_NOTE = "符号键移到工具栏。"
   || ! rg -qF 'static final String TALL_RETURN_NOTE = "回车竖占两行，符号键在左下角。";' "$style_policy" \
   || rg -q 'TWENTY_SIX_KEY_NOTE|FOURTEEN_KEY_NOTE|NINE_KEY_NOTE' "$style_page" "$style_policy" \
   || ! rg -qF 'static final String NUMBER_ROW_NOTE = "在 26 键、14 键和 18 键上方加一行 1 到 0；横屏时不显示。";' "$style_page" \
-  || ! rg -q -U 'if \(TouchKeyStyle\.Groups\.offeredBy\(edition\)\.any\(\)\)\n\s*layout\.nav\("按键布局", "各类键盘的底行样式、键位和顶部数字行", null,' \
+  || ! rg -q -U 'if \(TouchKeyStyle\.Groups\.offeredBy\(edition\)\.any\(\)\)\n\s*layout\.nav\("按键布局", null, null,\n[^\n]*\)\.help\("各类键盘的底行样式、键位和顶部数字行"\);' \
     "$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java" \
   || ! rg -qF 'if (page == PageId.KEY_LAYOUT_STYLES && !keyLayoutOffered) continue;' \
     "$repo_root/platforms/android/java/app/msime/android/home/KeyboardFragment.java" \
@@ -1354,10 +1471,10 @@ if ! rg -qF '+ ":" + english + ":" + style + ":" + symbolFirst + ":" + numberPad
   || ! rg -qF '|| imeLayoutRows.numberPadSpaceStale()' "$account_service" \
   || ! rg_q_stdin -F 'symbolFirst = preferences.optBoolean(TouchKeyStyle.SYMBOL_FIRST_PREFERENCE, false);' <<< "$style_render" \
   || ! rg_q_stdin -U 'note = caption;\n\n\s*//.*\n\s*GroupCard toggles = GroupCard\.add\(target, null\);\n\s*if \(kinds\.contains\(KeyLayoutStylesPolicy\.Kind\.TWENTY_SIX\)\) \{\n\s*symbolFirstRow = toggles\.toggle\(' <<< "$style_section" \
-  || ! rg_q_stdin -U 'toggles\.toggle\(TouchKeyStyle\.SYMBOL_FIRST_TITLE, TouchKeyStyle\.SYMBOL_FIRST_NOTE, symbolFirst, checked -> \{\n\s*symbolFirst = checked;\n\s*refreshStyles\(\);\n\s*save\(edited -> edited\.put\(TouchKeyStyle\.SYMBOL_FIRST_PREFERENCE, checked\)\);' <<< "$style_section" \
+  || ! rg_q_stdin -U 'toggles\.toggle\(TouchKeyStyle\.SYMBOL_FIRST_TITLE, null, symbolFirst, checked -> \{\n\s*symbolFirst = checked;\n\s*refreshStyles\(\);\n\s*save\(edited -> edited\.put\(TouchKeyStyle\.SYMBOL_FIRST_PREFERENCE, checked\)\);\n\s*\}\)\.help\(TouchKeyStyle\.SYMBOL_FIRST_NOTE\);' <<< "$style_section" \
   || ! rg_q_stdin -F 'if (swap != null) swap.setVisible(shown == KeyLayoutStylesPolicy.Kind.TWENTY_SIX);' <<< "$style_refresh" \
   || ! rg_q_stdin -U 'if \(kind != null\) styleSection\(context, target, kinds\);\n\s*//.*\n\s*if \(groups\.any\(\)\) numberPadSection\(context, target\);\n\s*//.*\n\s*if \(!groups\.numberRow\(\)\) return;' <<< "$style_render" \
-  || ! rg_q_stdin -U 'GroupCard numberPad = GroupCard\.add\(target, TouchKeyStyle\.NUMBER_PAD_SPACE_GROUP\);\n.*\n.*\n\s*numberPad\.addView\(row\);\n\s*numberPadChips = row;\n\s*numberPad\.footer\(TouchKeyStyle\.NUMBER_PAD_SPACE_NOTE\);' <<< "$number_pad_section" \
+  || ! rg_q_stdin -U 'GroupCard numberPad = GroupCard\.add\(target, TouchKeyStyle\.NUMBER_PAD_SPACE_GROUP\);\n.*\n.*\n\s*numberPad\.addView\(row\);\n\s*numberPadChips = row;\n\s*numberPad\.help\(TouchKeyStyle\.NUMBER_PAD_SPACE_NOTE\);' <<< "$number_pad_section" \
   || rg_q_stdin -F 'HorizontalScrollView' <<< "$number_pad_section" \
   || ! rg_q_stdin -F 'for (TouchKeyStyle.NumberPadSpace choice : TouchKeyStyle.NumberPadSpace.CHOICES)' <<< "$number_pad_refresh" \
   || ! rg_q_stdin -F 'addChip(context, row, chip(context, choice.title, choice == numberPadSpace, () -> chooseNumberPadSpace(choice)));' <<< "$number_pad_refresh" \
@@ -1394,12 +1511,48 @@ if [[ "$sidebar_readers" != "platforms/android/java/app/msime/android/settings/K
   || rg -q 'NineKeySidebar|edit_sidebar_key|"九键左侧符号"|"九键数字键盘左侧符号"' "$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java" \
   || ! rg_q_stdin -F 'sidebar.nav(KeyLayoutStylesPolicy.NINE_KEY_SIDEBAR_TITLE, null,' <<< "$sidebar_section" \
   || ! rg_q_stdin -F 'sidebar.nav(KeyLayoutStylesPolicy.DIGIT_SIDEBAR_TITLE, null,' <<< "$sidebar_number_pad" \
-  || ! rg_q_stdin -U 'numberPad\.footer\(TouchKeyStyle\.NUMBER_PAD_SPACE_NOTE\);\n\s*refreshNumberPad\(\);\n\s*//.*\n\s*GroupCard sidebar = GroupCard\.add\(target, null\);' <<< "$sidebar_number_pad" \
+  || ! rg_q_stdin -U 'numberPad\.help\(TouchKeyStyle\.NUMBER_PAD_SPACE_NOTE\);\n\s*refreshNumberPad\(\);\n\s*//.*\n\s*GroupCard sidebar = GroupCard\.add\(target, null\);' <<< "$sidebar_number_pad" \
   || ! rg_q_stdin -F 'if (sidebar != null) ViewPolicy.setVisible(sidebar, shown == KeyLayoutStylesPolicy.Kind.NINE);' <<< "$sidebar_refresh" \
   || ! rg -qF 'KeyboardSheets.save(owner, edited -> edited.put(key, new JSONArray(stored)),' "$sidebar_sheet" \
   || ! rg -qF 'List<String> stored = NineKeySidebarPolicy.toPreference(symbols, defaults);' "$sidebar_sheet" \
   || rg -q 'saveLocal' "$sidebar_sheet"; then
   echo "Android nine-key sidebar tables must come from touch_nine_key_sidebar_symbols / touch_nine_key_digit_sidebar_symbols: only KeyLayoutStyleMigration reads and deletes the legacy local keys, the keyboard re-renders and the long press opens 按键布局, and 按键布局 lists both rows and saves only that shared table" >&2
+  exit 1
+fi
+# 排序面板按住把手拖动排序（#10392、#10396，#10546 合成一份，.agents/notes/implemented/feature/2026-10-31-android-order-sheets-drag.md）：挪动、位次、落点、贴边滚动步长和序号的规则只在 ReorderPolicy 里，由 ReorderPolicySmoke 覆盖；拖动和读屏操作只在控制器 ReorderList 里，行的内容由各面板画。ReorderList 引用 androidx，JVM 冒烟碰不到，这里钉住：「文本编辑按键顺序」「符号分类顺序」「按钮顺序」都经 ReorderList 排序、不再有上下箭头；「九键左侧符号」编辑页不再自带一份拖动代码或规则，符号牌念「第 N 项，符号：X」；拖动按下把手就拿起、只改 translationY，落点按布局中线算，松手经 ReorderPolicy.moved 改草稿；手指贴近面板上下边缘时滚动外层 NestedScrollView，滚过的距离算进跟手位移；读屏：行念「第 N 项，名称」，把手状态念「第 N 项」，「上移」「下移」挂在把手上，键盘焦点在把手上时 Alt+↑ / Alt+↓ 挪一格；把手的触控区与原来的箭头一样宽 48 dp、高占满整行；落位动画结束后换回行原来的底色。
+reorder_list="$repo_root/platforms/android/java/app/msime/android/home/ReorderList.java"
+for reorder_sheet in TextEditOrderSheet SymbolCategoryOrderSheet ToolbarOrderSheet; do
+  reorder_sheet_file="$repo_root/platforms/android/java/app/msime/android/home/$reorder_sheet.java"
+  if ! rg -qF 'rows = new ReorderList<>(' "$reorder_sheet_file" \
+    || rg -q 'addArrow|"↑"|"↓"|上下箭头' "$reorder_sheet_file"; then
+    echo "Android $reorder_sheet must reorder through ReorderList's drag handle, not up/down arrows" >&2
+    exit 1
+  fi
+done
+if ! rg -qF 'rows = new ReorderList<>(context, current, this::symbolRow);' "$sidebar_sheet" \
+  || rg -q 'NineKeySidebarPolicy\.(moved|dragSlot|dragTarget|edgeScrollStep|scrollTowardRoom|positionDescription|ordinalDescription)|setOnTouchListener|addAccessibilityAction' "$sidebar_sheet" \
+  || rg -q 'static .* (moved|dragSlot|dragTarget|edgeScrollStep|scrollTowardRoom|positionDescription|ordinalDescription)\(' "$repo_root/platforms/android/java/app/msime/android/keyboard/NineKeySidebarPolicy.java" \
+  || ! rg -qF 'symbol.setContentDescription(ReorderPolicy.ordinalDescription(position, "符号：" + text));' "$sidebar_sheet" \
+  || ! rg -qF 'ImageView handle = ReorderList.addHandle(context, row, text);' "$sidebar_sheet"; then
+  echo "Android nine-key sidebar editor must reorder through ReorderList with ReorderPolicy's rules, not a drag controller or rule set of its own, and read each row as 第 N 项，符号：X" >&2
+  exit 1
+fi
+if rg -q 'ItemTouchHelper|RecyclerView' "$reorder_list" \
+  || ! rg -qF 'handle.setOnTouchListener((touched, event) -> handleDrag(views, event));' "$reorder_list" \
+  || ! rg -qF 'int target = ReorderPolicy.dragTarget(centers[dragFrom] + offset, dragFrom, centers);' "$reorder_list" \
+  || ! rg -qF 'items = ReorderPolicy.moved(items, from, to);' "$reorder_list" \
+  || ! rg -qF 'float scrolled = rowsTopAtDown - screenTop(rows);' "$reorder_list" \
+  || ! rg -qF 'scroller.scrollBy(0, step);' "$reorder_list" \
+  || ! rg -qF 'step = ReorderPolicy.scrollTowardRoom(step,' "$reorder_list" \
+  || ! rg -qF 'ViewCompat.addAccessibilityAction(handle, "上移",' "$reorder_list" \
+  || ! rg -qF 'ViewCompat.addAccessibilityAction(handle, "下移",' "$reorder_list" \
+  || ! rg -qF 'title.setContentDescription(ReorderPolicy.ordinalDescription(position, text));' "$reorder_list" \
+  || ! rg -qF 'views.renumber().accept(position);' "$reorder_list" \
+  || ! rg -qF '.withEndAction(() -> ViewPolicy.setBackground(landed, resting)).start();' "$reorder_list" \
+  || ! rg -qF 'ViewCompat.setStateDescription(views.handle(), ReorderPolicy.positionDescription(position));' "$reorder_list" \
+  || ! rg -qF 'handle.setOnKeyListener((focused, keyCode, event) -> onKey(views, keyCode, event));' "$reorder_list" \
+  || ! rg -qF 'row.addView(handle, new LinearLayout.LayoutParams(DimensionPolicy.pixels(context, 48),' "$reorder_list"; then
+  echo "Android ReorderList must drag from the handle (translationY, layout midlines, edge-scrolling the sheet, restoring the row background after the drop), keep 上移 / 下移 and the 第 N 项 position on the handle for screen readers and Alt+Up / Alt+Down for keyboards, and keep a 48 dp handle" >&2
   exit 1
 fi
 # 「中/英键放在空格左边」（#10228，`touch_language_key_side`）：排法由 TouchKeyStyleSmoke 覆盖，预览与高亮由 KeyLayoutStylesPolicySmoke 覆盖，这里钉住接线：底行签名带着它、字母层底行和数字九宫格都按它排；右侧大回车九宫格下方那一行按它排，变了经 tallReturnStale 整块重建；设置页三个分段都显示这个开关（不在 26 键的 if 里，排在互换开关之后），改它先重画预览再写 left / right；热力图跟着画；设置搜索登记了标题。
@@ -1409,7 +1562,7 @@ if ! rg -qF 'boolean languageLeft = s.languageKeyLeft;' "$bottom_row_file" \
     | rg_q_stdin -F 's.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS), digits, languageLeft)) {' \
   || ! sed -n '/    boolean tallReturnStale() {$/,/^    }$/p' "$layout_rows" | rg_q_stdin -F 'builtTallReturnLanguageLeft != s.languageKeyLeft' \
   || ! rg_q_stdin -F 'languageLeft = TouchKeyStyle.languageLeft(preferences.opt(TouchKeyStyle.LANGUAGE_KEY_SIDE_PREFERENCE));' <<< "$style_render" \
-  || ! rg_q_stdin -U '\n        \}\n\s*//.*\n\s*toggles\.toggle\(TouchKeyStyle\.LANGUAGE_LEFT_TITLE, TouchKeyStyle\.LANGUAGE_LEFT_NOTE, languageLeft, checked -> \{\n\s*languageLeft = checked;\n\s*refreshStyles\(\);\n\s*save\(edited -> edited\.put\(TouchKeyStyle\.LANGUAGE_KEY_SIDE_PREFERENCE, TouchKeyStyle\.languageKeySideWire\(checked\)\)\);' <<< "$style_section" \
+  || ! rg_q_stdin -U '\n        \}\n\s*//.*\n\s*toggles\.toggle\(TouchKeyStyle\.LANGUAGE_LEFT_TITLE, null, languageLeft, checked -> \{\n\s*languageLeft = checked;\n\s*refreshStyles\(\);\n\s*save\(edited -> edited\.put\(TouchKeyStyle\.LANGUAGE_KEY_SIDE_PREFERENCE, TouchKeyStyle\.languageKeySideWire\(checked\)\)\);\n\s*\}\)\.help\(TouchKeyStyle\.LANGUAGE_LEFT_NOTE\);' <<< "$style_section" \
   || ! rg -qF 'boolean languageLeft = TouchKeyStyle.languageLeft(preferences.opt(TouchKeyStyle.LANGUAGE_KEY_SIDE_PREFERENCE));' "$repo_root/platforms/android/java/app/msime/android/home/StatisticsFragment.java" \
   || ! rg -qF 'KeyHeatmapLayout.nine(styles.nine(), languageLeft)' "$repo_root/platforms/android/java/app/msime/android/home/StatisticsFragment.java" \
   || ! rg -qF '"中/英键放在空格左边"' "$repo_root/platforms/android/java/app/msime/android/home/PageId.java" \
@@ -1454,13 +1607,24 @@ if ! rg_q_stdin 'int frameLayout = s\.displayedTouchLayout\(s\.view\);' <<< "$ni
   echo "Android rebuildNineKeyRows must size the tall-return frame by the displayed face, so stroke's number layer keeps the stroke frame" >&2
   exit 1
 fi
-# 右侧大回车接到符号栏末尾的 ！ 接替拼音九键右列 ！ 的手势（右上角印 0、上滑输入 0、长按上下标 0），否则字母层没有直接输入 0 的地方；哪一格由 NineKeySidebarPolicy.appendedExclamationIndex 定（NineKeySidebarPolicySmoke 钉住），绑定在 symbolSidebar 里。笔画右列的 ！ 本来没有这个手势，笔画不带。
+# 右侧大回车接到符号栏末尾的 ！ 接替拼音九键右列 ！ 的手势（右上角印 0、沿「九键滑动输入数字」的方向滑出 0、长按上下标 0），否则字母层没有直接输入 0 的地方；哪一格由 NineKeySidebarPolicy.appendedExclamationIndex 定（NineKeySidebarPolicySmoke 钉住），绑定在 symbolSidebar 里。笔画右列的 ！ 本来没有这个手势，笔画不带。
 sidebar_body=$(sed -n '/    private FrameLayout symbolSidebar(boolean digits, boolean capped, int visibleRows, boolean tallReturn,$/,/^    }$/p' "$layout_rows")
 if ! rg_q_stdin 'NineKeySidebarPolicy\.appendedExclamationIndex\(digits,' <<< "$sidebar_body" \
   || ! rg_q_stdin 'exclamation\.setDigitText\(SuperscriptShortcutPolicy\.ZERO\);' <<< "$sidebar_body" \
-  || ! rg_q_stdin 's\.imeLetterRows\.bindSuperscriptShortcut\(exclamation, symbol\);' <<< "$sidebar_body" \
+  || ! rg_q_stdin 's\.imeLetterRows\.bindNineKeySuperscriptShortcut\(exclamation, symbol\);' <<< "$sidebar_body" \
   || ! rg -q 'FrameLayout sidebar = tallReturn \? symbolSidebar\(false, true, true, false\)' "$layout_rows"; then
   echo "Android tall-return sidebar ！ must carry the right-column ！ zero gestures on nine-key and not on stroke" >&2
+  exit 1
+fi
+# 拼音九键字母层的 ！（右列，及右侧大回车接到符号栏末尾的那个）滑出 0 的方向跟「九键滑动输入数字」走，选下滑时下滑出 0，与 1–9 键一致（#10441）；123 / #+= 符号页的 ！ 仍是固定上滑。方向和阈值每次按下时从服务上读，不在建键时定死。
+superscript_nine_body=$(sed -n '/    private void bindSuperscriptShortcut(Button key, String text, boolean nineKey) {$/,/^    }$/p' "$letter_rows")
+if ! rg -q 's\.imeLetterRows\.bindNineKeySuperscriptShortcut\(exclamation, last\);' "$layout_rows" \
+  || [[ $(rg -c 'bindNineKeySuperscriptShortcut\(' "$layout_rows") != 2 ]] \
+  || ! rg -q 'bindSuperscriptShortcut\(key, text\);' "$letter_rows" \
+  || ! rg_q_stdin 'SuperscriptShortcutPolicy\.zeroThresholdDp\(s\.nineKeySwipeDigits,' <<< "$superscript_nine_body" \
+  || ! rg_q_stdin 'SuperscriptShortcutPolicy\.swiped\(direction\[0\], threshold\[0\], downY\[0\],' <<< "$superscript_nine_body" \
+  || ! rg -q 'return SuperscriptShortcutPolicy\.zeroDirection\(s\.nineKeySwipeDigits\);' "$letter_rows"; then
+  echo "Android nine-key ！ must swipe out 0 in the 九键滑动输入数字 direction read at touch time, while the 123 / #+= ！ keeps the fixed up-swipe" >&2
   exit 1
 fi
 # 拼音九键格子上的长按数字画在右上角，字号和上边距与 26 键字母的角标相同（KeyHintButton 的 CORNER_HINT_SP、CORNER_HINT_TOP_DP，基线按 ascent 算），右边单独向内收至 12 dp，给圆角和胶囊键帽的顶部曲线让出空间；iOS 的 keyNumberHint 仍是上 3、右 5。绘制在 onDraw 里，JVM 冒烟碰不到，这里钉住它使用专用常量，而不是让数字贴到圆角外。
@@ -1483,15 +1647,28 @@ if ! sed -n '/void closeToolbarPanels()/,/^    }$/p' "$account_service" | rg_q_s
   echo "Android text edit panel must close and count like the other toolbar panels" >&2
   exit 1
 fi
-# SpeechRecognizer 绑定的是 RecognitionService；Android 11 起只声明 RECOGNIZE_SPEECH 的话，识别服务与识别界面分属两个包的设备上会判为没有系统识别服务。原生宿主与 Tauri 壳共用同一个识别窗口，两份清单都要声明。
-for manifest in \
-    "$repo_root/platforms/android/AndroidManifest.xml" \
-    "$repo_root/apps/desktop/src-tauri/gen/android/app/src/main/AndroidManifest.xml"; do
-  if ! rg -q '<action android:name="android\.speech\.RecognitionService" />' "$manifest"; then
-    echo "Android manifests must query android.speech.RecognitionService for SpeechRecognizer: $manifest" >&2
-    exit 1
-  fi
-done
+# SpeechRecognizer 绑定的是 RecognitionService；Android 11 起只声明 RECOGNIZE_SPEECH 的话，识别服务与识别界面分属两个包的设备上会判为没有系统识别服务。
+if ! rg -q '<action android:name="android\.speech\.RecognitionService" />' "$repo_root/platforms/android/AndroidManifest.xml"; then
+  echo "Android manifest must query android.speech.RecognitionService for SpeechRecognizer" >&2
+  exit 1
+fi
+# 「朗读」靠 queryIntentServices(TTS_SERVICE) 判断装没装语音引擎；Android 11 起清单不声明这个查询就永远看不见引擎，菜单和背单词卡片上都不会出现这一项。
+if ! rg -q '<action android:name="android\.intent\.action\.TTS_SERVICE" />' "$repo_root/platforms/android/AndroidManifest.xml"; then
+  echo "Android manifest must query android.intent.action.TTS_SERVICE for read aloud" >&2
+  exit 1
+fi
+# 「朗读」的接线在 ImeCandidates、MSIMEInputService 和 VocabularyReviewPage 里，JVM 冒烟碰不到，这里钉住：长按菜单加上这一项、点下去交给服务朗读，键盘服务销毁时和背单词页离开时都断开语音引擎。
+read_aloud_candidates="$repo_root/platforms/android/java/app/msime/android/core/ImeCandidates.java"
+read_aloud_service="$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"
+read_aloud_review="$repo_root/platforms/android/java/app/msime/android/home/VocabularyReviewPage.java"
+if ! rg -qF 'popup.getMenu().add(Menu.NONE, CandidateManagementAction.READ_ALOUD_MENU_ITEM,' "$read_aloud_candidates" \
+  || ! rg -qF 'item.getItemId() == CandidateManagementAction.READ_ALOUD_MENU_ITEM' "$read_aloud_candidates" \
+  || ! rg -qF 's.readAloud(readAloud);' "$read_aloud_candidates" \
+  || ! awk '/public void onDestroy\(\)/ { inside = 1 } inside && /readAloudSpeaker\.shutdown\(\);/ { found = 1 } inside && /^    }$/ { exit } END { exit !found }' "$read_aloud_service" \
+  || ! rg -qF 'if (speaker != null) speaker.shutdown();' "$read_aloud_review"; then
+  echo "Android read aloud must add and route the candidate menu item and shut the speaker down with the service and the review page" >&2
+  exit 1
+fi
 # 键区里的系统识别服务是 SpeechRecognizer 回调接线，JVM 冒烟只能覆盖 PlatformSpeechPolicy 和 ImeVoiceEntry.choose 这些纯逻辑，这里守住回调里不能被悄悄改回去的几处（#5553）：两条入口都按错误码提示、空结果不冒用错误码，权限拒绝或聆听前启动失败时转交识别窗口，系统识别服务和豆包流式不被 1.5 s 停顿截断（豆包整句流式说到 15 秒才回第一段结果，#9886），说完后收回音量光圈。
 voice_entry="$repo_root/platforms/android/java/app/msime/android/core/ImeVoiceEntry.java"
 if ! rg -qF 'fail(PlatformSpeechPolicy.message(error))' "$voice_activity" \
@@ -1517,7 +1694,8 @@ if [[ -n "$host_tag" && -x "$jni_compiler" ]]; then
   "$jni_compiler" -std=c++20 -fsyntax-only -Wall -Werror \
     -I"$repo_root/crates/host-api/include" -I"$repo_root/shared" \
     "$repo_root/platforms/android/native/client_jni.cpp" \
-    "$repo_root/platforms/android/native/JniCallbacks.cpp"
+    "$repo_root/platforms/android/native/JniCallbacks.cpp" \
+    "$repo_root/platforms/common/CrashRecorder.cpp"
   echo "client_jni.cpp, JniCallbacks.cpp: aarch64-linux-android compile against the shared header passed"
 else
   echo "client_jni.cpp: skipped (pinned NDK 28.2.13676358 not installed)"
@@ -1738,7 +1916,9 @@ if ! rg -qF 'oneHandedSidePanel = oneHandedSidePanelFrom(preferences);' "$side_p
   || ! rg -qF 's.imeLayoutRows.nineKeyDecimalKey()' "$side_pad_builder" \
   || ! rg -qF 's.imeLetterRows.bindBackspaceRepeat(delete, deleteAction);' "$side_pad_builder" \
   || ! rg -qF 'if (sidePad != null) applySidePadGeometry(sidePad);' "$repo_root/platforms/android/java/app/msime/android/core/ImeStyler.java" \
-  || ! rg -qF 'layout.toggle("大屏单手时侧边显示数字键盘", "单手模式下用九键打字时，空出来的一侧显示数字键盘。只在平板、折叠屏展开和 iPad 全宽键盘上生效，分离式和浮动键盘不变。",' \
+  || ! rg -qF 'layout.toggle("大屏单手时侧边显示数字键盘", null,' \
+    "$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java" \
+  || ! rg -qF '.help("单手模式下用九键打字时，空出来的一侧显示数字键盘。只在平板、折叠屏展开和 iPad 全宽键盘上生效，分离式和浮动键盘不变。");' \
     "$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java" \
   || ! rg -qF 'savePreference(OneHandSidePadPolicy.PREFERENCE_KEY,' "$repo_root/platforms/android/java/app/msime/android/home/KeyboardOptionsPage.java"; then
   echo "Android one-handed side number pad wiring is missing: read touch_one_handed_side_panel into the geometry key and skin hint, place the pad in ImeFrame.applyOneHanded, reuse the digit-layer literal commit and backspace repeat, follow the key geometry, and keep the shared settings wording" >&2
@@ -1857,6 +2037,7 @@ javac --release 17 -Xlint:all -Werror -cp "$android_jar" -d "$output_dir" \
   "$repo_root/platforms/android/java/app/msime/android/home/OnboardingChoicePolicy.java" \
   "$repo_root/platforms/android/java/app/msime/android/home/HelpcodeChoicePolicy.java" \
   "$repo_root/platforms/android/java/app/msime/android/home/KeyLayoutStylesPolicy.java" \
+  "$repo_root/platforms/android/java/app/msime/android/home/ReorderPolicy.java" \
   "$repo_root/platforms/android/gradle-app/ocr-module/src/main/java/app/msime/ocr/module/OcrPipeline.java" \
   "${test_sources[@]}"
 # 可选 OCR 模块的前后处理只用 Java 标准库，跟宿主的纯 Java 模型一起编译，由 tests/ocr/OcrPipelineSmoke.java 覆盖；模块里调用 ONNX Runtime 和 Android 图形接口的 OcrModule 只由 Gradle 编译。

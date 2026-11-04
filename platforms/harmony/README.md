@@ -62,6 +62,8 @@ Harmony 设置页暴露共享的模糊拼音规则、触摸输入方案启用列
 
 语音输入的麦克风由键盘自己采集（`HarmonyPcmCapture`），再交给选中的识别方式：系统识别把音频写进 Core Speech Kit `speechRecognizer` 的写音频模式（见下文），豆包、HTTP 服务商和本地模型各自接收同一份 PCM。工具面板可以开始、停止或取消识别，最终文字经过长度和控制字符边界检查后通过当前 `KeyboardSession` 提交；原始音频不写入文件、不进入日志，也不复制到 Engine，只有选了云端服务时才发给那个服务。选了豆包却一项凭据都没填（这就是出厂配置）时用系统识别，语音面板和设置页都写明这一点；填了一部分时，语音面板报出缺的那一项，不再悄悄换成系统识别。系统识别需要 `SystemCapability.AI.SpeechRecognizer`，所有识别方式都需要用户授予 `ohos.permission.MICROPHONE`。
 
+手机和平板上点按开始的本地识别出字后停顿一段时间自动结束（#10310）：时间是共享设置页语音页「识别」组的「本地停顿时间」（`voice_input.pause_millis`，500–5000 毫秒，默认 1500），经过 VAD 的整段模型还判定在说话时顺延；「判停灵敏度」（`voice_input.stop_sensitivity`，10–90，默认 50，越高越容易判定说完）换成 Silero VAD 的判定阈值（÷100），只给这类会话。两项只留在本机，设置桥只在手机和平板上报告 `voice_pause_settings`。豆包流式和上传式服务由用户点「说完了」结束，系统识别（含没填凭据、实际走系统识别的豆包）沿用键盘固定的 1500 毫秒停顿结束，不跟「本地停顿时间」走；按住空格或快捷键的录音由松手结束，VAD 阈值保持 0.5。
+
 云联想与 AI 联想复用 Engine 的 `online_query` 代际契约（AI 联想目前随 AI 生成类功能一起关闭，见上文）：Harmony NAPI 只传递有界查询和结果，ArkTS 通过系统 HTTPS 栈异步访问云候选或用户配置的 Chat Completions 服务，结果再交回 Engine 做会话、偏好和 generation 校验。请求防抖、超时、响应大小、重复候选和控制字符检查均在宿主边界完成，失败只丢弃可选展示结果，不阻塞本地输入，也不把查询或响应写入日志。用户配置的 AI 服务地址经 NAPI 的 `aiEndpointCheck`（`msime_client_ai_endpoint_check`）交给 `crates/client-providers/src/ai/endpoint.rs` 检查，`keyboard/settings/AiEndpoint.ets` 调用、`AiEndpointPolicy.ts` 读回答，宿主不再自己判断：https 不限主机，http 只能指向本机或局域网（回环、私有地址、`100.64.0.0/10`、链路本地、IPv6 唯一本地地址、`.local`），这样 LM Studio 这类本地模型服务可以直接用 `http://192.168.x.x:1234/v1`，公网主机仍然只走 https。本工程没有 `network_config.json`，按 HarmonyOS 网络安全配置的默认值（`cleartextTrafficPermitted` 未配置时允许明文），系统 http 模块不会拦下这类请求；这一点尚未在设备上验证，若设备报 2300997（Cleartext traffic not permitted），再在 `entry/src/main/resources/base/profile/network_config.json` 里按需放开。
 
 共享设置页的「AI 对话」由 Harmony 承载（目前随 AI 生成类功能一起关闭，见上文），对应 MSIME-Apple 的 `KeyboardChatView` 与 `BackendChatClient`。它与「AI」页那个用户自配的服务不是一回事：后者带着用户自己的 endpoint 和 token，而这一个用宿主已经持有的账号会话认证（没有登录时用本机匿名账号，额度按匿名账号算），WebView 全程看不到任何凭据。模型列表是 Rust `msime_client_account` 的 `chat_models`，回复是 `chat`，请求与响应的边界都在 Rust 里校验（16 条历史、单条 16 KiB、请求体 64 KiB），与其他平台相同。`chat` 最长阻塞 125 秒，NAPI 的 `accountThread` 给它单独起一个线程，不占工作线程池。
@@ -130,7 +132,9 @@ Apple 的首页（`KeyboardHomeView`）也由 Harmony 承载，但是按本平�
 
 已知的回退：已有的账号操作断网时从「网络连接失败」变成「暂不可用」（Rust 对已有操作仍报 `account_unavailable`）；云词库面板参数不合法时的码从 `account_invalid` 变成 `invalid_cloud_dictionary`，面板对每个动作有自己的失败句子，不按码写文案，所以措辞不变。
 
-使用情况上报、公告与社区审核走 client-services 的共享实现，本宿主只决定何时调用。上报开关是共享偏好 `usage_reporting`（默认开启，设置页关闭后立即清空本地队列）；队列、随机安装 id、每日一次的 `active` 和会话记录都在 `files/state/telemetry`，设置应用和键盘扩展两个进程共用、由 client-services 加锁（API 12 起两个进程的 `files/state` 不是同一个目录，见上文「输入法扩展的独立沙箱」）。一次会话就是一个键盘进程：`KeyboardExtensionAbility` 创建时开始、被正常销毁时结束；设置应用只发送已排队的事件，不再在每次启动时发 `download`。崩溃不装自己的处理器，而是用 HiAppEvent 在下次启动时收系统上报的 `APP_CRASH`（JavaScript 与原生都有），所以崩溃仍按原来的方式结束进程。键盘在开始新会话前等两秒：这期间收到的、属于上一个键盘进程的崩溃写成那次会话的崩溃记录，于是计为 `session_crash`；其余崩溃（设置应用的、或来得太晚的）写成独立记录，只计为 `crash`。原生帧只留文件名加 pc 和符号，信号只留名称和 code，不带地址；`TelemetryPolicy.ts` 里的这些决定由 `tests/run.sh` 覆盖，HiAppEvent 的实际投递时机只能在设备上确认。
+使用情况上报、公告与社区审核走 client-services 的共享实现，本宿主只决定何时调用。上报开关是共享偏好 `usage_reporting`（默认开启），队列、随机安装 id、每日一次的 `active` 和会话记录位于**各进程私有**的 `files/state/telemetry`；API 12 起 App 与键盘的 `files/state` 不同，不能把两份队列视为共用，见上文「输入法扩展的独立沙箱」。一次会话就是一个键盘进程，正常销毁时仅结束本进程实际开始的会话；设置应用只准备独立捕获并发送，不增加输入会话。API 21 起，NAPI 接入共用 POSIX 原生记录器，主线程的 ArkTS 致命异常经 `setDefaultErrorHandler` 同步落盘后交回原处理器，无前任时同步退出；不读取异常消息、不在故障回调联网。两类入口在暂停、关闭和停止时同步停写，链式处理器在进程内只安装一次，避免覆盖后来安装的处理器。HiAppEvent 另监听 `APP_CRASH`（JavaScript 与原生）及 `APP_FREEZE`。正常路径用 `setEventParam` 保存 Rust 预备的 UUID、原构建头、PID 与准备时刻，系统补报只有原身份与当前授权匹配时才入队，旧无身份报告不追认。崩溃按原 UUID 归属会话，卡死独立；原生帧保留合法 ELF build-id。延迟报告带系统原版本与发生时间，经 Rust 共享权威授权代次核对后入队，读取授权失败保持拒绝，不回退为独立文件。统计关闭与隐私政策撤回共同使权威授权失效，通知只触发重读和条件清理。原生帧只留文件名、pc 和符号；信号只留名称与 code。
+
+App 在共享目录 `msime/reporting-authority` 发布合并统计开关与隐私政策的持续授权；键盘只读既有锁文件和记录，不创建文件。两个活跃进程每秒独立核对，网络请求不阻塞撤回；源或政策关闭重开换代，临时源读取错误暂停且不清队列。App 无共享目录时使用私有授权，键盘保持拒绝。App 导入键盘偏好保留自己的统计开关，避免陈旧镜像重新开启。系统原身份传递的真实投递与精确构建收件仍待设备验收；官方 HiAppEvent 规格从 API 22 支持输入法应用，当前最低 API 21 使用上述本进程兼容入口，其真实故障与原处理器链仍待设备验收；协议与设备缺口见[崩溃补报笔记](../../.agents/notes/implemented/feature/2026-11-01-harmony-crash-reporting.md)。`tests/run.sh` 覆盖策略和替代系统 API 后的实际适配器回归，有 NDK 时还由 `tests/check-native-capture.sh` 严格编译三架构记录器与 NAPI；HAP 编译不代表设备上新增 NAPI 及系统回调已验收。
 
 公告在设置窗口打开或回到前台时取（client-services 一分钟内直接用缓存），显示为设置页上方一张可关闭的卡片，关闭按公告 id 记在本地。正文是 client-services 用 pulldown-cmark 渲染、原始 HTML 已转义的 HTML，放进一个禁用脚本、CSP 为 `default-src 'none'` 的小 Web 组件里；点链接一律交给系统浏览器或邮件应用。这里没有用 RichText：它没有拦截链接点击的入口，链接会在卡片里打开，而 Web 组件的 `onLoadIntercept` 可以把它拦下来交出去。
 
@@ -202,7 +206,7 @@ Harmony 触屏键盘的工具栏没有语音按钮，语音从功能面板的「
 
 2in1 候选右键菜单同样从 candidate 调色板派生（surface 底、text 字、accent 动作、border 描边），而不是键盘调色板。触摸键盘上的长按条属于键盘本身，继续用键盘调色板。
 
-全局主题（system / shuishan / light / paper / night / ink / custom）经 ABI 3 的 `msime_client_resolve_theme` 与主题目录接入：键盘按主题的 keyboard 调色板着色（字母键、功能键、secondary 文字各有其色，回车键始终是平台 accent 白字），2in1 候选窗与 STATUS_BAR 工具栏使用 candidate 调色板，主题带固定明暗时所有面都随之固定。`global_theme` 为 `custom` 时，`custom_theme.keyboard` 若带一份设计，键盘读取它的颜色、圆角、边框、透明度和键面字体属性；否则用 `custom_theme.base` 所指主题的 keyboard 调色板。原生主题选择器会展示同一份设计，避免设置页保存了设计但键盘仍绘制默认配色。2in1 候选窗的次要文字（译文、注释、编码提示和序号）一律用调色板自带透明度的 secondary，不再叠加额外的不透明度；编号色和边框色跟随主题和皮肤（`candidate_number_color`、`candidate_border_color` 为假），解析请求里的自定义主题去掉存下的这两个槽位（`GlobalTheme.hostDrawnCustomTheme`），选了文字颜色时编号色由它推出；组字行末尾显示「当前页 / 总页」与可点的 ‹ ›，组字行关闭时它随之隐藏。输入模式提示（中/英徽章）用主题的 accent 与 on_accent 着色。触摸候选栏空闲时是一条工具栏：最左是品牌键（水杉标志，打开功能面板，面板打开时高亮），随后是表情、常用语、剪贴板、皮肤、键盘（输入方式选择器）五个工具按钮，最右是收起键盘；中/英、方案、译、标点不再是工具栏上的胶囊，设置也不再是工具栏上的 ⚙，它们都在功能面板里。输入时候选不编号、无底色，选中项以 accent 与 600 字重区分。功能面板和输入方式选择器每页四列，可左右翻页，行数与磁贴大小与 iOS、Android 同一条规则、同一组常数（`FunctionPanelPolicy.pickerGrid`）：满尺寸是手机竖屏和平板三行、行高 52vp、行距 12vp，手机横屏（屏幕宽大于高且最短边不到 600vp，转屏时随 `display` 的 change 事件重排）两行、行距 16vp。网格按面板去掉上方留白、页点和下方留白后实际能占的高度排，永远不超出面板：放不下满尺寸时磁贴连同行距整体等比缩小，只有三行要缩到磁贴矮于 44vp（触摸目标下限）时才退成两行。键区默认 197vp，三行磁贴缩到约 0.94；最矮 176vp 时三行会矮于 44vp，退成满尺寸的两行。功能面板的图块顺序由 `FunctionPanelPolicy.ts` 决定：先是设计稿的十四个图块（全角、中文标点、模糊音、繁体、手写、词库、键盘高度、设置、按键音、振动、单手模式、隐私模式、反馈、关于；隐私模式关掉会话学习并把会话标为私密，打字统计、按键计数、语音时长、剪贴板历史和云剪贴板都不再记录，见 `PrivacyGate.ts`），再是 Harmony 键盘自己的候选翻译、符号、本地输入、语音输入、高情商回复、AI 润色、振动强度，与 Android `FunctionPanelModel.java` 的先例一致。这个顺序与 `guides/harmony.md` 里描述的面板不同，以代码为准。词库、反馈、关于三格直接打开设置应用的对应页面（`openSettings('dictionary' | 'feedback' | 'about')`，经 want 的 `page` 参数交给 `EntryAbility`），输入方式选择器里的「添加语言」打开「输入」页，在「语言与方案」卡片中添加和管理语言。候选翻译与模糊音写的是设置页同一份 `candidate_translations` 与 `fuzzy_pinyin.enabled`：切换译文后键盘按新值重算释义行并调整高度；模糊音先存盘再交给会话，这样首次开启时由偏好存储补上的全部规则会立即生效，关闭时已选规则原样保留。
+全局主题（system / shuishan / light / paper / night / ink / custom）经 ABI 3 的 `msime_client_resolve_theme` 与主题目录接入：键盘按主题的 keyboard 调色板着色（字母键、功能键、secondary 文字各有其色，回车键始终是平台 accent 白字），2in1 候选窗与 STATUS_BAR 工具栏使用 candidate 调色板，主题带固定明暗时所有面都随之固定。`global_theme` 为 `custom` 时，`custom_theme.keyboard` 若带一份设计，键盘读取它的颜色、圆角、边框、透明度和键面字体属性；否则用 `custom_theme.base` 所指主题的 keyboard 调色板。原生主题选择器会展示同一份设计，避免设置页保存了设计但键盘仍绘制默认配色。2in1 候选窗的次要文字（译文、注释、编码提示和序号）一律用调色板自带透明度的 secondary，不再叠加额外的不透明度；编号色和边框色跟随主题和皮肤（`candidate_number_color`、`candidate_border_color` 为假），解析请求里的自定义主题去掉存下的这两个槽位（`GlobalTheme.hostDrawnCustomTheme`），选了文字颜色时编号色由它推出；组字行末尾显示「当前页 / 总页」与可点的 ‹ ›，组字行关闭时它随之隐藏。输入模式提示（中/英徽章）用主题的 accent 与 on_accent 着色。触摸候选栏空闲时是一条工具栏：最左是品牌键（水杉标志，打开功能面板，面板打开时高亮），随后是表情、常用语、剪贴板、皮肤、键盘（输入方式选择器）五个工具按钮，最右是收起键盘；中/英、方案、译、标点不再是工具栏上的胶囊，设置也不再是工具栏上的 ⚙，它们都在功能面板里。输入时候选不编号、无底色，选中项以 accent 与 600 字重区分。功能面板和输入方式选择器每页四列，可左右翻页，行数与磁贴大小与 iOS、Android 同一条规则、同一组常数（`FunctionPanelPolicy.pickerGrid`）：满尺寸是手机竖屏和平板三行、行高 52vp、行距 12vp，手机横屏（屏幕宽大于高且最短边不到 600vp，转屏时随 `display` 的 change 事件重排）两行、行距 16vp。网格按面板去掉上方留白、页点和下方留白后实际能占的高度排，永远不超出面板：放不下满尺寸时磁贴连同行距整体等比缩小，只有三行要缩到磁贴矮于 44vp（触摸目标下限）时才退成两行。键区默认 197vp，三行磁贴缩到约 0.94；最矮 176vp 时三行会矮于 44vp，退成满尺寸的两行。功能面板的图块顺序由 `FunctionPanelPolicy.ts` 决定：先是设计稿的十四个图块（全角、中文标点、模糊音、繁体、手写、词库、键盘调整（原「键盘高度」）、设置、按键音、振动、单手模式、隐私模式、反馈、关于；隐私模式关掉会话学习并把会话标为私密，打字统计、按键计数、语音时长、剪贴板历史和云剪贴板都不再记录，见 `PrivacyGate.ts`），再是 Harmony 键盘自己的候选翻译、符号、本地输入、语音输入、高情商回复、AI 润色、振动强度，与 Android `FunctionPanelModel.java` 的先例一致。这个顺序与 `guides/harmony.md` 里描述的面板不同，以代码为准。词库、反馈、关于三格直接打开设置应用的对应页面（`openSettings('dictionary' | 'feedback' | 'about')`，经 want 的 `page` 参数交给 `EntryAbility`），输入方式选择器里的「添加语言」打开「输入」页，在「语言与方案」卡片中添加和管理语言。候选翻译与模糊音写的是设置页同一份 `candidate_translations` 与 `fuzzy_pinyin.enabled`：切换译文后键盘按新值重算释义行并调整高度；模糊音先存盘再交给会话，这样首次开启时由偏好存储补上的全部规则会立即生效，关闭时已选规则原样保留。
 
 共享设置中的触摸输入方案启用列表也由 Harmony 消费：输入方案选择器只展示启用的方案，切换当前方案时保留其余启用/禁用状态，不会因为一次选择把用户隐藏的方案重新打开。
 
@@ -284,6 +288,12 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 这次断言审计还找出两处比样式更直接的错误。第一，在线 `candidate_translations` 的结果被误绑到独立的 `candidate_english_gloss` 开关；关掉随包英文释义后，网络结果已经写回 Engine 却永远不画。现在展示门控是两者的并集，是否预留空行则分别按「目标语言含英语」和「已配置可用 provider」判断。第二，无释义时实现返回的是 `width('100%')`，与“按词宽”的注释和 `CandidateChipWidth.content(..., false, ...)` 测试相反，横排因此一屏只有一个候选；现在走同一份词宽算术。`scripts/test-harmony-candidate-translation.py` 固定这条宿主接线，纯逻辑套件固定 provider、空占位、面板高度和纵向适配。
 
+## 候选英文音标
+
+「显示读音」读共享偏好 `candidate_pronunciation`（默认关），设置页在手机「输入 › 翻译」和 2in1 的表达页一直显示这一行（`apps/harmony` 给 `candidatePronunciation`）：英文候选的音标不看释义开关，关掉释义以后仍要能把它关掉。鸿蒙没有资源包下载，ECDICT 生成的 `en-phonetic.db`（约 5.7 MB，MIT）连同 NOTICE 随 HAP 分发：`stage-resources.sh` 第五个参数（默认 `target/pronunciations`，`scripts/fetch_gloss_tables.py` 取来）按 `resources/pronunciations.lock.json` 核对后放进 `resfile/pronunciations`，发版设 `MSIME_REQUIRE_PRONUNCIATIONS=1`，键盘扩展把它暂存到引擎资源旁。`KeyboardSession` 在发布候选前经 NAPI `candidatePronunciations` 同步查还没缓存的文字（英文候选读它本身，中文候选读英语释义的第一行，规则在 `CandidatePronunciationPolicy`），按文字缓存，`CandidateEntry.pronunciation` 带给视图。音标画在释义下面单独一行，按设置预留：`glossRows()` 是 `translationRows()` 加 `pronunciationRows()`；触屏胶囊只放得下词和一行注释，两者都开时 `KeyboardMetrics.touchExtraDetailVp` 让胶囊和工具条各高 11.5vp。2in1 竖排把音标接在旁边，`CandidateWidthPolicy.widthVp` 按音标加宽窗口；只为音标预留了一行（`translationRows()` 为 0）时，横排候选格和触屏胶囊都把译文画回词旁边。带控制字符的释义不查，免得共享层拒绝整批。直接输入英文时的补全不标音标（Android 会标）。展开网格不画释义，也不画音标。见 `.agents/notes/implemented/feature/2026-11-01-mobile-candidate-pronunciation.md`。
+
+法、日、西、俄、德、韩语目标的释义行读外语读音表（维基词典生成，CC BY-SA 4.0，约 3.6 MB）：`stage-resources.sh` 第六个参数（默认 `target/target-pronunciations`）按 `resources/target-pronunciations.lock.json` 核对后连同 NOTICE 放进 `resfile/target-pronunciations`，`MSIME_REQUIRE_PRONUNCIATIONS=1` 时也必须在，键盘扩展同样暂存到引擎资源旁；主目标语言那一行按它的语言查，日语给罗马字。见 `.agents/notes/implemented/feature/2026-11-01-target-language-gloss-readings.md`。
+
 ## 展开候选面板里没有释义，长按也没有反应
 
 上一条把释义接到了候选条的长按菜单上。来源还有两条与之配套：`TheExpandedPanelDrawsTheSameGlossesAsTheStrip` 和 `TheExpandedPanelAnswersALongPressToo`——候选多到要展开时，那一页同样画释义、同样答应长按。
@@ -310,7 +320,7 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 拼音网格左上角的 @#（1 键）不打开符号面板：短按把当前模式的常用标点放进候选条，就是逗号长按的那一组（`QuickPunctuationPolicy.entries`，中文模式是 `， 。 ？ ！ 、 ； ：`），组字中也一样。点选一个与侧栏标点一样交给 Engine 的标点处理（组字中先上屏首选），候选条随即清空；Engine 下一次回报候选（`onChanged`）或打开别的界面时换回 Engine 的候选。长按仍输入 1。
 
-「九键滑动输入数字」（#10229，共享偏好 `touch_nine_key_swipe_digits`，`off` / `up` / `down`，默认 `off`，同步键 `platform.harmony.nine_key_swipe`）在设置页「屏幕键盘 › 手势」里、紧跟 26 键的「滑动方向」，只在触屏宿主且版本提供全拼九键时列出。选了方向后，拼音九键字母层 1–9 键（`nineKeyHoldKey`，两处网格都经它）沿这个方向滑过 24 vp 的那一刻键面换成这个键的数字、角标藏起来，松手按长按选数字的同一条路径上屏（先结束组字再字面上屏），按键音、振动和键位统计与点按这一格相同；反方向滑过 24 vp 弹出和长按相同的数字和字母（1 键没有字母，反方向什么也不做）。判定在 `input/NineKeySwipePolicy.ts`，与 Android `NineKeySwipePolicy.gesture` 逐条相同：只看纵向位移、严格大于阈值、一次触摸只判定一次，滑出去之后点击和长按都不再做事，长按先弹出时不再判定，系统取消时什么也不输入。阈值固定 24 vp；Android 的阈值是本机「九键滑动距离」（14–48 dp，默认 24），鸿蒙和 iOS 没有这个滑块，这是三端唯一的差异。数字层、九键双拼、笔画和借来的数字九宫格不受影响；2in1 没有这项设置，同步过来的值也不在 2in1 上判定。
+「九键滑动输入数字」（#10229，共享偏好 `touch_nine_key_swipe_digits`，`off` / `up` / `down`，默认 `off`，同步键 `platform.harmony.nine_key_swipe`）在设置页「屏幕键盘 › 手势」里、26 键「滑动方向」和「显示字母键角标」之后，只在触屏宿主且版本提供全拼九键时列出。选了方向后，拼音九键字母层 1–9 键（`nineKeyHoldKey`，两处网格都经它）沿这个方向滑过 24 vp 的那一刻键面换成这个键的数字、角标藏起来，松手按长按选数字的同一条路径上屏（先结束组字再字面上屏），按键音、振动和键位统计与点按这一格相同；反方向滑过 24 vp 弹出和长按相同的数字和字母（1 键没有字母，反方向什么也不做）。判定在 `input/NineKeySwipePolicy.ts`，与 Android `NineKeySwipePolicy.gesture` 逐条相同：只看纵向位移、严格大于阈值、一次触摸只判定一次，滑出去之后点击和长按都不再做事，长按先弹出时不再判定，系统取消时什么也不输入。阈值固定 24 vp；Android 的阈值是本机「九键滑动距离」（14–48 dp，默认 24），鸿蒙和 iOS 没有这个滑块，这是三端唯一的差异。数字层、九键双拼、笔画和借来的数字九宫格不受影响；2in1 没有这项设置，同步过来的值也不在 2in1 上判定。
 
 ## 大屏单手侧边数字键盘
 
@@ -334,6 +344,19 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 - 两个空格共用同一套空格手势状态（光标拖动、长按语音）：两根拇指同时按住两个空格时后按下的会接管，与 Android 每个空格各自一份状态不同。
 - 设置桥的能力位（`SettingsFormFactorCapabilities` 的 `splitKeyboard`，报给共享设置页的 `touch_keyboard_split`）与侧边数字键盘相同：平板和可折叠手机为真，直板手机和 2in1 为假。
 - 测试：`tests/split-keyboard.test.ts` 覆盖读法、启用条件、几何和能力位，`tests/run.sh` 钉住接线；共享设置页的 `apps/desktop/tests/settings/harmony-split-keyboard.test.tsx`。见 `.agents/notes/implemented/feature/2026-10-30-split-keyboard-iphone-harmony.md`。
+
+## 键盘调整
+
+功能面板的「键盘调整」磁贴（原「键盘高度」，图标和位置不变，id 仍是 `keyboard_height`）打开一层盖在整块键盘上的遮罩，取代原来替换工具栏的高度条 `HeightBar`。Android、iOS 按同一份契约实现，三端界面和行为一致，决定见 `.agents/notes/implemented/feature/2026-11-01-harmony-keyboard-adjust-overlay.md`。
+
+- 样子（`KeyboardView.adjustOverlay`）：键盘外框上盖约 45% 不透明的黑色（`KeyboardAdjustPolicy.MASK_COLOR`），下面的工具栏和按键照常画作实时预览，整层挡住触摸；四角是皮肤强调色（`skin.accent`）的直角括号。上沿、下沿正中各一个三道横线的把手，左右两沿垂直居中各一个两道竖线的把手，中间一排白色的「重置」「移动」「确认」。
+- 每个柄只动自己那条边，对边在屏幕上不动（下沿往上拖过高度下限时例外；换算在 `keyboard/KeyboardAdjustPolicy.ts`）：上沿改高度（往上拖变高，1vp 对 1vp）；下沿改底部抬高：往上拖时抬高跟着手指走、高度反向让出同样多，上沿不动，高度到下限 −12 后整块键盘继续往上，直到抬高到 160；往下拖时抬高减、高度加，上沿不动，抬高到 0 或高度到 48 时停（`dragBottom`）；左右沿改宽度并同时改水平位置，另一侧边不动；「移动」按住拖动整块键盘，同时改底部抬高和水平位置，大小不变。拖动按屏幕坐标（`TouchObject.displayX` / `displayY`）算，柄跟着面板移动也不影响。
+- 四项：高度仍是共享偏好 `touch_keyboard_height_adjustment`（-12..48vp）；底部抬高 `bottomLift`（0–160vp，缺省 0）、宽度 `widthPercent`（面板宽的 60–100%，缺省 100，拖动时另有 240vp 下限，取两者中更宽的）、水平位置 `positionX`（两侧剩余空间里左侧所占的千分比，0–1000，缺省 500 居中）存在本机的 `key-feedback.json`（`KeyboardFeedback`），与 `oneHanded`、`floatingX/Y` 同处，不进共享偏好、不同步，设置页和账号同步写这个文件时经 `KeyboardFeedbackBridge.fromShared` 沿用它们。设置页只有「键盘高度」滑块，没有另外三项。
+- 生效条件（`KeyboardAdjustPolicy.availability`）：浮动键盘、手机横屏和 2in1 上底部抬高、宽度、位置都不生效，只画上沿柄、不画「移动」；单手模式或分离式键盘画着时宽度和位置不生效，不画左右柄，「移动」只改抬高。不生效时存着的值不变，条件变了自动回来。
+- 布局：宽度和位置作用于整块键盘，触屏根节点的左右内边距在 4vp 之外多出 `adjustFrame` 的左右两段，底部内边距在 6vp 之外多出抬高；让出的地方只有键盘底色，点了不落到按键。宽度和位置按 `keyboardStack` 量到的面板宽换算（`KeyboardView.adjustPanelWidthVp`），不按屏幕宽：停靠面板的宽度是扩展能力建面板时的屏幕宽，平板转屏、折叠屏开合之后与此刻的屏幕宽不同。中间一排按钮与 iOS 一样 72vp、间距 28vp，窄外框里按 `KeyboardAdjustPolicy.buttonRow` 先收间距再收按钮，不压到左右柄。上沿柄的横线贴着外框上沿画在工具栏图标上方；浮动时下面两角的括号按卡片圆角画。面板仍是建面板时的整屏宽，高度是 `KeyboardMetrics.totalHeightVp` 加抬高（最后一个参数），冷启动第一帧由扩展能力按 `KeyboardSession.firstTouchLift` 算进去，视图从它出发核对。转屏或开关浮动键盘让抬高生效或不生效时，`syncStripHeight` 改面板高度。
+- 重置把四项预览回默认（高度 0、抬高 0、宽度 100%、居中），不保存；确认保存并退出。保存时高度一直写，抬高、宽度、位置只写此刻生效且和打开时不同的项（`KeyboardAdjustPolicy.saved`，与 Android `AndroidLocalSettings.keyboardAdjustEdits` 同一条规则）：在手机横屏或浮动键盘里点了重置，存着的抬高、宽度、位置不变。没有「取消」：其他任何离开方式（收起键盘、换输入框、切应用、切到别的面板）都按确认保存，都经 `KeyboardView.show` 的同一处；换输入框时系统可能只来新的 `inputStart`，会话的 `attach` 经 `onEditorAttached` 让视图离开。调整中途设置页保存引起的偏好重载不会把预览盖回去。
+- 读屏：四个柄的名称是「键盘高度」「键盘底部高度」「键盘宽度（左边）」「键盘宽度（右边）」，当前值和调法在说明里；三个按钮各有说明。调整期间遮罩下的工具条和按键整块不进读屏（`keyboard()` 的列设 `accessibilityLevel('no-hide-descendants')`），读屏只走遮罩上的柄和按钮，与 Android 的 `IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS`、iOS 的 `accessibilityViewIsModal` 相同。HarmonyOS 到 API 24 为止 `AccessibilityAction` 只有点击，自定义组件做不了「增减」，读屏用户调这四项只能靠拖动（屏幕朗读下的拖动手势没有在设备上验证）。
+- 测试：`tests/keyboard-adjust.test.ts` 覆盖范围、生效条件和柄、外框换算、各边拖动约束（对边不动、下沿过下限后整块上移、到限停住）、存放与不进共享结构、面板高度含抬高、磁贴改名；`tests/run.sh` 钉住离开即保存、只存生效且动过的项、调整期间键区不进读屏、重载保留预览、根节点内边距、面板高度和冷启动第一帧的接线，以及 `HeightBar` 不再存在。
 
 ## 全拼九键的三栏展开面板
 
@@ -387,6 +410,20 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 短语里已经选定的那一段和正在运行的本地模式的名字仍留在候选栏上。韩语音节、注音转换、越南语单词这类本身就是文字的组字保持原样：写进输入框，候选栏也照旧画。逻辑测试在 `tests/keyboard-logic.test.ts` 的「a phone always writes the composition into the field」和「nine-key writes its pinyin reading into the field」两组。
 
+## 上屏后联想（#9433）
+
+设置页「表达 › 智能」（手机）或「输入 › 候选与联想」（2in1）打开「上屏后联想」后，选词上屏，候选栏换成接着可能要打的词，View 里 `prediction` 为真、没有组字。规则与其他平台相同：联想和普通候选一样选，点选、数字键选本页对应的一条、空格选高亮的一条（共享运行时在交给引擎之前接管）；回车、标点和退格照常输入，继续打字时联想消失；关闭键 × 和实体键盘的 Esc 关闭联想（送 Cancel，不往输入框写字）。规则集中在 `keyboard/candidate/NextWordPredictionPolicy.ts`（`tests/next-word-prediction.test.ts`），视图、会话和扩展能力的接线由 `tests/run.sh` 钉住。
+
+- 空格和数字：触屏空格本来就送「选高亮候选」，运行时在联想时选中高亮的一条并报已处理，`pressSpace` 因此不再另插空格，读屏名称仍是「选定」；触屏数字行的数字在联想时也先交给运行时（`typeNumberRowDigit`）：原来没有组字时它走符号键那条路，标点入口拒收数字，联想的候选又让键盘以为还在组字、不补写这个数字，按下去什么也没有（真机上发现）。实体键盘在没有组字时会把空格和数字交给应用，所以联想时扩展能力先拦下不带修饰键的空格和数字（「数字键选词」开着时），交给运行时（`KeyboardSession.pressPredictionKey`）；运行时没收下的数字（越过本页）照常交给应用，按住时的重复不再选。触屏 123 层的数字仍是输入。
+- 回车：`ReturnKeyAction.dispatch` 在联想时给 `FINISH_THEN_EDITOR`，先让引擎清掉联想，再照常换行或执行编辑器动作。以前按候选数走「上屏高亮」，引擎清掉联想却报未处理，这一下回车就被吞了。回车键面在联想时也按空闲画，不显示「确认」。
+- 候选栏按键：读共享偏好 `next_word_prediction_buttons`，与 Android 一样三种样式，× 在展开键左边；「只有关闭」不放展开键。展开面板开着时 × 先收起面板。
+- 联想时候选栏不画读音行的光标：原来触屏读音行按「拼写没写进输入框」画空串加光标，联想上方会竖着一根孤零零的光标（真机上发现）。
+- 长按联想的候选什么也不做：它们不属于正在组的字，不能固定、调序或删除。
+- 外部改动：编辑器回报的文字或选区变化不是键盘自己写入的回声（`EditEchoLedger`）时重新聚焦会话，清掉旧联想并切断词序上下文。实体键盘交给应用的回车、退格和越过本页的数字也靠这一条清掉联想；123 层、表情、剪贴板这类直接写进编辑器的文字在写之前先清掉联想。
+- 2in1：手机和 2in1 是同一个原生库，偏好打开时两边都有联想。2in1 的候选窗原来只跟着组字出现，现在联想时也出现（`KeyboardSession.candidateWindowWanted`），用鼠标点选，空格和数字键选中，Esc 关闭；候选窗不画 × 和展开键，与桌面宿主一样。
+
+2026-11-02 在 JUY-AL50（debug 签名覆盖安装）上验收了触屏的这些行为，见决策笔记的验证一节；实体键盘的空格、数字和 Esc 要接上实体键盘或在 2in1 上验收。
+
 ## 键盘里调的高度被设置页的值盖回去
 
 `changePreferences` 存好文档、记下版本号，却不更新缓存的偏好，`preferences()` 一直返回准备会话时的那份。视图存完立刻读回旧高度：拖动弹回原位，± 不累加，拖间距时把旧高度一起写回，面板尺寸也按旧值算；下次聚焦时版本号已经一致，不会重建，旧值就留到进程重启。现在存完按存下的整份文档重算外观（`refreshPreparedPreferences`），`selectGlobalTheme` 原来自己补的那一步也并进去了。设置页的改动仍按版本号在下次聚焦时重建会话。
@@ -395,7 +432,7 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 数字层的排列是固定的：九键的数字层按电话拨号盘排，1 2 3 在上（`NineKeyLayout.digits()`）；触屏 26 键和 14 键按 123 出的是一行 1–0 的 123 / #+= 双层。共享偏好 `touch_number_keypad_order` 和 `touch_twenty_six_key_number_layout` 仍随账号同步（`platform.harmony.number_keypad_order`、`platform.harmony.twenty_six_key_number_layout`），但设置页不再列出它们，键盘也不读取。
 
-共享偏好 `touch_shuangpin_key_hints` 为 `false` 时（设置页「屏幕键盘 › 布局」的「双拼键位提示」），26 键双拼的字母键不再画底部的声母/韵母提示，提示行不占高度；缺省和旧文档都按开。账号同步键是 `platform.harmony.shuangpin_key_hints`。
+共享偏好 `touch_shuangpin_key_hints` 为 `false` 时（设置页「屏幕键盘 › 布局」的「双拼键位提示」），26 键双拼的字母键不再画底部的声母/韵母提示，提示行不占高度；缺省和旧文档都按开。账号同步键是 `platform.harmony.shuangpin_key_hints`。粤语双拼（#10438）也受这个开关控制：选中的触屏方案是 `cantonese_shuangpin`、会话也跑着粤拼（scheme 5）时（`ShuangpinKeyHintPolicy.cantoneseFace`），字母键画 `cantonese` 键面，表抄自引擎 `cantonese::shuangpin::key_hints`，`keyboard-logic.test.ts` 逐键核对；普通粤拼不画。
 
 共享偏好 `touch_quanpin_shift`（设置页「屏幕键盘 › 布局」的「组字时保留 Shift」）默认开启，全拼 26 键组字时第三排左端保留 ⇧，点一下臂辅助码（Shift+字母），不再换成「分词」键；明确写 `false` 后改为分词，九键、14 键和 18 键自带的分词键不受它影响。键盘在 `KeyboardSession` 准备偏好时按 `!== false` 读它（缺键、类型错都按开），`KeyboardView` 的 `usesQuanpinSeparator()` 和键面 `faceKey()` 都按它分支，开关变化即重画。账号同步键是 `platform.harmony.quanpin_shift`。
 
@@ -434,7 +471,7 @@ Apple 的 `AppIconSettingsView` 和 Android 的同名入口在共享页面上是
 
 验证看的是打出来的包而不是源文件——`$media:` 解析不到时会被丢掉而不是报错。解包 `module.json` 后两个元素都带着 `"iconId": 16777217`，说明引用真的解析到了资源。`scripts/test-harmony-manifest.py` 现在查这三件事：模块级重复键、mainElement 有没有 icon、桌面入口有没有 icon，外加包里 `icon` 有没有对应的 `iconId`。对着改之前的清单跑，三条全报。后来又加了一条：两份清单里配置的每个图标都不能含透明像素（分层图标看背景层），原因见下一段。
 
-桌面图标用分层图标 `$media:app_icon_layered`（`AppScope/resources/base/media/app_icon_layered.json`）：背景层 `app_icon_background.png` 是 1024×1024 的 `#252525`，与 Android 经典图标的 `app_icon_field` 同色；前景层 `app_icon_foreground.png` 是 `app_icon.png` 缩到 640 居中，四周留给桌面的圆角遮罩。只有 `app.json5` 和桌面入口 `EntryAbility` 用它；`app_icon.png` 本身是透明底，直接给桌面时圆角方块外透出壁纸，看起来没有底板，而键盘里的品牌键、输入模式提示和启动窗仍按普通图片用它。
+桌面图标用分层图标 `$media:app_icon_layered`（`AppScope/resources/base/media/app_icon_layered.json`）：背景层 `app_icon_background.png` 是 1024×1024 的 `#A8DF8E`，即标志的绿边色；前景层 `app_icon_foreground.png` 是标志 `packages/ui/src/assets/msime.svg` 撑满画布、透明底，所以桌面的圆角遮罩切出来就是标志本身，外面不再套任何底板，与其他平台一致。只有 `app.json5` 和桌面入口 `EntryAbility` 用它；`app_icon.png` 本身是透明底，直接给桌面时圆角方块外透出壁纸，看起来没有底板，而键盘里的品牌键、输入模式提示和启动窗仍按普通图片用它。
 
 输入法扩展 `KeyboardExtensionAbility` 的 `icon`（系统输入法列表和切换器里那枚）用 `app_icon_opaque.png`：分层图标的背景层和前景层压成的一张 1024×1024 不透明图。AppGallery 上架审核要求提审页上传的图标和包内配置的图标都不含透明像素，以前这里直接用透明底的 `app_icon.png`，审核因此退回过。重新生成：在 `AppScope/resources/base/media` 下运行 `magick app_icon_background.png app_icon_foreground.png -compose over -composite -alpha off -strip PNG24:app_icon_opaque.png`。AGC 提审页上传的图标也用这张。
 

@@ -1,5 +1,6 @@
 #include "msime_client.h"
 #include "../../common/HostApiString.h"
+#include "../../common/CrashRecorder.h"
 #include "key_sound_render.h"
 #include <napi/native_api.h>
 #include <zlib.h>
@@ -279,6 +280,10 @@ TEXT_ENTRY(SkinToolbarImageLayout, msime_client_skin_toolbar_image_layout)
 TEXT_ENTRY(KeyboardSkinTrial, msime_client_keyboard_skin_trial)
 TEXT_ENTRY(Dictionary, msime_client_dictionary)
 TEXT_ENTRY(TypingStatistics, msime_client_typing_statistics)
+TEXT_ENTRY(PersonalWordbookMerge, msime_client_personal_wordbook_merge)
+TEXT_ENTRY(PersonalWordbookDrain, msime_client_personal_wordbook_drain)
+// 长按菜单的「朗读」和背单词卡片的喇叭要读的英文：纯函数，不读写文件，打开菜单时在主线程上调用。
+TEXT_ENTRY(ReadAloudText, msime_client_read_aloud_text)
 TEXT_ENTRY(MobileClipboardHistory, msime_client_mobile_clipboard_history)
 TEXT_ENTRY(PersonalDictionarySync, msime_client_personal_dictionary_sync)
 TEXT_ENTRY(PersonalDictionaryRequest, msime_client_personal_dictionary_request)
@@ -299,9 +304,45 @@ TEXT_ENTRY(Plugins, msime_client_plugins)
 TEXT_ENTRY(Create, msime_client_create)
 // Usage reporting without the network: each touches a few small files under the telemetry directory, so the crash observer can call record_crash before the process goes.
 TEXT_ENTRY(TelemetryBegin, msime_client_telemetry_begin)
+TEXT_ENTRY(TelemetryConsent, msime_client_telemetry_consent)
 TEXT_ENTRY(TelemetryEnd, msime_client_telemetry_end)
 TEXT_ENTRY(TelemetryRecordCrash, msime_client_telemetry_record_crash)
 TEXT_ENTRY(TelemetryClear, msime_client_telemetry_clear)
+
+// 只在正常主线程路径准备共享层返回的路径和原构建头；信号回调不调用 NAPI 或 Rust。
+static napi_value TelemetryNativeCapture(napi_env env, napi_callback_info info) {
+    msime::crash::disarm();
+    size_t count = 2;
+    napi_value args[2]{};
+    bool enabled = false;
+    try {
+        std::string path;
+        std::string header;
+        if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) == napi_ok
+                && count == 2 && argumentText(env, args[0], path)
+                && argumentText(env, args[1], header)
+                && !path.empty() && path.size() < 4096 && header.size() < 1024
+                && path.find('\0') == std::string::npos && header.find('\0') == std::string::npos
+                && header.compare(0, 14, "MSIME-CRASH/1 ") == 0) {
+            msime::crash::install_crash_handlers();
+            msime::crash::arm(path, header);
+            enabled = msime::crash::is_armed();
+        }
+    } catch (...) { msime::crash::disarm(); }
+    napi_value result = nullptr;
+    if (napi_get_boolean(env, enabled, &result) != napi_ok) {
+        msime::crash::disarm();
+        return nullptr;
+    }
+    return result;
+}
+
+// 按需加载 sherpa-onnx HAR 的原生库后刷新崩溃记录器模块快照。
+static napi_value TelemetryNativeRefreshModules(napi_env env, napi_callback_info) {
+    msime_native_crash_refresh_modules();
+    napi_value result = nullptr;
+    return napi_get_undefined(env, &result) == napi_ok ? result : nullptr;
+}
 TEXT_ENTRY(NoticeDismiss, msime_client_notice_dismiss)
 // 宿主自报的 User-Agent 由 Rust 拼装和清洗（#8201 的 P11）：纯函数，不联网、不读文件。
 TEXT_ENTRY(ClientAgent, msime_client_client_agent)
@@ -582,6 +623,11 @@ static napi_value CommunityResourceLibrary(napi_env env, napi_callback_info info
 // progress. Keep parsing, file locks and atomic replacement off the ArkTS thread.
 static napi_value VocabularyReview(napi_env env, napi_callback_info info) {
     return queueRequest(env, info, msime_client_vocabulary_review, "MSIME vocabulary review");
+}
+
+// 键盘长按菜单的「加入生词本」写进键盘自己沙箱里的生词本：要取词书目录的文件锁、读写整本生词本，不在 ArkTS 线程上做。设置应用导入键盘发布的那本时的合并（personalWordbookMerge）和键盘清走交过的词（personalWordbookDrain）是同步的，因为共享沙箱的导入本身就在主线程上同步进行（SharedStateMirror），和统计的合并一样；请求里只有文件路径，生词本平常很小，代价是工作线程正拿着词书目录的锁（例如导入一份大词表）时主线程要等它做完。
+static napi_value PersonalWordbookAdd(napi_env env, napi_callback_info info) {
+    return queueRequest(env, info, msime_client_personal_wordbook_add, "MSIME personal wordbook add");
 }
 
 // 「统计」标签页的概览要读取整份统计文档、推导每个时间窗口，并在键盘进程同样会获取的文件锁下写入新达成的徽章，所以设置应用把它放到 ArkTS 线程之外运行，就像 Android 放在 worker 上运行一样。键盘的记录量小，继续使用同步的 `typingStatistics`。
@@ -1069,6 +1115,7 @@ static napi_value VoiceLocalModelRemove(napi_env env, napi_callback_info info) {
 
 PAIR_ENTRY(EmojiCatalog, msime_client_emoji_catalog_request)
 PAIR_ENTRY(CandidateGlosses, msime_client_candidate_gloss_request)
+PAIR_ENTRY(CandidatePronunciations, msime_client_pronunciation_request)
 PAIR_ENTRY(EnglishCompletions, msime_client_english_completions_request)
 PAIR_ENTRY(TranslationGlossSave, msime_client_translation_gloss_save)
 TEXT_ENTRY(TranslationPlan, msime_client_custom_translation_plan)
@@ -1785,9 +1832,14 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("typingStatisticsEnabled", TypingStatisticsEnabled),
         ENTRY("typingStatisticsAsync", TypingStatisticsAsync),
         ENTRY("vocabularyReview", VocabularyReview),
+        ENTRY("personalWordbookAdd", PersonalWordbookAdd),
+        ENTRY("personalWordbookMerge", PersonalWordbookMerge),
+        ENTRY("readAloudText", ReadAloudText),
+        ENTRY("personalWordbookDrain", PersonalWordbookDrain),
         ENTRY("mobileClipboardHistory", MobileClipboardHistory),
         ENTRY("emojiCatalog", EmojiCatalog),
         ENTRY("candidateGlosses", CandidateGlosses),
+        ENTRY("candidatePronunciations", CandidatePronunciations),
         ENTRY("releaseGlossCaches", ReleaseGlossCaches),
         ENTRY("englishCompletions", EnglishCompletions),
         ENTRY("resetCache", ResetCache),
@@ -1831,10 +1883,13 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("aiSkinGenerate", AiSkinGenerate),
         ENTRY("aiSkinCancel", AiSkinCancel),
         ENTRY("telemetryBegin", TelemetryBegin),
+        ENTRY("telemetryConsent", TelemetryConsent),
         ENTRY("telemetryEnd", TelemetryEnd),
         ENTRY("telemetryRecordCrash", TelemetryRecordCrash),
         ENTRY("telemetryFlush", TelemetryFlush),
         ENTRY("telemetryClear", TelemetryClear),
+        ENTRY("telemetryNativeCapture", TelemetryNativeCapture),
+        ENTRY("telemetryNativeRefreshModules", TelemetryNativeRefreshModules),
         ENTRY("notices", Notices),
         ENTRY("updateCheck", UpdateCheck),
         ENTRY("noticeDismiss", NoticeDismiss),

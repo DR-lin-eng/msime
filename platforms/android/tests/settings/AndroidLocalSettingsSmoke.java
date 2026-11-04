@@ -41,6 +41,8 @@ public final class AndroidLocalSettingsSmoke {
         unreadableFilesReadAsDefaults();
         atomicWrite();
         splitKeyboardRoundTrip();
+        bottomHeightSlider();
+        keyboardAdjustEdits();
         capitalizationSetting();
         diagnosticDirectorySetting();
         syncedKeysMatchClientCore();
@@ -53,9 +55,13 @@ public final class AndroidLocalSettingsSmoke {
         check("siji".equals(settings.choice(AndroidLocalSettings.APP_THEME)), "app theme default");
         check("off".equals(settings.choice(AndroidLocalSettings.ONE_HANDED)), "one-handed default");
         check(!settings.bool(AndroidLocalSettings.SPLIT_KEYBOARD), "split keyboard is off by default");
+        check(!settings.bool(AndroidLocalSettings.SPLIT_KEYBOARD_PHONE_LANDSCAPE), "phone landscape split is off by default");
         check(settings.bool(AndroidLocalSettings.KEY_POPUP), "key popup default");
         check(settings.bool(AndroidLocalSettings.SWIPE_DOWN_SYMBOLS), "swipe default");
         check("up".equals(settings.choice(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION)), "swipe direction default");
+        check(settings.bool(AndroidLocalSettings.LETTER_CORNER_HINTS), "letter corner hints are drawn by default");
+        check(AndroidLocalSettings.spec(AndroidLocalSettings.LETTER_CORNER_HINTS).synced,
+            "letter corner hints sync like the swipe switch beside them");
         AndroidLocalSettings.Snapshot explicitDown = new AndroidLocalSettings.Snapshot(
             AndroidLocalSettings.accepted(Map.of(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION, "down")));
         check("down".equals(explicitDown.choice(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION)),
@@ -84,6 +90,22 @@ public final class AndroidLocalSettingsSmoke {
         check("follow_skin".equals(settings.choice(AndroidLocalSettings.HANDWRITING_STROKE_COLOR)), "stroke colour default");
         check(settings.integer(AndroidLocalSettings.HANDWRITING_STROKE_WIDTH) == 3, "stroke width default");
         check(settings.bool(AndroidLocalSettings.VOICE_OFFLINE_FALLBACK), "offline fallback default");
+        check(settings.integer(AndroidLocalSettings.VOICE_PAUSE_MILLIS) == 1500, "voice pause retains its default");
+        check(settings.integer(AndroidLocalSettings.VOICE_VAD_SENSITIVITY) == 50, "voice sensitivity retains its default");
+        AndroidLocalSettings.Spec pause = AndroidLocalSettings.spec(AndroidLocalSettings.VOICE_PAUSE_MILLIS);
+        AndroidLocalSettings.Spec sensitivity = AndroidLocalSettings.spec(AndroidLocalSettings.VOICE_VAD_SENSITIVITY);
+        check(pause.accept(500).equals(500) && pause.accept(5000).equals(5000), "voice pause limits accepted");
+        check(pause.accept(499) == null && pause.accept(5001) == null && pause.accept(1550) == null,
+            "voice pause rejects invalid duration and step");
+        check(sensitivity.accept(10).equals(10) && sensitivity.accept(90).equals(90), "voice sensitivity limits accepted");
+        check(sensitivity.accept(9) == null && sensitivity.accept(91) == null, "voice sensitivity rejects invalid limits");
+        AndroidLocalSettings.Snapshot voice = new AndroidLocalSettings.Snapshot(AndroidLocalSettings.accepted(Map.of(
+            AndroidLocalSettings.VOICE_PAUSE_MILLIS, 2500, AndroidLocalSettings.VOICE_VAD_SENSITIVITY, 70)));
+        check(voice.integer(AndroidLocalSettings.VOICE_PAUSE_MILLIS) == 2500
+            && voice.integer(AndroidLocalSettings.VOICE_VAD_SENSITIVITY) == 70, "voice controls survive snapshot validation");
+        check(!pause.synced && !sensitivity.synced
+            && !voice.synced().containsKey(AndroidLocalSettings.VOICE_PAUSE_MILLIS)
+            && !voice.synced().containsKey(AndroidLocalSettings.VOICE_VAD_SENSITIVITY), "microphone timing and sensitivity stay local");
         check(!settings.bool(AndroidLocalSettings.INCOGNITO), "incognito default");
         check("before".equals(settings.choice(AndroidLocalSettings.QUICK_DELETE_SCOPE)), "quick delete keeps the cursor-before default");
         check(!settings.bool(AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO), "contribute audio default");
@@ -96,6 +118,10 @@ public final class AndroidLocalSettingsSmoke {
         check(!AndroidLocalSettings.spec(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS).synced, "key swap stays local");
         check(!settings.bool(AndroidLocalSettings.NUMBER_ROW), "number row is off by default");
         check(!AndroidLocalSettings.spec(AndroidLocalSettings.NUMBER_ROW).synced, "number row stays on this device");
+        check(!settings.bool(AndroidLocalSettings.CLIPBOARD_DELETE_AUTHENTICATION),
+            "clipboard delete authentication is opt-in");
+        check(!AndroidLocalSettings.spec(AndroidLocalSettings.CLIPBOARD_DELETE_AUTHENTICATION).synced,
+            "clipboard delete authentication stays on this device");
         check(!settings.bool(AndroidLocalSettings.DEVELOPER_INPUT_LOG), "input log default");
         check("one_day".equals(settings.choice(AndroidLocalSettings.MCP_RETENTION)), "retention default");
         check(settings.bool(AndroidLocalSettings.MCP_CRASH_LOGS), "crash logs default");
@@ -191,6 +217,15 @@ public final class AndroidLocalSettingsSmoke {
             && Integer.valueOf(160).equals(paddingHeight.accept(160))
             && paddingHeight.accept(-1) == null && paddingHeight.accept(161) == null,
             "padding target is bounded independently of key height");
+        // 「键盘调整」的宽度与水平位置：缺省占满、居中，只在本机。
+        check(fresh.integer(AndroidLocalSettings.KEYBOARD_WIDTH_PERCENT) == 100
+            && fresh.integer(AndroidLocalSettings.KEYBOARD_POSITION_X) == 500, "keyboard width and position default");
+        AndroidLocalSettings.Spec width = AndroidLocalSettings.spec(AndroidLocalSettings.KEYBOARD_WIDTH_PERCENT);
+        check(Integer.valueOf(60).equals(width.accept(60)) && Integer.valueOf(100).equals(width.accept(100))
+            && width.accept(59) == null && width.accept(101) == null, "keyboard width is 60-100 percent");
+        AndroidLocalSettings.Spec position = AndroidLocalSettings.spec(AndroidLocalSettings.KEYBOARD_POSITION_X);
+        check(Integer.valueOf(0).equals(position.accept(0)) && Integer.valueOf(1000).equals(position.accept(1000))
+            && position.accept(-1) == null && position.accept(1001) == null, "keyboard position is 0-1000");
         // 「加高底行」（#6354）已移除，底行默认就和键行同高：不再是一个设置项，存着的旧值读取时丢掉。
         check(!AndroidLocalSettings.specs().containsKey("platform.android.tall_bottom_row"), "tall bottom row is no longer a setting");
         AndroidLocalSettings.Spec floatingX = AndroidLocalSettings.spec(AndroidLocalSettings.FLOATING_KEYBOARD_X);
@@ -214,16 +249,17 @@ public final class AndroidLocalSettingsSmoke {
         check("off".equals(snapshot.choice(AndroidLocalSettings.ONE_HANDED)), "dropped value reads its default");
         check(snapshot.has(AndroidLocalSettings.APP_THEME) && !snapshot.has(AndroidLocalSettings.ONE_HANDED), "has()");
         Map<String, Object> synced = snapshot.synced();
-        check(synced.size() == 18, "eighteen synced keys, got " + synced.size());
+        check(synced.size() == 19, "nineteen synced keys, got " + synced.size());
         check(Boolean.FALSE.equals(synced.get(AndroidLocalSettings.SPLIT_KEYBOARD)), "split keyboard syncs its default");
         check("dongxue".equals(synced.get(AndroidLocalSettings.APP_THEME)), "synced carries explicit values");
         check(Boolean.TRUE.equals(synced.get(AndroidLocalSettings.KEY_POPUP)), "synced carries defaults");
         for (String local : new String[] {AndroidLocalSettings.INCOGNITO, AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO,
                 AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT, AndroidLocalSettings.FLOATING_KEYBOARD,
                 AndroidLocalSettings.FLOATING_KEYBOARD_X, AndroidLocalSettings.FLOATING_KEYBOARD_Y,
-                AndroidLocalSettings.HARDWARE_CARET_CANDIDATES,
+                AndroidLocalSettings.HARDWARE_CARET_CANDIDATES, AndroidLocalSettings.SPLIT_KEYBOARD_PHONE_LANDSCAPE,
                 AndroidLocalSettings.TOOLBAR_FLOATING, AndroidLocalSettings.TOOLBAR_TEXT_EDIT, AndroidLocalSettings.BOTTOM_BAR, AndroidLocalSettings.BOTTOM_PADDING,
-                AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, AndroidLocalSettings.DEVELOPER_DEBUG_OVERLAY,
+                AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, AndroidLocalSettings.KEYBOARD_WIDTH_PERCENT,
+                AndroidLocalSettings.KEYBOARD_POSITION_X, AndroidLocalSettings.DEVELOPER_DEBUG_OVERLAY,
                 AndroidLocalSettings.DEVELOPER_LOGGING_ENABLED,
                 AndroidLocalSettings.DEVELOPER_LOG_LEVEL, AndroidLocalSettings.DEVELOPER_INPUT_LOG,
                 AndroidLocalSettings.MCP_RETENTION, AndroidLocalSettings.MCP_INPUT_EVENTS}) {
@@ -334,6 +370,89 @@ public final class AndroidLocalSettingsSmoke {
         } finally {
             deleteTree(directory);
         }
+    }
+
+    /** 设置页「键盘底部高度」滑块与两个旧字段之间的读写映射（#10447）。 */
+    private static void bottomHeightSlider() {
+        check(AndroidLocalSettings.bottomHeightDp(AndroidLocalSettings.defaults()) == 0,
+            "a new user sees 0 dp, the same layout as before");
+        AndroidLocalSettings.Snapshot legacy = new AndroidLocalSettings.Snapshot(AndroidLocalSettings.accepted(Map.of(
+            AndroidLocalSettings.BOTTOM_PADDING, true, AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, 96)));
+        check(AndroidLocalSettings.bottomHeightDp(legacy) == 96, "an old user who turned bottom padding on sees the stored height");
+        AndroidLocalSettings.Snapshot off = new AndroidLocalSettings.Snapshot(AndroidLocalSettings.accepted(Map.of(
+            AndroidLocalSettings.BOTTOM_PADDING, false, AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, 96)));
+        check(AndroidLocalSettings.bottomHeightDp(off) == 0, "a stored height with the switch off shows 0");
+
+        Map<String, Object> raise = AndroidLocalSettings.bottomHeightEdits(64);
+        check(raise.size() == 2 && Boolean.TRUE.equals(raise.get(AndroidLocalSettings.BOTTOM_PADDING))
+            && Integer.valueOf(64).equals(raise.get(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT)),
+            "a positive value turns the switch on and stores the height");
+        Map<String, Object> zero = AndroidLocalSettings.bottomHeightEdits(0);
+        check(zero.size() == 1 && Boolean.FALSE.equals(zero.get(AndroidLocalSettings.BOTTOM_PADDING))
+            && !zero.containsKey(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT),
+            "zero turns the switch off and keeps the stored height");
+        for (Map.Entry<String, Object> edit : raise.entrySet()) {
+            check(AndroidLocalSettings.spec(edit.getKey()).accept(edit.getValue()) != null, "slider edits pass validation: " + edit.getKey());
+            check(!AndroidLocalSettings.spec(edit.getKey()).synced, "the bottom height stays on this device: " + edit.getKey());
+        }
+        for (int value = KeyboardBottomBarPolicy.MIN_PADDING_DP; value <= KeyboardBottomBarPolicy.MAX_PADDING_DP;
+                value += KeyboardBottomBarPolicy.PADDING_STEP_DP) {
+            Map<String, Object> edits = AndroidLocalSettings.bottomHeightEdits(value);
+            Map<String, Object> merged = new LinkedHashMap<>();
+            merged.put(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, 96);
+            merged.putAll(edits);
+            AndroidLocalSettings.Snapshot saved = new AndroidLocalSettings.Snapshot(AndroidLocalSettings.accepted(merged));
+            check(AndroidLocalSettings.bottomHeightDp(saved) == value, "slider round trip at " + value + " dp");
+            if (value == 0) check(saved.integer(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT) == 96, "zero keeps the previous height");
+        }
+    }
+
+    /** 「键盘调整」确认时写哪些本地设置：只写生效且变了的项，抬高按「键盘底部高度」的口径存，内存里的快照与写盘取值规则相同。 */
+    private static void keyboardAdjustEdits() {
+        KeyboardAdjustPolicy.Availability all = KeyboardAdjustPolicy.Availability.of(false, false, false, false, false);
+        KeyboardAdjustPolicy.Horizontal full = KeyboardAdjustPolicy.Horizontal.DEFAULT;
+        check(AndroidLocalSettings.keyboardAdjustEdits(all, false, 24, 24, full, full).isEmpty(),
+            "nothing changed writes nothing");
+        Map<String, Object> raised = AndroidLocalSettings.keyboardAdjustEdits(all, false, 0, 48, full, full);
+        check(raised.equals(Map.of(AndroidLocalSettings.BOTTOM_PADDING, true, AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, 48)),
+            "without the bottom bar the lift is the stored height: " + raised);
+        Map<String, Object> withBar = AndroidLocalSettings.keyboardAdjustEdits(all, true, 0, 48, full, full);
+        check(Integer.valueOf(88).equals(withBar.get(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT)),
+            "with the bottom bar shown the stored target includes its 40 dp: " + withBar);
+        Map<String, Object> lowered = AndroidLocalSettings.keyboardAdjustEdits(all, true, 48, 0, full, full);
+        check(lowered.equals(Map.of(AndroidLocalSettings.BOTTOM_PADDING, false)),
+            "dragging the lift to 0 only turns the switch off and keeps the height: " + lowered);
+        KeyboardAdjustPolicy.Horizontal narrow = new KeyboardAdjustPolicy.Horizontal(80, 0);
+        Map<String, Object> resized = AndroidLocalSettings.keyboardAdjustEdits(all, false, 0, 0, full, narrow);
+        check(resized.equals(Map.of(AndroidLocalSettings.KEYBOARD_WIDTH_PERCENT, 80, AndroidLocalSettings.KEYBOARD_POSITION_X, 0)),
+            "width and position are written when they change: " + resized);
+        check(AndroidLocalSettings.keyboardAdjustEdits(all, false, 0, 0, full,
+            new KeyboardAdjustPolicy.Horizontal(100, 0)).equals(Map.of(AndroidLocalSettings.KEYBOARD_POSITION_X, 0)),
+            "only the value that changed is written");
+        KeyboardAdjustPolicy.Availability oneHanded = KeyboardAdjustPolicy.Availability.of(false, false, false, true, false);
+        check(AndroidLocalSettings.keyboardAdjustEdits(oneHanded, false, 0, 16, full, narrow)
+            .equals(Map.of(AndroidLocalSettings.BOTTOM_PADDING, true, AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, 16)),
+            "one-handed mode saves the lift but not the width it cannot show");
+        KeyboardAdjustPolicy.Availability floating = KeyboardAdjustPolicy.Availability.of(true, false, false, false, false);
+        check(AndroidLocalSettings.keyboardAdjustEdits(floating, false, 0, 16, full, narrow).isEmpty(),
+            "a floating keyboard saves none of the docked-only values");
+        for (Map.Entry<String, Object> edit : resized.entrySet())
+            check(!AndroidLocalSettings.spec(edit.getKey()).synced, "keyboard adjustments stay on this device: " + edit.getKey());
+
+        AndroidLocalSettings.Snapshot base = new AndroidLocalSettings.Snapshot(AndroidLocalSettings.accepted(Map.of(
+            AndroidLocalSettings.BOTTOM_PADDING, true, AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, 96)));
+        AndroidLocalSettings.Snapshot applied = base.withEdits(lowered);
+        check(!applied.bool(AndroidLocalSettings.BOTTOM_PADDING) && applied.integer(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT) == 96,
+            "the in-memory snapshot applies the edits like the file would");
+        check(base.bool(AndroidLocalSettings.BOTTOM_PADDING), "withEdits leaves the original snapshot alone");
+        check(base.withEdits(resized).integer(AndroidLocalSettings.KEYBOARD_WIDTH_PERCENT) == 80, "width applied in memory");
+        boolean rejected = false;
+        try {
+            base.withEdits(Map.of(AndroidLocalSettings.KEYBOARD_WIDTH_PERCENT, 59));
+        } catch (IllegalArgumentException expected) {
+            rejected = true;
+        }
+        check(rejected, "withEdits rejects a value the file write would reject");
     }
 
     /** client-services 校验 `android_local` 用的表与这里的同步键逐项一致。 */

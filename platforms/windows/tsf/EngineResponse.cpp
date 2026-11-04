@@ -17,6 +17,13 @@ bool EngineSessionAdapter::parse_result(const std::string &text,
     parsed.has_commit = value.value("has_commit", value.contains("commit") && !value.at("commit").is_null());
     if (value.contains("commit") && !value.at("commit").is_null())
       parsed.commit = value.at("commit").get<std::string>();
+    if (parsed.has_commit && value.contains("commit") && value.at("commit").is_string() &&
+        value.contains("commit_cursor_suffix") && value.at("commit_cursor_suffix").is_string()) {
+      const auto suffix = value.at("commit_cursor_suffix").get<std::string>();
+      if (suffix.size() <= parsed.commit.size() &&
+          parsed.commit.compare(parsed.commit.size() - suffix.size(), suffix.size(), suffix) == 0)
+        parsed.commit_cursor_suffix = suffix;
+    }
     if (value.contains("diagnostic") && !value.at("diagnostic").is_null())
       parsed.diagnostic = value.at("diagnostic").get<std::string>();
     if (value.contains("view") || value.contains("preedit")) {
@@ -28,6 +35,8 @@ bool EngineSessionAdapter::parse_result(const std::string &text,
       parsed.view.reading = view.value("reading", "");
       parsed.view.generation = view.value("generation", uint64_t{0});
       parsed.view.caret = view.value("caret_position", std::size_t{0});
+      if (view.contains("preedit_caret") && view.at("preedit_caret").is_number_unsigned())
+        parsed.view.preedit_caret = view.at("preedit_caret").get<std::size_t>();
       parsed.view.scheme = view.value("scheme", uint32_t{0});
       parsed.view.key_grid = view.value("key_grid", std::string{"none"});
       parsed.view.spelling_symbols = view.value("spelling_symbols", "");
@@ -36,6 +45,7 @@ bool EngineSessionAdapter::parse_result(const std::string &text,
       parsed.view.conversion = view.value("conversion", "");
       parsed.view.conversion_focus_start = view.value("conversion_focus_start", std::size_t{0});
       parsed.view.conversion_focus_end = view.value("conversion_focus_end", std::size_t{0});
+      parsed.view.prediction = view.value("prediction", false);
       for (const auto &candidate : view.value("candidates", json::array())) {
         std::string id;
         std::size_t index = candidate.value("index", std::size_t{0});

@@ -37,6 +37,15 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/transport.py"
       $<TARGET_FILE:shared-voice-transport>)
   set_tests_properties(shared-voice-http-transport PROPERTIES TIMEOUT 30)
+  add_executable(shared-voice-curl-headers tests/curl_headers.cpp)
+  target_link_libraries(shared-voice-curl-headers PRIVATE CURL::libcurl)
+  target_compile_features(shared-voice-curl-headers PRIVATE cxx_std_17)
+  if(MSVC)
+    target_compile_options(shared-voice-curl-headers PRIVATE /W4 /WX /utf-8)
+  else()
+    target_compile_options(shared-voice-curl-headers PRIVATE -Wall -Wextra -Werror)
+  endif()
+  add_test(NAME shared-voice-curl-headers COMMAND shared-voice-curl-headers)
   if(MSIME_HOST_LIBRARY)
     add_executable(shared-doubao-auth tests/doubao_auth.cpp)
     target_compile_features(shared-doubao-auth PRIVATE cxx_std_17)
@@ -109,6 +118,11 @@ if(BUILD_TESTING)
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_helper.py"
         $<TARGET_FILE:msime-voice-local> "${MSIME_LOCAL_ASR_TEST_RUNTIME}" "${MSIME_LOCAL_ASR_TEST_MODEL}")
     set_tests_properties(shared-voice-local-helper PROPERTIES TIMEOUT 120)
+    # 仅 Fun-ASR-Nano 检查目录型分词器，其他模型明确跳过；全程不发送音频。
+    add_test(NAME shared-voice-local-helper-tokenizer
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_helper_tokenizer.py"
+        $<TARGET_FILE:msime-voice-local> "${MSIME_LOCAL_ASR_TEST_RUNTIME}" "${MSIME_LOCAL_ASR_TEST_MODEL}")
+    set_tests_properties(shared-voice-local-helper-tokenizer PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
   endif()
   # 同样可选：再给一段录音（MSIME_LOCAL_ASR_TEST_WAV，16 kHz 单声道 16 位 PCM）时，直接经会话 API 识别它，并检查 VAD 的说话状态。
   if(MSIME_LOCAL_ASR_TEST_MODEL AND MSIME_LOCAL_ASR_TEST_RUNTIME AND MSIME_LOCAL_ASR_TEST_WAV)

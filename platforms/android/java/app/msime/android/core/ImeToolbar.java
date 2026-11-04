@@ -3,9 +3,11 @@ package app.msime.android;
 import app.msime.android.LayoutPolicy;
 
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.os.SystemClock;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
+import android.view.TouchDelegate;
 import android.view.inputmethod.InputConnection;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -17,7 +19,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * 键盘顶部一行（设计 50 dp）：空闲时是工具栏（品牌、表情、常用语、剪贴板、皮肤、输入方式、收起），组词时是候选条（读音 + 候选 chip + 分隔线 + 展开键），调整键盘高度时是内联高度条。状态仍在服务里。
+ * 键盘顶部一行（设计 50 dp）：空闲时是工具栏（品牌、表情、常用语、剪贴板、皮肤、输入方式、收起），组词时是候选条（读音 + 候选 chip + 分隔线 + 展开键），「键盘调整」时照常显示，盖在遮罩下面。状态仍在服务里。
  */
 final class ImeToolbar {
     /** 组词时读音那一行的最小高度（设计稿按 12 sp 的读音排的 14 dp）。读音字号跟设置「预编辑字号」（`candidate_preedit_font_size`）按比例缩放（ReadingRowPolicy.textSizeSp，默认仍是 12 sp），字号变大、系统字体放大或厂商字体更高时按读音实际高度加上 {@link #READING_GAP_DP} 加高，见 ReadingRowPolicy；空闲时的工具栏取读音行加候选行的同一高度，打字时键盘不变高。 */
@@ -45,8 +47,6 @@ final class ImeToolbar {
     private int foregroundColor;
     private int hairlineColor;
     private int hintColor;
-    private int returnBackgroundColor;
-    private int returnForegroundColor;
 
     ImeToolbar(MSIMEInputService s) {
         this.s = s;
@@ -59,7 +59,7 @@ final class ImeToolbar {
         s.dismissShortcutButton = dismissButton;
         shortcutButtons = new Button[] {s.emojiShortcutButton, s.phraseShortcutButton,
             s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton,
-            s.textEditShortcutButton, s.undoShortcutButton, s.redoShortcutButton, s.voiceShortcutButton};
+            s.textEditShortcutButton, s.undoShortcutButton, s.redoShortcutButton, s.voiceShortcutButton, s.randomDigitsShortcutButton};
         for (Button button : shortcutButtons) bindEditor(button);
         s.imeTextEditPanel.bindShortcut(s.textEditShortcutButton);
         for (Button button : new Button[] {s.moreButton, s.symbolShortcutButton, dismissButton}) {
@@ -187,11 +187,23 @@ final class ImeToolbar {
                 case UNDO -> s.undoShortcutButton;
                 case REDO -> s.redoShortcutButton;
                 case VOICE -> s.voiceShortcutButton;
+                case RANDOM_DIGITS -> s.randomDigitsShortcutButton;
             };
             // 算式结果保留为中间滚动区的第一项，两端按钮不参与排序。
             s.shortcutBar.addView(button, index + 1);
         }
         appliedOrder = order;
+    }
+
+    /** 读音行当前 TouchDelegate 的范围，用来判断重新布局后是否需要换新的。 */
+    private Rect preeditTouchBounds;
+
+    /** 读音的可点区域：读音所在那一段的整个宽度，靠行首一侧延到行的边缘（含行的左内边距），上下占满整行（含行底和候选行之间的间距）。坐标是读音行自己的。 */
+    private static Rect preeditTouchTarget(View header, View preeditFrame) {
+        boolean rtl = header.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+        int left = rtl ? preeditFrame.getLeft() : 0;
+        int right = rtl ? header.getWidth() : preeditFrame.getRight();
+        return new Rect(left, 0, right, header.getHeight());
     }
 
     /** 读音行（读音、提示、页码、漢、退出本地模式）与工具栏的滚动容器；读音行只在组词或有提示时显示。 */
@@ -219,6 +231,14 @@ final class ImeToolbar {
         preeditFrame.addView(s.preedit, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         candidateHeader.addView(preeditFrame, LayoutPolicy.weightedWrapParams(1));
+        // 读音本身只有文字那么大，打 wo 这样的短拼音时只有十几 dp 宽，点偏一点就点不中（#10474）。读音所在的那一段（从行首到右边的提示、页码、漢、× 为止）连同行底和候选行之间的间距，子视图都不接的触摸经 TouchDelegate 交给读音；能不能点、能不能长按仍由读音自己的状态决定，不能编辑时照样不接。读音行就是键盘可触摸区域的最上沿，往上没法扩；行高不变。
+        // 只在范围真的变了时才换一个新的 TouchDelegate：它把“这一次按下是否交给读音”记在实例上，异步候选、云候选或提示通道更新引起的重新布局如果在手指按住时换掉它，新实例收不到后续的移动和抬起，读音就会一直停在按下状态、丢掉这次点按，长按计时也不会取消，手指早已抬起后仍会弹出本地模式菜单。
+        candidateHeader.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            Rect target = preeditTouchTarget(candidateHeader, preeditFrame);
+            if (target.equals(preeditTouchBounds)) return;
+            preeditTouchBounds = target;
+            candidateHeader.setTouchDelegate(new TouchDelegate(target, s.preedit));
+        });
         // 宿主提示通道：正常为空，只有准备中、失败或提示时才有文字。
         s.status = toolbarText(10);
         ViewPolicy.setMaxLinesEllipsized(s.status, 1);
@@ -280,6 +300,9 @@ final class ImeToolbar {
             KeyboardShortcutIconPolicy.Icon.VOICE, s::startVoiceRecognition);
         s.voiceShortcutButton.setContentDescription("语音输入");
         s.keyId(s.voiceShortcutButton, "SoftVoice");
+        s.randomDigitsShortcutButton = s.shortcutButton(s.shortcutBar, "随",
+            KeyboardShortcutIconPolicy.Icon.RANDOM_DIGITS, s.imeLayoutRows::toggleRandomDigits);
+        s.randomDigitsShortcutButton.setContentDescription("随机数字");
         s.aiPolishShortcutButton = s.button(s.shortcutBar, "AI", s.imePanels::showAiPolish);
         s.aiPolishShortcutButton.setContentDescription("打开 AI 润色");
         s.replyShortcutButton = s.shortcutButton(s.shortcutBar, "回复",
@@ -478,17 +501,7 @@ final class ImeToolbar {
         recentClipActionButton.setContentDescription(RecentClipboardSuggestion.quickActionDescription(action));
     }
 
-    /** 内联键盘高度条：调整时替换整行工具栏。 */
-    void addInlineHeightBar(LinearLayout candidateRegion) {
-        InlineHeightBar bar = new InlineHeightBar(s);
-        ViewPolicy.hide(bar);
-        bar.setBasePixels(s.pixels(KeyboardHeightPolicy.HEIGHT_PERCENT_BASE_DP));
-        s.inlineHeightBar = bar;
-        candidateRegion.addView(bar, LayoutPolicy.matchWidthHeightPx(
-            s.pixels(KeyboardGeometry.DESIGN_TOOLBAR_ROW_HEIGHT_DP)));
-    }
-
-    /** 每次 render 末尾：工具栏图标色、激活底、品牌键配色、展开键与高度条的颜色。 */
+    /** 每次 render 末尾：工具栏图标色、激活底、品牌键配色、展开键的颜色与「键盘调整」括号的强调色。 */
     void styleTopRow() {
         applyShortcutOrder();
         KeyboardSkin skin = s.skin;
@@ -501,8 +514,6 @@ final class ImeToolbar {
             foregroundColor = Color.parseColor(skin.keyForeground());
             hairlineColor = Color.parseColor(skin.hairline());
             hintColor = Color.parseColor(skin.hint());
-            returnBackgroundColor = Color.parseColor(skin.returnBackground());
-            returnForegroundColor = Color.parseColor(skin.returnForeground());
         }
         for (Button button : shortcutButtons == null ? new Button[0] : shortcutButtons) {
             if (button instanceof KeyboardShortcutButton shortcut) {
@@ -525,8 +536,8 @@ final class ImeToolbar {
         if (recentClipCollapseButton instanceof KeyboardShortcutButton collapse)
             collapse.setIconColors(foregroundColor, foregroundColor);
         if (s.moreButton instanceof KeyboardBrandButton brand) {
-            // 品牌键与键盘共用皮肤强调色，圆盘混入键盘底色，换肤时一起更新。
-            brand.setLogoColors(skin.logoDisc(), skin.logoMark());
+            // 品牌键按工具栏设计稿画：固定配色的标志，不垫圆盘；面板底随皮肤更新。
+            brand.useToolbarDesign();
             brand.setPanelOpen(s.anyToolbarPanelOpen(), activeBackgroundColor);
         }
         if (s.expandCandidates instanceof CandidateChevronButton chevron) {
@@ -539,9 +550,7 @@ final class ImeToolbar {
         if (s.closePrediction instanceof CandidateCloseButton close)
             close.setColors(s.candidateAppearance.externalSkin() ? s.candidateAppearance.text() : foregroundColor,
                 s.candidateAppearance.externalSkin() ? s.candidateAppearance.border() : hairlineColor);
-        if (s.inlineHeightBar != null)
-            s.inlineHeightBar.setColors(foregroundColor, hintColor,
-                returnBackgroundColor, returnForegroundColor);
+        if (s.keyboardAdjustOverlay != null) s.keyboardAdjustOverlay.setAccent(Color.parseColor(skin.accent()));
         if (s.floatingBar != null) s.floatingBar.setColors(foregroundColor);
         s.imeBottomBar.style(iconColor, activeIconColor, activeBackgroundColor);
         if (s.preedit != null) {

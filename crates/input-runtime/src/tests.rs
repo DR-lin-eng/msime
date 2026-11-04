@@ -5485,6 +5485,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         shuangpin_profile: 0,
         shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
+        shuangpin_preedit_separated: false,
         force_cantonese_shuangpin: false,
         single_character_only: false,
         caret_edit_suffix: false,
@@ -5547,6 +5548,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         quick_phrase_frequency: true,
         helpcode_table: None,
         helpcode_fallback_resources: None,
+        custom_helpcode_root: None,
         sentence_association: msime_engine::SentenceAssociationOptions {
             word_lattice: true,
             neural_keyboard: false,
@@ -5667,12 +5669,31 @@ fn next_word_prediction_is_idle_and_only_explicit_selection_commits_it() {
 }
 
 #[test]
-fn next_word_prediction_passes_space_return_and_digits_to_the_editor() {
+fn next_word_prediction_space_and_digits_pick_like_ordinary_candidates() {
+    let space = |value| Action::Character {
+        value,
+        shift: false,
+    };
+    for (action, expected) in [
+        (Action::SelectHighlighted, "饭"),
+        (space(b' '), "饭"),
+        (space(b'1'), "饭"),
+        (space(b'2'), "好"),
+    ] {
+        let (_directory, mut runtime) = prediction_runtime();
+        assert_eq!(runtime.view().candidates[0].text, "饭");
+        let transition = runtime.dispatch(action).unwrap();
+        assert!(transition.handled);
+        assert_eq!(transition.commit.as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn next_word_prediction_passes_return_and_digits_past_the_page_to_the_editor() {
     for action in [
-        Action::SelectHighlighted,
         Action::Command(Command::CommitRaw),
         Action::Character {
-            value: b'1',
+            value: b'5',
             shift: false,
         },
         Action::Command(Command::Backspace),
@@ -5685,7 +5706,7 @@ fn next_word_prediction_passes_space_return_and_digits_to_the_editor() {
     }
 }
 
-/// 联想候选栏上的关闭键（#10078）送 Cancel：建议清空、报已处理，宿主因此不往编辑器补任何字符，这和会多插一个空格的空格键不同。
+/// 联想候选栏上的关闭键（#10078）送 Cancel：建议清空、报已处理，宿主因此不往编辑器补任何字符。
 #[test]
 fn next_word_prediction_cancel_clears_suggestions_without_reaching_the_editor() {
     let (_directory, mut runtime) = prediction_runtime();
@@ -7331,9 +7352,81 @@ fn mixed_wubi_continues_a_pinyin_reading_past_a_native_four_code() {
     }
 }
 
+/// #10696：四码唯一自动上屏和第五码顶字是两个开关。只关前者时，完整四码之后再敲字母仍按顶字上屏首选，看起来像自动上屏没关掉；两个都关、混输开着时，这串字母才整串留在组字里，回车按原样上屏，空格仍选首选。混输关着时纯五笔没有地方放第五个字母，照旧顶字，不丢键。
+#[test]
+fn wubi_fifth_letter_stays_in_the_composition_only_when_top_commit_is_off_and_mixed_is_on() {
+    let start = |mixed: bool, unique: bool, top: bool| {
+        let directory = tempfile::tempdir().unwrap();
+        let mut options = real_engine_options(directory.path());
+        options.scheme = 2;
+        options.wubi_mixed_pinyin = mixed;
+        options.mixed_english = false;
+        rusqlite::Connection::open(
+            std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+        )
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
+                INSERT INTO wubi86 VALUES('wqaa','合成甲',100),('eeee','合成乙',100);",
+        )
+        .unwrap();
+        let mut runtime =
+            Runtime::new(msime_engine::host::Session::new(&options).unwrap(), 5).unwrap();
+        runtime.set_wubi_auto_commit_unique(unique);
+        runtime.set_wubi_fifth_code_top_commit(top);
+        runtime.focus(true).unwrap();
+        (directory, runtime)
+    };
+    let type_key = |runtime: &mut Runtime<msime_engine::host::Session>, value: u8| {
+        runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap()
+    };
+
+    // 出厂设置（两个开关都开）：第四键就把唯一的词上屏。
+    let (_directory, mut runtime) = start(true, true, true);
+    let committed: Vec<_> = b"wqaa"
+        .iter()
+        .filter_map(|value| type_key(&mut runtime, *value).commit)
+        .collect();
+    assert_eq!(committed, ["合成甲"]);
+
+    for mixed in [false, true] {
+        for top in [false, true] {
+            // 自动上屏关掉：四码停在候选里。
+            let (_directory, mut runtime) = start(mixed, false, top);
+            for value in b"wqaa" {
+                assert!(type_key(&mut runtime, *value).commit.is_none());
+            }
+            assert_eq!(runtime.view().editing_text, "wqaa");
+            assert_eq!(runtime.view().candidates[0].text, "合成甲");
+            let fifth = type_key(&mut runtime, b'e');
+            if mixed && !top {
+                assert!(fifth.commit.is_none(), "{fifth:?}");
+                assert_eq!(fifth.view.editing_text, "wqaae");
+                let raw = runtime
+                    .dispatch(Action::Command(Command::CommitRaw))
+                    .unwrap();
+                assert_eq!(raw.commit.as_deref(), Some("wqaae"));
+            } else {
+                // 顶字：首选上屏，第五个字母开始下一组编码。
+                assert_eq!(
+                    fifth.commit.as_deref(),
+                    Some("合成甲"),
+                    "mixed={mixed} top={top}"
+                );
+                assert_eq!(fifth.view.editing_text, "e");
+            }
+        }
+    }
+}
+
 /// Android 设备验收「26 键五笔第五码顶字（混输开）」在运行时的对应：`wqiy` 的简拼前缀不挡顶字，`a` 选掉「你」并开始下一组编码。宿主开着 `phrase_preedit`（安卓、现代 Windows）时「你」留在暂存词段、不立即上屏，下一段选词时连同它一起上屏。
 #[test]
-fn a_fifth_letter_after_wqiy_holds_the_topped_word_with_phrase_preedit() {
+fn a_fifth_letter_after_wqiy_commits_the_topped_word_even_with_phrase_preedit() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = real_engine_options(directory.path());
     options.scheme = 2;
@@ -7345,7 +7438,8 @@ fn a_fifth_letter_after_wqiy_holds_the_topped_word_with_phrase_preedit() {
     .unwrap()
     .execute_batch(
         "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
-            INSERT INTO wubi86 VALUES('wqiy','你',100),('aaaa','工',100);
+            INSERT INTO wubi86 VALUES('wqiy','你',100),('aaaa','工',100),('aaaa','式',50),
+            ('ggll','五',100),('ggll','吾',50);
             CREATE TABLE tbl_2_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);
             INSERT INTO tbl_2_w VALUES('wan''qi','wq','晚期',1000);",
     )
@@ -7354,31 +7448,40 @@ fn a_fifth_letter_after_wqiy_holds_the_topped_word_with_phrase_preedit() {
     runtime.set_phrase_preedit(true);
     runtime.set_wubi_fifth_code_top_commit(true);
     runtime.focus(true).unwrap();
-    for value in b"wqiy" {
-        let typed = runtime
+    let type_key = |runtime: &mut Runtime<msime_engine::host::Session>, value: u8| {
+        runtime
             .dispatch(Action::Character {
-                value: *value,
+                value,
                 shift: false,
             })
-            .unwrap();
-        assert!(typed.commit.is_none());
+            .unwrap()
+    };
+    for value in b"wqiy" {
+        assert!(type_key(&mut runtime, *value).commit.is_none());
     }
     assert_eq!(runtime.view().candidates[0].text, "你");
-    let topped = runtime
-        .dispatch(Action::Character {
-            value: b'a',
-            shift: false,
-        })
-        .unwrap();
-    assert!(topped.commit.is_none(), "{topped:?}");
-    assert_eq!(topped.view.phrase_prefix, "你");
+    // 顶字是用户定下的字，不是造词中途的选词：直接上屏，`a` 开始下一组编码。
+    let topped = type_key(&mut runtime, b'a');
+    assert_eq!(topped.commit.as_deref(), Some("你"), "{topped:?}");
+    assert_eq!(topped.view.phrase_prefix, "");
     assert_eq!(topped.view.editing_text, "a");
     assert_eq!(topped.view.candidates[0].text, "工");
-    let id = topped.view.candidates[0].id;
-    let selected = runtime.dispatch(Action::Select(id)).unwrap();
-    assert_eq!(selected.commit.as_deref(), Some("你工"));
-    assert_eq!(selected.view.phrase_prefix, "");
-    assert_eq!(selected.view.editing_text, "");
+    // 连续顶字：每个完整四码后的字母都顶一次，续打的码不会被截在四码外丢掉。
+    for value in b"aaa" {
+        assert!(type_key(&mut runtime, *value).commit.is_none());
+    }
+    let second = type_key(&mut runtime, b'g');
+    assert_eq!(second.commit.as_deref(), Some("工"), "{second:?}");
+    assert_eq!(second.view.editing_text, "g");
+    for value in b"gll" {
+        assert!(type_key(&mut runtime, *value).commit.is_none());
+    }
+    assert_eq!(runtime.view().editing_text, "ggll");
+    // Esc 只取消还没上屏的这组编码，已经顶下来的字都在文档里。
+    let cancelled = runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    assert!(cancelled.commit.is_none(), "{cancelled:?}");
+    assert_eq!(cancelled.view.phrase_prefix, "");
+    assert_eq!(cancelled.view.editing_text, "");
 }
 
 #[test]
@@ -9285,11 +9388,11 @@ fn cantonese_dictionary(directory: &std::path::Path) -> String {
     path.to_str().unwrap().to_owned()
 }
 
-/// A real Engine on the Cantonese scheme with learning on, so a learning path the scheme failed to skip would write. Focused.
-fn cantonese_runtime(directory: &std::path::Path) -> Runtime {
+/// A real Engine on the Cantonese scheme with the learning switch as given. Since #10758 Cantonese learns like Pinyin while the switch is on (frequency adjustment and words made from pieces), and writes nothing while it is off. Focused.
+fn cantonese_runtime(directory: &std::path::Path, learning: bool) -> Runtime {
     let mut options = real_engine_options(directory);
     options.scheme = CANTONESE_SCHEME;
-    options.learning = true;
+    options.learning = learning;
     options.cantonese_dictionary = cantonese_dictionary(directory);
     let session = msime_engine::host::Session::new(&options).unwrap();
     let mut runtime = Runtime::new(session, 5).unwrap();
@@ -9356,7 +9459,7 @@ fn database_rows(root: &std::path::Path) -> Vec<(String, String, i64)> {
 #[test]
 fn cantonese_digits_select_and_the_apostrophe_reaches_the_engine() {
     let directory = tempfile::tempdir().unwrap();
-    let mut runtime = cantonese_runtime(directory.path());
+    let mut runtime = cantonese_runtime(directory.path(), true);
 
     let typed = compose_cantonese(&mut runtime, "neihou");
     assert_eq!(typed.view.scheme, CANTONESE_SCHEME);
@@ -9401,8 +9504,9 @@ fn cantonese_digits_select_and_the_apostrophe_reaches_the_engine() {
         assert!(boundary.handled && boundary.commit.is_none(), "{route}");
         let typed = compose_cantonese(&mut runtime, "oi");
         assert_eq!(typed.view.editing_text, "ngo oi", "{route}");
-        assert_eq!(texts(&typed.view)[0], "我", "{route}");
-        let picked = character(&mut runtime, b'1');
+        // 首位是两个音节组出的整句（#10557），第二位才是只覆盖 `ngo` 的「我」。
+        assert_eq!(texts(&typed.view)[..2], ["我愛", "我"], "{route}");
+        let picked = character(&mut runtime, b'2');
         assert_eq!(picked.commit.as_deref(), Some("我"), "{route}");
         let rest = character(&mut runtime, b'1');
         assert_eq!(rest.commit.as_deref(), Some("愛"), "{route}");
@@ -9410,37 +9514,24 @@ fn cantonese_digits_select_and_the_apostrophe_reaches_the_engine() {
     }
 }
 
-/// A row covering only the leading syllables goes to the document at once, even for a host that draws held phrase pieces, and the rest keeps composing. Nothing the user picks is learned: the journal and the main dictionary keep their rows, and the same reading comes back in the same order.
+/// A row covering only the leading syllables goes to the document at once, even for a host that draws held phrase pieces, and the rest keeps composing. With the learning switch off nothing the user picks is learned: the journal and the main dictionary keep their rows, and the same reading comes back in the same order. With the switch on Cantonese learns like Pinyin (#10758), which the Engine's own tests cover; here it only serves as the control.
 #[test]
-fn a_cantonese_partial_selection_commits_at_once_and_learns_nothing() {
-    let directory = tempfile::tempdir().unwrap();
-    let dictionaries = directory.path().join("dictionaries");
-    std::fs::create_dir_all(&dictionaries).unwrap();
-    rusqlite::Connection::open(dictionaries.join(msime_engine::assets::MAIN_DICTIONARY))
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE tbl_2_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
-             INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',1000),('ni''hao','nh','拟好',500);",
-        )
-        .unwrap();
-
-    // The control: the same pick under Quanpin with the same options writes the journal, so the comparison below would see a Cantonese write. The baseline is taken after composing, because reading candidates can already create the journal with empty tables, so only the pick itself can change the counts.
-    let mut options = real_engine_options(directory.path());
-    options.learning = true;
-    let mut quanpin = Runtime::new(msime_engine::host::Session::new(&options).unwrap(), 5).unwrap();
-    quanpin.focus(true).unwrap();
-    for value in *b"nihao" {
-        character(&mut quanpin, value);
-    }
-    let initial = database_rows(directory.path());
-    assert_eq!(
-        character(&mut quanpin, b'2').commit.as_deref(),
-        Some("拟好")
-    );
-    drop(quanpin);
+fn a_cantonese_partial_selection_commits_at_once_and_learns_nothing_with_learning_off() {
+    // The control: the same two pieces picked with learning on make a word, so the comparison below would see a write. It runs in a directory of its own, because the learned rows are read back whatever the switch says and would reorder the candidates below. The baseline is taken after composing, because reading candidates can already create the journal with empty tables, so only the picks themselves can change the counts.
+    let control = tempfile::tempdir().unwrap();
+    let mut learning = cantonese_runtime(control.path(), true);
+    learning.set_phrase_preedit(true);
+    compose_cantonese(&mut learning, "neihou");
+    let initial = database_rows(control.path());
+    let piece = character(&mut learning, b'3');
+    assert_eq!(piece.commit.as_deref(), Some("你"));
+    let id = piece.view.candidates[1].id;
+    let rest = learning.dispatch(Action::Select(id)).unwrap();
+    assert_eq!(rest.commit.as_deref(), Some("號"));
+    drop(learning);
     msime_engine::flush_personal_learning();
     // Some table must gain rows; a journal created with empty tables does not count as a write.
-    let learned = database_rows(directory.path());
+    let learned = database_rows(control.path());
     assert!(
         learned.iter().any(|(file, table, count)| {
             let previous = initial
@@ -9449,13 +9540,14 @@ fn a_cantonese_partial_selection_commits_at_once_and_learns_nothing() {
                 .map_or(0, |(_, _, before)| *before);
             *count > previous
         }),
-        "the Quanpin pick wrote no rows: {initial:?} -> {learned:?}"
+        "the picks with learning on wrote no rows: {initial:?} -> {learned:?}"
     );
 
-    let mut runtime = cantonese_runtime(directory.path());
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = cantonese_runtime(directory.path(), false);
     runtime.set_phrase_preedit(true);
-    let before = database_rows(directory.path());
     compose_cantonese(&mut runtime, "neihou");
+    let before = database_rows(directory.path());
     let first = character(&mut runtime, b'3');
     assert!(first.handled);
     assert_eq!(first.commit.as_deref(), Some("你"));
@@ -10824,6 +10916,13 @@ mod rerank_declined;
 
 mod model_contests;
 
+mod candidate_scorer;
+
+mod prediction_rerank;
+
+mod sentence_pool;
+mod sentence_start;
+
 mod settled_async;
 
 mod online_slot_order_equivalence;
@@ -11038,6 +11137,7 @@ fn literal_symbol_survives_runtime_punctuation_without_early_commit() {
 }
 
 mod multilingual;
+mod quick_phrase_cursor;
 
 /// 五笔 14 键的真实引擎：拼音主词库给词频，码表在同一个工作副本里。
 fn wubi_grid_runtime(root: &std::path::Path) -> Runtime {

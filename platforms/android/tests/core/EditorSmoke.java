@@ -47,8 +47,40 @@ public final class EditorSmoke {
         public boolean select(int start, int end) { throw new AssertionError("select must not run"); }
         public void end() { throw new IllegalStateException("synthetic disconnected editor"); }
     }
+    static final class CursorSink extends Sink {
+        boolean batch;
+        boolean disconnect;
+        @Override public void begin() { super.begin(); batch = true; }
+        @Override public void end() { super.end(); batch = false; }
+        @Override public boolean verify() { check(!batch); calls.add("verify"); return true; }
+        @Override public void positionCommitCursor(String text, String suffix) {
+            check(!batch);
+            calls.add("position:" + text + ":" + suffix);
+            if (disconnect) throw new IllegalStateException("synthetic disconnect");
+        }
+    }
     static void check(boolean condition) { if (!condition) throw new AssertionError(); }
     public static void main(String[] args) {
+        // 定位必须等提交已应用，再开始下一段组字；拒写与定位断连不能重复提交。
+        EditorBridge cursorBridge = new EditorBridge();
+        CursorSink cursor = new CursorSink();
+        check(cursorBridge.apply(cursor, "title:\"\"", "n", "\""));
+        check(cursor.calls.equals(List.of("begin", "commit:title:\"\"", "end", "verify",
+            "position:title:\"\":\"", "begin", "compose:n", "end", "verify")));
+        cursor.calls.clear();
+        cursor.disconnect = true;
+        check(cursorBridge.apply(cursor, "[]", "", "]"));
+        check(cursor.calls.equals(List.of("begin", "commit:[]", "end", "verify", "position:[]:]")));
+        cursor.calls.clear();
+        cursor.reject = true;
+        check(!cursorBridge.apply(cursor, "[]", "n", "]"));
+        check(cursor.calls.equals(List.of("begin", "commit:[]", "end")));
+        cursor.reject = false;
+        for (String suffix : new String[] {null, "", "different"}) {
+            cursor.calls.clear();
+            check(cursorBridge.apply(cursor, "[]", "n", suffix));
+            check(cursor.calls.equals(List.of("begin", "commit:[]", "compose:n", "end", "verify")));
+        }
         // 读回验证必须在编辑器应用整批命令之后运行，拒写和断开仍由调用方统一处理。
         EditorBridge deferredBridge = new EditorBridge();
         VerificationSink deferred = new VerificationSink();
@@ -182,6 +214,10 @@ public final class EditorSmoke {
         check(!EditorPolicy.uri(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_TEXT_VARIATION_URI));
         check(EditorPolicy.prefersLatin(InputType.TYPE_CLASS_TEXT
             | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS));
+        // #10481：数字密码与文字密码一样进框临时切英文，「返回原键盘」是 26 键而不是上次记住的中文键面；普通数字框和电话框不切。
+        check(EditorPolicy.prefersLatin(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD));
+        check(!EditorPolicy.prefersLatin(InputType.TYPE_CLASS_NUMBER));
+        check(!EditorPolicy.prefersLatin(InputType.TYPE_CLASS_PHONE));
         // #6147：邮箱后缀除了密码框都给，普通文本框、聊天框（不给建议、短消息）、搜索框、网址框和邮箱框都算。
         check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS));
         check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS));

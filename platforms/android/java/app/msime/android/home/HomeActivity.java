@@ -101,6 +101,11 @@ public final class HomeActivity extends AppCompatActivity {
     /** 回到前台时读共享偏好、解析应用主题用的工作线程。 */
     private final ExecutorService themeWorker = Executors.newSingleThreadExecutor(
         ThreadPolicy.namedDaemonFactory("msime-home-theme"));
+    /** 本进程已经替用户处理过「增强」的逐键重排模型（排了后台下载，按流量计费时也问过了），之后回到前台不再列一遍资源包。 */
+    private static final java.util.concurrent.atomic.AtomicBoolean RERANK_MODEL_CHECKED =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    /** 按流量计费的网络上问过一次要不要下载「增强」的模型：存在宿主自己的 msime_home_v1 里，不同步，问过就不再问（连上 Wi-Fi 时后台任务会自己下）。 */
+    private static final String RERANK_MODEL_ASKED = "rerank_model_metered_asked";
     /** 这个进程里是否已经替用户请求过五笔码表（{@link #requestWubiTableIfWanted}）：用户在计费网络的确认框里点了取消、或当时没联网，到下次启动应用再问，不在每次回到前台时都打扰。 */
     private static final java.util.concurrent.atomic.AtomicBoolean WUBI_TABLE_REQUESTED =
         new java.util.concurrent.atomic.AtomicBoolean();
@@ -215,6 +220,7 @@ public final class HomeActivity extends AppCompatActivity {
         if (state == FirstRunPreparation.State.READY && !themeWorker.isShutdown()) {
             themeWorker.execute(() -> DictionaryUpdates.request(getApplicationContext(), "automatic", null));
             requestWubiTableIfWanted();
+            requestRerankModelIfWanted();
         }
     };
 
@@ -229,6 +235,7 @@ public final class HomeActivity extends AppCompatActivity {
             installNoticeShowing = InstallNotice.showIfNeeded(this, () -> {
                 installNoticeShowing = false;
                 requestWubiTableIfWanted();
+                requestRerankModelIfWanted();
             });
         }
         themeWorker.execute(() -> {
@@ -239,10 +246,50 @@ public final class HomeActivity extends AppCompatActivity {
             runOnUiThread(this::recreateIfSeasonChanged);
         });
         CloudSync.onResume(this);
+        // 设置窗口在前台时才轮询诊断授权，退到后台由 onPause 暂停。
+        Telemetry.resumeConsentWatch(this);
         // 打开了「上传到云端」时补传打字统计；十分钟的节流在共享层，没登录真实账号时什么都不发。
         TypingUpload.onResume(this);
         themeWorker.execute(() -> DictionaryUpdates.request(getApplicationContext(), "automatic", null));
         requestWubiTableIfWanted();
+        requestRerankModelIfWanted();
+    }
+
+    /**
+     * 整句候选「增强」开着、逐键重排模型（{@link ResourcePacks#RERANK_MODEL}）没装时：排后台下载任务（{@link app.msime.android.RerankModelDownload}，只在不按流量计费的网络上跑）；当前网络按流量计费时再弹窗问一次（{@link ResourcePackService#requestOnBehalf}），问过就记下，以后不再问。「增强」多半是缺省或从别的设备同步来的，用户没在设置页里选过，不这样做模型永远不会下载。时机和五笔码表的询问一样：准备完成之后、首启引导和升级说明都不在前面时。
+     */
+    private void requestRerankModelIfWanted() {
+        if (FirstRunPreparation.state() != FirstRunPreparation.State.READY || RERANK_MODEL_CHECKED.get()
+                || themeWorker.isShutdown()) return;
+        themeWorker.execute(() -> {
+            JSONObject snapshot = HostStore.prepared(this) ? HostStore.loadPreferences(this) : null;
+            JSONObject preferences = snapshot == null ? null : snapshot.optJSONObject("preferences");
+            if (!app.msime.android.RerankModelDownload.wanted(preferences)) return;
+            ResourcePacks.Pack pack = ResourcePacks.pack(getFilesDir(), ResourcePacks.RERANK_MODEL);
+            if (pack == null) return;
+            java.util.Set<String> installed = pack.installed() ? java.util.Set.of(pack.id()) : java.util.Set.of();
+            app.msime.android.RerankModelDownload.scheduleIfWanted(this, preferences, installed);
+            android.content.SharedPreferences store = getSharedPreferences("msime_home_v1", MODE_PRIVATE);
+            android.net.ConnectivityManager connectivity = getSystemService(android.net.ConnectivityManager.class);
+            boolean metered = connectivity != null && connectivity.getActiveNetwork() != null
+                && connectivity.isActiveNetworkMetered();
+            if (pack.installed() || !metered || store.getBoolean(RERANK_MODEL_ASKED, false)) {
+                RERANK_MODEL_CHECKED.set(true);
+                return;
+            }
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || !getLifecycle().getCurrentState().isAtLeast(
+                        androidx.lifecycle.Lifecycle.State.RESUMED)) return;
+                if (ViewPolicy.isVisible(findViewById(R.id.home_intro)) || !OnboardingActivity.seen(this)
+                        || installNoticeShowing) return;
+                ResourcePackService.Status status = ResourcePackService.status(ResourcePacks.RERANK_MODEL);
+                if (status != null && status.running()) return;
+                if (!RERANK_MODEL_CHECKED.compareAndSet(false, true)) return;
+                store.edit().putBoolean(RERANK_MODEL_ASKED, true).apply();
+                ResourcePackService.requestOnBehalf(this, ResourcePacks.RERANK_MODEL, pack.size(),
+                    "整句候选「增强」用它给候选排序，比应用自带的模型更准、更快。不下载也能打字，连上 Wi-Fi 时会自动下载。");
+            });
+        });
     }
 
     /**
@@ -301,6 +348,11 @@ public final class HomeActivity extends AppCompatActivity {
         recreate();
     }
 
+    @Override protected void onPause() {
+        Telemetry.pauseConsentWatch();
+        super.onPause();
+    }
+
     @Override protected void onPostResume() {
         super.onPostResume();
         Intent link = pendingLink;
@@ -351,9 +403,9 @@ public final class HomeActivity extends AppCompatActivity {
     }
 
     /**
-     * 开场：本季底色上光晕浮起，浅色圆盘弹入，那枚标随后旋入并自己写一遍，名字与拉丁名升上来，底部进度条 2.4 秒走满，停满 2.8 秒或被轻点后让开。
+     * 开场：本季底色上光晕浮起，水杉标志（不垫圆盘，标志本身就是外框）随后旋入，折线自己写一遍，名字与拉丁名升上来，底部进度条 2.4 秒走满，停满 2.8 秒或被轻点后让开。
      *
-     * <p>Drawn by the app rather than by the platform's splash screen. Timing follows the design's keyframes: msCircIn for the disc (0.65 s), msLogoIn for the mark (0.6 s from 0.25 s, turning in from -30°), the stroke drawn by the animated vector, msRipple on the ring twice from 1.45 s, the name and the Latin line fading up at 0.9 and 1.1 s, and msBreath on the halo from 1.4 s.
+     * <p>Drawn by the app rather than by the platform's splash screen. Timing follows the design's keyframes: msCircIn for the container the mark sits in, which no longer paints a disc (0.65 s), msLogoIn for the mark (0.6 s from 0.25 s, turning in from -30°), the stroke drawn by the animated vector (the design's msRipple ring is not drawn: nothing goes around the mark), the name and the Latin line fading up at 0.9 and 1.1 s, and msBreath on the halo from 1.4 s.
      */
     private void playIntro(boolean leadsToOnboarding) {
         View intro = findViewById(R.id.home_intro);
@@ -381,7 +433,6 @@ public final class HomeActivity extends AppCompatActivity {
             animatable.stop();
             animatable.start();
         }
-        ripple(findViewById(R.id.home_intro_ring));
         fadeUp(findViewById(R.id.home_intro_name), 900);
         fadeUp(findViewById(R.id.home_intro_latin), 1100);
 
@@ -411,24 +462,6 @@ public final class HomeActivity extends AppCompatActivity {
 
         intro.removeCallbacks(dismissIntro);
         intro.postDelayed(dismissIntro, INTRO_HOLD_MILLIS);
-    }
-
-    /** 设计的 msRipple：圆盘外的圆环从圆盘大小放到 1.2 倍并淡出，1.45 s 起放两次，每次 1.2 s。 */
-    private static void ripple(View ring) {
-        ring.animate().cancel();
-        ring.setAlpha(0f);
-        ring.setScaleX(1f);
-        ring.setScaleY(1f);
-        ring.animate().setStartDelay(1450).setDuration(0).withEndAction(() -> rippleOnce(ring, 2)).start();
-    }
-
-    private static void rippleOnce(View ring, int remaining) {
-        if (remaining <= 0) return;
-        ring.setAlpha(0.5f);
-        ring.setScaleX(1f);
-        ring.setScaleY(1f);
-        ring.animate().alpha(0f).scaleX(1.2f).scaleY(1.2f).setStartDelay(0).setDuration(1200)
-            .setInterpolator(MotionCurves.EASE).withEndAction(() -> rippleOnce(ring, remaining - 1)).start();
     }
 
     private final Runnable dismissIntro = this::dismissIntro;

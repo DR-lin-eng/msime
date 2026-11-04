@@ -14,9 +14,9 @@ zhoumo   →  周末   weekend   →  weekend
 
 **[下载水杉输入法](https://msime.app/download/)** · Windows · macOS · Linux · Android · iOS · HarmonyOS · 免费开源（GPL-3.0-only）
 
-- **怎么打开**：默认都是关的。在设置里打开「显示英文释义」（Android 和 iOS 上叫「离线英文释义」），想看音标再开「显示读音」（Android 上叫「显示英文音标」）。释义和读音查本机词库，显示时不联网（Android 的英文音标词典要在第一次打开时下载一次）；「候选词翻译」不选在线翻译服务时也只查本机词库。
+- **怎么打开**：默认都是关的。在设置里打开「显示英文释义」（Android 和 iOS 上叫「离线英文释义」），想看读音再开「显示读音」：英文释义标音标，日文和韩文释义标罗马字，法、西、俄、德释义标国际音标（德语给实际读音）。释义和读音查本机词库，显示时不联网（Android、iOS 和 Linux 上英文音标词典和法日西俄德韩的外语读音词典各要在设置里下载一次）；「候选词翻译」不选在线翻译服务时也只查本机词库。
 - **还有什么**：「候选词翻译」的目标语言还可以换成法、日、西、俄、德、韩（鸿蒙手机上没有俄语）；「背单词」内置中考到 GRE 八本词书，按间隔重复排复习。
-- **平台差异**：音标目前在 macOS、Android 和 Windows 新版预览上显示；Windows 正式版由 [msime-windows](https://github.com/metasequoiaime/msime-windows) 发布，没有单独的「显示英文释义」开关，打开「候选词翻译」就会显示离线英文释义，也能用 Ctrl+Enter，暂时没有音标，也没有按间隔重复排复习的「背单词」词书；手机版仍是测试版。
+- **平台差异**：读音目前在 macOS、Linux、Android、iOS、鸿蒙和 Windows 新版预览上显示；Windows 正式版由 [msime-windows](https://github.com/metasequoiaime/msime-windows) 发布，没有单独的「显示英文释义」开关，打开「候选词翻译」就会显示离线英文释义，也能用 Ctrl+Enter，暂时没有音标，也没有按间隔重复排复习的「背单词」词书；手机版仍是测试版。
 
 **输入法能看到你输入的一切，所以这个问题应该有一个能逐条核对的答案：[哪些数据会离开设备](PRIVACY.md)。**简短版本：新装的默认配置下没有功能会把你输入的内容发出设备；云联想（把正在组的拼音发给 Google 输入工具）要你在首次询问或设置里打开，其余联网功能都要你自己填凭据或选择服务才会工作。另有一条不携带输入内容的自有匿名使用统计：六个平台都会向 `api.msime.app` 发送每日活跃、会话和崩溃（错误摘要与去掉目录的调用栈）记录，默认开启，可以在设置的「匿名使用统计」里关闭——字段、逐平台差异和落盘位置逐条列在 [PRIVACY.md](PRIVACY.md#使用统计与崩溃上报默认开启可关闭)。仓库不接入任何第三方统计或崩溃上报 SDK。
 
@@ -66,7 +66,7 @@ zhoumo   →  周末   weekend   →  weekend
 
 | 平台 | 入口目录 | 宿主形态与集成方式 |
 | --- | --- | --- |
-| [Android](platforms/android/README.md) | `platforms/android/` | 输入法服务 `app.msime.android.MSIMEInputService` 跑在 `:ime` 独立进程，Java 宿主经 `platforms/android/native/client_jni.cpp` 调 host-api；发布的 APK（`build-apk.sh`）用原生 Java 设置界面，不含 Tauri/React；带 React 设置的 Tauri 合包（`build-client-apk.sh`）与输入法同包不同进程、共享私有 files/bootstrap/state，只用于开发验证，不发布；手写走 ML Kit Digital Ink |
+| [Android](platforms/android/README.md) | `platforms/android/` | 输入法服务 `app.msime.android.MSIMEInputService` 跑在 `:ime` 独立进程，Java 宿主经 `platforms/android/native/client_jni.cpp` 调 host-api；发布的 APK（`build-apk.sh`）用原生 Java 设置界面，不含 Tauri/React；手写走 ML Kit Digital Ink |
 | [iOS](platforms/ios/README.md) | `platforms/ios/` | XcodeGen 从 `project.yml` 生成的原生 App 内嵌键盘扩展 `MSIMEKeyboardExtension`，两者通过 App Group `group.app.msime.ios` 共享状态；Swift 键盘直接调 host-api，手写走 ML Kit Digital Ink |
 | [macOS](platforms/macos/README.md) | `platforms/macos/` | InputMethodKit bundle（产物名 `水杉输入法.app`，bundle id `app.msime.inputmethod.MetasequoiaIME`），Swift 后端编成 `MSIMEBackend.dylib` 随 bundle 分发，Sparkle 负责自动更新 |
 | [Linux](platforms/linux/README.md) | `platforms/linux/` | IBus 与 Fcitx5 是两个并列的系统入口，链同一份 host-api ABI；在线联想、语音、剪贴板等能力由独立 provider 进程加 systemd 用户单元承载；CPack 出 TGZ 与 DEB |
@@ -109,7 +109,7 @@ pnpm build
 
 桌面设置的应用标识和默认应用数据目录按平台命名：macOS 是 `app.msime.macos`，Windows 是 `app.msime.windows`，Linux 是 `app.msime.linux`。偏好保存在其中的 `preferences.json`。也可用绝对路径环境变量 `MSIME_CLIENT_STATE_DIR` 指向隔离开发目录。macOS 原生宿主读取同一份配置并在当前组词结束后应用更新；多个设置窗口同时保存时通过 revision 检测冲突，用户须显式重新读取后决定是否覆盖。
 
-Android 合包构建和设备测试见 [Android 宿主](platforms/android/README.md#tauri--react-共享设置合包)。合包只用于开发验证，发布的 APK 是不含 Tauri 的原生包；合包里 Tauri 设置与原生 `:ime` 服务同包、不同进程，共享私有 files/bootstrap/state，关闭设置窗口不结束输入法进程。iOS 的产品宿主是 `platforms/ios` 的原生 App，设置界面是 SwiftUI 原生页面，它嵌入原生键盘扩展并通过 App Group 共享状态；App 里没有 WebView，Tauri iOS 工程只在单独构建公共组件时产出，不作为 App 分发或启动。签名与设备安装步骤见 [iOS 宿主](platforms/ios/README.md)。
+Android 的构建和设备测试见 [Android 宿主](platforms/android/README.md)，发布的 APK 是不含 Tauri 的原生包。iOS 的产品宿主是 `platforms/ios` 的原生 App，设置界面是 SwiftUI 原生页面，它嵌入原生键盘扩展并通过 App Group 共享状态；App 里没有 WebView。签名与设备安装步骤见 [iOS 宿主](platforms/ios/README.md)。
 
 共享设置支持 shuangpin_profile：xiaohe（小鹤）、ziranma（自然码）、shoudao（首道）、microsoft（微软）、smart_abc（智能 ABC），以及 custom（自定义双拼，键位表存在 shuangpin_custom_profile）。缺省按小鹤读取，未知值拒绝；设置页在非双拼方案下禁用此选择但保留已选值。macOS 和 Linux 的设置页可以从内置方案起步编辑自定义键位、导入导出 JSON，表要通过 Engine 的校验才能保存；表不能用时输入法按小鹤运行。方案更改沿用组词结束后替换 Engine 的规则。
 

@@ -34,12 +34,23 @@ pub fn build(sources: &Sources, licenses: &Path, out: &Path) -> Result<Vec<Strin
         }
         None => Vec::new(),
     };
+    let corpus = hkcancor::parse(&corpus)?;
+    // 两张异体表和否决表都必须在 checkout 里，缺了就直接失败，不退回旧的替换清单：只有 msime-dictionary 的发布跑 `languages`，它总是构建 `main` 的当前提交，碰到缺文件只可能是两个仓库的 PR 合反了顺序，报出缺哪个文件比悄悄发布另一份字形好查。
+    let tw_variants = text::read(&sources.pinned(cantonese::TW_VARIANTS)?)?;
+    let hk_variants = text::read(&sources.pinned(cantonese::HK_VARIANTS)?)?;
+    let vetoes =
+        cantonese::parse_variant_vetoes(&text::read(&sources.pinned(cantonese::VARIANT_VETOES)?)?)?;
+    let forms = cantonese::hong_kong_forms(
+        &cantonese::candidate_variants(&tw_variants, &hk_variants, &vetoes)?,
+        &corpus,
+    );
     let dictionary = cantonese::build(
         &characters,
         &cantonese::parse_words(&words)?,
         &cantonese::parse_essay(&essay)?,
-        &hkcancor::parse(&corpus)?,
+        &corpus,
         &custom_words,
+        &forms,
     );
     let database = out.join(cantonese::DATABASE);
     cantonese::write(&dictionary, &database, commit)?;
@@ -60,8 +71,14 @@ pub fn build(sources: &Sources, licenses: &Path, out: &Path) -> Result<Vec<Strin
         ),
         None => format!("{} is not in the checkout", cantonese::CUSTOM),
     };
+    let forms_summary = forms
+        .iter()
+        .map(|(opencc, form)| format!("{opencc}→{} {}", form.hong_kong, form.corpus_count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let vetoes_summary = vetoes.iter().collect::<String>();
     summaries.push(format!(
-        "{}: {} syllables, {} character and {} word entries ({} of them from the essay; {} words weighed by the HKCanCor counts at {} each, {} of them held below an essay word of their key; {custom_summary})",
+        "{}: {} syllables, {} character and {} word entries ({} of them from the essay; {} words weighed by the HKCanCor counts at {} each, {} of them held below an essay word of their key; {custom_summary}; {} character entries raised toward {} by the words they are written in; {} OpenCC forms spelled the Hong Kong way, with their HKCanCor counts: {forms_summary}; kept by {}: {vetoes_summary})",
         cantonese::DATABASE,
         counts.syllables,
         counts.characters,
@@ -69,7 +86,11 @@ pub fn build(sources: &Sources, licenses: &Path, out: &Path) -> Result<Vec<Strin
         dictionary.essay_words,
         dictionary.corpus_words,
         dictionary.corpus_scale,
-        dictionary.corpus_capped
+        dictionary.corpus_capped,
+        dictionary.characters_raised,
+        cantonese::WORD_FLOOR_CEILING,
+        forms.len(),
+        cantonese::VARIANT_VETOES
     ));
 
     let commit = reference_commit(sources, zhuyin::REFERENCE)?;

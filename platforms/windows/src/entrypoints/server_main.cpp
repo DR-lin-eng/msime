@@ -32,6 +32,7 @@
 #include "HelpcodeRoot.h"
 #include "SoundPackRoot.h"
 #include "PluginPackRoot.h"
+#include "RerankModelRoot.h"
 #include "MaintenanceHotkey.h"
 #include "NativeTextInput.h"
 #include "ModeAuthority.h"
@@ -58,6 +59,8 @@
 #include "TrayMenuWindow.h"
 #include "UpdateNotifier.h"
 #include "../../common/UpdateRecordDirectory.h"
+#include "../../../common/VocabularyDueMenu.h"
+#include "../../../common/ReadAloudText.h"
 #include "DictionarySyncSchedule.h"
 #include "DictionarySyncWorker.h"
 #include "../../common/DictionarySyncDirectory.h"
@@ -65,6 +68,7 @@
 #include "VoiceHotkey.h"
 #include "VoiceInputSession.h"
 #include "VoiceSessionPolicy.h"
+#include "SystemSpeech.h"
 #include "WatchdogPolicy.h"
 #include "Telemetry.h"
 #include "TelemetryConsent.h"
@@ -152,6 +156,25 @@ nlohmann::json theme_catalog() {
   } catch (const std::exception &) {
   }
   return nlohmann::json();
+}
+// 今日待复习的张数（msime_client_vocabulary_due_count），读不出来时是 -1。目录与设置窗口、共享应用的背单词页相同：状态目录、Server 所在的目录（内置词书装在它的 wordbooks 下）和状态目录下的插件目录。托盘卡片打开时调一次，读进度文档和选中的一本书，不在按键路径上。
+int32_t vocabulary_due_count(const std::filesystem::path &state_root,
+                             const std::filesystem::path &resources) {
+  const auto day = msime::vocabulary_due::local_day(std::time(nullptr));
+  if (day.empty() || state_root.empty() || resources.empty())
+    return -1;
+  try {
+    const auto request = nlohmann::json{
+        {"directory", state_root.u8string()},
+        {"resources", resources.u8string()},
+        {"plugins", (state_root / L"plugins").u8string()},
+        {"day", day}}.dump();
+    return msime_client_vocabulary_due_count(
+        reinterpret_cast<const uint8_t *>(request.data()), request.size());
+  } catch (...) {
+    // 路径转不成 UTF-8：当作读不出来，这一行不列出。
+    return -1;
+  }
 }
 // The artwork and minimum width of the package a resolved theme draws. The theme names the package only when it is drawn in this layout and mode, so there is no gate here.
 msime::windows::CandidateSkinAssets
@@ -1041,9 +1064,11 @@ int wmain(int argc, wchar_t **argv) {
     apply_diagnostic_log(diagnostic_log, prepared.at("value").at("preferences"));
     // Usage reporting, on unless the user turned usage_reporting off: one session per Server process, kept in this Windows user's %LOCALAPPDATA%\MSIME. begin closes the previous session (session_crash only when it left a crash record) and queues today's active; it is file I/O only. Delivery runs on a thread that is never joined, so an unreachable endpoint cannot delay the Server and exiting mid-request only leaves the events queued for the next start.
     startup_stage = "telemetry";
-    const bool usage_reporting = msime::windows::usage_reporting_enabled(prepared.at("value").at("preferences"));
+    std::optional<msime::telemetry::ConsentObserver> reporting_observer;
     if (const auto telemetry_directory = edition_telemetry_directory(); !telemetry_directory.empty()) {
-      msime::telemetry::begin({"windows", MSIME_WINDOWS_VERSION, telemetry_directory, usage_reporting, {}});
+      // 持久偏好与队列绑定同一授权代次；观察不等待网络，迟到的发布回调不覆盖当前授权。
+      msime::telemetry::begin({"windows", MSIME_WINDOWS_VERSION, telemetry_directory, std::nullopt, config.state_root});
+      reporting_observer.emplace();
       msime::telemetry::start_flushing();
     }
     // The user's anonymous MSIME account is registered on the first run after install, as on every other platform; once anonymous-session.json exists this is a file read. It runs off the main thread for the same reason as the telemetry event, and a failure (offline, rate limited) is simply retried on the next start.
@@ -1115,6 +1140,12 @@ int wmain(int argc, wchar_t **argv) {
     auto follow_cursor = std::make_shared<std::atomic<bool>>(
         prepared.at("value").at("preferences")
             .value("candidate_follow_cursor", true));
+    // 游戏兜底锚点放客户区上部。多数游戏的聊天输入框在左下角，默认的落点就是按那里定的；
+    // 输入框在画面上沿的游戏（DNF）把这一项打开，候选窗才落在输入处附近。
+    auto game_anchor_top = std::make_shared<std::atomic<bool>>(
+        prepared.at("value").at("preferences")
+            .value("game_compatibility", nlohmann::json::object())
+            .value("overlay_anchor_top", false));
     // 「输入时显示双拼键位提示」（共享偏好 `shuangpin_keymap_hint`，没选过时文档里没有这一项，按关处理），同样经原子量发布，改了设置不用重启 Server。
     auto shuangpin_keymap_enabled = std::make_shared<std::atomic<bool>>(
         shuangpin_keymap_preference(prepared.at("value").at("preferences")));
@@ -1217,7 +1248,7 @@ int wmain(int argc, wchar_t **argv) {
                       FanyImeProtocol::OrderedPreferences |
                       FanyImeProtocol::GameHostCandidate |
                       FanyImeProtocol::FieldTraits |
-                      FanyImeProtocol::JapaneseToggleShortcut)
+                      FanyImeProtocol::QuickPhraseCursor | FanyImeProtocol::JapaneseToggleShortcut)
                    : (FanyImeProtocol::RequiredCapabilities |
                       FanyImeProtocol::CandidateContinuation |
                       FanyImeProtocol::UiLessCandidates |
@@ -1225,7 +1256,7 @@ int wmain(int argc, wchar_t **argv) {
                       FanyImeProtocol::GroupedPanelKeys |
                       FanyImeProtocol::OrderedPreferences |
                       FanyImeProtocol::GameHostCandidate |
-                      FanyImeProtocol::FieldTraits);
+                      FanyImeProtocol::FieldTraits | FanyImeProtocol::QuickPhraseCursor);
     // 管道对端身份对不上时记下 pid 和错误码，用来区分「DLL 加载了但 Server 拒了连接」和「DLL 根本没加载」，比如反作弊剥掉了 Server 打开游戏进程所需的权限。
     // 在握手线程上运行，而 notice 会写盘：反作弊持续拒绝时 TSF 每次重连都会走到这里，所以同一个 pid 一分钟只记一条，免得拖慢排队中的握手。
     auto identity_rejected_logged =
@@ -1248,7 +1279,7 @@ int wmain(int argc, wchar_t **argv) {
     options.preferences_directory = config.state_root.u8string();
     options.preferences_published =
         [&, voice_config, voice_config_mutex, voice_host_options, traditional_output,
-         toolbar_enabled, follow_cursor, shuangpin_keymap_enabled, typing_feedback, candidate_mouse_wheel, voice_theme, candidate_fonts, candidate_style,
+         toolbar_enabled, follow_cursor, game_anchor_top, shuangpin_keymap_enabled, typing_feedback, candidate_mouse_wheel, voice_theme, candidate_fonts, candidate_style,
          toolbar_theme, menu_theme, mode_scope_global, app_mode_rules,
          input_mode_hud_enabled, input_mode_hud_logo, tsf_config, candidate_layout,
          tsf_config_mutex, tray_preferences, tray_preferences_mutex,
@@ -1324,6 +1355,10 @@ int wmain(int argc, wchar_t **argv) {
           follow_cursor->store(
               preferences.value("candidate_follow_cursor", true),
               std::memory_order_release);
+          game_anchor_top->store(
+              preferences.value("game_compatibility", nlohmann::json::object())
+                  .value("overlay_anchor_top", false),
+              std::memory_order_release);
           shuangpin_keymap_enabled->store(shuangpin_keymap_preference(preferences),
                                           std::memory_order_release);
           typing_feedback->store(typing_feedback_wanted(preferences),
@@ -1389,6 +1424,7 @@ int wmain(int argc, wchar_t **argv) {
     name_builtin_sound_packs(session_options, config.state_root);
     name_builtin_helpcodes(session_options, config.state_root);
     name_official_plugin_packs(session_options, executable_directory());
+    name_rerank_models(session_options, executable_directory());
     startup_stage = "pipe_server";
     SessionPump::Presentation pump_presentation;
     pump_presentation.delivered = [&](const FocusLease &lease, const PendingReply &reply,
@@ -1613,6 +1649,12 @@ int wmain(int argc, wchar_t **argv) {
           const auto notice = add_to_personal_wordbook(directory, request);
           hud_feedback.publish({notice, notice, true});
         });
+    // 候选右键菜单「朗读」：SAPI 读完才返回，所以不在候选窗的 UI 线程上做。一次只读一个，正在读时多点的那几下丢掉；没有可用的声音时提示走同一个 HUD。声明位置与 personal_wordbook 相同的理由。
+    SingleClickWorker<std::string> read_aloud(
+        [&hud_feedback](const std::string &text) {
+          if (const auto problem = msime::windows::speak_english(text))
+            hud_feedback.publish({*problem, *problem, true});
+        });
     startup_stage = "candidate_window";
     DesktopCandidateSettings candidate_settings;
     candidate_settings.fonts = {config.candidate_font, config.candidate_fallback_fonts,
@@ -1627,7 +1669,8 @@ int wmain(int argc, wchar_t **argv) {
         [&](const CandidatePresentation &value) { server.candidate_rendered(value.lease, value.render_serial); },
         [&](const FocusLease &lease, bool open) { server.set_candidate_expansion(lease, open); },
         [&](const FocusLease &lease) { return server.candidate_lease_current(lease); },
-        [&](const CandidateWindow::PersonalWordbookRequest &request) { (void)personal_wordbook.submit(request); }});
+        [&](const CandidateWindow::PersonalWordbookRequest &request) { (void)personal_wordbook.submit(request); },
+        {msime::read_aloud::text_for, [&](const std::string &text) { (void)read_aloud.submit(text); }}});
     // 空格、数字键和点选的渲染屏障要等回执时叫醒候选窗立即绘制，屏障的 30 毫秒只花在真正的绘制上，不花在两级 16 毫秒的轮询上（#9519）。守卫声明在 candidates 之后、先于它析构：撤掉之后 Server 不会再调用这个回调。
     server.set_candidate_render_request([&candidates] { candidates.wake(); });
     struct CandidateRenderRequestGuard {
@@ -1730,6 +1773,7 @@ int wmain(int argc, wchar_t **argv) {
       candidate_skin_applied = theme.candidate_skin;
     }
     candidate_settings.follow_cursor = follow_cursor->load(std::memory_order_acquire);
+    candidate_settings.game_anchor_top = game_anchor_top->load(std::memory_order_acquire);
     candidate_settings.keymap_enabled = shuangpin_keymap_enabled->load(std::memory_order_acquire);
     candidates.start(candidate_settings);
     // The toolbar and the menus draw the card's theme in their own light/dark mode, with the card's layout deciding whether a package is drawn.
@@ -1824,25 +1868,25 @@ int wmain(int argc, wchar_t **argv) {
       return std::optional<bool>(
           traditional_output->load(std::memory_order_acquire));
     });
-    // The Server owns the floating toolbar. Every other row opens a surface in
-    // the shared desktop shell, which is a separate process: with no shell
-    // installed beside this Server those rows stay visible and disabled rather
-    // than accepting a click that does nothing.
+    // Server 自己管悬浮工具栏，其余各行都在另一个进程里打开界面：设置窗口或面板宿主不在本 Server 旁边时，这些行显示但不可用，不接受一次什么都不做的点击。面板宿主由 MSIME_WINDOWS_PANEL_HOST 选定，启动时读一次，可用性判断和实际启动用同一个选择。
     const auto shell_directory = executable_directory();
     const auto configured_shell = configured_shell_command();
+    const auto panel_host = configured_panel_host();
     const auto settings_request = shell_surface_request(TrayMenuCommand::OpenSettings);
     const auto preview_request = shell_surface_request(TrayMenuCommand::OpenEmojiPanel);
     const auto settings_shell = settings_request
                                     ? shell_executable(shell_directory, configured_shell,
-                                                       *settings_request)
+                                                       *settings_request, panel_host)
                                     : std::nullopt;
     const auto preview_shell = preview_request
-                                   ? shell_executable(shell_directory, {}, *preview_request)
+                                   ? shell_executable(shell_directory, {}, *preview_request,
+                                                      panel_host)
                                    : std::nullopt;
     const ShellLaunchContext shell_context{
         config.state_root, config.state_root / L"runtime-options.json"};
     const auto launch_shell = [&](const ShellSurfaceRequest &request) {
-      const auto executable = shell_executable(shell_directory, configured_shell, request);
+      const auto executable =
+          shell_executable(shell_directory, configured_shell, request, panel_host);
       return executable && launch_shell_surface(*executable, request, shell_context);
     };
     // 首次准备运行配置后立即打开设置首页。安装器只负责安装文件和启动 Server，
@@ -1885,6 +1929,7 @@ int wmain(int argc, wchar_t **argv) {
     menu_capabilities.settings = settings_shell.has_value();
     menu_capabilities.cloud_clipboard = preview_shell.has_value();
     menu_capabilities.cloud_dictionary = preview_shell.has_value();
+    menu_capabilities.vocabulary_panel = preview_shell.has_value();
     menu_capabilities.cantonese = language_dictionaries.cantonese;
     menu_capabilities.zhuyin = language_dictionaries.zhuyin;
     menu_capabilities.stroke = language_dictionaries.stroke;
@@ -2035,8 +2080,17 @@ int wmain(int argc, wchar_t **argv) {
           state.themes = theme_rows;
           return state;
     };
+    // 托盘卡片另外带上今日待复习：只有卡片列「背单词」一行，悬浮工具栏的方案菜单也取 tray_state，不必为它读进度。候选窗开着就是在组字，这时不读也不列。
+    const auto tray_card_state = [&] {
+          auto state = tray_state();
+          const auto shown = server.candidate_view();
+          state.composing = shown && shown->visible;
+          if (!state.composing && menu_capabilities.vocabulary_panel)
+            state.vocabulary_due = vocabulary_due_count(config.state_root, shell_directory);
+          return state;
+    };
     startup_stage = "tray_menu";
-    TrayMenuWindow tray(menu_capabilities, tray_command, tray_state);
+    TrayMenuWindow tray(menu_capabilities, tray_command, tray_card_state);
     // 主题页的一行写存储的 global_theme；偏好监视器随后把新主题发布给候选窗、工具栏和这张卡片。只接受目录里有的主题。
     tray.set_theme_action([&](const std::string &theme) {
       const bool listed = std::any_of(
@@ -2592,6 +2646,8 @@ int wmain(int argc, wchar_t **argv) {
       }
       candidate_settings.follow_cursor =
           follow_cursor->load(std::memory_order_acquire);
+      candidate_settings.game_anchor_top =
+          game_anchor_top->load(std::memory_order_acquire);
       candidate_settings.mouse_wheel =
           candidate_mouse_wheel->load(std::memory_order_acquire);
       candidate_settings.keymap_enabled = shuangpin_keymap_enabled->load(std::memory_order_acquire);

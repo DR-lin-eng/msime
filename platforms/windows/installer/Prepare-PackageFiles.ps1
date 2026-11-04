@@ -156,6 +156,10 @@ $tsfArm64Release = Join-Path $tsfArm64Directory 'MetasequoiaImeTsf.dll'
 $tsfArm64Pdb = Join-Path $tsfArm64Directory 'MetasequoiaImeTsf.pdb'
 $arm64HostDllName = [IO.Path]::GetFileNameWithoutExtension($hostDllName) + '_arm64.dll'
 $tsfArm64Host = Join-Path $tsfArm64Directory $arm64HostDllName
+$werHelperName = 'MetasequoiaImeCrashWer.dll'
+$tsf32WerHelper = Join-Path (Split-Path -Parent $tsf32Release) $werHelperName
+$tsf64WerHelper = Join-Path (Split-Path -Parent $tsf64Release) $werHelperName
+$tsfArm64WerHelper = Join-Path $tsfArm64Directory $werHelperName
 $tsf32Host = Join-Path (Split-Path -Parent $tsf32Release) $hostDllName
 $tsf64Host = Join-Path (Split-Path -Parent $tsf64Release) $hostDllName
 $factoryConfig = Join-Path $PSScriptRoot 'config.default.toml'
@@ -191,14 +195,23 @@ if ($DesktopPreviewExecutable -and -not (Test-Path -LiteralPath $previewSource -
 Assert-PathExists -LiteralPath $serverRelease -Description 'Server Release 输出目录'
 Assert-PathExists -LiteralPath (Join-Path $serverRelease 'MetasequoiaImeWatchdog.exe') -Description 'Watchdog Release EXE'
 Assert-PathExists -LiteralPath $mcpRelease -Description 'MCP 服务程序 Release EXE'
+# 现代包的原生面板宿主（Build-Client.ps1 用 panels/win7 的源码编出的 msime-client-panels.exe）随 Server 输出整体复制。缺了它，MSIME_WINDOWS_PANEL_HOST=native 的机器上托盘和设置里的面板入口全都不可用，所以在替换旧暂存之前就拒绝。Win7 包用自己的 msime-client-panels-win7.exe。
+if ($Windows7Architecture -eq '') {
+    Assert-PathExists -LiteralPath (Join-Path $serverRelease 'msime-client-panels.exe') -Description '原生面板宿主 msime-client-panels.exe'
+}
 Assert-PathExists -LiteralPath $tsf32Release -Description '32 位 TSF Release DLL'
-if ($Windows7Architecture -ne 'x86') { Assert-PathExists -LiteralPath $tsf64Release -Description '64 位 TSF Release DLL' }
+Assert-PathExists -LiteralPath $tsf32WerHelper -Description '32 位 TSF 的 WER helper'
+if ($Windows7Architecture -ne 'x86') {
+    Assert-PathExists -LiteralPath $tsf64Release -Description '64 位 TSF Release DLL'
+    Assert-PathExists -LiteralPath $tsf64WerHelper -Description '64 位 TSF 的 WER helper'
+}
 if ($Windows7Architecture -eq '') {
 Assert-PathExists -LiteralPath $tsf32Pdb -Description '32 位 TSF Release PDB'
 Assert-PathExists -LiteralPath $tsf64Pdb -Description '64 位 TSF Release PDB'
 Assert-PathExists -LiteralPath $tsfArm64Release -Description 'Arm64X TSF Release DLL'
 Assert-PathExists -LiteralPath $tsfArm64Pdb -Description 'Arm64X TSF Release PDB'
 Assert-PathExists -LiteralPath $tsfArm64Host -Description "Arm64X TSF 的 $arm64HostDllName"
+Assert-PathExists -LiteralPath $tsfArm64WerHelper -Description 'Arm64X TSF 的 WER helper'
 }
 foreach ($hostDll in @($tsf32Host) + @($(if ($Windows7Architecture -ne 'x86') { $tsf64Host }))) {
     if (-not (Test-Path -LiteralPath $hostDll -PathType Leaf)) {
@@ -336,7 +349,7 @@ else {
     Reset-Directory -LiteralPath $targetAppData
     $defaultConfigPath = Join-Path $targetAppData 'config.default.toml'
     # 出厂配置来自本仓库的 default_config，不依赖本机是否已安装输入法。安装脚本用 onlyifdoesntexist 生成用户 config.toml，升级不会覆盖已有方案/主题。
-    [IO.File]::WriteAllText($defaultConfigPath, $defaultConfig, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($defaultConfigPath, $defaultConfig, [Text.UTF8Encoding]::new($true))
 
     $targetHelpcodes = Join-Path $targetAppData 'helpcodes'
     Reset-Directory -LiteralPath $targetHelpcodes
@@ -425,9 +438,10 @@ if (-not $editionOfflineGlosses) {
         Write-Host "No offline glosses with their notice in $glossesSource; candidate glosses stay English only"
     }
 }
-# 候选释义的英文读音表（scripts/build_pronunciations.py）、单字英文释义（scripts/build_character_glosses.py）和 english.db 没收的词的英文释义（scripts/build_word_glosses.py），和 macOS 的 stage-resources.sh 一样装在 resources 旁边：host-api 的 msime_client_pronunciation_request、msime_client_candidate_gloss_request 和 msime_client_gloss_breakdown_request 到那里找。都是可选的，只随各自的授权声明一起装；没有时英文释义不标音标、单字和长尾词没有英文释义、整句候选没有逐词拆解。单字和词的释义按中文候选查，只给提供中文方案的版本。
+# 候选释义的英文读音表（scripts/build_pronunciations.py）、法日西俄德韩释义行的读音表（scripts/build_target_pronunciations.py，六种语言各一个 *-phonetic.db）、单字英文释义（scripts/build_character_glosses.py）和 english.db 没收的词的英文释义（scripts/build_word_glosses.py），和 macOS 的 stage-resources.sh 一样装在 resources 旁边：host-api 的 msime_client_pronunciation_request、msime_client_candidate_gloss_request 和 msime_client_gloss_breakdown_request 到那里找。都是可选的，只随各自的授权声明一起装；没有时英文释义不标音标、其他语言的释义不标读音、单字和长尾词没有英文释义、整句候选没有逐词拆解。单字和词的释义按中文候选查，只给提供中文方案的版本；两张读音表读的是释义行本身，和英文读音表一样不分版本。
 foreach ($table in @(
         @{ Name = 'pronunciations'; Database = 'en-phonetic.db'; Notice = 'pronunciations-NOTICE.txt'; Chinese = $false },
+        @{ Name = 'target-pronunciations'; Database = '*-phonetic.db'; Notice = 'target-pronunciations-NOTICE.txt'; Chinese = $false },
         @{ Name = 'character-glosses'; Database = 'zh-en.db'; Notice = 'character-glosses-NOTICE.txt'; Chinese = $true },
         @{ Name = 'word-glosses'; Database = 'zh-en.db'; Notice = 'word-glosses-NOTICE.txt'; Chinese = $true })) {
     $tableSource = Join-Path $RepoRoot (Join-Path 'target' $table.Name)
@@ -436,11 +450,15 @@ foreach ($table in @(
         Remove-Item -LiteralPath $tableTarget -Recurse -Force
     }
     if ($Light -or ($table.Chinese -and -not $editionOfflineGlosses)) { continue }
-    $tableDatabase = Join-Path $tableSource $table.Database
+    # Database 可以是通配符（外语读音表每种语言一个文件），按它找到的文件都装上。
+    $tableDatabases = @()
+    if (Test-Path -LiteralPath $tableSource -PathType Container) {
+        $tableDatabases = @(Get-ChildItem -LiteralPath $tableSource -Filter $table.Database -File)
+    }
     $tableNotice = Join-Path $tableSource $table.Notice
-    if ((Test-Path -LiteralPath $tableDatabase -PathType Leaf) -and (Test-Path -LiteralPath $tableNotice -PathType Leaf)) {
+    if (($tableDatabases.Count -gt 0) -and (Test-Path -LiteralPath $tableNotice -PathType Leaf)) {
         New-Item -ItemType Directory -Path $tableTarget -Force | Out-Null
-        Copy-Item -LiteralPath $tableDatabase -Destination $tableTarget -Force
+        foreach ($tableDatabase in $tableDatabases) { Copy-Item -LiteralPath $tableDatabase.FullName -Destination $tableTarget -Force }
         Copy-Item -LiteralPath $tableNotice -Destination $tableTarget -Force
         Write-Host "$($table.Name) staged in $tableTarget"
     } else {
@@ -529,6 +547,49 @@ if (-not $Light) {
         }
     }
 }
+# 整句联想「增强」逐键重排的两档 ONNX 模型（chinese-ime-lm 的 rerank-v2：8x448 与 6x256），scripts/fetch_rerank_model.py 按 resources/rerank-model.lock.json 下载核对到 target/rerank-model。装在 Server 目录旁边的 rerank-model 和 rerank-model-small：Server 把自己所在的目录作为模型目录告诉它的会话（src/system/RerankModelRoot.h），x64 宿主 DLL 开着 onnx-rerank（Build-RustOutputs.ps1），加载时先自测大的、打一页超过 10 ms 换小的；没有模型时退回 resources 里随包的 sentence-model.safetensors。只给带键盘神经模型的版本（版本表 features.neural_keyboard）；轻量包不带，Win7 包也不带（Win7 的宿主不链接 ONNX Runtime，见 Build-Windows7Core.ps1）。暂存前按锁核对长度和 SHA-256；设置 MSIME_REQUIRE_RERANK_MODELS=1 时缺了就失败。
+$rerankSource = Join-Path $RepoRoot 'target/rerank-model'
+$rerankLock = Get-Content -LiteralPath (Join-Path $RepoRoot 'resources/rerank-model.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$editionNeuralKeyboard = [bool]$editionEntry[0].features.neural_keyboard
+$rerankWanted = -not $Light -and $Windows7Architecture -eq '' -and $editionNeuralKeyboard
+$rerankComplete = $rerankWanted
+if ($rerankWanted) {
+    # 先核对再动暂存目录：不符时拒绝，上一次暂存的模型原样留着。
+    foreach ($model in $rerankLock.models) {
+        foreach ($artifact in $model.artifacts) {
+            $rerankFile = Join-Path (Join-Path $rerankSource $model.directory) $artifact.file
+            if (-not (Test-Path -LiteralPath $rerankFile -PathType Leaf)) {
+                $rerankComplete = $false
+                continue
+            }
+            if ((Get-Item -LiteralPath $rerankFile).Length -ne [long]$artifact.size -or
+                (Get-FileHash -LiteralPath $rerankFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $artifact.sha256) {
+                throw "$rerankFile 与 resources/rerank-model.lock.json 不符，重新运行 python scripts/fetch_rerank_model.py"
+            }
+        }
+    }
+    if (-not $rerankComplete -and $env:MSIME_REQUIRE_RERANK_MODELS -eq '1') {
+        throw "MSIME_REQUIRE_RERANK_MODELS=1，但 $rerankSource 里没有 resources/rerank-model.lock.json 列出的全部模型文件，先运行 python scripts/fetch_rerank_model.py"
+    }
+}
+foreach ($model in $rerankLock.models) {
+    $rerankTarget = Join-Path $targetServer $model.directory
+    if (Test-Path -LiteralPath $rerankTarget) {
+        Remove-Item -LiteralPath $rerankTarget -Recurse -Force
+    }
+}
+if ($rerankComplete) {
+    foreach ($model in $rerankLock.models) {
+        $rerankTarget = Join-Path $targetServer $model.directory
+        New-Item -ItemType Directory -Path $rerankTarget -Force | Out-Null
+        foreach ($artifact in $model.artifacts) {
+            Copy-Item -LiteralPath (Join-Path (Join-Path $rerankSource $model.directory) $artifact.file) -Destination $rerankTarget -Force
+        }
+    }
+    Write-Host "逐键重排模型已装入：$(@($rerankLock.models | ForEach-Object { Join-Path $targetServer $_.directory }) -join ', ')"
+} elseif ($rerankWanted) {
+    Write-Host "未找到逐键重排模型（$rerankSource），整句联想「增强」退回随包的句子模型"
+}
 if ($null -eq $voiceRuntimeFrom) {
     Write-Host "未找到本地语音识别运行时（$voiceRuntimeSource），安装包不含本地语音识别"
 } elseif ($voiceRuntimeFrom -ne $serverRelease) {
@@ -545,14 +606,14 @@ Get-ChildItem -LiteralPath $targetServer -Recurse -File |
     Remove-Item -Force
 # CI 里 Server 输出目录同时也是 x64 TIP 的构建目录。TIP 和它的符号暂存在 tsf_dll\64 下，只从版本目录加载；宿主 DLL 和 TIP 的运行时 DLL 也从同一份 tsf_dll\64 进入 Server 目录（msime_setup.iss），所以它们都不重复暂存。Build-Client.ps1 也把宿主 DLL 的 PDB 留在这里；Collect-Symbols.ps1 直接从构建输出取它打进符号包，所以它完全不暂存。
 $sharedRemoval = if ($Windows7Architecture -eq '') { @($hostDllName,'msime_host_api.pdb') + @($tsf64Dependencies | ForEach-Object { Split-Path -Leaf $_ }) } else { @('windows7-runtime-closure.json','windows7-imports.txt','files.txt') }
-foreach ($name in @('MetasequoiaImeTsf.dll', 'MetasequoiaImeTsf.pdb') + $sharedRemoval) {
+foreach ($name in @('MetasequoiaImeTsf.dll', 'MetasequoiaImeTsf.pdb', $werHelperName, 'MetasequoiaImeCrashWer.pdb') + $sharedRemoval) {
     $staged = Join-Path $targetServer $name
     if (Test-Path -LiteralPath $staged -PathType Leaf) { Remove-Item -LiteralPath $staged -Force }
 }
 
 # 版本声明（Edition::PACKAGE_MARKER_FILE）：MSIME.exe 和 msime-mcp.exe 从自己所在的 Server 目录读它，决定连哪个版本的 Server、用哪个状态目录。只有管理员能写 Program Files，普通进程改不了它。每个版本（包括 full）都写：full 在 Windows 上也有自己的一组名字（版本表 platforms.windows），不再是引入版本之前的那组。
 $editionMarker = Join-Path $targetServer 'edition.json'
-[IO.File]::WriteAllText($editionMarker, "{`"edition`": `"$Edition`"}`n", [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($editionMarker, "{`"edition`": `"$Edition`"}`n", [Text.UTF8Encoding]::new($true))
 
 Reset-Directory -LiteralPath $targetTsf
 $targetTsf32 = Join-Path $targetTsf '32'
@@ -563,7 +624,7 @@ if ($Windows7Architecture -ne '') {
         if ($Windows7Architecture -eq 'x86' -and $target[0] -eq 'x64') { continue }
         $sourceDirectory = Split-Path -Parent $target[1]
         & (Join-Path (Split-Path -Parent $PSScriptRoot) 'Copy-Windows7RuntimeClosure.ps1') -ProgramDirectory $sourceDirectory `
-            -EntryPoints @('MetasequoiaImeTsf.dll') -DependencyDirectories @($sourceDirectory) -Destination $target[2] -Architecture $target[0]
+            -EntryPoints @('MetasequoiaImeTsf.dll','MetasequoiaImeCrashWer.dll') -DependencyDirectories @($sourceDirectory) -Destination $target[2] -Architecture $target[0]
     }
 } else {
 New-Item -ItemType Directory -Path $targetTsf32, $targetTsf64, $targetTsfArm64 -Force | Out-Null
@@ -573,8 +634,8 @@ Copy-Item -LiteralPath $tsf64Release -Destination $targetTsf64 -Force
 Copy-Item -LiteralPath $tsf64Pdb -Destination $targetTsf64 -Force
 Copy-Item -LiteralPath $tsf32Host -Destination $targetTsf32 -Force
 Copy-Item -LiteralPath $tsf64Host -Destination $targetTsf64 -Force
-# Arm64X TIP 的 ARM64EC 那一半导入 x64 宿主，它由 tsf_dll\64 那一份装进同一个版本目录；这里只放 TIP 和 ARM64 宿主。两者都静态链接 C 运行时，没有别的运行时 DLL。
-Copy-Item -LiteralPath $tsfArm64Release, $tsfArm64Pdb, $tsfArm64Host -Destination $targetTsfArm64 -Force
+# Arm64X TIP 的 ARM64EC 那一半导入 x64 宿主，它由 tsf_dll\64 那一份装进同一个版本目录；这里放 TIP、WER helper 和 ARM64 宿主，均静态链接 C 运行时。
+Copy-Item -LiteralPath $tsfArm64Release, $tsfArm64Pdb, $tsfArm64Host, $tsfArm64WerHelper -Destination $targetTsfArm64 -Force
 # Build-Client 把检查过架构的发布依赖收集到 TIP 旁边；只复制上面列出的那些，绝不复制共用 x64 目录里的其余文件。
 foreach ($dependency in $tsf32Dependencies) { Copy-Item -LiteralPath $dependency -Destination $targetTsf32 -Force }
 foreach ($dependency in $tsf64Dependencies) { Copy-Item -LiteralPath $dependency -Destination $targetTsf64 -Force }
@@ -603,7 +664,14 @@ $updatedIss = [regex]::Replace(
     "#define MyAppVersion   `"$TargetVersion`""
 )
 $updatedIss = $updatedIss.TrimEnd("`r", "`n") + "`r`n"
-[IO.File]::WriteAllText($targetIss, $updatedIss, [Text.UTF8Encoding]::new($false))
+# 带 BOM 写回，和仓库里存的那一份一致：Inno Setup 6.3 之前读没有 BOM 的脚本会按系统
+# ANSI 代码页解释，而这个脚本里有中文的用户可见文字——开始菜单的「卸载 …」项，以及
+# [Code] 里缺 WebView2 / VC 运行库时的提示。同一件事在 editions.iss 上已经发生过：生成器
+# 当时不写 BOM，用 Inno Setup 6.2.2 编出来的 Windows 7 安装包里中文显示名就是乱码
+# （#10638 改成了 utf-8-sig）。改写版本号是编译前的最后一次落盘，不该顺带改掉一个被跟踪
+# 文件的编码：Windows 7 那条流水线编译时用的正是 6.2.2，而本机 ACP 是 65001 的机器丢了
+# BOM 也看不出问题，于是出不出乱码取决于在哪台机器上打包。
+[IO.File]::WriteAllText($targetIss, $updatedIss, [Text.UTF8Encoding]::new($true))
 
 }
 

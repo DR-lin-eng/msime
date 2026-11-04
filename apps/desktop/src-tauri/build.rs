@@ -1,27 +1,4 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
-
-fn link_ios_swift_runtime_exports() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("ios") {
-        return;
-    }
-    println!("cargo:rerun-if-env-changed=CONFIGURATION_BUILD_DIR");
-    let Some(products) = env::var_os("CONFIGURATION_BUILD_DIR").map(PathBuf::from) else {
-        return;
-    };
-    let archive = products.join("libMSIMESwiftRsRuntimeExports.a");
-    if !archive.is_file() {
-        panic!(
-            "missing Xcode 27 SwiftRs runtime export archive: {}",
-            archive.display()
-        );
-    }
-    println!("cargo:rustc-link-search=native={}", products.display());
-    println!("cargo:rustc-link-lib=static=MSIMESwiftRsRuntimeExports");
-}
+use std::{env, fs, path::Path, process::Command};
 
 /// 关于页写在版本号后面的发布日期 `YYYY-MM-DD`，经 `MSIME_APP_RELEASE_DATE` 编进设置应用（`app_release_date` 命令）。
 ///
@@ -131,7 +108,22 @@ fn watch_git_path(root: &Path, name: &str) {
 }
 
 fn main() {
-    link_ios_swift_runtime_exports();
+    if matches!(
+        env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        Ok("macos" | "windows" | "linux")
+    ) {
+        println!("cargo:rerun-if-changed=../../../platforms/common/CrashRecorder.cpp");
+        println!("cargo:rerun-if-changed=../../../platforms/common/CrashRecorder.h");
+        println!("cargo:rerun-if-changed=../../../platforms/common/PosixCrashFile.h");
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .file("../../../platforms/common/CrashRecorder.cpp")
+            .compile("msime_native_crash");
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+            println!("cargo:rustc-link-lib=dl");
+        }
+    }
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rerun-if-changed=macos/settings_glass.mm");
         cc::Build::new()

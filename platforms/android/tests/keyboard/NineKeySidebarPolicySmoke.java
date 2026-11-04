@@ -15,8 +15,9 @@ public final class NineKeySidebarPolicySmoke {
         sharedPreference();
         editor();
         choices();
+        ordinals();
         localSetting();
-        System.out.println("Android nine-key sidebar: defaults, layer row heights, shared tables, editor validation, symbol choices, custom symbol parsing and the legacy local key passed");
+        System.out.println("Android nine-key sidebar: defaults, layer row heights, shared tables, editor validation, symbol choices, ordinals, custom symbol parsing and the legacy local key passed");
     }
 
     /** 哪个键面用哪张表：数字键面换成算式符号那张，字母键面不变；空表回到各自的出厂表。 */
@@ -180,6 +181,12 @@ public final class NineKeySidebarPolicySmoke {
         check(NineKeySidebarPolicy.ADDABLE_SYMBOLS.stream().allMatch(symbol ->
             NineKeySidebarPolicy.parse(symbol) != null && NineKeySidebarPolicy.parse(symbol).size() == 1),
             "every fixed choice is a valid single symbol");
+    }
+
+    /** 编辑页每行的序号：1..N，第 30 项也是「30.」，三端同一写法。读屏描述、挪动和拖动的规则在 `home/ReorderPolicy`，由 ReorderPolicySmoke 覆盖（#10546）。 */
+    private static void ordinals() {
+        check(NineKeySidebarPolicy.ordinal(0).equals("1.") && NineKeySidebarPolicy.ordinal(29).equals("30."),
+            "ordinals count from one");
     }
 
     /** 本机旧键只留给迁移读：声明和规范化不变，读出来的值经 parse 交给迁移。 */

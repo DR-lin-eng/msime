@@ -1,7 +1,9 @@
 #include "../src/candidates/CandidateColors.h"
 #include "../src/candidates/CandidatePalette.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 
 int main() {
   using Json = nlohmann::json;
@@ -11,11 +13,29 @@ int main() {
   const auto light = host::candidate_native_palette(false);
   assert(light.surface == 0xFFFFFFu && light.text == 0x2E2E2Eu && light.number == 0x737373u);
   assert(light.accent == 0x1C71D8u && light.border == 0xE5E5E5u);
-  assert(light.selected == 0x3584E4u && light.selected_text == 0xFFFFFFu && light.selected_number == 0xE1EDFBu);
+  assert(light.selected == 0x1A5FB4u && light.selected_text == 0xFFFFFFu && light.selected_number == 0xDDE7F4u);
   const auto dark = host::candidate_native_palette(true);
   assert(dark.surface == 0x303030u && dark.text == 0xFFFFFFu && dark.number == 0xA2A2A2u);
   assert(dark.accent == 0x78AEEDu && dark.border == 0x404040u);
-  assert(dark.selected == 0x3584E4u && dark.selected_text == 0xFFFFFFu);
+  assert(dark.selected == 0x1A5FB4u && dark.selected_text == 0xFFFFFFu && dark.selected_number == 0xDDE7F4u);
+  // 默认选中行的候选文字和序号对选中底色都到 WCAG AA 的 4.5:1；选中行没有皮肤释义色时释义画序号色，读音和释义同色，所以它们也到 4.5:1。GNOME 强调色 #3584E4 上的白字只有约 3.8:1，所以选中底不用它。
+  const auto luminance = [](std::uint32_t rgb) {
+    const auto linear = [](double channel) {
+      return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(((rgb >> 16) & 255) / 255.0) + 0.7152 * linear(((rgb >> 8) & 255) / 255.0) +
+           0.0722 * linear((rgb & 255) / 255.0);
+  };
+  const auto contrast = [&](std::uint32_t a, std::uint32_t b) {
+    const double x = luminance(a), y = luminance(b);
+    return (std::max(x, y) + 0.05) / (std::min(x, y) + 0.05);
+  };
+  assert(contrast(0xFFFFFFu, host::kLinuxAccent) < 4.5);
+  for (const auto &native : {light, dark}) {
+    assert(native.selected == host::kLinuxSelection);
+    assert(contrast(native.selected_text, native.selected) >= 4.5);
+    assert(contrast(native.selected_number, native.selected) >= 4.5);
+  }
 
   // "follow" takes the mode preference, as Windows resolves theme_cand against theme_mode: only "system" consults the desktop appearance, and an explicit candidate mode wins over both.
   using host::candidate_dark_theme;
@@ -73,14 +93,14 @@ int main() {
   assert(!host::theme_color(Json("#1234567g")));
   assert(!host::theme_color(Json(nullptr)));
 
-  // `system` resolves to a null palette: the native tokens in the host's mode, solid #3584E4 selection with white text, a one-pixel outline, and no package decoration.
+  // `system` 解析出的调色板是 null：按宿主明暗画原生 token，实心 #1A5FB4 选中底配白字，一像素描边，没有皮肤装饰。
   const Json system = Json::parse(R"({"id":"system","source":"system","appearance":null,"candidate":null,"keyboard":null,"candidate_skin":null})");
   const auto native_light = host::candidate_theme_colors(system, false);
   assert(!native_light.dark && native_light.candidate_skin.empty());
   assert(native_light.colors.background == 0xFFFFFFu && native_light.colors.text == 0x2E2E2Eu);
   assert(native_light.colors.number == 0x737373u && native_light.colors.accent == 0x1C71D8u);
-  assert(native_light.colors.selected == 0x3584E4u && native_light.colors.selected_text == 0xFFFFFFu);
-  assert(native_light.colors.selected_number == 0xE1EDFBu);
+  assert(native_light.colors.selected == 0x1A5FB4u && native_light.colors.selected_text == 0xFFFFFFu);
+  assert(native_light.colors.selected_number == 0xDDE7F4u);
   assert(native_light.colors.border == 0xE5E5E5u && native_light.colors.border_width == 1);
   const auto native_dark = host::candidate_theme_colors(system, true);
   assert(native_dark.dark && native_dark.colors.background == 0x303030u && native_dark.colors.border == 0x404040u);
@@ -213,16 +233,37 @@ int main() {
          candidate_theme_selection(Json{{"global_theme", "paper"}, {"candidate_layout", "vertical"}}));
   assert(candidate_theme_selection(Json(nullptr)) == candidate_theme_selection(Json::array({Json(1)})));
 
-  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 0) ==
+  // 显示的就是按键原文时按 caret_position（字节）放，preedit_caret 不参与。
+  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 0, std::nullopt) ==
          "|nihao");
-  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 2) ==
+  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 2, 4) ==
          "ni|hao");
-  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 5) ==
+  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 5, std::nullopt) ==
          "nihao|");
-  assert(msime::linux_host::candidate_preedit_with_caret("ni'hao", "nihao", 2) ==
-         "ni'hao");
-  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 9) ==
+  assert(msime::linux_host::candidate_preedit_with_caret("nihao", "nihao", 9, 2) ==
          "nihao");
+  // 分词显示的全拼按引擎的 preedit_caret（标量）放：音节边界上落在隔音符前面。没有它时不猜。
+  assert(msime::linux_host::candidate_preedit_with_caret("ni'hao", "nihao", 2, 2) ==
+         "ni|'hao");
+  assert(msime::linux_host::candidate_preedit_with_caret("ni'hao", "nihao", 2, std::nullopt) ==
+         "ni'hao");
+  assert(msime::linux_host::candidate_preedit_with_caret("ni'hao", "nihao", 0, 0) ==
+         "|ni'hao");
+  // 双拼拼音分词：按键 uiui 展开成 shi'shi，按键偏移数不进展开的拼写。
+  assert(msime::linux_host::candidate_preedit_with_caret("shi'shi", "uiui", 2, 3) ==
+         "shi|'shi");
+  // 末尾（假名、韩文等没有可靠对应时引擎也放在这里）和越界都不画。
+  assert(msime::linux_host::candidate_preedit_with_caret("ni'hao", "nihao", 5, 6) ==
+         "ni'hao");
+  assert(msime::linux_host::candidate_preedit_with_caret("かな", "kana", 4, 2) ==
+         "かな");
+  assert(msime::linux_host::candidate_preedit_with_caret("ni'hao", "nihao", 5, 9) ==
+         "ni'hao");
+  // 标量换成字节：光标在第一个假名后面。
+  assert(msime::linux_host::candidate_preedit_with_caret("かな", "kana", 2, 1) ==
+         "か|な");
+  assert(msime::linux_host::candidate_preedit_caret_bytes("かな", "kana", 2, 1) == 3u);
+  assert(!msime::linux_host::candidate_preedit_caret_bytes("", "", 0, 0));
 
   // 皮肤包 [toolbar] 的配色按菜单槽位读：background、icon、hover、border、divider；只取所画明暗的那一组，读不出的颜色留空。
   {

@@ -29,7 +29,8 @@ export type ResourcePackId =
   | "grammar-model-baishuang"
   | "wubi"
   | "voice-runtime-macos"
-  | "pronunciations";
+  | "pronunciations"
+  | "target-pronunciations";
 
 /** 宿主报告的资源包状态，即 `msime_client_providers::resource_packs::ResourcePackStatus`。`outdated` 表示已下载的文件字节（名字、SHA-256、长度）与当前锁文件不一致：输入法不再使用这份旧文件，要重新下载。只换了下载地址、字节没变的资源包仍是 `installed`。 */
 export type ResourcePackStatus = {
@@ -73,6 +74,7 @@ export const resourcePackTitles: Record<ResourcePackId, string> = {
   wubi: "五笔码表",
   "voice-runtime-macos": "本地语音识别运行库",
   pronunciations: "离线英文音标词典",
+  "target-pronunciations": "离线外语读音词典",
 };
 
 /** 资源包和本地语音模型共用的下载镜像（`voice_input.asr_model_mirror`）在设置页里的草稿值和修改入口；下载失败时资源包行就地提供它。 */
@@ -336,7 +338,7 @@ export function ResourcePackRow({
     return (
       <ActionRow
         title={title}
-        description={
+        detail={
           <span className="inline-flex items-center gap-2">
             <MascotIllustration scene="downloading" size={32} />
             {`${localModelStageLabel(progress.stage)} ${localModelProgressPercent(progress)}%`}
@@ -355,7 +357,7 @@ export function ResourcePackRow({
       <>
         <ActionRow
           title={title}
-          description={error}
+          detail={error}
           action={async () => {
             // 宿主按已保存的偏好取镜像：刚在下面填的镜像可能还在自动保存的倒计时里，先写进去再下载。
             await packs.mirror?.flush?.();
@@ -371,7 +373,8 @@ export function ResourcePackRow({
   return (
     <ActionRow
       title={title}
-      description={`约 ${formatModelBytes(status.size)}，下载后切换一次输入框即可使用${note ? `。${note}` : ""}`}
+      description={`下载后切换一次输入框即可使用${note ? `。${note}` : ""}`}
+      detail={`约 ${formatModelBytes(status.size)}`}
       action={() => packs.install(id)}
       label="下载"
       ariaLabel={`下载${title}`}

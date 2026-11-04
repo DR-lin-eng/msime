@@ -5,6 +5,9 @@
 #include "Private.h"
 #include "Globals.h"
 #include "MetasequoiaIME.h"
+#include "quick_phrase_cursor_pipe.h"
+#include "QuickPhraseCursorReply.h"
+#include "ipc_negotiation.h"
 #include "CandidateListUIPresenter.h"
 #include "CompositionProcessorEngine.h"
 #include "Compartment.h"
@@ -223,10 +226,11 @@ class CPunctuationCommitEditSession : public CEditSessionBase
   public:
     CPunctuationCommitEditSession(CMetasequoiaIME *pTextService, ITfContext *pContext, UINT code, WCHAR wch,
                                   uint64_t requestId, LARGE_INTEGER requestStartQpc, std::wstring prefetchedText,
-                                  uint64_t focusToken, uint64_t compositionEpoch, uint64_t deferredReplayToken)
+                                  uint64_t focusToken, uint64_t compositionEpoch, uint64_t deferredReplayToken,
+                                  std::optional<std::size_t> cursorSuffix)
         : CEditSessionBase(pTextService, pContext), _code(code), _wch(wch), _requestId(requestId),
           _requestStartQpc(requestStartQpc), _prefetchedText(std::move(prefetchedText)), _focusToken(focusToken),
-          _compositionEpoch(compositionEpoch), _deferredReplayToken(deferredReplayToken)
+          _compositionEpoch(compositionEpoch), _deferredReplayToken(deferredReplayToken), _cursorSuffix(cursorSuffix)
     {
         if (_requestStartQpc.QuadPart == 0)
         {
@@ -263,8 +267,10 @@ class CPunctuationCommitEditSession : public CEditSessionBase
             return S_FALSE;
         }
         PerfTimer timer;
-        HRESULT hr =
-            _pTextService->_HandleCompositionPunctuation(ec, _pContext, _code, _wch, _requestId, _prefetchedText);
+        _pTextService->_BeginEditorOperation();
+        HRESULT hr = _cursorSuffix
+            ? _pTextService->_CommitServerExactText(ec, _pContext, _prefetchedText, _cursorSuffix)
+            : _pTextService->_HandleCompositionPunctuation(ec, _pContext, _code, _wch, _requestId, _prefetchedText);
         completion.applied = hr == S_OK;
         LARGE_INTEGER freq = {};
         LARGE_INTEGER nowQpc = {};
@@ -284,6 +290,7 @@ class CPunctuationCommitEditSession : public CEditSessionBase
     uint64_t _focusToken;
     uint64_t _compositionEpoch;
     uint64_t _deferredReplayToken;
+    std::optional<std::size_t> _cursorSuffix;
 };
 
 class CCommitCandidateAndContinueEditSession : public CEditSessionBase
@@ -291,9 +298,9 @@ class CCommitCandidateAndContinueEditSession : public CEditSessionBase
   public:
     CCommitCandidateAndContinueEditSession(CMetasequoiaIME *pTextService, ITfContext *pContext, std::wstring payload,
                                            uint64_t focusToken, uint64_t compositionEpoch,
-                                           uint64_t replayToken, uint64_t generation)
+                                           uint64_t replayToken, uint64_t generation, std::optional<std::size_t> cursorSuffix)
         : CEditSessionBase(pTextService, pContext), _payload(std::move(payload)), _focusToken(focusToken),
-          _compositionEpoch(compositionEpoch), _replayToken(replayToken), _generation(generation)
+          _compositionEpoch(compositionEpoch), _replayToken(replayToken), _generation(generation), _cursorSuffix(cursorSuffix)
     {
     }
 
@@ -305,7 +312,8 @@ class CCommitCandidateAndContinueEditSession : public CEditSessionBase
             return S_FALSE;
         }
         if (!_pTextService->_IsWubiWorkerEditCurrent(_replayToken, _generation, _pContext)) return S_FALSE;
-        const HRESULT result = _pTextService->_HandleCommitCandidateAndContinue(ec, _pContext, _payload);
+        _pTextService->_BeginEditorOperation();
+        const HRESULT result = _pTextService->_HandleCommitCandidateAndContinue(ec, _pContext, _payload, _cursorSuffix);
         if (_replayToken) _pTextService->_FinishWubiWorkerEdit(_replayToken, result == S_OK);
         return result;
     }
@@ -315,6 +323,7 @@ class CCommitCandidateAndContinueEditSession : public CEditSessionBase
     uint64_t _focusToken;
     uint64_t _compositionEpoch;
     uint64_t _replayToken, _generation;
+    std::optional<std::size_t> _cursorSuffix;
 };
 
 class CDeferredApplicationTextEditSession : public CEditSessionBase
@@ -520,6 +529,7 @@ CMetasequoiaIME::CMetasequoiaIME()
     _passthroughStatsMessageTime = 0;
     _shiftHotkeyArmed = false;
     _ctrlHotkeyArmed = false;
+    _staleModifierMaskAfterFocusLoss = 0;
     _modifierHotkeyExpire = {};
     _bareShiftHook = nullptr;
     _bareShiftDownMask = 0;
@@ -540,6 +550,7 @@ thread_local CMetasequoiaIME *CMetasequoiaIME::_bareShiftHookOwner = nullptr;
 
 CMetasequoiaIME::~CMetasequoiaIME()
 {
+    _crashCapture.reset();
     _UninitBareShiftKeyboardHook();
     _ClearDeferredKeyDowns();
     // Deactivate normally owns the unbind.  Keep this owner-aware fallback for
@@ -617,7 +628,8 @@ HRESULT CMetasequoiaIME::_RequestDirectPunctuationEditSession(_In_ ITfContext *p
                                                               uint64_t requestId, std::wstring prefetchedText,
                                                               uint64_t expectedFocusToken,
                                                               uint64_t expectedCompositionEpoch,
-                                                              uint64_t deferredReplayToken)
+                                                              uint64_t deferredReplayToken,
+                                                              std::optional<std::size_t> cursorSuffix)
 {
     if (pContext == nullptr)
     {
@@ -630,7 +642,7 @@ HRESULT CMetasequoiaIME::_RequestDirectPunctuationEditSession(_In_ ITfContext *p
     CPunctuationCommitEditSession *pEditSession = new (std::nothrow) CPunctuationCommitEditSession(
         this, pContext, code, wch, requestId, requestStartQpc, std::move(prefetchedText),
         expectedFocusToken != 0 ? expectedFocusToken : _CaptureFocusSessionToken(),
-        expectedCompositionEpoch != 0 ? expectedCompositionEpoch : _CaptureCompositionEpoch(), deferredReplayToken);
+        expectedCompositionEpoch != 0 ? expectedCompositionEpoch : _CaptureCompositionEpoch(), deferredReplayToken, cursorSuffix);
     if (pEditSession == nullptr)
     {
         _RetryDeferredKeyReplay(deferredReplayToken);
@@ -679,7 +691,8 @@ bool CMetasequoiaIME::_TakePendingServerCandidate(_Out_ UINT *pMsgType, _Out_ st
 
 bool CMetasequoiaIME::_PostAsyncKeyRequest(UINT message, UINT code, WCHAR wch, uint64_t requestId,
                                            std::wstring prefetchedText, uint64_t expectedFocusToken,
-                                           uint64_t expectedCompositionEpoch, uint64_t deferredReplayToken)
+                                           uint64_t expectedCompositionEpoch, uint64_t deferredReplayToken,
+                                           std::optional<std::size_t> cursorSuffix)
 {
     switch (message)
     {
@@ -722,7 +735,7 @@ bool CMetasequoiaIME::_PostAsyncKeyRequest(UINT message, UINT code, WCHAR wch, u
             } while (token == 0 || _pendingAsyncKeyMessages.count(token) != 0);
             _pendingAsyncKeyMessages.emplace(token, AsyncKeyRequest{message, code, wch, requestId, focusToken,
                                                                     compositionEpoch, deferredReplayToken,
-                                                                    std::move(prefetchedText)});
+                                                                    std::move(prefetchedText), cursorSuffix});
         }
     }
     if (token == 0)
@@ -756,14 +769,14 @@ bool CMetasequoiaIME::_PostAsyncKeyRequest(UINT message, UINT code, WCHAR wch, u
     return true;
 }
 
-bool CMetasequoiaIME::_PostServerCandidateCommit(_In_z_ const WCHAR *candidateText)
+bool CMetasequoiaIME::_PostServerCandidateCommit(_In_z_ const WCHAR *candidateText, std::optional<std::size_t> cursorSuffix)
 {
-    return _PostServerTextDelivery(WM_CommitCandidate, candidateText);
+    return _PostServerTextDelivery(WM_CommitCandidate, candidateText, 0, 0, cursorSuffix);
 }
 
-bool CMetasequoiaIME::_PostServerCandidateCommitAndContinue(_In_z_ const WCHAR *payload)
+bool CMetasequoiaIME::_PostServerCandidateCommitAndContinue(_In_z_ const WCHAR *payload, std::optional<std::size_t> cursorSuffix)
 {
-    return _PostServerTextDelivery(WM_CommitCandidateAndContinue, payload);
+    return _PostServerTextDelivery(WM_CommitCandidateAndContinue, payload, 0, 0, cursorSuffix);
 }
 
 bool CMetasequoiaIME::_PostServerInsertText(_In_z_ const WCHAR *text)
@@ -884,7 +897,8 @@ void CMetasequoiaIME::_DispatchServerText(WPARAM wParam, KEYSTROKE_FUNCTION func
 }
 
 bool CMetasequoiaIME::_PostServerTextDelivery(UINT windowMessage, _In_z_ const WCHAR *text,
-                                             uint64_t expectedFocus, uint64_t expectedEpoch)
+                                             uint64_t expectedFocus, uint64_t expectedEpoch,
+                                             std::optional<std::size_t> cursorSuffix)
 {
     constexpr size_t maxPendingServerCommits = 64;
     if (!_workerCommitReady.load(std::memory_order_acquire) ||
@@ -920,7 +934,7 @@ bool CMetasequoiaIME::_PostServerTextDelivery(UINT windowMessage, _In_z_ const W
             token = NextWindowMessageToken();
         } while (token == 0 || _pendingServerCommitMessages.count(token) != 0);
         _pendingServerCommitMessages.emplace(token,
-                                             WorkerCandidateCommit{text ? text : L"", focusToken, compositionEpoch});
+                                             WorkerCandidateCommit{text ? text : L"", focusToken, compositionEpoch, cursorSuffix});
     }
 
     if (!PostMessage(ownerWindow, windowMessage, static_cast<WPARAM>(token), 0))
@@ -1510,6 +1524,11 @@ STDAPI_(ULONG) CMetasequoiaIME::Release()
 
 STDAPI CMetasequoiaIME::ActivateEx(ITfThreadMgr *pThreadMgr, TfClientId tfClientId, DWORD dwFlags)
 {
+    try {
+        _crashCapture = std::make_unique<msime::tsf::TsfCrashCapture>();
+    } catch (...) {
+        _crashCapture.reset();
+    }
     BOOL hasThreadFocus = FALSE;
     HRESULT threadFocusResult = E_FAIL;
     ITfDocumentMgr *pDocMgrFocus = nullptr;
@@ -1566,7 +1585,8 @@ STDAPI CMetasequoiaIME::ActivateEx(ITfThreadMgr *pThreadMgr, TfClientId tfClient
     _queuedLocalResetToken = 0;
     BindNamedpipeFocusState(this, &_focusResetPending, &_activationRequired, &_expectedWorkerFocusToken,
                             &_localSessionResetPending, &_localSessionResetToken, &_workerCommitReady,
-                            &_acknowledgedWorkerFocusToken, &_hToTsfWorkerThreadPipe, &_workerPipeGeneration);
+                            &_acknowledgedWorkerFocusToken, &_hToTsfWorkerThreadPipe, &_workerPipeGeneration,
+                            &_workerServerCapabilities);
 
     /*
     std::wstring processName = FanyUtils::GetCurrentProcessName();
@@ -1710,6 +1730,7 @@ ExitError:
 
 STDAPI CMetasequoiaIME::Deactivate()
 {
+    _crashCapture.reset();
     // The flush runs on the thread pool under its own loader reference, so it survives this tip going away. It is deliberately not waited for: TSF calls Deactivate the same way for a profile switch as for a closing thread and gives no exit signal to tell them apart, so a wait would stall every ordinary deactivation. A process that exits before the drain finishes loses at most the presses since the last focus-loss flush, capped by the 256-press and 30-second triggers.
     FlushKeyPressStatistics();
     _SyncHostContextFocus(nullptr);
@@ -1772,6 +1793,8 @@ STDAPI CMetasequoiaIME::Deactivate()
     // down the engine and thread manager. Context stack changes can otherwise
     // re-enter a half-deactivated service.
     _InitTextEditSink(nullptr);
+    // 连接已经关了，Server 那边随焦点一起清掉联想；这里只放掉手里的区间和上下文。
+    _ForgetPrediction();
     // TODO: 去掉共享内存，只保留命名管道
     // CloseNamedpipe();
 
@@ -2029,6 +2052,11 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
         if (continuation.active())
             pIME->_PostCandidateContinuationFailure(continuation.focus(), continuation.epoch());
         continuation.reset();
+        const auto cursorReply = msime::tsf::DecodeWorkerCursorReply(buf.msg_type, buf.data, std::size(buf.data),
+            (pIME->_workerServerCapabilities.load(std::memory_order_acquire) & FanyImeProtocol::QuickPhraseCursor) != 0);
+        if (!cursorReply || pIME->_workerPipeGeneration.load(std::memory_order_acquire) != workerGeneration) continue;
+        const auto cursorSuffix = cursorReply->suffixUnits;
+        buf.msg_type = cursorReply->messageType;
         if (buf.msg_type > Global::DataToTsfWorkerThreadMsgType::MaxKnown)
         {
             continue;
@@ -2239,14 +2267,14 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
         {
             if (pIME->_workerCommitReady.load(std::memory_order_acquire))
             {
-                pIME->_PostServerCandidateCommit(buf.data);
+                pIME->_PostServerCandidateCommit(buf.data, cursorSuffix);
             }
         }
         else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::CommitCandidateAndContinue)
         {
             if (pIME->_workerCommitReady.load(std::memory_order_acquire))
             {
-                pIME->_PostServerCandidateCommitAndContinue(buf.data);
+                pIME->_PostServerCandidateCommitAndContinue(buf.data, cursorSuffix);
             }
         }
         else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::InsertText)
@@ -2642,8 +2670,16 @@ void CMetasequoiaIME::_PollPreferenceTransition()
     }
     if (_preferenceTransitionStarted == 0) _preferenceTransitionStarted = GetTickCount64();
     if (GetTickCount64() - _preferenceTransitionStarted >= 2000) {
+        // 放弃这一次有序切换，而不是留着屏障等下一次轮询。屏障不清、计时不归零时，
+        // `WM_ApplyPreferenceTransition` 和 500ms 的偏好刷新每来一次都仍然判定「已经超时」，
+        // 于是每来一次就 MarkNamedpipeSessionDirty 一次：新激活令牌、关掉反向下行管道、
+        // 重连，而重连中的会话又让这次应用配置继续失败——超时和重连互为因果，停不下来。
+        // 会话稳定的下一次通知还会重新开始一次屏障，不需要靠反复重连去救。
         KillTimer(_msgWndHandle, TIMER_PREFERENCE_TRANSITION);
+        _preferenceBarrier.reset();
+        _preferenceTransitionStarted = 0;
         MarkNamedpipeSessionDirtyForOwner(this);
+        _ScheduleDeferredKeyDownDrain();
         return;
     }
     SetTimer(_msgWndHandle, TIMER_PREFERENCE_TRANSITION, 10, nullptr);
@@ -2653,7 +2689,14 @@ void CMetasequoiaIME::_PollPreferenceTransition()
     if (!configuration || configuration->revision < _preferenceBarrier.target() ||
         configuration->preferenceSnapshot.empty() || !engine || !engine->GetHostEngineAdapter() ||
         !engine->GetHostEngineAdapter()->valid()) {
+        // 没有可应用的对象：配置还没读进来，或者这次焦点还没把引擎会话建起来。留着屏障只会
+        // 把 10ms 轮询一直拖到两秒后判超时，而且在 500ms 的偏好刷新里 `active()` 一挡，
+        // 宿主会话重建和按键补发都进不来。放弃这一次有序切换，下一次通知重新开始。
+        KillTimer(_msgWndHandle, TIMER_PREFERENCE_TRANSITION);
+        _preferenceBarrier.reset();
+        _preferenceTransitionStarted = 0;
         msime::tsf::invalidate_host_configuration();
+        _ScheduleDeferredKeyDownDrain();
         return;
     }
     const auto focusGeneration = _deferredKeyFocusGeneration;
@@ -3027,6 +3070,8 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
         break;
     }
     case WM_UpdateIMEStatus: {
+        // 中英切换结束上屏后联想。
+        pIME->_DismissPrediction();
         SendCurrentImeStatusSnapshot(pIME);
         break;
     }
@@ -3060,7 +3105,7 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
                 KeystrokeState.Category = CATEGORY_CANDIDATE;
                 KeystrokeState.Function = FUNCTION_FINALIZE_CANDIDATELIST;
                 pIME->_InvokeKeyHandler(pContext, 0, 0, 0, KeystrokeState, FANY_IME_UNSOLICITED_REQUEST_ID,
-                                        std::move(request.text), 0, request.compositionEpoch, request.focusToken);
+                                        std::move(request.text), 0, request.compositionEpoch, request.focusToken, 0, request.cursorSuffix);
                 pContext->Release();
             }
             pDocMgrFocus->Release();
@@ -3114,7 +3159,7 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
         {
             auto *edit = new (std::nothrow) CCommitCandidateAndContinueEditSession(
                 pIME, context, std::move(request.text), request.focusToken, request.compositionEpoch,
-                replayToken, generation);
+                replayToken, generation, request.cursorSuffix);
             if (edit)
             {
                 dispatch = context->RequestEditSession(pIME->_tfClientId, edit,
@@ -3243,7 +3288,7 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
                 {
                     pIME->_RequestDirectPunctuationEditSession(pContext, code, wch, request.requestId,
                                                                std::move(request.prefetchedText), request.focusToken,
-                                                               request.compositionEpoch, request.deferredReplayToken);
+                                                               request.compositionEpoch, request.deferredReplayToken, request.cursorSuffix);
                     handedOffReplay = true;
                 }
                 else
@@ -3253,7 +3298,7 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
                     KeystrokeState.Function = FUNCTION_PUNCTUATION;
                     pIME->_InvokeKeyHandler(pContext, code, wch, 0, KeystrokeState, request.requestId,
                                             std::move(request.prefetchedText), 0, request.compositionEpoch,
-                                            request.focusToken, request.deferredReplayToken);
+                                            request.focusToken, request.deferredReplayToken, request.cursorSuffix);
                     handedOffReplay = true;
                 }
                 pContext->Release();
@@ -3382,7 +3427,12 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
             break;
         }
 
-        if (receivedData->msg_type == Global::DataFromServerMsgType::CommitExactText)
+        if (const auto suffix = FanyImeQuickPhraseCursorPipe::SuffixUnits(receivedData->msg_type, false)) {
+            pIME->_PostAsyncKeyRequest(WM_AsyncPunctuationCommit, code, wch, request.requestId,
+                receivedData->candidate_string, request.focusToken, request.compositionEpoch,
+                request.deferredReplayToken, suffix);
+        }
+        else if (receivedData->msg_type == Global::DataFromServerMsgType::CommitExactText)
         {
             pIME->_PostAsyncKeyRequest(WM_AsyncPunctuationCommit, code, wch, request.requestId,
                                        receivedData->candidate_string, request.focusToken, request.compositionEpoch,

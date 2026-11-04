@@ -1,5 +1,7 @@
 #include "Ipc.h"
 #include "ReplyWaitPolicy.h"
+#include "PipeRecoveryPolicy.h"
+#include "quick_phrase_cursor_pipe.h"
 #include "AuxNamedpipeSender.h"
 #include "../../../../shared/contracts/ipc_negotiation.h"
 #include "../../common/PipeMetadata.h"
@@ -24,6 +26,7 @@
 
 static thread_local HANDLE hPipe = nullptr;
 static thread_local uint32_t negotiatedServerCapabilities = 0;
+static thread_local std::atomic<uint32_t> *boundWorkerServerCapabilities = nullptr;
 // 本线程当前字段的属性（FanyImeFieldTraits），由 NoteFieldTraitsForServer 记下；还没观察过时不报。
 static thread_local bool fieldTraitsObserved = false;
 static thread_local uint32_t observedFieldTraits = 0;
@@ -341,7 +344,10 @@ void RequestNamedpipeReconnect()
 
 bool IsValidServerReply(const FanyImeNamedpipeDataToTsf &reply)
 {
-    if (reply.msg_type > Global::DataFromServerMsgType::ProtocolMismatch)
+    const auto metadata = FanyImeQuickPhraseCursorPipe::Decode(reply.msg_type, reply.candidate_string,
+        std::size(reply.candidate_string), false,
+        (negotiatedServerCapabilities & FanyImeProtocol::QuickPhraseCursor) != 0);
+    if (!metadata || metadata->messageType > Global::DataFromServerMsgType::ProtocolMismatch)
     {
         return false;
     }
@@ -504,6 +510,7 @@ bool WaitForWorkerPipeReady(HANDLE hPipeHandle)
 bool WaitForProtocolReady(uint64_t requestId)
 {
     negotiatedServerCapabilities = 0;
+    if (boundWorkerServerCapabilities) boundWorkerServerCapabilities->store(0, std::memory_order_release);
     const ULONGLONG deadline = GetTickCount64() + 250;
     while (GetTickCount64() < deadline)
     {
@@ -522,6 +529,8 @@ bool WaitForProtocolReady(uint64_t requestId)
             if (accepted)
             {
                 negotiatedServerCapabilities = FanyImeProtocol::ReplyCapabilities(reply);
+                if (boundWorkerServerCapabilities)
+                    boundWorkerServerCapabilities->store(negotiatedServerCapabilities, std::memory_order_release);
                 fieldTraitsDelivered = false;
             }
             return accepted;
@@ -545,7 +554,7 @@ bool WritePipeHello(HANDLE hPipeHandle, UINT pipeRole)
                       FanyImeProtocol::OrderedPreferences |
                                        FanyImeProtocol::KeyboardCompositionCancel |
                                        FanyImeProtocol::GameHostCandidate | FanyImeProtocol::FieldTraits |
-                                       FanyImeProtocol::JapaneseToggleShortcut);
+                                       FanyImeProtocol::QuickPhraseCursor | FanyImeProtocol::JapaneseToggleShortcut);
         BOOL ret = WriteFile(hPipeHandle, &hello, sizeof(hello), &bytesWritten, NULL);
         // Never authorize keys from merely writing a hello. An old Server
         // without negotiation times out into the existing raw-input fallback.
@@ -670,6 +679,10 @@ bool TryOpenClientPipe(HANDLE &hPipeHandle, const wchar_t *pipeName, UINT pipeRo
         // authorize commits from the preceding endpoint/focus generation.
         RequireNamedpipeFocusActivation();
     }
+    if (msime::windows::tsf::ReopenMainAfterPipeOpen(pipeRole))
+    {
+        ClosePipeHandleIfValid(hPipe);
+    }
     return true;
 }
 } // namespace
@@ -678,7 +691,8 @@ void BindNamedpipeFocusState(const void *owner, bool *focusResetPending, bool *a
                              std::atomic<uint64_t> *expectedWorkerFocusToken,
                              std::atomic<bool> *localSessionResetPending, std::atomic<UINT> *localSessionResetToken,
                              std::atomic<bool> *workerCommitReady, std::atomic<uint64_t> *acknowledgedWorkerFocusToken,
-                             std::atomic<HANDLE> *workerPipeHandle, std::atomic<UINT> *workerPipeGeneration)
+                             std::atomic<HANDLE> *workerPipeHandle, std::atomic<UINT> *workerPipeGeneration,
+                             std::atomic<uint32_t> *workerServerCapabilities)
 {
     boundFocusStateOwner = owner;
     boundFocusResetPending = focusResetPending;
@@ -690,6 +704,9 @@ void BindNamedpipeFocusState(const void *owner, bool *focusResetPending, bool *a
     boundAcknowledgedWorkerFocusToken = acknowledgedWorkerFocusToken;
     boundWorkerPipeHandle = workerPipeHandle;
     boundWorkerPipeGeneration = workerPipeGeneration;
+    boundWorkerServerCapabilities = workerServerCapabilities;
+    if (boundWorkerServerCapabilities)
+        boundWorkerServerCapabilities->store(negotiatedServerCapabilities, std::memory_order_release);
 }
 
 uint64_t GetNamedpipeClientId()
@@ -708,6 +725,8 @@ void UnbindNamedpipeFocusState(const void *owner)
     {
         return;
     }
+    if (boundWorkerServerCapabilities) boundWorkerServerCapabilities->store(0, std::memory_order_release);
+    boundWorkerServerCapabilities = nullptr;
     boundFocusStateOwner = nullptr;
     boundFocusResetPending = nullptr;
     boundActivationRequired = nullptr;
@@ -906,6 +925,7 @@ int CloseIpc()
 int CloseNamedpipe()
 {
     negotiatedServerCapabilities = 0;
+    if (boundWorkerServerCapabilities) boundWorkerServerCapabilities->store(0, std::memory_order_release);
     ClosePipeHandleIfValid(hPipe);
     ClosePipeHandleIfValid(hFromServerPipe);
     ClosePipeHandleIfValid(hToTsfWorkerThreadPipe);
@@ -917,6 +937,12 @@ void ResetNamedpipeReplyState()
 {
     pendingReplies.clear();
     unsolicitedReplies.clear();
+}
+
+bool SupportsQuickPhraseCursor()
+{
+    return hPipe && hPipe != INVALID_HANDLE_VALUE &&
+           (negotiatedServerCapabilities & FanyImeProtocol::QuickPhraseCursor) != 0;
 }
 
 bool SupportsCharacterSetShortcut()
@@ -1733,12 +1759,18 @@ bool EnsureNamedpipeFocusSessionActivated()
         }
     }
 
-    // ClientActivated is not complete until the worker channel echoes the
-    // exact focus token. This closes the first-key window and rejects stale
-    // markers that were buffered before OnKill.
+    // ClientActivated 不算完成，要等 worker 通道把 focus token 原样回执回来。这个回执是
+    // 「这次会话可以发普通包」的唯一凭据，也挡住 OnKill 之前缓存的旧标记。
+    //
+    // 这里的 `boundWorkerCommitReady` 是**指针**，判的是这次激活有没有绑定 worker 通道，
+    // 不是它指向的值——`RequireNamedpipeFocusActivation` 只 store(false)，指针仍然非空。
+    // 所以绑定之后这段一定会等；等不到就是传输失败（FocusEchoOutcomeFor），要换一代激活
+    // 令牌、关掉反向下行管道，交给重连定时器重建，而不是把「没确认」当成「已就绪」。
+    // 等待预算和按键回包共用同一个现场值。
     if (boundWorkerCommitReady)
     {
-        const ULONGLONG deadline = GetTickCount64() + 150;
+        const ULONGLONG deadline = GetTickCount64() + msime::windows::tsf::kServerReplyWaitTimeoutMs;
+        bool acknowledged = false;
         while (GetTickCount64() < deadline)
         {
             if (IsLocalSessionResetPending())
@@ -1747,13 +1779,18 @@ bool EnsureNamedpipeFocusSessionActivated()
             }
             if (IsExpectedWorkerFocusAcknowledged())
             {
-                return true;
+                acknowledged = true;
+                break;
             }
             Sleep(1);
         }
-        MarkNamedpipeSessionDirty();
+        if (msime::windows::tsf::FocusEchoOutcomeFor(acknowledged, false) ==
+            msime::windows::tsf::FocusEchoOutcome::ResetTransport)
+        {
+            MarkNamedpipeSessionDirty();
+        }
     }
-    return !boundWorkerCommitReady;
+    return IsExpectedWorkerFocusAcknowledged();
 }
 
 /**

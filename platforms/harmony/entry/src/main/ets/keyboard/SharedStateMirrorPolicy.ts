@@ -8,6 +8,10 @@
 
 import { PRIVACY_CONSENT_ENTRY, PRIVACY_CONSENT_FILE } from "../privacy/PrivacyConsentPolicy";
 import {
+  KEYBOARD_PERSONAL_WORDBOOK_DRAINED_PATH,
+  KEYBOARD_PERSONAL_WORDBOOK_PATH,
+} from "./PersonalWordbookPolicy";
+import {
   SCREEN_CAPTURE_PROTECTION_ENTRY,
   SCREEN_CAPTURE_PROTECTION_FILE,
 } from "./settings/ScreenCaptureProtectionPolicy";
@@ -87,6 +91,10 @@ export const ABSENT_FINGERPRINT: string = "absent";
 export const MANIFEST_FILE: string = "manifest.json";
 /** 设置应用写给键盘的统计开关，见 `StatisticsSwitch`。 */
 export const STATISTICS_SWITCH_FILE: string = "typing-statistics-switch.json";
+/** 键盘那本生词本的镜像条目名。 */
+export const KEYBOARD_PERSONAL_WORDBOOK_ENTRY: string = "personal-wordbook";
+/** 键盘记的「清走过哪一版」的镜像条目名，见 `PersonalWordbookPolicy`。 */
+export const KEYBOARD_PERSONAL_WORDBOOK_DRAINED_ENTRY: string = "personal-wordbook-drained";
 const RETENTIONS: string[] = ["forever", "30d", "90d", "180d", "365d"];
 
 /** 本机匿名账号的身份文件（`{subject, secret}`），会话过期或被拒以后靠它重新登录同一个匿名账号。 */
@@ -220,7 +228,7 @@ export const SETTINGS_ENTRIES: MirrorEntry[] = [
   },
 ];
 
-/** 键盘在完整体验模式下发布、设置应用导入的条目：键盘里改的偏好和按键反馈、刷新过的账号会话、匿名账号的身份（随匿名会话由 Rust 采用），以及打字统计。 */
+/** 键盘在完整体验模式下发布、设置应用导入的条目：键盘里改的偏好和按键反馈、刷新过的账号会话、匿名账号的身份（随匿名会话由 Rust 采用）、打字统计，以及键盘长按菜单「加入生词本」写进的那本生词本和它清走过哪一版（设置应用并进自己的生词本，见 `PersonalWordbookPolicy`）。 */
 export const KEYBOARD_ENTRIES: MirrorEntry[] = [
   {
     name: "preferences",
@@ -264,6 +272,21 @@ export const KEYBOARD_ENTRIES: MirrorEntry[] = [
     path: "typing-statistics.json",
     fullModeOnly: true,
   },
+  {
+    name: KEYBOARD_PERSONAL_WORDBOOK_ENTRY,
+    kind: "file",
+    base: "state",
+    path: KEYBOARD_PERSONAL_WORDBOOK_PATH,
+    fullModeOnly: true,
+  },
+  // 排在生词本后面：发布时按这里的顺序复制，设置应用先读这条再读生词本，读到新的记录时生词本一定也已经是新的。
+  {
+    name: KEYBOARD_PERSONAL_WORDBOOK_DRAINED_ENTRY,
+    kind: "file",
+    base: "state",
+    path: KEYBOARD_PERSONAL_WORDBOOK_DRAINED_PATH,
+    fullModeOnly: true,
+  },
 ];
 
 /** 由 Rust 的 `session_adopt` 采用、不按文件复制导入的条目：登录会话、本机匿名账号的会话（#8201 第 2 步），以及匿名账号的身份，它随匿名会话一起采用（`identity_path`，迁移差异 M40），会话和身份始终属于同一个匿名账号。 */
@@ -299,20 +322,76 @@ export class SharedStateMirrorPolicy {
     return `${text.length.toString(16)}-${hash.toString(16).padStart(8, "0")}`;
   }
 
-  /** 偏好文档的指纹只看 `preferences`，键按字典序排好再算，修订号和键的顺序都不影响它。读不懂的文档按全文算，至少能在它变化时察觉。 */
+  /** 指纹忽略修订号及各沙箱独立的授权元数据，避免本机代次差异造成镜像往返；其余偏好仍按内容比较。 */
   static preferencesFingerprint(documentText: string): string {
     try {
       const parsed: Object = JSON.parse(documentText) as Object;
       const preferences: Object | undefined = (parsed as PreferencesDocument).preferences;
       if (preferences !== undefined && preferences !== null) {
         return SharedStateMirrorPolicy.fingerprintText(
-          SharedStateMirrorPolicy.canonical(preferences),
+          SharedStateMirrorPolicy.canonical(
+            SharedStateMirrorPolicy.withoutReportingConsent(preferences),
+          ),
         );
       }
     } catch {
       // 落到下面按全文计算。
     }
     return SharedStateMirrorPolicy.fingerprintText(documentText);
+  }
+
+  private static withoutReportingConsent(preferences: Object): Object {
+    const fields = preferences as Record<string, Object>;
+    const result: Record<string, Object> = {};
+    for (const key of Object.keys(fields))
+      if (key !== "usage_reporting_consent") result[key] = fields[key];
+    return result;
+  }
+
+  /** 设置应用导入键盘改动时保留自己的统计开关；键盘的陈旧副本不能替用户重新同意。 */
+  static preferencesImport(
+    documentText: string,
+    localText: string,
+    preserveReporting: boolean,
+  ): string | null {
+    try {
+      const incoming: unknown = JSON.parse(documentText);
+      const local: unknown = JSON.parse(localText);
+      if (
+        incoming === null ||
+        typeof incoming !== "object" ||
+        Array.isArray(incoming) ||
+        local === null ||
+        typeof local !== "object" ||
+        Array.isArray(local)
+      )
+        return null;
+      const source = (incoming as Record<string, unknown>).preferences;
+      const current = (local as Record<string, unknown>).preferences;
+      if (
+        source === null ||
+        typeof source !== "object" ||
+        Array.isArray(source) ||
+        current === null ||
+        typeof current !== "object" ||
+        Array.isArray(current)
+      )
+        return null;
+      const preferences = SharedStateMirrorPolicy.withoutReportingConsent(source) as Record<
+        string,
+        unknown
+      >;
+      if (preserveReporting) {
+        const enabled: unknown = (current as Record<string, unknown>).usage_reporting;
+        if (typeof enabled !== "boolean") return null;
+        preferences.usage_reporting = enabled;
+      }
+      const snapshot = local as Record<string, unknown>;
+      snapshot.preferences = preferences;
+      return JSON.stringify(snapshot);
+    } catch {
+      return null;
+    }
   }
 
   /** 目录的指纹：每个文件的相对路径、大小和修改时间，按路径排序。空目录与不存在不同，前者也会被复制过去。 */
@@ -418,6 +497,48 @@ export class SharedStateMirrorPolicy {
         : record.entries.filter((item: ImportedEntry): boolean => item.name !== name);
     entries.push({ name: name, fingerprint: fingerprint });
     return { format: MIRROR_FORMAT, entries: entries };
+  }
+
+  /** 设置应用发布时附上的 `applied`：只有键盘那本生词本和它的清走记录导入到了哪一版，键盘据此决定能不能清走交过的词。 */
+  static personalWordbookApplied(record: ImportRecord | null): ImportedEntry[] {
+    if (record === null) return [];
+    return record.entries.filter(
+      (item: ImportedEntry): boolean =>
+        item.name === KEYBOARD_PERSONAL_WORDBOOK_ENTRY ||
+        item.name === KEYBOARD_PERSONAL_WORDBOOK_DRAINED_ENTRY,
+    );
+  }
+
+  /**
+   * 键盘能不能清走交过的词：设置应用并过的生词本正是键盘现在发布着的那一版，而且设置应用已经看到了键盘最近一次的清走记录。能时返回那一版的指纹，否则为 null。
+   *
+   * 要求看到最近一次清走记录，是因为指纹只看内容：键盘清走以后又加回同样的词，生词本的指纹会和上一轮一模一样，只看生词本就会在设置应用还没并进来之前又把它清走。
+   */
+  static personalWordbookDrainable(
+    keyboard: MirrorManifest | null,
+    settings: MirrorManifest | null,
+  ): string | null {
+    if (keyboard === null || settings === null) return null;
+    const published = (name: string): string | undefined => {
+      const entry: ManifestEntry | undefined = keyboard.entries.find(
+        (item: ManifestEntry): boolean => item.name === name,
+      );
+      return entry === undefined ? undefined : entry.fingerprint;
+    };
+    const applied = (name: string): string | undefined => {
+      const entry: ImportedEntry | undefined = settings.applied.find(
+        (item: ImportedEntry): boolean => item.name === name,
+      );
+      return entry === undefined ? undefined : entry.fingerprint;
+    };
+    const book: string | undefined = published(KEYBOARD_PERSONAL_WORDBOOK_ENTRY);
+    if (book === undefined || book === ABSENT_FINGERPRINT) return null;
+    if (applied(KEYBOARD_PERSONAL_WORDBOOK_ENTRY) !== book) return null;
+    const marker: string | undefined = published(KEYBOARD_PERSONAL_WORDBOOK_DRAINED_ENTRY);
+    if (marker !== undefined && applied(KEYBOARD_PERSONAL_WORDBOOK_DRAINED_ENTRY) !== marker) {
+      return null;
+    }
+    return book;
   }
 
   /**

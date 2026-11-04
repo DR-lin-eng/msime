@@ -3,7 +3,7 @@ import type { ConfirmRequest } from "../core/confirm";
 import { downloadBlob } from "../core/download-blob";
 import { exceptionMessage } from "../core/exception-message";
 import { ErrorAlert } from "../core/error-alert";
-import { GroupList, PageIntro, Row } from "../core/platform-controls";
+import { GroupList, Row } from "../core/platform-controls";
 import { select as selectStyle, textInput } from "../core/platform-controls-style";
 import { StatusMessage } from "../core/status-message";
 import { useAsyncActionRunner, type AsyncActionOperation } from "../core/use-async-action";
@@ -13,6 +13,7 @@ import { ActionButton } from "./action-button";
 import { SettingsManagerActions } from "./settings-manager-actions";
 import * as settings from "./settings-style";
 import { SettingsSubViewHeader } from "./settings-subview-header";
+import { SettingsGroupNote } from "./settings-group-note";
 import { useAsyncGeneration } from "./use-async-generation";
 import {
   builtinShuangpinProfiles,
@@ -344,8 +345,8 @@ function KeyTableEditor<Profile extends string>({
       <SettingsSubViewHeader
         title={definition.title}
         back={{ label: "输入", ariaLabel: "返回输入", onClick: () => void leave(), ref: back }}
+        help={definition.intro}
       />
-      <PageIntro>{definition.intro}</PageIntro>
       <GroupList title="起点与文件">
         <Row title="从内置方案开始" description="用它的键位填满整张表，再改动想换的键。">
           <select
@@ -390,7 +391,7 @@ function KeyTableEditor<Profile extends string>({
       </GroupList>
       {definition.groups.map(({ part, title, note, maxLength }) => (
         <GroupList key={part} title={title}>
-          <p className={settings.groupNote}>{note}</p>
+          <SettingsGroupNote>{note}</SettingsGroupNote>
           <div
             className={`${settings.groupBlock} grid grid-cols-[repeat(auto-fill,minmax(6.5rem,1fr))] gap-x-3 gap-y-2`}
           >
@@ -420,7 +421,7 @@ function KeyTableEditor<Profile extends string>({
       <GroupList title="保存">
         <Row
           title={active ? "保存键位" : `保存并选用${definition.title}`}
-          description={
+          detail={
             problem === undefined
               ? "正在检查键位…"
               : problem

@@ -1,5 +1,6 @@
 import { CandidateLayoutPolicy } from '../keyboard/candidate/CandidateSkinPolicy';
 import { CandidateCanvasPolicy } from '../keyboard/candidate/CandidateCanvasPolicy';
+import { NextWordPredictionPolicy } from '../keyboard/candidate/NextWordPredictionPolicy';
 import { CandidateCanvasDecoder } from '../keyboard/candidate/CandidateCanvasFrame';
 import InputMethodExtensionAbility from '@ohos.InputMethodExtensionAbility';
 import inputMethodEngine from '@ohos.inputMethodEngine';
@@ -48,6 +49,7 @@ import { HarmonyAccountIdentity } from '../account/HarmonyAccountIdentity';
 import { SharedStateSync } from '../keyboard/SharedStateSync';
 import { HarmonyPrivacyConsent } from '../privacy/HarmonyPrivacyConsent';
 import { ScreenCaptureProtection } from '../keyboard/settings/ScreenCaptureProtection';
+import { HarmonyReadAloud } from '../speech/HarmonyReadAloud';
 
 // Where the badge goes and how long it stays, from platforms/macos/src/input/InputModeHUDPanel.mm: shown long enough to read and gone before the next word. Its size is the floating toolbar's, from InputModeHudPolicy.sizeVp.
 const HUD_SCREEN_MARGIN_VP: number = 8;
@@ -142,7 +144,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       // When follow-cursor is disabled, the first composition position is the anchor for the
       // whole candidate window lifetime. Keep recording the latest caret while idle so the next
       // composition still starts beside the newly focused text.
-      if (KeyboardSession.shared.composing()
+      if (KeyboardSession.shared.candidateWindowWanted()
         && KeyboardSession.shared.preferences().candidateFollowCursor) {
         this.placeCandidateWindow();
       }
@@ -528,7 +530,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     }
     if (surface === DesktopSurface.NONE) {
       this.resizeCandidateWindow(surface).then((): void => {
-        if (!KeyboardSession.shared.composing()) {
+        if (!KeyboardSession.shared.candidateWindowWanted()) {
           panel.hide();
         }
       }).catch((error: Object): void => {
@@ -805,6 +807,8 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
   private readonly releasedKeys: Set<number> = new Set<number>();
   /** Key codes whose key-down the emoji panel took, so their key-up is taken too. */
   private readonly panelKeys: Set<number> = new Set<number>();
+  /** 按下时关闭或选中了上屏后联想的键（Esc、空格、数字），抬起和按住时的重复一并收下。 */
+  private readonly predictionKeys: Set<number> = new Set<number>();
 
   private readonly typed: (event: InputKeyEvent) => boolean = (event: InputKeyEvent): boolean => {
     const session: KeyboardSession = KeyboardSession.shared;
@@ -906,6 +910,30 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     })) {
       this.panelKeys.add(event.key.code);
       return true;
+    }
+    // 上屏后联想：Esc 关闭联想（送 Cancel），与候选栏的关闭键 × 相同；空格选高亮的一条，数字选本页对应的一条，都交给运行时。没有组字时路由会把这几个键交给应用，所以在这里先拦。运行时没收下的数字（越过本页）照常交给应用。回车和退格照常走下去交给应用，编辑器的改动回报随后清掉联想（`KeyboardSession.editorTextChanged`）；字母开始新的组字，标点由引擎清掉联想后输入。按住时的重复不再选：选中后马上又是新的一组联想，一直按着会连着上屏。
+    if (event.action !== KeyAction.DOWN && this.predictionKeys.delete(event.key.code)) {
+      return true;
+    }
+    if (event.action === KeyAction.DOWN && !newPress && this.predictionKeys.has(event.key.code)) {
+      return true;
+    }
+    if (event.action === KeyAction.DOWN && NextWordPredictionPolicy.dismissesOnKey(event.key.code,
+      event.ctrlKey, event.altKey, event.logoKey, event.shiftKey) && session.dismissPrediction()) {
+      this.predictionKeys.add(event.key.code);
+      return true;
+    }
+    const numpad: HardwareKey = HardwareKeyRouter.normalizeNumpad(key);
+    const predictionKey: number = NextWordPredictionPolicy.selectionKey(numpad.keyCode, numpad.unicodeChar,
+      event.ctrlKey, event.altKey, event.logoKey, event.shiftKey,
+      KeyboardSession.shared.preferences().numberRowSelection);
+    if (event.action === KeyAction.DOWN && newPress && predictionKey >= 0 && session.predicting()) {
+      if (session.pressPredictionKey(predictionKey)) {
+        this.predictionKeys.add(event.key.code);
+        return true;
+      }
+      this.releasedKeys.add(event.key.code);
+      return false;
     }
     // A space with nothing being composed is the editor's, with one exception: it is also the key
     // that rewrites a just-committed Chinese mark as ASCII, and that arming only exists after a
@@ -1070,6 +1098,9 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
    */
   async onCreate(want: Want): Promise<void> {
     try {
+      // `inputStart` 可能在下面任意一次异步准备期间到达；先订阅才能由 `pending` 留住首个编辑框，等面板建好再接入。
+      engine.on('inputStart', this.started);
+      engine.on('inputStop', this.stopped);
       const files: string = this.context.filesDir;
       const resources: string = `${files}/engine`;
       const state: string = `${files}/state`;
@@ -1081,11 +1112,13 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       const resolving: Promise<SharedStateMirror | null> = SharedStateMirror.resolve(this.context)
         .then((groupDir: string | null): SharedStateMirror | null => {
           const status = HarmonySharedSandboxPolicy.status(groupDir);
+          HarmonyTelemetry.configureAuthority(status.available ? status.directory : null, false);
           return status.available ? new SharedStateMirror(status.directory, files) : null;
         });
       // 在拿到共享目录之前就占住会话镜像的队列：设置应用发布的会话要先采用过来，本进程的认证请求（匿名注册、云剪贴板）都排在它后面（迁移差异 M2）。
       AccountSessionAdoption.adoptOnStart(resolving, state, 'settings', fullMode);
       const mirror: SharedStateMirror | null = await resolving;
+      if (this.tornDown) return;
       if (mirror !== null) {
         KeyboardSession.shared.useSharedSandbox(mirror, fullMode);
         SharedStateSync.keyboardSync(mirror, state, fullMode());
@@ -1107,6 +1140,21 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       } else {
         StagedResources.unstage(`${files}/offline-glosses`, `${files}/offline-glosses.ready`);
       }
+      // 候选英文音标表同样暂存到引擎资源旁，共享层在 pronunciations/en-phonetic.db 找它；包里没带时移除旧表，「显示读音」就不为英文预留那一行。
+      const pronunciations: string = `${this.context.resourceDir}/pronunciations`;
+      if (fs.accessSync(pronunciations)) {
+        StagedResources.stage(pronunciations, `${files}/pronunciations`, `${files}/pronunciations.ready`);
+      } else {
+        StagedResources.unstage(`${files}/pronunciations`, `${files}/pronunciations.ready`);
+      }
+      // 法日西俄德韩释义行的读音表同样暂存，共享层在 target-pronunciations/<语言>-phonetic.db 找它们。
+      const targetPronunciations: string = `${this.context.resourceDir}/target-pronunciations`;
+      if (fs.accessSync(targetPronunciations)) {
+        StagedResources.stage(targetPronunciations, `${files}/target-pronunciations`,
+          `${files}/target-pronunciations.ready`);
+      } else {
+        StagedResources.unstage(`${files}/target-pronunciations`, `${files}/target-pronunciations.ready`);
+      }
       StagedResources.stageLanguageDictionaries(this.context.resourceDir, files);
       StagedResources.stageHandwriting(this.context.resourceDir, files);
       // 扩展上下文提供系统颜色模式，视图本身没有可查询的上下文。
@@ -1124,8 +1172,6 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         KeyboardLog.error('onCreate: no session, panel not created');
         return;
       }
-      engine.on('inputStart', this.started);
-      engine.on('inputStop', this.stopped);
       engine.on('keyboardShow', this.keyboardShown);
       engine.on('keyboardHide', this.keyboardHidden);
       inputMethodEngine.getKeyboardDelegate().on('selectionChange', this.selectionChanged);
@@ -1197,10 +1243,11 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
             settings.candidatePreeditFontSize, CandidateLayoutPolicy.gap(settings.candidateSkinLayout, true,
         settings.candidateFontSize)) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit))
-          // 刚创建时还没有组字也没有面板，工具条画不画看工具栏设置和上次的键面是不是长空格样式的中文 26 键，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。
+          // 刚创建时还没有组字也没有面板，工具条画不画看工具栏设置和上次的键面是不是长空格样式的中文 26 键，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。停靠时底部抬高（键盘调整）也算进去，与视图的 `resizeTouchPanel` 相同。
           : requested !== null ? requested : KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-            settings.candidatePreeditFontSize, false, opened.strip, opened.extraRows, settings.candidateScalePercent);
+            settings.candidatePreeditFontSize, false, opened.strip, opened.extraRows, settings.candidateScalePercent,
+            KeyboardSession.shared.firstTouchLift());
         // 软键盘占满屏幕宽度（浮动时按 `fitTouchPanel` 收窄），候选窗口只按内容取宽，避免在桌面上遮住候选所对应的文本。
         this.density = screen.densityPixels;
         this.screenWidth = screen.width;
@@ -1230,7 +1277,7 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
           };
           KeyboardSession.shared.onCandidateCount = (count: number): void => {
             this.candidateCount = count;
-            if (KeyboardSession.shared.composing()
+            if (KeyboardSession.shared.candidateWindowWanted()
               && KeyboardSession.shared.openSurface() === DesktopSurface.NONE) {
               this.resizeCandidateWindow(DesktopSurface.NONE).then((): void => {
                 this.placeCandidateWindow();
@@ -1318,6 +1365,8 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
 
   /** Undoes everything onCreate installed. Safe to run twice: a failed onCreate and then onDestroy. */
   private teardown(): void {
+    // 长按菜单「朗读」用的引擎：没建过时什么也不做。
+    HarmonyReadAloud.shutdown();
     this.statusPanelGeneration += 1;
     this.tornDown = true;
     this.pending = undefined;

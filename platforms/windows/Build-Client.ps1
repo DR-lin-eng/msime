@@ -122,11 +122,23 @@ try {
                 '/p:Configuration=RelWithDebInfo', '/p:Platform=x64',
                 '/p:TargetName=msime-client-settings',
                 "/p:HostApiLibrary=$hostLibrary", "/p:MsimeEdition=$Edition",
+                "/p:NativeDependenciesInclude=$(Join-Path $X64Dependencies 'include')",
                 "/p:OutDir=$bin\", "/p:IntDir=$settingsIntermediate\") + $settingsVersion)
             $settingsPdb = Join-Path $bin 'msime-client-settings.pdb'
             if (-not (Test-Path -LiteralPath $settingsPdb -PathType Leaf)) {
                 throw "Expected one WinUI settings PDB output: $settingsPdb"
             }
+            # 原生面板宿主：与 Win7 包的 msime-client-panels-win7.exe 同一份 panels/win7 源码，这里以 MSIME_PANELS_MODERN_WINDOWS 编成 msime-client-panels.exe，连同 PDB 放在 Server 旁边。MSIME_WINDOWS_PANEL_HOST=native 时托盘、悬浮工具栏和设置窗口改由它打开面板，缺省仍是上面的 MSIME.exe。它和设置窗口链接同一个宿主导入库，不是 full 的版本是上面按版本改名生成的那份；不编它的测试。
+            $panels = Join-Path $output 'panels'
+            $panelConfigure = @('-S', (Join-Path $RepoRoot 'platforms/windows/panels/win7'), '-B', $panels,
+                '-G', $Generator, '-A', $platform,
+                "-DCMAKE_PREFIX_PATH=$($env:CMAKE_PREFIX_PATH)",
+                "-DMSIME_HOST_LIBRARY=$hostLibrary", "-DMSIME_EDITION=$Edition",
+                "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO=$bin",
+                '-DMSIME_PANELS_MODERN_WINDOWS=ON', '-DBUILD_TESTING=OFF')
+            if ($TargetVersion -ne '') { $panelConfigure += "-DMSIME_WINDOWS_VERSION=$TargetVersion" }
+            Invoke-ClientBuild cmake $panelConfigure
+            Invoke-ClientBuild cmake @('--build', $panels, '--config', 'RelWithDebInfo', '--parallel', '4', '--target', 'msime-client-panels')
         }
     }
     $env:CMAKE_PREFIX_PATH = $X64Dependencies
@@ -170,7 +182,7 @@ try {
         $prefix = if ($arch -eq 'x64') { $X64Dependencies } else { $X86Dependencies }
         & (Join-Path $PSScriptRoot 'Copy-RuntimeDependencies.ps1') `
             -DependencyPrefix $prefix -Destination $bin -Architecture $arch
-        foreach ($dll in @('MetasequoiaImeTsf.dll', $hostDll)) {
+        foreach ($dll in @('MetasequoiaImeTsf.dll', 'MetasequoiaImeCrashWer.dll', $hostDll)) {
             & (Join-Path $PSScriptRoot 'Test-PortableExecutable.ps1') -LiteralPath (Join-Path $bin $dll) -Architecture $arch -Kind dll
         }
         if ($arch -eq 'x64') {
@@ -179,12 +191,13 @@ try {
             }
             foreach ($exe in @('MetasequoiaImeServer.exe', 'MetasequoiaImeWatchdog.exe',
                 'msime-client-prepare.exe', 'msime-mcp.exe',
-                'msime-client-settings.exe', 'MSIME.exe')) {
+                'msime-client-settings.exe', 'MSIME.exe', 'msime-client-panels.exe')) {
                 & (Join-Path $PSScriptRoot 'Test-PortableExecutable.ps1') -LiteralPath (Join-Path $bin $exe) -Architecture x64 -Kind exe
             }
         }
     }
     & (Join-Path $PSScriptRoot 'Test-PortableExecutable.ps1') -LiteralPath (Join-Path $arm64Bin 'MetasequoiaImeTsf.dll') -Architecture arm64x -Kind dll
+    & (Join-Path $PSScriptRoot 'Test-PortableExecutable.ps1') -LiteralPath (Join-Path $arm64Bin 'MetasequoiaImeCrashWer.dll') -Architecture arm64x -Kind dll
     & (Join-Path $PSScriptRoot 'Test-PortableExecutable.ps1') -LiteralPath (Join-Path $arm64Bin $arm64HostDll) -Architecture arm64 -Kind dll
     Write-Output 'Client build commands and PE architecture checks completed; no signing, packaging or installation performed.'
 } finally {

@@ -86,7 +86,10 @@ jobs:
             esac
             case "$path" in
               platforms/android/*) android=true ;;
-              platforms/linux/*) linux=true ;;
+              # 精简 ONNX Runtime 的锁：Android 的 host 库（build-native.sh 开着 onnx-rerank，设备作业和发版构建）和 Linux 的 package-container.sh 都按它下载、静态链接，改了要两边重编。case 只走第一条匹配，所以两个平台写在同一条里。
+              resources/onnxruntime-minimal.lock.json) android=true; linux=true ;;
+              # package-container.sh 按这两份锁取精简 ONNX Runtime 链进宿主库、取两档逐键重排模型，下面的 Fedora 作业就跑它。
+              platforms/linux/*|resources/rerank-model.lock.json) linux=true ;;
               platforms/harmony/*) harmonyos=true ;;
               platforms/windows/*) windows=true ;;
               # Telemetry is compiled by the Linux and Windows hosts and DictionaryQuiesceLease.h by Linux and macOS; Android and HarmonyOS build neither, so this is not a shared path. ci-macos.yml covers the macOS side.
@@ -166,7 +169,7 @@ jobs:
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
         run: >-
-          apps/desktop/src-tauri/gen/android/gradlew --project-dir platforms/android/gradle-app --console=plain
+          platforms/android/gradle-app/gradlew --project-dir platforms/android/gradle-app --console=plain
           compileFullReleaseJavaWithJavac compilePinyinReleaseJavaWithJavac compileWubiReleaseJavaWithJavac
           compileJapaneseReleaseJavaWithJavac compileVietnameseReleaseJavaWithJavac compileTibetanReleaseJavaWithJavac
       # 编译通过不代表能在 minSdk 的设备上运行：javac 按 compileSdk 解析，0.2.0 调用的 Path.of 要 API 34，Android 9 到 12 上准备词库直接 NoSuchMethodError。lint 在 gradle-app 里只开了 NewApi，这一步专门拦高于 minSdk 的调用。
@@ -174,7 +177,7 @@ jobs:
         if: ${{ needs.changes.outputs.android == 'true' }}
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
-        run: apps/desktop/src-tauri/gen/android/gradlew --project-dir platforms/android/gradle-app --console=plain lintFullRelease
+        run: platforms/android/gradle-app/gradlew --project-dir platforms/android/gradle-app --console=plain lintFullRelease
       - name: Android platform unchanged
         if: ${{ needs.changes.outputs.android != 'true' }}
         run: echo 'No Android or shared-platform changes; platform gate skipped.'
@@ -185,13 +188,13 @@ jobs:
     if: ${{ needs.changes.outputs.android == 'true' && github.event_name != 'pull_request' }}
     uses: ./.github/workflows/android-device.yml
 
-  # PR 改了键盘或设置界面的 Java、资源或设备套件时，只在 API 35 上跑一遍设备验收，让作者合并前就看到界面文字、交互改动打破了哪条验收。它不是必需检查，失败不挡合并；API 28 和整套仍在合并后的 push 与 nightly 上跑（见 .agents/notes/implemented/process/2026-10-28-android-device-on-ui-prs.md）。
+  # PR 改了键盘、设置界面或崩溃设备套件时，API 28 先跑独立 crash-only，API 35 跑独立崩溃门禁后再跑完整输入验收，让 minSdk 的 Java/JNI 现场链路和高版本的完整交互都能在合并前看到；API 28 的完整输入和全套仍在合并后的 push 与 nightly 上跑（见 .agents/notes/implemented/process/2026-10-28-android-device-on-ui-prs.md）。这两个 PR 设备作业都不是必需检查，失败不挡合并。
   android-device-pr:
     needs: changes
     if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.android_device == 'true' }}
     uses: ./.github/workflows/android-device.yml
     with:
-      matrix: '[{"api": 35, "smoke": ""}]'
+      matrix: '[{"api": 28, "smoke": "--crash-only"}, {"api": 35, "smoke": ""}]'
 
   linux:
     needs: changes
@@ -205,6 +208,36 @@ jobs:
       - name: Build IBus and Fcitx5 hosts in the pinned container
         if: ${{ needs.changes.outputs.linux == 'true' }}
         run: bash platforms/linux/build-container.sh
+      - name: Linux platform unchanged
+        if: ${{ needs.changes.outputs.linux != 'true' }}
+        run: echo 'No Linux or shared-platform changes; platform gate skipped.'
+
+  linux-resource-integration:
+    needs: changes
+    name: Linux native host resource integration
+    runs-on: depot-ubuntu-24.04-8
+    timeout-minutes: 45
+    env:
+      MSIME_SKIP_RUST_TESTS: '1'
+      MSIME_RESOURCE_SMOKE_ONLY: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the locked desktop resources
+        if: ${{ needs.changes.outputs.linux == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/linux-resources
+          resource_dir="$(cargo run --quiet --locked -p msime-client-core --example install_resources -- target/linux-resources | tail -n 1)"
+          test -d "$resource_dir"
+          printf '%s\n' "$resource_dir" > target/linux-resources/path
+      - name: Run IBus resource acceptance
+        if: ${{ needs.changes.outputs.linux == 'true' }}
+        run: bash platforms/linux/tests/tools/check-container.sh "$(cat target/linux-resources/path)"
+      - name: Run Fcitx5 resource acceptance
+        if: ${{ needs.changes.outputs.linux == 'true' }}
+        run: bash platforms/linux/tests/tools/check-container.sh "$(cat target/linux-resources/path)" --fcitx5
       - name: Linux platform unchanged
         if: ${{ needs.changes.outputs.linux != 'true' }}
         run: echo 'No Linux or shared-platform changes; platform gate skipped.'
@@ -265,8 +298,8 @@ jobs:
           sudo apt-get install --yes libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libasound2-dev libssl-dev libxkbcommon-dev libayatana-appindicator3-dev librsvg2-dev libibus-1.0-dev pkgconf
           # Installs the toolchain rust-toolchain.toml pins, with its clippy component.
           rustup toolchain install
-      # Tauri 的构建脚本要求 frontendDist 目录存在；单元测试用不到页面，放一个空页面即可，省掉 pnpm 构建。
-      - name: Clippy and unit tests for msime-desktop
+      # Tauri 的构建脚本要求 frontendDist 目录存在；单元测试用不到页面，放一个空页面即可，省掉 pnpm 构建。msime-mcp-server 的测试（含崩溃采集的同意生命周期和 stdio 集成测试）在别的作业里只编不跑，放在这里一起跑。
+      - name: Clippy and unit tests for msime-desktop and msime-mcp-server
         if: ${{ needs.changes.outputs.linux == 'true' }}
         run: |
           set -euo pipefail
@@ -274,6 +307,8 @@ jobs:
           [ -e apps/desktop/dist/index.html ] || : > apps/desktop/dist/index.html
           cargo clippy --locked -p msime-desktop --all-targets -- -D warnings
           cargo test --locked -p msime-desktop
+          cargo clippy --locked -p msime-mcp-server --all-targets -- -D warnings
+          cargo test --locked -p msime-mcp-server
           # 复用已构建的 Rust 依赖，检查共享 UI 的静态语音目录没有漂移。
           cargo run --quiet --locked -p msime-client-providers --example export_voice_provider_catalog -- --check
           cargo run --quiet --locked -p msime-client-providers --example export_polish_prompt_catalog -- --check
@@ -282,7 +317,7 @@ jobs:
         if: ${{ needs.changes.outputs.linux != 'true' }}
         run: echo 'No Linux or shared-platform changes; platform gate skipped.'
 
-  # msime-engine 的单元测试和 golden 基准此前没有任何 CI 作业运行：上面的 Linux 容器只测 client-base、client-core、client-providers、client-services、input-runtime 和 host-api，提交前的 `verify-local.sh --quick` 不跑 Rust 测试，只有很少有人跑的全量 `verify-local.sh` 才跑。引擎里钉死精确次数的分配预算测试因此在 develop 上红了好几个 PR 都没人发现（见 .agents/notes/implemented/testing/2026-10-10-engine-tests-in-ci.md）。这里以 runner 的普通用户运行；整句模型不在仓库里，依赖它的测试会自行跳过并说明原因。
+  # msime-engine 的单元测试和 golden 基准此前没有任何 CI 作业运行：上面的 Linux 容器原本只测 client-base、client-core、client-providers、client-services、input-runtime 和 host-api（资源集成作业设了 MSIME_SKIP_RUST_TESTS，实际都跳过了，input-runtime 现在在这里测），提交前的 `verify-local.sh --quick` 不跑 Rust 测试，只有很少有人跑的全量 `verify-local.sh` 才跑。引擎里钉死精确次数的分配预算测试因此在 develop 上红了好几个 PR 都没人发现（见 .agents/notes/implemented/testing/2026-10-10-engine-tests-in-ci.md）。这里以 runner 的普通用户运行；整句模型不在仓库里，依赖它的测试会自行跳过并说明原因。
   engine:
     needs: changes
     name: Rust engine
@@ -340,6 +375,10 @@ jobs:
           # 安装 rust-toolchain.toml 钉住的工具链。
           rustup toolchain install
           cargo test --locked -p msime-engine
+      # msime-input-runtime 的单元测试此前也没有作业运行：Linux 资源集成作业设了 MSIME_SKIP_RUST_TESTS，跳过了容器里的 cargo test。2026-11-03 #10758 让粤语按学习开关调频时漏改了这里的一条用例，develop 一直红到发 macOS 0.58.0 前才被发现（#10820）。它与引擎同一套触发条件，接在引擎测试后面复用同一份编译缓存。
+      - name: Unit tests for msime-input-runtime
+        if: ${{ needs.changes.outputs.engine == 'true' }}
+        run: cargo test --locked -p msime-input-runtime
       # msime 自己经 path 依赖用引擎的源码，crates.io 上的采用方拿到的是按 include 白名单打出来的包；新加的数据文件漏进白名单、或者 README 里的路径在包里不存在，我们这边照常编过，只有下载包的人编不过。所以每个改了引擎的 PR 都把三个发布的 crate 按发布时的方式打包，并在打包后的源码上各编一遍。用 cargo package 不用 cargo publish --dry-run：后者遇到 crates.io 上已有的版本会失败，而版本号只在发版时才改。
       - name: Published crates build from their packages
         if: ${{ needs.changes.outputs.engine == 'true' }}
@@ -696,11 +735,30 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $msbuild = @(& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\amd64\MSBuild.exe')
           if ($msbuild.Count -lt 1) { throw 'MSBuild not found' }
+          # 设置工程直接由 MSBuild 构建，不经过 Build-Client.ps1，因此这里要显式准备它需要的 nlohmann/json.hpp。
+          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { 'C:\vcpkg' }
+          $nativeDeps = Join-Path $env:GITHUB_WORKSPACE 'target/windows-native-deps/settings'
+          & (Join-Path $vcpkgRoot 'vcpkg.exe') install 'nlohmann-json:x64-windows-static-md' "--x-install-root=$nativeDeps" --disable-metrics
+          if ($LASTEXITCODE -ne 0) { throw 'nlohmann-json install failed' }
+          $nativeInclude = Join-Path $nativeDeps 'x64-windows-static-md/include'
+          if (-not (Test-Path -LiteralPath (Join-Path $nativeInclude 'nlohmann/json.hpp') -PathType Leaf)) { throw 'nlohmann/json.hpp not found after vcpkg install' }
           # 使用与发布脚本相同的完整 Build，确保 Windows SDK 引用和 WinRT 投影均已初始化。
           $output = "$env:GITHUB_WORKSPACE/target/windows-full/x64/settings/"
-          & $msbuild[0] platforms/windows/settings/MSIME.Settings.vcxproj /restore /t:Build /p:Configuration=RelWithDebInfo /p:Platform=x64 /p:TargetName=msime-client-settings /p:HostApiLibrary="$env:GITHUB_WORKSPACE/target/debug/msime_host_api.dll.lib" /p:OutDir="$output" /p:IntDir="$env:GITHUB_WORKSPACE/target/windows-full/x64/settings-obj/" /verbosity:minimal
+          & $msbuild[0] platforms/windows/settings/MSIME.Settings.vcxproj /restore /t:Build /p:Configuration=RelWithDebInfo /p:Platform=x64 /p:TargetName=msime-client-settings /p:HostApiLibrary="$env:GITHUB_WORKSPACE/target/debug/msime_host_api.dll.lib" /p:NativeDependenciesInclude="$nativeInclude" /p:OutDir="$output" /p:IntDir="$env:GITHUB_WORKSPACE/target/windows-full/x64/settings-obj/" /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { throw 'Settings host build failed' }
           Copy-Item target/debug/msime_host_api.dll $output
+      # 设置应用和 msime-mcp 的 Windows 路径（崩溃采集经 cc/MSVC 编译 CrashRecorder.cpp、遥测目录、配置路径）在 PR 里没有别的作业编译；这里编译设置应用（只编库和可执行文件：它的测试目标在 Windows 上编不过，macOS 专属的 macos_input_source 测试没有按平台排除）并跑 msime-mcp-server 的测试。Tauri 的构建脚本只要求 frontendDist 存在，放一个空页面。
+      - name: Compile the settings app and test msime-mcp-server
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force apps/desktop/dist | Out-Null
+          if (-not (Test-Path apps/desktop/dist/index.html)) { New-Item -ItemType File apps/desktop/dist/index.html | Out-Null }
+          cargo check --locked -p msime-desktop -j 2
+          if ($LASTEXITCODE -ne 0) { throw 'Settings app check failed' }
+          cargo test --locked -p msime-mcp-server -j 2
+          if ($LASTEXITCODE -ne 0) { throw 'MCP server tests failed' }
       # 共享存储替换设置文件时，目标被别的进程短暂打开（杀毒、备份、索引）要等它过去，而不是让设置页把这次保存当成失败、重读旧值。这几条测试在真的 Windows 上打开着目标去替换，macOS 和 Linux 的作业碰不到这种失败。
       - name: Test shared storage replacement while the target is open
         if: ${{ needs.changes.outputs.windows == 'true' }}
@@ -761,6 +819,16 @@ jobs:
           Copy-Item target/debug/msime_host_api.dll "$output/RelWithDebInfo/"
           ctest --test-dir $output -C RelWithDebInfo --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'Windows 7 handwriting controls tests failed' }
+          # 同一份面板源码的现代 Windows 变体：Build-Client.ps1 把它编成 msime-client-panels.exe 随现代包安装（MSIME_WINDOWS_PANEL_HOST=native 时承载面板）。不链接 HarfBuzz、版本取 version.txt、跳到别的界面时找现代包的程序名，这里用同一套面板测试核对它在现代 Windows 上编得过、跑得通。
+          $modern = 'target/windows-full/x64/panels'
+          cmake -S platforms/windows/panels/win7 -B $modern -A x64 -DMSIME_PANELS_MODERN_WINDOWS=ON "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DVCPKG_MANIFEST_DIR=$env:GITHUB_WORKSPACE/platforms/windows/settings/win7" "-DVCPKG_INSTALLED_DIR=$env:GITHUB_WORKSPACE/target/windows-native-deps/win7-settings" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md "-DMSIME_HOST_LIBRARY=$env:GITHUB_WORKSPACE/target/debug/msime_host_api.dll.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Modern native panel host configuration failed' }
+          cmake --build $modern --config RelWithDebInfo --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Modern native panel host build failed' }
+          if (-not (Test-Path -LiteralPath "$modern/RelWithDebInfo/msime-client-panels.exe" -PathType Leaf) -or (Test-Path -LiteralPath "$modern/RelWithDebInfo/msime-client-panels-win7.exe")) { throw 'Modern native panel host has the wrong executable name' }
+          Copy-Item target/debug/msime_host_api.dll "$modern/RelWithDebInfo/"
+          ctest --test-dir $modern -C RelWithDebInfo --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Modern native panel host tests failed' }
       - name: Check Windows 7 product editions
         if: ${{ needs.changes.outputs.windows == 'true' }}
         shell: pwsh
@@ -801,10 +869,59 @@ jobs:
         if: ${{ needs.changes.outputs.windows != 'true' }}
         run: echo 'No Windows settings changes; native gate skipped.'
 
+  windows-wer:
+    needs: changes
+    name: Windows TSF system WER
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare WER test headers
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkgRoot = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { 'C:\vcpkg' }
+          $nativeDeps = Join-Path $env:GITHUB_WORKSPACE 'target/windows-native-deps/wer'
+          & (Join-Path $vcpkgRoot 'vcpkg.exe') install 'nlohmann-json:x64-windows-static-md' "--x-install-root=$nativeDeps" --disable-metrics
+          if ($LASTEXITCODE -ne 0) { throw 'WER test header install failed' }
+      # 独立工程复用生产采集器和 helper，只依赖已有的头文件包，不重新构建完整产品或 Rust。
+      - name: Build and run TSF system WER capture (x64 and x86)
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $jsonConfig = "$env:GITHUB_WORKSPACE/target/windows-native-deps/wer/x64-windows-static-md/share/nlohmann_json"
+          if (-not (Test-Path -LiteralPath "$jsonConfig/nlohmann_jsonConfig.cmake" -PathType Leaf)) { throw 'nlohmann-json configuration not found' }
+          foreach ($architecture in @(@{ Name = 'x64'; Generator = 'x64' }, @{ Name = 'x86'; Generator = 'Win32' })) {
+            $build = "target/windows-full/$($architecture.Name)/wer-lifecycle"
+            cmake -S platforms/windows/tsf/tests/capture_lifecycle -B $build -A $architecture.Generator "-Dnlohmann_json_DIR=$jsonConfig"
+            if ($LASTEXITCODE -ne 0) { throw "$($architecture.Name) TSF WER configuration failed" }
+            cmake --build $build --config RelWithDebInfo --parallel 2
+            if ($LASTEXITCODE -ne 0) { throw "$($architecture.Name) TSF WER build failed" }
+            ctest --test-dir $build -C RelWithDebInfo --output-on-failure --output-junit wer-tests.xml
+            if ($LASTEXITCODE -ne 0) { throw "$($architecture.Name) TSF WER callback or lifecycle test failed" }
+            & platforms/windows/tsf/tests/Invoke-SystemWer.ps1 -BuildDirectory $build -OutputDirectory "$build/system-wer"
+            if ($LASTEXITCODE -ne 0) { throw "$($architecture.Name) TSF system WER capture failed" }
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && needs.changes.outputs.windows == 'true' }}
+        with:
+          name: windows-tsf-system-wer
+          path: |
+            target/windows-full/*/wer-lifecycle/system-wer/
+            target/windows-full/*/wer-lifecycle/wer-tests.xml
+          if-no-files-found: warn
+      - name: Windows WER unchanged
+        if: ${{ needs.changes.outputs.windows != 'true' }}
+        run: echo 'No Windows changes; system WER gate skipped.'
+
   windows-scripts:
     needs: changes
     name: Windows release script tests
-    # The release scripts are PowerShell run on Windows, and the cross-build container above has no pwsh, so their probe tests run on a Windows runner. None of them compiles anything; the state directory step at the end is the one native build here, kept to a single test target.
+    # 发版脚本是在 Windows 上跑的 PowerShell，上面的交叉构建容器里没有 pwsh，所以它们的探测测试放在 Windows runner 上。脚本测试本身不编译；末尾的状态目录和候选取色两步是这里仅有的原生构建，共用一棵 pipe-only 构建树，只编几个只依赖头文件的测试目标。
     runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
     timeout-minutes: 15
     steps:
@@ -825,17 +942,18 @@ jobs:
         shell: pwsh
         run: ./platforms/windows/tests/server-manifest/verify.ps1
       # The installer script itself cannot be compiled here, so these read msime_setup.iss for its lifecycle contracts. watchdog-task also registers the logon task's exact /TR text with Task Scheduler under a throwaway name and reads back what schtasks stored; the hosted runner is elevated, which that round trip needs.
+      # repo-root 之前不在这张单子上，也不在别的流水线里，所以它从来没跑过：它只解析 Prepare-PackageFiles.ps1 的参数声明，不碰磁盘，和同列的其他几个一样不需要装过的包，漏掉是疏忽而不是前置条件不足。
       - name: Run installer script tests
         if: ${{ needs.changes.outputs.windows == 'true' }}
         shell: pwsh
         run: |
-          foreach ($test in 'lifecycle', 'watchdog-task', 'tauri-layout', 'tsf-registration', 'signpath-payload', 'installer_entry') {
+          foreach ($test in 'lifecycle', 'watchdog-task', 'tauri-layout', 'tsf-registration', 'signpath-payload', 'installer_entry', 'package-files', 'repo-root') {
             Write-Host "== $test"
             & pwsh -NoProfile -File "platforms/windows/installer/tests/$test.ps1"
             if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
           }
-      # 状态根和安装登记的注册表读取（common/StateDirectory.h、common/RegistryString.h）只能在真的 Windows 上跑：Windows GNU 交叉编译作业编这个测试但不运行，windows-settings 的 ctest 用的是 Win7 设置、面板和兼容 API 各自的构建树，所以这里单独编 windows-state-directory，x64 和 Win32 各跑一次。Win32 进程在这台 x64 runner 上走 WOW64，覆盖 32 位进程用 KEY_WOW64_64KEY 读 64 位视图，以及多余终止符、缺值、缺键和非字符串值。Win7 上 RRF_SUBKEY_WOW6464KEY 读不到、显式打开视图读得到的差别在现代 Windows 上不出现，这里测不出，只能在 Win7 x64 实机上验收。pipe-only 配置不链接 Rust 库，但根 CMakeLists 无条件找 nlohmann_json，所以只从 runner 自带的 vcpkg 装这一个头文件库，不按清单装 curl 等全部依赖。
-      - name: Test the state directory and registry view as x64 and x86
+      # 状态根和安装登记的注册表读取（common/StateDirectory.h、common/RegistryString.h）只能在真的 Windows 上跑：Windows GNU 交叉编译作业编这个测试但不运行，windows-settings 的 ctest 用的是 Win7 设置、面板和兼容 API 各自的构建树，所以这里单独编 windows-state-directory，x64 和 Win32 各跑一次。Win32 进程在这台 x64 runner 上走 WOW64，覆盖 32 位进程用 KEY_WOW64_64KEY 读 64 位视图，以及多余终止符、缺值、缺键和非字符串值。Win7 上 RRF_SUBKEY_WOW6464KEY 读不到、显式打开视图读得到的差别在现代 Windows 上不出现，这里测不出，只能在 Win7 x64 实机上验收。Server、watchdog 和准备程序共用的崩溃记录器（common/CrashRecorder.cpp）同样只依赖 Windows SDK，windows-crash-recorder 在同一构建树里以 MSVC /W4 /WX 编译，x64 和 Win32 各让子进程真实崩溃一次，核对落盘记录、解除武装后不写和 terminate 摘要优先。pipe-only 配置不链接 Rust 库，但根 CMakeLists 无条件找 nlohmann_json，所以只从 runner 自带的 vcpkg 装这一个头文件库，不按清单装 curl 等全部依赖。
+      - name: Test the state directory, registry view and crash recorder as x64 and x86
         if: ${{ needs.changes.outputs.windows == 'true' }}
         shell: pwsh
         run: |
@@ -852,11 +970,22 @@ jobs:
             $output = "target/windows-state-directory/$($arch.Platform)"
             cmake -S platforms/windows -B $output -A $arch.Platform -DMSIME_WINDOWS_PIPE_ONLY=ON "-DCMAKE_TOOLCHAIN_FILE=$toolchain" -DVCPKG_MANIFEST_MODE=OFF "-DVCPKG_INSTALLED_DIR=$installed" "-DVCPKG_TARGET_TRIPLET=$($arch.Triplet)"
             if ($LASTEXITCODE -ne 0) { throw "State directory configuration failed for $($arch.Platform)" }
-            cmake --build $output --config Release --target windows-state-directory --parallel 2
+            cmake --build $output --config Release --target windows-state-directory windows-crash-recorder --parallel 2
             if ($LASTEXITCODE -ne 0) { throw "State directory build failed for $($arch.Platform)" }
-            ctest --test-dir $output -C Release -R '^windows-state-directory$' --output-on-failure --no-tests=error
+            ctest --test-dir $output -C Release -R '^(windows-state-directory|windows-crash-recorder)$' --output-on-failure --no-tests=error
             if ($LASTEXITCODE -ne 0) { throw "State directory tests failed for $($arch.Platform)" }
           }
+      # 候选窗的取色（CandidatePalette.h、CandidateSkin.h：默认选中行的对比度、选中行释义色、皮肤槽位）只用头文件和 nlohmann_json，在 Windows GNU 交叉编译作业里只编译不运行。这里复用上一步 x64 的 pipe-only 构建树，用 MSVC 编译并运行 windows-candidate-palette 和 windows-candidate-skin，不另装依赖。
+      - name: Test the candidate palette and skin colours
+        if: ${{ needs.changes.outputs.windows == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = 'target/windows-state-directory/x64'
+          cmake --build $output --config Release --target windows-candidate-palette windows-candidate-skin --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate palette build failed' }
+          ctest --test-dir $output -C Release -R '^windows-candidate-(palette|skin)$' --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate palette tests failed' }
       - name: Windows platform unchanged
         if: ${{ needs.changes.outputs.windows != 'true' }}
         run: echo 'No Windows or shared-platform changes; platform gate skipped.'
@@ -924,13 +1053,14 @@ jobs:
         if: ${{ needs.changes.outputs.web == 'true' }}
         run: |
           cargo run --locked -p msime-engine-wasm --example make_fixture -- target/web-engine/fixture/msime.db
+          cargo run --locked -p msime-engine-wasm --example make_fixture -- target/web-engine/fixture/msime-cantonese.db --cantonese
           node crates/engine-wasm/tests/smoke.mjs target/web-engine/fixture/msime.db
       # SDK（@msime/web-engine）：test/ 下全部 *.test.mjs 单元测试（按键映射、皮肤解析等，glob 由 Node 自己展开），对构建脚本组装出的 npm 包做的端到端冒烟，以及在 runner 自带的 google-chrome 里跑的候选栏和 attachInput 接线检查（candidates.browser.mjs）。
       - name: Test the web engine SDK
         if: ${{ needs.changes.outputs.web == 'true' }}
         run: |
           node --test 'packages/web-engine/test/*.test.mjs'
-          node packages/web-engine/test/smoke.mjs target/web-engine/fixture/msime.db
+          node packages/web-engine/test/smoke.mjs target/web-engine/fixture/msime.db --cantonese target/web-engine/fixture/msime-cantonese.db
           node packages/web-engine/test/candidates.browser.mjs
       # 包括 routing.rs 和 notice.rs；parity.rs 与 rerank_routing.rs 需要真实词库，没有 MSIME_EVAL_RESOURCES 时跳过。
       - name: Test msime-engine-wasm

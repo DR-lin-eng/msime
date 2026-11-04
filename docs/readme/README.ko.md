@@ -16,9 +16,9 @@ zhoumo   →  周末   weekend      →  weekend
 
 **[메타세쿼이아 IME 다운로드](https://msime.app/download/)** · Windows · macOS · Linux · Android · iOS · HarmonyOS · 무료 오픈 소스(GPL-3.0-only)
 
-- **켜는 방법**: 기본으로 모두 꺼져 있습니다. 설정에서 「영어 뜻 표시」(显示英文释义, Android와 iOS에서는 「오프라인 영어 뜻」离线英文释义)를 켜고, 발음 기호도 보려면 「읽는 법 표시」(显示读音, Android에서는 「영어 발음 기호 표시」显示英文音标)도 켭니다. 뜻과 읽는 법은 기기 안의 사전에서 찾으므로 표시할 때 네트워크를 쓰지 않습니다(Android의 영어 발음 기호 사전만 처음 켤 때 한 번 내려받습니다). 「후보 번역」도 온라인 번역 서비스를 고르지 않으면 기기 안의 사전만 찾습니다.
+- **켜는 방법**: 기본으로 모두 꺼져 있습니다. 설정에서 「영어 뜻 표시」(显示英文释义, Android와 iOS에서는 「오프라인 영어 뜻」离线英文释义)를 켜고, 읽는 법도 보려면 「읽는 법 표시」(显示读音)도 켭니다. 영어 뜻에는 발음 기호, 일본어 뜻에는 헵번식 로마자, 한국어 뜻에는 국어의 로마자 표기법(개정 로마자 표기법)에 따른 로마자, 프랑스어·스페인어·러시아어·독일어 뜻에는 IPA(독일어는 실제 발음을 적은 정밀 표기)가 붙습니다. 뜻과 읽는 법은 기기 안의 사전에서 찾으므로 표시할 때 네트워크를 쓰지 않습니다(Android, iOS, Linux에서는 영어 발음 기호 사전과 나머지 여섯 언어의 읽는 법 사전을 설정에서 각각 한 번 내려받습니다). 「후보 번역」도 온라인 번역 서비스를 고르지 않으면 기기 안의 사전만 찾습니다.
 - **그 밖에**: 「후보 번역」의 대상 언어는 프랑스어, 일본어, 스페인어, 러시아어, 독일어, 한국어로도 바꿀 수 있습니다(HarmonyOS 휴대폰에는 러시아어가 없습니다). 「단어 외우기」(背单词)에는 중고 입시(中考)부터 GRE까지 단어장 여덟 권이 들어 있고, 간격 반복으로 복습 일정을 잡습니다.
-- **플랫폼별 차이**: 발음 기호는 현재 macOS, Android, Windows 새 버전 미리 보기에서 표시됩니다. Windows 정식판은 [msime-windows](https://github.com/metasequoiaime/msime-windows)가 배포하며 「영어 뜻 표시」라는 별도 스위치가 없고 「후보 번역」(候选词翻译)을 켜면 오프라인 영어 뜻이 표시되며 Ctrl+Enter도 쓸 수 있지만, 발음 기호와 간격 반복 「단어 외우기」 단어장은 아직 없습니다. 모바일 앱은 아직 베타입니다.
+- **플랫폼별 차이**: 읽는 법은 현재 macOS, Linux, Android, iOS, HarmonyOS, Windows 새 버전 미리 보기에서 표시됩니다. Windows 정식판은 [msime-windows](https://github.com/metasequoiaime/msime-windows)가 배포하며 「영어 뜻 표시」라는 별도 스위치가 없고 「후보 번역」(候选词翻译)을 켜면 오프라인 영어 뜻이 표시되며 Ctrl+Enter도 쓸 수 있지만, 발음 기호와 간격 반복 「단어 외우기」 단어장은 아직 없습니다. 모바일 앱은 아직 베타입니다.
 
 **입력기는 여러분이 입력하는 모든 것을 볼 수 있으므로, 이 질문에는 항목별로 확인할 수 있는 답이 있어야 합니다: [어떤 데이터가 기기를 떠나는가](../../PRIVACY.md).** 짧게 말하면, 새로 설치한 기본 설정에서는 입력한 내용을 기기 밖으로 보내는 기능이 없습니다. 클라우드 연상(조합 중인 병음을 Google 입력 도구로 보내는 기능)은 처음 물어볼 때나 설정에서 직접 켜야 하며, 나머지 네트워크 기능은 모두 직접 자격 증명을 입력하거나 서비스를 선택해야만 동작합니다. 이와 별도로 입력 내용을 담지 않는 자체 익명 사용 통계가 하나 있습니다. 여섯 플랫폼 모두 `api.msime.app`에 일일 활성, 세션, 크래시(오류 요약과 디렉터리를 제거한 호출 스택) 기록을 보내며, 기본으로 켜져 있고 설정의 「익명 사용 통계」에서 끌 수 있습니다. 필드, 플랫폼별 차이, 디스크 저장 위치는 [PRIVACY.md](../../PRIVACY.md#使用统计与崩溃上报默认开启可关闭)에 항목별로 나와 있습니다. 저장소는 어떠한 서드파티 통계나 크래시 보고 SDK도 사용하지 않습니다.
 
@@ -68,7 +68,7 @@ zhoumo   →  周末   weekend      →  weekend
 
 | 플랫폼 | 진입 디렉터리 | 호스트 형태와 통합 방식 |
 | --- | --- | --- |
-| [Android](../../platforms/android/README.md) | `platforms/android/` | 입력기 서비스 `app.msime.android.MSIMEInputService`는 `:ime` 독립 프로세스에서 실행되며, Java 호스트는 `platforms/android/native/client_jni.cpp`를 거쳐 host-api를 호출합니다. 릴리스되는 APK(`build-apk.sh`)는 네이티브 Java 설정 화면을 쓰며 Tauri/React를 포함하지 않습니다. React 설정을 포함한 Tauri 통합 패키지(`build-client-apk.sh`)는 입력기와 같은 패키지의 다른 프로세스로 비공개 files/bootstrap/state를 공유하지만, 개발용이며 릴리스하지 않습니다. 필기 입력은 ML Kit Digital Ink를 사용합니다 |
+| [Android](../../platforms/android/README.md) | `platforms/android/` | 입력기 서비스 `app.msime.android.MSIMEInputService`는 `:ime` 독립 프로세스에서 실행되며, Java 호스트는 `platforms/android/native/client_jni.cpp`를 거쳐 host-api를 호출합니다. 릴리스되는 APK(`build-apk.sh`)는 네이티브 Java 설정 화면을 쓰며 Tauri/React를 포함하지 않습니다. 필기 입력은 ML Kit Digital Ink를 사용합니다 |
 | [iOS](../../platforms/ios/README.md) | `platforms/ios/` | XcodeGen이 `project.yml`로부터 생성하는 네이티브 App에 키보드 확장 `MSIMEKeyboardExtension`이 내장되며, 둘은 App Group `group.app.msime.ios`를 통해 상태를 공유합니다. Swift 키보드가 host-api를 직접 호출하고, 필기 입력은 ML Kit Digital Ink를 사용합니다 |
 | [macOS](../../platforms/macos/README.md) | `platforms/macos/` | InputMethodKit bundle(산출물 이름 `水杉输入法.app`, bundle id `app.msime.inputmethod.MetasequoiaIME`). Swift 백엔드는 `MSIMEBackend.dylib`로 빌드되어 bundle과 함께 배포되며, Sparkle이 자동 업데이트를 담당합니다 |
 | [Linux](../../platforms/linux/README.md) | `platforms/linux/` | IBus와 Fcitx5는 나란히 있는 두 시스템 진입점으로, 동일한 host-api ABI를 링크합니다. 온라인 연상, 음성, 클립보드 등의 기능은 독립 provider 프로세스와 systemd 사용자 유닛이 담당합니다. CPack으로 TGZ와 DEB를 만듭니다 |
@@ -111,7 +111,7 @@ pnpm build
 
 데스크톱 설정의 앱 식별자와 기본 앱 데이터 디렉터리는 플랫폼별로 이름이 정해집니다: macOS는 `app.msime.macos`, Windows는 `app.msime.windows`, Linux는 `app.msime.linux`입니다. 환경설정은 그 안의 `preferences.json`에 저장됩니다. 절대 경로 환경 변수 `MSIME_CLIENT_STATE_DIR`로 격리된 개발 디렉터리를 지정할 수도 있습니다. macOS 네이티브 호스트는 같은 설정을 읽고 현재 단어 조합이 끝난 뒤 업데이트를 적용합니다. 여러 설정 창이 동시에 저장하면 revision으로 충돌을 감지하며, 사용자는 명시적으로 다시 읽은 뒤 덮어쓸지 결정해야 합니다.
 
-Android 통합 패키지 빌드와 기기 테스트는 [Android 호스트](../../platforms/android/README.md#tauri--react-共享设置合包)를 참고하십시오. 통합 패키지는 개발용이며, 릴리스되는 APK는 Tauri를 포함하지 않는 네이티브 패키지입니다. 통합 패키지에서 Tauri 설정과 네이티브 `:ime` 서비스는 같은 패키지의 다른 프로세스로 비공개 files/bootstrap/state를 공유하며, 설정 창을 닫아도 입력기 프로세스는 종료되지 않습니다. iOS의 제품 호스트는 `platforms/ios`의 네이티브 App으로, 설정 화면은 네이티브 SwiftUI 페이지입니다. 네이티브 키보드 확장을 내장하고 App Group을 통해 상태를 공유합니다. App에는 WebView가 없으며, Tauri iOS 프로젝트는 공용 컴포넌트를 따로 빌드할 때만 만들어지고 App으로 배포되거나 실행되지 않습니다. 서명과 기기 설치 절차는 [iOS 호스트](../../platforms/ios/README.md)를 참고하십시오.
+Android 빌드와 기기 테스트는 [Android 호스트](../../platforms/android/README.md)를 참고하십시오. 릴리스되는 APK는 Tauri를 포함하지 않는 네이티브 패키지입니다. iOS의 제품 호스트는 `platforms/ios`의 네이티브 App으로, 설정 화면은 네이티브 SwiftUI 페이지입니다. 네이티브 키보드 확장을 내장하고 App Group을 통해 상태를 공유합니다. App에는 WebView가 없습니다. 서명과 기기 설치 절차는 [iOS 호스트](../../platforms/ios/README.md)를 참고하십시오.
 
 공유 설정은 shuangpin_profile로 xiaohe(小鹤), ziranma(自然码), shoudao(首道), microsoft(마이크로소프트), 그리고 custom(사용자 정의 쌍병, 키 표는 shuangpin_custom_profile에 저장)을 지원합니다. 기본값은 Xiaohe로 읽으며, 알 수 없는 값은 거부합니다. 설정 페이지는 쌍병이 아닌 방식에서 이 선택을 비활성화하지만 이미 선택된 값은 유지합니다. macOS와 Linux의 설정 페이지에서는 내장 방식을 출발점으로 사용자 정의 키 배치를 편집하고 JSON으로 가져오거나 내보낼 수 있으며, 키 표는 Engine의 검사를 통과해야만 저장되고 쓸 수 없는 표일 때 입력기는 Xiaohe로 동작합니다. 방식 변경은 단어 조합이 끝난 뒤 Engine을 교체하는 규칙을 그대로 따릅니다.
 

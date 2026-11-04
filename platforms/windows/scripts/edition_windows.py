@@ -202,6 +202,8 @@ def header_text(table: dict) -> str:
             ("MSIME_EDITION_WUBI_MIXED_PINYIN_DEFAULT", "1" if entry["preference_defaults"].get("wubi_mixed_pinyin", False) else "0"),
             ("MSIME_EDITION_INPUT_SCHEMES", ", ".join(narrow(scheme) for scheme in entry["input_schemes"])),
             ("MSIME_EDITION_TEMPORARY_JAPANESE", "1" if entry["features"]["temporary_japanese"] else "0"),
+            # 版本带不带逐键重排的键盘模型：为 0 的版本 host-api 不挂重排器，两个设置窗口都不列「整句联想」的「标准 / 增强」选择。
+            ("MSIME_EDITION_NEURAL_KEYBOARD", "1" if entry["features"]["neural_keyboard"] else "0"),
             # 手写模型只认汉字：为 0 的版本（日文、越南文和藏文版）托盘菜单、悬浮工具栏和原生设置窗口都不提供手写。
             ("MSIME_EDITION_HANDWRITING", "1" if entry["features"]["handwriting"] else "0"),
         ]
@@ -260,13 +262,18 @@ def generated_files(table: dict) -> dict[pathlib.Path, str]:
     return {HEADER: header_text(table), INNO: inno_text(table)}
 
 
+def encoded(path: pathlib.Path, text: str) -> bytes:
+    # editions.iss carries a UTF-8 BOM: Inno Setup before 6.3 reads a script without one in the system ANSI code page, which turned the Chinese display names into mojibake in the Windows 7 installer built with Inno Setup 6.2.2.
+    return text.encode("utf-8-sig" if path == INNO else "utf-8")
+
+
 def drift(files: dict[pathlib.Path, str]) -> list[str]:
     problems = []
     for path, text in files.items():
         relative = path.relative_to(ROOT)
         if not path.is_file():
             problems.append(f"{relative} is missing")
-        elif path.read_text(encoding="utf-8") != text:
+        elif path.read_bytes() != encoded(path, text):
             problems.append(f"{relative} differs from the generated content")
     return problems
 
@@ -279,8 +286,8 @@ def gen(check: bool) -> int:
             print(f"FAIL: {problem}; run python3 platforms/windows/scripts/edition_windows.py gen")
         return 1 if problems else 0
     for path, text in files.items():
-        if not path.is_file() or path.read_text(encoding="utf-8") != text:
-            path.write_text(text, encoding="utf-8", newline="\n")
+        if not path.is_file() or path.read_bytes() != encoded(path, text):
+            path.write_bytes(encoded(path, text))
             print(f"wrote {path.relative_to(ROOT)}")
     return 0
 

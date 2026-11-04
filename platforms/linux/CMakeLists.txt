@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 project(MSIMEClientLinux LANGUAGES CXX)
+# 保留 Release 的原优化级别，只额外生成供崩溃符号归档使用的调试行。
+option(MSIME_RELEASE_CRASH_SYMBOLS "Keep source lines for release crash symbols" OFF)
+if(MSIME_RELEASE_CRASH_SYMBOLS)
+  add_compile_options("$<$<CONFIG:Release>:-g1>")
+endif()
 find_package(CURL REQUIRED)
 include(GNUInstallDirs)
 include(cmake/Edition.cmake)
@@ -141,7 +146,7 @@ target_compile_options(msime-ibus-host PRIVATE -Wall -Wextra -Werror)
 target_include_directories(msime-ibus-host PUBLIC src src/core src/candidates src/clipboard src/providers src/voice src/overlay src/system src/entrypoints ../../crates/host-api/include)
 # ClientEngine.cpp 用到 pthread，由这个库自己公开声明，链接它的可执行文件不必各自补 `Threads::Threads`。glibc 2.34 之前 pthread 不在 libc 里，漏掉就只在 Debian 10 这类旧系统上链接失败（#7849 新加的 ibus-mode-hint-lifecycle 就是这样）。
 find_package(Threads REQUIRED)
-target_link_libraries(msime-ibus-host PUBLIC PkgConfig::IBUS PkgConfig::XKBCOMMON nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads)
+target_link_libraries(msime-ibus-host PUBLIC PkgConfig::IBUS PkgConfig::XKBCOMMON ${CMAKE_DL_LIBS} nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads)
 if(X11_SURFACE_FOUND)
   target_compile_definitions(msime-ibus-host PRIVATE MSIME_LINUX_HAS_X11_SURFACE)
   target_link_libraries(msime-ibus-host PUBLIC PkgConfig::X11_SURFACE)
@@ -210,15 +215,31 @@ if(NOT MSIME_LINUX_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
   message(FATAL_ERROR "The Linux package version must be MAJOR.MINOR.PATCH: ${MSIME_LINUX_VERSION}")
 endif()
 find_package(Threads REQUIRED)
+add_library(msime-linux-auxiliary-telemetry STATIC
+  src/core/AuxiliaryCrashCapture.cpp ../common/Telemetry.cpp ../common/CrashRecorder.cpp)
+target_include_directories(msime-linux-auxiliary-telemetry PUBLIC ../../crates/host-api/include)
+target_compile_options(msime-linux-auxiliary-telemetry PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(msime-linux-auxiliary-telemetry PRIVATE
+  MSIME_LINUX_VERSION="${MSIME_LINUX_VERSION}"
+  MSIME_SYSTEM_OPTIONS="${CMAKE_INSTALL_FULL_SYSCONFDIR}/${MSIME_CLIENT_DIRECTORY}/runtime-options.json")
+target_link_libraries(msime-linux-auxiliary-telemetry PUBLIC
+  nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads ${CMAKE_DL_LIBS})
+set_target_properties(msime-linux-auxiliary-telemetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(msime-python-crash SHARED src/core/PythonCrashCapture.cpp)
+target_compile_options(msime-python-crash PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(msime-python-crash PRIVATE msime-linux-auxiliary-telemetry)
+set_target_properties(msime-python-crash PROPERTIES INSTALL_RPATH "$ORIGIN")
+install(TARGETS msime-python-crash LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}")
 add_executable(msime-linux-ibus src/entrypoints/ibus_main.cpp src/system/SystemTheme.cpp)
-target_sources(msime-linux-ibus PRIVATE ../common/Telemetry.cpp)
+target_sources(msime-linux-ibus PRIVATE ../common/Telemetry.cpp ../common/CrashRecorder.cpp)
 target_include_directories(msime-linux-ibus PRIVATE ../common)
 target_compile_definitions(msime-linux-ibus PRIVATE MSIME_LINUX_VERSION="${MSIME_LINUX_VERSION}")
 target_link_libraries(msime-linux-ibus PRIVATE Threads::Threads)
 target_compile_options(msime-linux-ibus PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-ibus PRIVATE msime-ibus-host)
 add_executable(msime-linux-dictionary src/providers/dictionary_request.cpp)
-add_executable(msime-linux-prepare src/entrypoints/prepare_host_main.cpp)
+add_executable(msime-linux-prepare src/entrypoints/prepare_host_main.cpp ../common/Telemetry.cpp ../common/CrashRecorder.cpp)
+target_compile_definitions(msime-linux-prepare PRIVATE MSIME_LINUX_VERSION="${MSIME_LINUX_VERSION}")
 target_compile_options(msime-linux-prepare PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-prepare PRIVATE msime-ibus-host)
 file(RELATIVE_PATH MSIME_INSTALLED_RESOURCE_RELATIVE_DIR
@@ -279,12 +300,24 @@ target_link_libraries(msime-linux-voice PRIVATE msime-ibus-host)
 find_package(Threads REQUIRED)
 set(MSIME_SHARED_VOICE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/voice")
 add_executable(msime-voice-local "${MSIME_SHARED_VOICE_DIR}/LocalAsrHelper.cpp" "${MSIME_SHARED_VOICE_DIR}/LocalAsr.cpp")
+target_sources(msime-voice-local PRIVATE src/voice/HelperCrashCapture.cpp)
+target_compile_definitions(msime-voice-local PRIVATE MSIME_VOICE_CRASH_CAPTURE)
 target_compile_options(msime-voice-local PRIVATE -Wall -Wextra -Werror)
 target_include_directories(msime-voice-local PRIVATE "${MSIME_SHARED_VOICE_DIR}" "${MSIME_SHARED_VOICE_DIR}/third_party")
 target_link_libraries(msime-voice-local PRIVATE nlohmann_json::nlohmann_json Threads::Threads ${CMAKE_DL_LIBS})
 add_executable(msime-linux-emoji src/providers/emoji_request.cpp)
 target_compile_options(msime-linux-emoji PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-emoji PRIVATE msime-ibus-host)
+set(MSIME_AUXILIARY_TARGETS msime-linux-dictionary msime-linux-cloud-dictionary
+  msime-linux-cloud-clipboard msime-linux-online msime-linux-translation msime-linux-clipboard
+  msime-linux-clipboard-capture msime-linux-handwriting msime-linux-voice msime-linux-emoji
+  msime-voice-local)
+if(TARGET msime-linux-clipboard-watch-x11)
+  list(APPEND MSIME_AUXILIARY_TARGETS msime-linux-clipboard-watch-x11)
+endif()
+foreach(auxiliary IN LISTS MSIME_AUXILIARY_TARGETS)
+  target_link_libraries(${auxiliary} PRIVATE msime-linux-auxiliary-telemetry)
+endforeach()
 if(BUILD_TESTING)
   add_executable(ibus-mode-hint-lifecycle tests/runtime/mode_hint_lifecycle.cpp)
   target_compile_options(ibus-mode-hint-lifecycle PRIVATE -Wall -Wextra -Werror)
@@ -315,6 +348,10 @@ if(BUILD_TESTING)
     MSIME_ZHUYIN_DICTIONARY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/zhuyin_dictionary.py"
     MSIME_STROKE_DICTIONARY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/stroke_dictionary.py")
   if(MSIME_ENGINE_RESOURCES)
+    # 默认分支串起全部 IBus 宿主用例（含按住说话、组合键取消、迟到结果），runner 负载高时要两分钟以上。
+    add_test(NAME ibus-native-context
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}")
+    set_tests_properties(ibus-native-context PROPERTIES TIMEOUT 300)
     add_test(NAME ibus-custom-voice-hotkey
       COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --voice-hotkey)
     set_tests_properties(ibus-custom-voice-hotkey PROPERTIES TIMEOUT 60)
@@ -345,6 +382,9 @@ if(BUILD_TESTING)
     add_test(NAME ibus-stale-candidate-click
       COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --stale-candidate-click)
     set_tests_properties(ibus-stale-candidate-click PROPERTIES TIMEOUT 60)
+    add_test(NAME ibus-next-word-prediction
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --prediction)
+    set_tests_properties(ibus-next-word-prediction PROPERTIES TIMEOUT 60)
   endif()
   add_executable(linux-navigation-bindings-test tests/input/navigation_bindings.cpp)
   target_compile_options(linux-navigation-bindings-test PRIVATE -Wall -Wextra -Werror)
@@ -486,11 +526,50 @@ if(BUILD_TESTING)
   add_executable(common-dictionary-quiesce-lease-test ../common/tests/dictionary_quiesce_lease.cpp)
   target_compile_options(common-dictionary-quiesce-lease-test PRIVATE -Wall -Wextra -Werror)
   add_test(NAME common-dictionary-quiesce-lease COMMAND common-dictionary-quiesce-lease-test)
-  add_executable(common-telemetry-test ../common/tests/telemetry.cpp ../common/Telemetry.cpp)
+  add_executable(common-vocabulary-due-menu-test ../common/tests/vocabulary_due_menu.cpp)
+  target_compile_options(common-vocabulary-due-menu-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  add_test(NAME common-vocabulary-due-menu COMMAND common-vocabulary-due-menu-test)
+  add_executable(common-telemetry-test ../common/tests/telemetry.cpp ../common/Telemetry.cpp ../common/CrashRecorder.cpp)
   target_compile_options(common-telemetry-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
   target_include_directories(common-telemetry-test PRIVATE ../common ../../crates/host-api/include)
   target_link_libraries(common-telemetry-test PRIVATE nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads)
   add_test(NAME common-telemetry COMMAND common-telemetry-test)
+  include(../common/tests/capture_only.cmake)
+  set(auxiliary_crash_arguments
+    --controller $<TARGET_FILE:common-capture-only-test> --version "${MSIME_LINUX_VERSION}"
+    --client-directory "${MSIME_CLIENT_DIRECTORY}"
+    --telemetry-directory "${MSIME_EDITION_FCITX5_ADDON}")
+  foreach(auxiliary IN LISTS MSIME_AUXILIARY_TARGETS)
+    if(NOT auxiliary STREQUAL "msime-linux-clipboard-watch-x11")
+      list(APPEND auxiliary_crash_arguments --binary "${auxiliary}" $<TARGET_FILE:${auxiliary}>)
+    endif()
+  endforeach()
+  add_test(NAME linux-auxiliary-crash-capture
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/auxiliary_crash_capture.py"
+      ${auxiliary_crash_arguments})
+  set_tests_properties(linux-auxiliary-crash-capture PROPERTIES TIMEOUT 120)
+  add_test(NAME linux-python-crash-capture
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/python_crash_capture.py"
+      --controller $<TARGET_FILE:common-capture-only-test> --bridge $<TARGET_FILE:msime-python-crash>
+      --paths "${CMAKE_CURRENT_BINARY_DIR}/msime_voice_paths.py" --scripts "${CMAKE_CURRENT_SOURCE_DIR}/scripts"
+      --host-library "${MSIME_HOST_LIBRARY}"
+      --version "${MSIME_LINUX_VERSION}" --client-directory "${MSIME_CLIENT_DIRECTORY}"
+      --telemetry-directory "${MSIME_EDITION_FCITX5_ADDON}")
+  set_tests_properties(linux-python-crash-capture PROPERTIES TIMEOUT 180)
+  if(TARGET msime-linux-clipboard-watch-x11 AND MSIME_XVFB_RUN)
+    add_test(NAME linux-x11-auxiliary-crash-capture
+      COMMAND "${MSIME_XVFB_RUN}" -a "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/auxiliary_crash_capture.py"
+        --controller $<TARGET_FILE:common-capture-only-test> --version "${MSIME_LINUX_VERSION}"
+        --client-directory "${MSIME_CLIENT_DIRECTORY}"
+        --telemetry-directory "${MSIME_EDITION_FCITX5_ADDON}"
+        --binary msime-linux-clipboard-watch-x11 $<TARGET_FILE:msime-linux-clipboard-watch-x11>)
+    set_tests_properties(linux-x11-auxiliary-crash-capture PROPERTIES TIMEOUT 45)
+  endif()
+  add_executable(common-crash-recorder-test ../common/tests/crash_recorder.cpp ../common/CrashRecorder.cpp)
+  target_compile_options(common-crash-recorder-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_link_libraries(common-crash-recorder-test PRIVATE ${CMAKE_DL_LIBS})
+  add_test(NAME common-crash-recorder COMMAND common-crash-recorder-test)
   add_executable(linux-input-mode-indicator-test tests/core/input_mode_indicator.cpp)
   target_compile_options(linux-input-mode-indicator-test PRIVATE -Wall -Wextra -Werror)
   target_include_directories(linux-input-mode-indicator-test PRIVATE src)
@@ -505,11 +584,21 @@ if(BUILD_TESTING)
   target_include_directories(linux-view-composition-test PRIVATE src)
   target_link_libraries(linux-view-composition-test PRIVATE nlohmann_json::nlohmann_json)
   add_test(NAME linux-view-composition COMMAND linux-view-composition-test)
+  add_executable(linux-next-word-prediction-test tests/core/next_word_prediction.cpp)
+  target_compile_options(linux-next-word-prediction-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-next-word-prediction-test PRIVATE src)
+  target_link_libraries(linux-next-word-prediction-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-next-word-prediction COMMAND linux-next-word-prediction-test)
   add_executable(linux-voice-provider-options-test tests/voice/voice_provider_options.cpp)
   target_compile_options(linux-voice-provider-options-test PRIVATE -Wall -Wextra -Werror)
   target_include_directories(linux-voice-provider-options-test PRIVATE src)
   target_link_libraries(linux-voice-provider-options-test PRIVATE nlohmann_json::nlohmann_json)
   add_test(NAME linux-voice-provider-options COMMAND linux-voice-provider-options-test)
+  add_executable(linux-voice-hold-chord-test tests/voice/voice_hold_chord.cpp)
+  target_compile_options(linux-voice-hold-chord-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-voice-hold-chord-test PRIVATE src)
+  target_link_libraries(linux-voice-hold-chord-test PRIVATE PkgConfig::IBUS)
+  add_test(NAME linux-voice-hold-chord COMMAND linux-voice-hold-chord-test)
   add_executable(linux-prepare-paths-test tests/core/prepare_paths.cpp)
   target_compile_options(linux-prepare-paths-test PRIVATE -Wall -Wextra -Werror)
   target_include_directories(linux-prepare-paths-test PRIVATE src)
@@ -617,7 +706,8 @@ if(BUILD_TESTING)
   target_link_libraries(linux-ibus-registration-bus PRIVATE PkgConfig::IBUS)
   add_test(NAME linux-ibus-startup-telemetry
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/ibus_startup_telemetry.py"
-                   $<TARGET_FILE:msime-linux-ibus> $<TARGET_FILE:linux-ibus-registration-bus> "${MSIME_LINUX_VERSION}")
+                   $<TARGET_FILE:msime-linux-ibus> $<TARGET_FILE:linux-ibus-registration-bus> "${MSIME_LINUX_VERSION}"
+                   $<TARGET_FILE:common-capture-only-test>)
   set_tests_properties(linux-ibus-startup-telemetry PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
   add_test(NAME linux-voice-provider-degraded-start
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/provider_degraded_start.py")
@@ -715,7 +805,7 @@ foreach(MSIME_PROVIDER online voice)
   install(FILES "${MSIME_UNIT_SOURCE}" DESTINATION "${MSIME_SYSTEMD_USER_UNIT_DIR}"
           RENAME ${MSIME_EDITION_PACKAGE}-${MSIME_PROVIDER}.socket)
 endforeach()
-install(FILES scripts/msime_voice_doubao.py scripts/msime_voice_local.py scripts/msime_voice_polish_prompts.py scripts/msime_voice_provider_catalog.py scripts/msime_provider_runtime.py scripts/host_api.py DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES scripts/msime_voice_doubao.py scripts/msime_voice_local.py scripts/msime_voice_polish_prompts.py scripts/msime_voice_provider_catalog.py scripts/msime_provider_runtime.py scripts/msime_crash_capture.py scripts/host_api.py DESTINATION "${CMAKE_INSTALL_BINDIR}")
 # The helper and the sherpa-onnx runtime share the host library's private directory: the helper finds the runtime in its own directory, and libsherpa-onnx-c-api.so finds libonnxruntime.so through its $ORIGIN RPATH.
 install(TARGETS msime-voice-local RUNTIME DESTINATION "${CMAKE_INSTALL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}")
 set(MSIME_VOICE_RUNTIME_DIR "" CACHE PATH "sherpa-onnx runtime for on-device recognition, as unpacked by scripts/fetch_voice_runtime.py --platform linux-<arch>")
@@ -745,6 +835,8 @@ file(RELATIVE_PATH MSIME_VOICE_LOCAL_HELPER_RELATIVE "${CMAKE_INSTALL_FULL_BINDI
 get_filename_component(MSIME_HOST_LIBRARY_NAME "${MSIME_HOST_LIBRARY}" NAME)
 file(RELATIVE_PATH MSIME_HOST_LIBRARY_RELATIVE "${CMAKE_INSTALL_FULL_BINDIR}"
      "${CMAKE_INSTALL_FULL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}/${MSIME_HOST_LIBRARY_NAME}")
+file(RELATIVE_PATH MSIME_PYTHON_CRASH_LIBRARY_RELATIVE "${CMAKE_INSTALL_FULL_BINDIR}"
+     "${CMAKE_INSTALL_FULL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}/${CMAKE_SHARED_LIBRARY_PREFIX}msime-python-crash${CMAKE_SHARED_LIBRARY_SUFFIX}")
 configure_file(data/msime_voice_paths.py.in msime_voice_paths.py @ONLY)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/msime_voice_paths.py" DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES data/voice/start.pcm data/voice/end.pcm data/voice/SOURCE.md
@@ -925,6 +1017,44 @@ if(MSIME_SETTLED_MODEL)
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/settled-model.lock.json"
           DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/neural-model.lock.json"
+          DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}")
+endif()
+# 整句联想「增强」逐键重排的两档 ONNX 模型（chinese-ime-lm 的 rerank-v2：8x448 在 rerank-model/，6x256 在 rerank-model-small/，各是 lm_step.ort、model.json、vocab.json），由 `scripts/fetch_rerank_model.py` 按 resources/rerank-model.lock.json 下载核对、改回原名，这里再按同一份锁逐个核对。装在资源目录旁边而不是里面，理由与上面的落定重排模型相同：资源目录要与词库锁逐项相符。host-api 要打开 `onnx-rerank` 编译才读它们（package-container.sh 这样编），两份都在时先自测大的、一页超过 10 ms 换小的，都没有时退回资源目录里随包的 sentence-model.safetensors。可选：发行版仓库的源码构建链接不了预编译的 ONNX Runtime，不传它，照旧用随包模型。只有带键盘模型的版本（版本表 features.neural_keyboard）装。
+set(MSIME_RERANK_MODELS "" CACHE PATH "Directory holding rerank-model/ and rerank-model-small/ from scripts/fetch_rerank_model.py, e.g. target/rerank-model")
+if(MSIME_RERANK_MODELS AND NOT MSIME_EDITION_NEURAL_KEYBOARD)
+  message(STATUS "Edition ${MSIME_EDITION} has no keyboard model; not installing the keystroke rerank models in ${MSIME_RERANK_MODELS}")
+  set(MSIME_INSTALL_RERANK_MODELS OFF)
+elseif(MSIME_RERANK_MODELS)
+  set(MSIME_INSTALL_RERANK_MODELS ON)
+else()
+  set(MSIME_INSTALL_RERANK_MODELS OFF)
+endif()
+if(MSIME_INSTALL_RERANK_MODELS)
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/rerank-model.lock.json" MSIME_RERANK_LOCK)
+  string(JSON MSIME_RERANK_MODEL_COUNT LENGTH "${MSIME_RERANK_LOCK}" models)
+  math(EXPR MSIME_RERANK_MODEL_LAST "${MSIME_RERANK_MODEL_COUNT} - 1")
+  foreach(MSIME_RERANK_MODEL_INDEX RANGE 0 ${MSIME_RERANK_MODEL_LAST})
+    string(JSON MSIME_RERANK_DIRECTORY GET "${MSIME_RERANK_LOCK}" models ${MSIME_RERANK_MODEL_INDEX} directory)
+    string(JSON MSIME_RERANK_ARTIFACT_COUNT LENGTH "${MSIME_RERANK_LOCK}" models ${MSIME_RERANK_MODEL_INDEX} artifacts)
+    math(EXPR MSIME_RERANK_ARTIFACT_LAST "${MSIME_RERANK_ARTIFACT_COUNT} - 1")
+    foreach(MSIME_RERANK_ARTIFACT_INDEX RANGE 0 ${MSIME_RERANK_ARTIFACT_LAST})
+      string(JSON MSIME_RERANK_NAME GET "${MSIME_RERANK_LOCK}" models ${MSIME_RERANK_MODEL_INDEX} artifacts ${MSIME_RERANK_ARTIFACT_INDEX} file)
+      string(JSON MSIME_RERANK_SIZE GET "${MSIME_RERANK_LOCK}" models ${MSIME_RERANK_MODEL_INDEX} artifacts ${MSIME_RERANK_ARTIFACT_INDEX} size)
+      string(JSON MSIME_RERANK_SHA256 GET "${MSIME_RERANK_LOCK}" models ${MSIME_RERANK_MODEL_INDEX} artifacts ${MSIME_RERANK_ARTIFACT_INDEX} sha256)
+      set(MSIME_RERANK_FILE "${MSIME_RERANK_MODELS}/${MSIME_RERANK_DIRECTORY}/${MSIME_RERANK_NAME}")
+      if(NOT EXISTS "${MSIME_RERANK_FILE}" OR IS_DIRECTORY "${MSIME_RERANK_FILE}" OR IS_SYMLINK "${MSIME_RERANK_FILE}")
+        message(FATAL_ERROR "Missing keystroke rerank model file ${MSIME_RERANK_DIRECTORY}/${MSIME_RERANK_NAME} in ${MSIME_RERANK_MODELS}")
+      endif()
+      file(SIZE "${MSIME_RERANK_FILE}" MSIME_RERANK_ACTUAL_SIZE)
+      file(SHA256 "${MSIME_RERANK_FILE}" MSIME_RERANK_ACTUAL_SHA256)
+      if(NOT MSIME_RERANK_ACTUAL_SIZE STREQUAL MSIME_RERANK_SIZE OR NOT MSIME_RERANK_ACTUAL_SHA256 STREQUAL MSIME_RERANK_SHA256)
+        message(FATAL_ERROR "Keystroke rerank model file ${MSIME_RERANK_DIRECTORY}/${MSIME_RERANK_NAME} does not match resources/rerank-model.lock.json")
+      endif()
+      install(FILES "${MSIME_RERANK_FILE}"
+              DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}/${MSIME_RERANK_DIRECTORY}")
+    endforeach()
+  endforeach()
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/rerank-model.lock.json"
           DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}")
 endif()
 # Offline glosses for non-English translation targets, one zh-<lang>.db per language built by `scripts/build_offline_glosses.py`, installed as a sibling of the resource bundle for the same reason as the settled model; the Engine looks for them there. Optional: without them the candidate glosses stay English only. Their notice is required with them, since the databases are CC BY-SA and must travel with their attribution.
@@ -1154,8 +1284,14 @@ install(FILES "${MSIME_HOST_LIBRARY}" DESTINATION "${CMAKE_INSTALL_LIBDIR}/${MSI
 file(RELATIVE_PATH MSIME_HOST_LIBRARY_RELATIVE_DIR
   "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}")
 set_target_properties(msime-linux-ibus msime-linux-dictionary msime-linux-cloud-dictionary msime-linux-cloud-clipboard msime-linux-online msime-linux-translation msime-linux-handwriting
-                      msime-linux-voice msime-linux-emoji msime-linux-clipboard-capture msime-linux-prepare PROPERTIES
+                      msime-linux-voice msime-linux-emoji msime-linux-clipboard msime-linux-clipboard-capture msime-linux-prepare PROPERTIES
   INSTALL_RPATH "$ORIGIN/${MSIME_HOST_LIBRARY_RELATIVE_DIR}")
+if(TARGET msime-linux-clipboard-watch-x11)
+  set_target_properties(msime-linux-clipboard-watch-x11 PROPERTIES
+    INSTALL_RPATH "$ORIGIN/${MSIME_HOST_LIBRARY_RELATIVE_DIR}")
+endif()
+# 本地语音程序与共享库安装在同一目录，不使用 bin 目录的相对路径。
+set_target_properties(msime-voice-local PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 if(BUILD_TESTING)
   add_executable(linux-native-compose-test tests/input/native_compose.cpp)
@@ -1297,6 +1433,8 @@ set(MSIME_NOTICE_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/adaptive-inference-NOTICES.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-stroke-LGPL-3.0.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/OpenCC-Apache-2.0.txt"
+  # 资源目录里的整句重排模型 sentence-model.safetensors 与随包时 settled-model/ 里的 sentence-model-desktop.safetensors 是 chinese-ime-lm 的 model-v1（Apache-2.0）：许可证全文、上游 NOTICE 与训练语料要求的署名都在这份各平台共用的文件里。
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/sentence-model-Apache-2.0.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/pinyin-data-MIT.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/ECDICT-MIT.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime_kaomoji_dict-MIT.txt"
@@ -1325,6 +1463,7 @@ set(MSIME_NOTICE_NAMES
   adaptive-inference-NOTICES.txt
   rime-stroke-LGPL-3.0.txt
   OpenCC-Apache-2.0.txt
+  sentence-model-Apache-2.0.txt
   pinyin-data-MIT.txt
   ECDICT-MIT.txt
   rime_kaomoji_dict-MIT.txt
@@ -1342,7 +1481,12 @@ list(APPEND MSIME_NOTICE_NAMES nlohmann_json-MIT.txt)
 # msime-voice-local compiles the sherpa-onnx C API header in; the runtime libraries, when installed, add ONNX Runtime and the notices of what it bundles.
 list(APPEND MSIME_NOTICE_SOURCES "${MSIME_SHARED_VOICE_DIR}/third_party/sherpa-onnx/LICENSE")
 list(APPEND MSIME_NOTICE_NAMES sherpa-onnx-Apache-2.0.txt)
-if(MSIME_VOICE_RUNTIME_DIR)
+# 装了逐键重排模型的包，宿主库也静态链接了精简构建的 ONNX Runtime 1.24.4（package-container.sh 两件一起做），同一份许可证与第三方通知也覆盖它；模型本身是 Apache-2.0，带上游的 NOTICE 和许可证全文。
+if(MSIME_INSTALL_RERANK_MODELS)
+  list(APPEND MSIME_NOTICE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/data/licenses/rerank-model-Apache-2.0.txt")
+  list(APPEND MSIME_NOTICE_NAMES rerank-model-Apache-2.0.txt)
+endif()
+if(MSIME_VOICE_RUNTIME_DIR OR MSIME_INSTALL_RERANK_MODELS)
   list(APPEND MSIME_NOTICE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/data/licenses/onnxruntime-MIT.txt"
        "${CMAKE_CURRENT_SOURCE_DIR}/data/licenses/onnxruntime-ThirdPartyNotices.txt")
   list(APPEND MSIME_NOTICE_NAMES onnxruntime-MIT.txt onnxruntime-ThirdPartyNotices.txt)
@@ -1408,6 +1552,20 @@ if(MSIME_ENABLE_FCITX5)
   add_subdirectory(fcitx5)
 endif()
 if(MSIME_ENABLE_PACKAGING)
+  if(MSIME_RELEASE_CRASH_SYMBOLS)
+    # 只有官方容器（MSIME_RELEASE_CRASH_SYMBOLS=ON）在 package-container.sh 归档符号后剥离 Rust 的安装副本。发行版的源码构建同样开 MSIME_ENABLE_PACKAGING 并执行 cmake --install，但不传这个选项，dh_strip / find-debuginfo 才能拿到未剥离的原件拆进 dbgsym / debuginfo 包。
+    get_filename_component(_msime_host_name "${MSIME_HOST_LIBRARY}" NAME)
+    set(_msime_rust_runtime_files "${CMAKE_INSTALL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}/${_msime_host_name}")
+    if(MSIME_MCP_BINARY)
+      list(APPEND _msime_rust_runtime_files "${CMAKE_INSTALL_BINDIR}/msime-mcp")
+    endif()
+    if(MSIME_DESKTOP_BINARY)
+      list(APPEND _msime_rust_runtime_files "${CMAKE_INSTALL_BINDIR}/msime-linux-desktop")
+    endif()
+    foreach(_msime_runtime IN LISTS _msime_rust_runtime_files)
+      install(CODE "execute_process(COMMAND \"${CMAKE_STRIP}\" --strip-unneeded \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_msime_runtime}\" COMMAND_ERROR_IS_FATAL ANY)")
+    endforeach()
+  endif()
   include(cmake/packaging.cmake)
 endif()
 

@@ -1,15 +1,10 @@
 # App icon sources
 
-All five launcher icons are derived from `apps/desktop/app-icon.svg`, the vector the Windows frontend ships as `windows/image/msime.ico` (metasequoiaime/MSIME-Windows commit `253b0689`). `platforms/android/scripts/generate_app_icons.py` renders them; nothing here is hand-edited.
+The launcher icon is the standalone mark, `packages/ui/src/assets/msime.svg`: a dark rounded square whose green edge is its border, with the white stroke on it - the same picture Windows, macOS, Linux, iOS and HarmonyOS show. The launcher cuts the icon to a shape of its own choosing, so the tile is scaled until its edge meets the border of what the mask shows and the background is the edge colour: on a rounded-square launcher the mask lands on the green edge and the home screen shows the PC icon's rounded square, the ground filling in only where the mask's corners are rounder than the tile's. A circular mask would cut the tile's corners off and leave the edge in four crescents, so each style also has a round icon, `app_icon_<style>_round`: a dark disc inside a ring of the edge colour, the ring as wide relative to the circle as the edge is relative to the tile, with the stroke at 88% of its tile size so its ends keep clear of the ring. The manifest names it as `android:roundIcon` on the application and on every launcher alias, and the framework picks it over `android:icon` while parsing the package when the system sets `config_useRoundIcon`, which Pixel's configuration overlay does along with its circular mask; nothing at runtime switches icons. The 我的 tab draws whichever of the two the framework resolved for each alias (`AppIcons.resource(Context, AppIconStyle)`), so it shows what the launcher shows. `platforms/android/scripts/generate_app_icons.py` renders every icon; nothing here is hand-edited.
 
-`app_icon_classic` is the artwork's own light green frame. `app_icon_forest`, `app_icon_sky`, `app_icon_dusk` and `app_icon_vermilion` differ from it by exactly one value - the colour of that frame - and stay the alternate styles the 我的 tab offers. The same table drives the iOS alternate icons, so the two platforms show one icon in five washes.
+`app_icon_classic` has the tile's own green edge, `#A8DF8E`. `app_icon_forest`, `app_icon_sky`, `app_icon_dusk` and `app_icon_vermilion` differ from it by exactly one value - the colour of the edge and the ground - and stay the alternate styles the 我的 tab offers. The theme table is the one the iOS alternate icons use, so each style looks the same on both.
 
-The artwork was drawn for the Windows tray, where it floats on whatever is behind it and so supplies its own border, painted as 164 scattered brush stamps. A launcher icon is the opposite case on both counts, so the script departs from the master twice:
-
-- It insets the artwork to 74% of the square, on the mark's own dark field. The container's mask cuts through anything near the edge, and the master's frame comes within 0.32 of the 110-unit canvas edge; shipping it at its native extent loses the top and bottom of the frame.
-- It replaces the brush stamps with one stroke on the same path, at the weight the brush band carried. At icon sizes the frame is about four pixels wide, where the ragged alpha and the gaps between stamps read as a smeared edge rather than as texture.
-
-The dark panel and the white mark are taken from the master unchanged.
+The plain bitmaps are the tile filling the bitmap with transparent corners, as a rounded-square launcher shows it, and for the round icons the circle filling the bitmap. With `minSdk` 28 no device draws them; they are what someone browsing the repository sees:
 
 | Density | Size |
 | --- | --- |
@@ -21,9 +16,9 @@ The dark panel and the white mark are taken from the master unchanged.
 
 ## Adaptive icons
 
-Each style also ships an `<adaptive-icon>` in `drawable-anydpi-v26`, because a plain bitmap gets the launcher's legacy treatment: shrunk and set on a grey plate the design never asked for. The background layer is `@color/app_icon_field`, the mark's own dark field, so what the mask cuts is that field rather than a plate.
+Each style also ships an `<adaptive-icon>` in `drawable-anydpi-v26`, because a plain bitmap gets the launcher's legacy treatment: shrunk and set on a grey plate the design never asked for. With `minSdk` 28 these are what the launcher and the 我的 tab actually draw.
 
-The foreground is rendered by the same script, from the same artwork, with two differences: it carries no field of its own — the background layer is that field — and it sits at 47% of the canvas rather than 74%. A circular mask shows only the middle 72 of the 108dp canvas, and a square fits inside that disc up to 72/√2 ≈ 51. The 66dp safe zone is sized for artwork that tolerates having its corners cut; this frame is the part that must not be.
+The background layer is the style's edge colour (`@color/app_icon_ground_<style>`) and the foreground is the whole tile, its outer edge on the border of the 72dp the mask shows. The round icons (`app_icon_<style>_round`) have the same background and a foreground whose circle is exactly the 72dp a circular mask shows, so the mask lands on the ring.
 
 | Density | Foreground size |
 | --- | --- |

@@ -387,6 +387,7 @@ test("Android touch schemes follow Apple order and stay absent on hosts without 
   expect(
     within(group)
       .getAllByRole("button")
+      .filter((button) => !button.hasAttribute("data-info-tip"))
       .map((button) => button.textContent?.replace("✓", "")),
   ).toEqual([...touchSchemeLabels, "全拼 14 键", "九键双拼", "全拼 18 键"]);
   // 高情商回复是键盘工具栏上的工具，不是输入方案。
@@ -431,6 +432,7 @@ test("touch hosts offering Cantonese, Zhuyin, Vietnamese, Tibetan and Stroke lis
   expect(
     within(group)
       .getAllByRole("button")
+      .filter((button) => !button.hasAttribute("data-info-tip"))
       .map((button) => button.textContent?.replace("✓", "")),
   ).toEqual([
     ...touchSchemeLabels,
@@ -443,10 +445,12 @@ test("touch hosts offering Cantonese, Zhuyin, Vietnamese, Tibetan and Stroke lis
     "全拼 14 键",
     "九键双拼",
     "全拼 18 键",
+    "粤语双拼",
   ]);
-  expect(within(group).getAllByRole("switch")).toHaveLength(20);
+  expect(within(group).getAllByRole("switch")).toHaveLength(21);
   for (const label of [
     "粤拼 26 键",
+    "粤语双拼",
     "大千注音",
     "越南语 26 键",
     "藏文 26 键",
@@ -471,6 +475,8 @@ test("a touch host without the Cantonese dictionary does not list the Cantonese 
   );
   await openInputSettings();
   expect(screen.queryByRole("switch", { name: "显示输入方案 粤拼 26 键" })).toBeNull();
+  // 粤语双拼用同一份粤拼词典，和粤拼一起隐藏。
+  expect(screen.queryByRole("switch", { name: "显示输入方案 粤语双拼" })).toBeNull();
   expect(screen.queryByRole("switch", { name: "显示输入方案 笔画" })).toBeNull();
   expect(screen.getByRole("switch", { name: "显示输入方案 大千注音" })).toBeTruthy();
   // 宿主没有列出藏文时也不显示藏文触屏键盘。
@@ -525,7 +531,7 @@ test("candidate pronunciation is host-enabled, defaults off, persists and needs 
   selectSettingsTab("候选释义");
   const toggle = screen.getByRole("switch", { name: "显示读音" }) as HTMLInputElement;
   expect(toggle.checked).toBe(false);
-  expect(screen.getByText(/英文释义给音标，日文释义给罗马音/)).toBeDefined();
+  expect(screen.getByText(/英文释义给音标，日文和韩文释义给罗马音/)).toBeDefined();
   fireEvent.click(toggle);
   saveSettingsNow();
   await screen.findByText("已保存");
@@ -593,7 +599,87 @@ test("Windows describes candidate pronunciation for English and Japanese glosses
   fireEvent.click(await screen.findByRole("button", { name: /^(标点与翻译|标点翻译)$/ }));
   selectSettingsTab("候选释义");
   expect(screen.getByRole("switch", { name: "显示读音" })).toBeDefined();
-  expect(screen.getByText(/英文释义给音标，日文释义给罗马音/)).toBeDefined();
+  expect(screen.getByText(/英文释义给音标，日文和韩文释义给罗马音/)).toBeDefined();
+});
+
+test("HarmonyOS phones offer English pronunciations under the gloss switch, without romaji", async () => {
+  const save = vi.fn().mockImplementation(async (_revision, preferences) => ({
+    ...initial,
+    revision: 8,
+    preferences,
+  }));
+  render(
+    <SettingsPage
+      client={{
+        load: async () => initial,
+        save,
+        candidateEnglishGloss: true,
+        candidatePronunciation: true,
+        host: testHost({ platform: "harmony", mobile_settings: true }),
+      }}
+    />,
+  );
+  await openInputSettings();
+  // 鸿蒙的读音都来自随包的离线词表，日文罗马音不由系统生成。
+  const toggle = screen.getByRole("switch", { name: "显示读音" }) as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  expect(screen.queryByRole("switch", { name: "显示英文音标" })).toBeNull();
+  expect(screen.getByText(/在英文候选和释义下面标出读音/)).toBeDefined();
+  expect(screen.queryByText(/罗马音由系统生成/)).toBeNull();
+  fireEvent.click(toggle);
+  saveSettingsNow();
+  await screen.findByText("已保存");
+  expect(save).toHaveBeenCalledWith(7, expect.objectContaining({ candidate_pronunciation: true }));
+});
+
+test("HarmonyOS keeps the English pronunciation switch with every gloss source off", async () => {
+  // 鸿蒙键盘给英文候选标音标不看释义开关，关掉释义以后这一行仍在，用户还能把音标关掉。
+  const glossless = {
+    ...initial,
+    preferences: {
+      ...initial.preferences,
+      candidate_translations: false,
+      candidate_english_gloss: false,
+      candidate_pronunciation: true,
+    },
+  };
+  const phone = render(
+    <SettingsPage
+      client={{
+        load: async () => glossless,
+        save: vi.fn(),
+        candidateEnglishGloss: true,
+        candidatePronunciation: true,
+        host: testHost({ platform: "harmony", mobile_settings: true }),
+      }}
+    />,
+  );
+  await openInputSettings();
+  const phoneToggle = screen.getByRole("switch", { name: "显示读音" }) as HTMLInputElement;
+  expect(phoneToggle.checked).toBe(true);
+  expect(screen.getByText(/英文候选不用打开释义也会标出/)).toBeDefined();
+  expect(screen.queryByText(/需要先打开释义/)).toBeNull();
+  phone.unmount();
+
+  // 2in1 的设置页走表达页的「候选释义」分类，说明同样是随包的离线词表，不提系统生成的罗马音。
+  render(
+    <SettingsPage
+      client={{
+        load: async () => glossless,
+        save: vi.fn(),
+        candidateEnglishGloss: true,
+        candidatePronunciation: true,
+        host: testHost({ platform: "harmony", mobile_settings: false }),
+      }}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /^(标点与翻译|标点翻译)$/ }));
+  selectSettingsTab("候选释义");
+  const tabletToggle = screen.getByRole("switch", { name: "显示读音" }) as HTMLInputElement;
+  expect(tabletToggle.checked).toBe(true);
+  expect(screen.queryByRole("switch", { name: "显示英文音标" })).toBeNull();
+  expect(screen.getByText(/在英文候选和释义下面标出读音/)).toBeDefined();
+  expect(screen.queryByText(/罗马音由系统生成/)).toBeNull();
 });
 
 test("Android English suggestions default on and persist independently", async () => {
@@ -2661,7 +2747,8 @@ test("Linux developer page moves the data root and says the fixed configuration 
   );
   fireEvent.click(screen.getByRole("button", { name: /^(维护与诊断|维护诊断)$/ }));
   expect(await screen.findByText("/synthetic/home/.config/msime-client")).toBeDefined();
-  expect(screen.getByRole("group", { name: "数据目录" }).textContent).toContain(
+  // 说明收进了组名旁的「?」，按整组（含气泡里的说明文字）读。
+  expect(screen.getByRole("group", { name: "数据目录" }).closest("section")?.textContent).toContain(
     "凭据固定保存在 ~/.config/msime-client",
   );
   fireEvent.click(screen.getByRole("button", { name: "选择位置…" }));
@@ -3249,7 +3336,7 @@ test("dictionary manager queries, edits and removes Engine entries", async () =>
   // filtering a page it had already fetched.
   expect(list).toHaveBeenCalledWith(0, 100, "quick_phrase", "");
   fireEvent.click(screen.getByRole("button", { name: "编辑" }));
-  fireEvent.change(screen.getByLabelText("短语"), { target: { value: "updated" } });
+  fireEvent.change(screen.getByLabelText(/^短语/), { target: { value: "updated" } });
   // The entry editor has its own 保存; 保存设置 in the footer writes the preferences document and
   // never touches the dictionary. A rename of the footer button swept this one up with it.
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -3364,7 +3451,7 @@ test("a refused pinyin entry says why instead of asking for a retry", async () =
   fireEvent.click(screen.getByRole("button", { name: /^(词库|词库管理)$/ }));
   fireEvent.change(await screen.findByLabelText("本地词库类型"), { target: { value: "pinyin" } });
   fireEvent.click(await screen.findByRole("button", { name: "新增词条" }));
-  fireEvent.change(screen.getByRole("textbox", { name: /^编码 / }), {
+  fireEvent.change(screen.getByRole("textbox", { name: "编码" }), {
     target: { value: "nhao" },
   });
   fireEvent.change(screen.getByRole("textbox", { name: "词条" }), {
@@ -3392,10 +3479,10 @@ test("dictionary manager creates entries with the Windows settings default weigh
   fireEvent.click(screen.getByRole("button", { name: /^(词库|词库管理)$/ }));
   fireEvent.click(await screen.findByRole("button", { name: "新增词条" }));
   expect(screen.getByRole("spinbutton", { name: "权重" })).toHaveProperty("value", "10");
-  fireEvent.change(screen.getByRole("textbox", { name: /^编码 / }), {
+  fireEvent.change(screen.getByRole("textbox", { name: "编码" }), {
     target: { value: "fixture-code" },
   });
-  fireEvent.change(screen.getByRole("textbox", { name: "短语" }), {
+  fireEvent.change(screen.getByRole("textbox", { name: /^短语/ }), {
     target: { value: "synthetic phrase" },
   });
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -4517,6 +4604,23 @@ test("the shuangpin key hint switch is not listed on an edition without double p
   expect(screen.queryByRole("switch", { name: "双拼键位提示" })).toBeNull();
 });
 
+test("the shuangpin key hint switch is listed on an edition whose only double pinyin is Cantonese", async () => {
+  render(
+    <SettingsPage
+      initialPage="screen-keyboard"
+      client={{
+        load: vi.fn().mockResolvedValue(initial),
+        save: vi.fn(),
+        // 有粤拼就有粤语双拼（#10438），它的 26 键也画键位提示。
+        host: testHost({ platform: "android", input_schemes: ["cantonese"] }),
+      }}
+    />,
+  );
+  expect(
+    await screen.findByRole("switch", { name: "双拼键位提示" }, { timeout: 3000 }),
+  ).toBeTruthy();
+});
+
 test("the theme page runs from the colour mode to the custom colours", async () => {
   render(
     <SettingsPage
@@ -4879,6 +4983,7 @@ test("macOS shows the shuangpin preedit in the 双拼 details and persists the e
   expect(save).toHaveBeenCalledWith(7, {
     ...shuangpin.preferences,
     shuangpin_preedit_uses_raw: false,
+    shuangpin_preedit_separated: false,
   });
   // 「候选窗口」页的预编辑各行不再画它，每项偏好只有一个入口。那几行收在页面的「更多选项」里，所以带上 hidden。
   fireEvent.click(screen.getByRole("button", { name: "候选窗口" }));
@@ -8245,7 +8350,7 @@ test.each(optionHosts)("候选窗口在 %s 上按四个顶部标签分组", asyn
     "布局",
     "候选项排列方式",
     "每页候选项数量",
-    platform === "macos" ? "显示页码和翻页按钮" : "显示页码",
+    "显示页码和翻页按钮",
     "跟随光标",
     "字体与大小",
     "候选字体",
@@ -8284,7 +8389,7 @@ test("the page number row needs a host that draws one", async () => {
   );
   await settingsReady();
   const appearance = screen.getByRole("group", { name: "候选窗口" });
-  expect(within(appearance).queryByLabelText("显示页码")).toBeNull();
+  expect(within(appearance).queryByLabelText(/^显示页码/)).toBeNull();
 });
 
 test("the page number switch saves show_candidate_page_number", async () => {
@@ -8304,7 +8409,8 @@ test("the page number switch saves show_candidate_page_number", async () => {
     />,
   );
   await settingsReady();
-  const toggle = screen.getByLabelText("显示页码") as HTMLInputElement;
+  // Windows 候选窗首行的页码和 ‹ › 一起隐藏，行名同 macOS（#10709）。
+  const toggle = screen.getByLabelText("显示页码和翻页按钮") as HTMLInputElement;
   expect(toggle.checked).toBe(true);
   fireEvent.click(toggle);
   saveSettingsNow();

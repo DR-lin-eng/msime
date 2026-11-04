@@ -5,6 +5,10 @@ import app.msime.android.LayoutPolicy;
 import app.msime.android.policy.HostOptionsPolicy;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import java.io.IOException;
+import java.io.InputStream;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -29,7 +33,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * 键盘内的语音识别：进程内能跑的识别器（本机 sherpa 模型、豆包流式、HTTP 整句上传）和设备自带的系统识别服务（SpeechRecognizer）都直接在键区里聆听，键区换成聆听面板（「正在聆听…」「说完了／取消」，圆盘外的光圈随麦克风音量涨落，边说边识别的引擎把中间文字显示在标题位），识别完自动上屏并短暂显示「已识别：…」。还没有麦克风权限（要由 Activity 申请）、系统识别服务在键盘里无法启动或录音权限被拒这几种情况仍走 VoiceRecognitionActivity（返回 false，或识别失败后由这里转交）。
+ * 键盘内的语音识别：进程内能跑的识别器（本机 sherpa 模型、豆包流式、HTTP 整句上传）和设备自带的系统识别服务（SpeechRecognizer）都直接在键区里聆听，键区换成聆听面板（「正在聆听…」「说完了／取消」，工具栏人物耳边的红线随麦克风音量变化，长按空格使用独立缩略图与音量短线，边说边识别的引擎把中间文字显示在标题位），识别完自动上屏并短暂显示「已识别：…」。还没有麦克风权限（要由 Activity 申请）、系统识别服务在键盘里无法启动或录音权限被拒这几种情况仍走 VoiceRecognitionActivity（返回 false，或识别失败后由这里转交）。
  *
  * <p>系统识别服务以前一律走识别窗口：窗口抢走焦点，键盘随之收起，屏幕上只剩对话框主题的灰色蒙层，看不到任何正在录音的提示，结果还要再到语音结果面板里手动插入（#5553）。键盘可见时系统给输入法进程前台的麦克风能力，本机模型与豆包也是在这里录音的，所以系统识别服务同样留在键区里。
  *
@@ -40,8 +44,8 @@ final class ImeVoiceEntry {
     static final String PLATFORM_PROVIDER = "system";
     /** 「已识别：…」停留的时间。 */
     static final long DONE_NOTICE_MILLIS = 1200;
-    /** 听到内容之后这么久没有新的识别文字，就当说完了，结束录音并出结果（与系统识别器停顿后自动结束一致）。经过 VAD 的本机整段模型还判定在说话时推迟，长按空格按住说话时不自动结束，见 {@link VoiceHoldPolicy#silenceElapsed}。 */
-    static final long SILENCE_STOP_MILLIS = 1500;
+    /** 每次开始本地识别时读取的停顿时间；本次会话中保持固定，长按仍等松手。 */
+    private int silenceStopMillis = AndroidLocalSettings.VOICE_PAUSE_DEFAULT_MILLIS;
 
     /** 键盘里接手的识别方式。 */
     enum Engine { LOCAL, STREAMING, UPLOAD, PLATFORM }
@@ -54,6 +58,7 @@ final class ImeVoiceEntry {
     });
     private Runnable silenceStop;
     private VoiceListeningView listening;
+    private Bitmap mascot;
     private View listeningPanel;
     private View coveredActionRow;
     private Button finishButton;
@@ -73,10 +78,14 @@ final class ImeVoiceEntry {
     /** 用户已经按语音键结束了这次系统识别：之后报的错（例如还没开始聆听就被叫停时的 ERROR_CLIENT）不再转交识别窗口，否则按两下语音键会弹出一个识别窗口重新录音。 */
     private boolean platformStopped;
     private long generation;
+    /** 这次聆听开始时读到的语音标点方式（{@link VoicePunctuation}），结果上屏前按它处理；与 {@link #generation} 同时更新。 */
+    private String punctuationMode = VoicePunctuation.AUTO;
     private boolean recognizing;
     private boolean diagnosticAllowed;
     /** 这次聆听由长按空格开始、空格还按着：松手才结束，停顿不自动结束。 */
     private boolean held;
+    /** 正在为长按空格开始一次聆听：本地识别在创建会话时就要知道，`held` 要等 `hold` 才设置，那时工作线程可能已经读过判停灵敏度。 */
+    private boolean startingHeld;
     /** 松手后继续聆听；只有显式发送会重新授权当前编辑位置。 */
     private boolean locked;
     private Button holdCancelButton;
@@ -173,9 +182,11 @@ final class ImeVoiceEntry {
         show(keyArea);
         uploadStopped = false;
         long session = ++generation;
+        punctuationMode = configured.punctuationMode();
         long startedAt = SystemClock.uptimeMillis();
         recognizing = true;
         held = false;
+        loadMascot(session, listening);
         speaking = false;
         VoiceRecognitionActivity.Polish polish = configured.polish();
         VoiceRecognitionActivity.Streaming stream = configured.streaming();
@@ -188,6 +199,10 @@ final class ImeVoiceEntry {
         if (engine == Engine.LOCAL) {
             LocalAsrRecognizer.watchMemory(s);
             local = new LocalAsrRecognizer();
+            AndroidLocalSettings.Snapshot localPreferences = AndroidLocalSettings.load(s);
+            silenceStopMillis = localPreferences.integer(AndroidLocalSettings.VOICE_PAUSE_MILLIS);
+            // 判停灵敏度只给点按开始、停顿后自动结束的会话；按住空格由松手结束，传 0 让阈值保持 0.5，与鸿蒙和 iOS 一致。
+            local.vadSensitivity(startingHeld ? 0 : localPreferences.integer(AndroidLocalSettings.VOICE_VAD_SENSITIVITY));
             local.diagnostics(kind -> diagnostic(session, kind));
             local.retainAudio(contribute);
         } else if (engine == Engine.UPLOAD) {
@@ -293,7 +308,7 @@ final class ImeVoiceEntry {
     }
 
     /**
-     * 识别中途的文字：聆听中显示在聆听面板的标题位；{@code pauseEnds} 为 true 时，从这一刻起停顿一个 {@link #SILENCE_STOP_MILLIS} 就自动结束录音。
+     * 识别中途的文字：聆听中显示在聆听面板的标题位；{@code pauseEnds} 为 true 时，从这一刻起按本次的 {@link #silenceStopMillis} 计停顿。
      *
      * <p>只有本机模型这样结束：它的 VAD 会报「还在说话」（{@link #spoke}），停顿计时据此推迟。系统识别服务自己判断说完了没有，这里再按停顿掐断会切掉还没说完的话。豆包流式也不按停顿结束：它不报是否在说话，整句流式（{@code bigmodel_nostream}）说话期间要到音频超过 15 秒才回第一段结果，按出字后停顿计时，口述到 16 秒多就会在用户还在说时被掐断（#9886）；豆包由用户点「说完了」或松开空格结束，和以前一样。
      */
@@ -321,13 +336,13 @@ final class ImeVoiceEntry {
                         silenceStop = null;
                         finishListening();
                     }
-                    case POSTPONE -> s.main.postDelayed(this, SILENCE_STOP_MILLIS);
+                    case POSTPONE -> s.main.postDelayed(this, silenceStopMillis);
                     case WAIT_FOR_RELEASE -> silenceStop = null;
                 }
             }
         };
         silenceStop = stop;
-        s.main.postDelayed(stop, SILENCE_STOP_MILLIS);
+        s.main.postDelayed(stop, silenceStopMillis);
     }
 
     /** 本机整段模型的 VAD 开始或停止判定在说话。一段说完时，已经在计的停顿改从这一刻重新计，而不是从上一次出字算起。 */
@@ -342,10 +357,27 @@ final class ImeVoiceEntry {
         return generation;
     }
 
+    /** 空格键在 {@code before} 之后开始的这次聆听（含松手时才补判出的长按）不显示工具栏耳部信号。按压只是结束了已有的聆听或转交了识别窗口时什么也不做。 */
+    void plainIndicator(long before) {
+        if (generation == before || listening == null) return;
+        listening.setMascotEnabled(false);
+    }
+
+    /** 长按空格开始的按住说话：本次本地识别不用判停灵敏度，阈值保持 0.5（松手结束，调高阈值只会丢轻声的字）。 */
+    void startHeld(Runnable start) {
+        startingHeld = true;
+        try {
+            start.run();
+        } finally {
+            startingHeld = false;
+        }
+    }
+
     /** 把这次按压刚开始的聆听切为长按面板，触摸仍由原空格接收。 */
     boolean hold(long before) {
         if (generation == before || !recognizing || listening == null) return false;
         held = true;
+        listening.setMascotEnabled(false);
         locked = false;
         coverActionRow();
         buildHoldActions();
@@ -727,10 +759,14 @@ final class ImeVoiceEntry {
         if (recognizer != null) recognizer.destroy();
     }
 
-    /** 识别结束：有文字就上屏，没有就提示 {@code failure}；{@code notice} 是文字上屏之后另外要说的一句（录音到了上限、识别途中断开）。 */
-    private void delivered(long session, String text, String failure, String notice, byte[] pcm,
+    /** 识别结束：有文字就上屏，没有就提示 {@code failure}；{@code notice} 是文字上屏之后另外要说的一句（录音到了上限、识别途中断开）。四种识别服务和润色的结果都经过这里，语音标点在这里处理一次，锁定等待发送时显示的、存进语音结果的也是处理后的文字；只剩标点时按没有识别到文字处理。 */
+    private void delivered(long session, String recognized, String reportedFailure, String notice, byte[] pcm,
                            long elapsedMillis, String language, String provider) {
         if (session != generation) return;
+        String text = VoicePunctuation.apply(recognized, punctuationMode);
+        // 识别出了内容、去掉标点后什么都不剩：与识别窗口一样提示没有识别到文字，不能无声收起。
+        String failure = reportedFailure == null && text != null && text.isEmpty()
+            && recognized != null && !recognized.isEmpty() ? "没有识别到文字" : reportedFailure;
         if (text != null && !text.isEmpty()) recordDiagnostic(DiagnosticEventKind.VOICE_SUCCESS);
         else if (failure == null) recordDiagnostic(DiagnosticEventKind.VOICE_EMPTY);
         recognizing = false;
@@ -857,6 +893,27 @@ final class ImeVoiceEntry {
         }
     }
 
+    /** 只在后台解码内置贴纸；结果总是缓存给后续会话，只有发起解码的会话与面板仍在时才更新面板，取消后的旧回调不能更新新面板。 */
+    private void loadMascot(long session, VoiceListeningView view) {
+        if (mascot != null) return;
+        try {
+            worker.execute(() -> {
+                try (InputStream input = s.getAssets().open(StickerPackModel.ASSET_DIRECTORY + "/01.webp")) {
+                    Bitmap bitmap = BitmapFactory.decodeStream(input);
+                    s.main.post(() -> {
+                        if (mascot == null) mascot = bitmap;
+                        if (generation != session || listening != view) return;
+                        view.setMascot(mascot);
+                    });
+                } catch (IOException error) {
+                    // 素材异常不触发下载，不影响识别、结束和取消控件。
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+            // 会话正在关闭，素材任务不再启动。
+        }
+    }
+
     /** 把键区的内容换成聆听面板；键区被重建（换布局、收起键盘）时自动取消。 */
     private void show(ViewGroup keyArea) {
         dismiss();
@@ -871,6 +928,8 @@ final class ImeVoiceEntry {
             }
         }
         VoiceListeningView view = new VoiceListeningView(s);
+        view.setMascotEnabled(true);
+        view.setMascot(mascot);
         // 跟随应用主题的皮肤要先按当季种子推导（样式通道画键帽用的也是这一份），否则圆盘取到的是基础色，和回车键等强调色对不上。
         KeyboardSkin skin = s.imeStyler.themed(s.skin);
         view.setColors(Color.parseColor(skin.accent()), Color.parseColor(skin.onAccent()),

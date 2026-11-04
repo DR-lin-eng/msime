@@ -122,7 +122,7 @@ function HarmonyChineseKeyboardRow({
     <SelectRow
       title="中文键盘"
       aria-label="中文键盘"
-      description={group ? undefined : "当前方案只有一种键盘，在「输入」里换方案"}
+      detail={group ? undefined : "当前方案只有一种键盘，在「输入」里换方案"}
       disabled={!group}
       value={current}
       onChange={(event) => {
@@ -375,9 +375,12 @@ export function ScreenKeyboardSettingsPage() {
             glideTyping={mobileKeyboardFeedback?.glideTyping}
             swipeSymbols={mobileKeyboardFeedback?.swipeSymbols}
             swipeSymbolsDirection={mobileKeyboardFeedback?.swipeSymbolsDirection}
-            // 只有触屏宿主的 26 键双拼画键位提示；不含双拼的版本（五笔、日文、越南文、藏文等）里不存在双拼键盘，和 Android、iOS 原生设置页一样不列出。缺省为关，与 client-core 的默认值一致。
+            letterCornerHints={mobileKeyboardFeedback?.letterCornerHints}
+            // 只有触屏宿主的 26 键双拼和粤语双拼画键位提示；既不含双拼也不含粤拼的版本（五笔、日文、越南文、藏文等）里没有这两种键盘，和 Android、iOS 原生设置页一样不列出。粤语双拼与粤拼共用方案和词典，有粤拼就有粤语双拼。缺省为关，与 client-core 的默认值一致。
             shuangpinKeyHints={
-              mobilePlatform && supportedInputSchemes(host).includes("shuangpin")
+              mobilePlatform &&
+              (supportedInputSchemes(host).includes("shuangpin") ||
+                supportedInputSchemes(host).includes("cantonese"))
                 ? (draft.touch_shuangpin_key_hints ?? false)
                 : undefined
             }
@@ -473,6 +476,11 @@ export function ScreenKeyboardSettingsPage() {
                   ...mobileKeyboardFeedback,
                   swipeSymbolsDirection,
                 });
+              }
+            }}
+            onLetterCornerHintsChange={(letterCornerHints) => {
+              if (mobileKeyboardFeedback) {
+                void saveMobileKeyboardFeedback({ ...mobileKeyboardFeedback, letterCornerHints });
               }
             }}
             onReset={(subjects) => void resetTouchKeyboardSettings(subjects)}

@@ -13,10 +13,12 @@ enum KeyboardLayoutPreference {
   static let tabletSplitKey = "keyboard.tablet.split"
   static let phoneLandscapeSplitKey = "keyboard.phone.landscapeSplit"
   static let glideTypingKey = "keyboard.gesture.glide"
+  static let bilingualGlideKey = "keyboard.gesture.bilingualGlide"
   static let cursorSwipeKey = "keyboard.gesture.cursorSwipe"
   static let spaceVoiceKey = "keyboard.gesture.spaceVoice"
   static let swipeSymbolsKey = "keyboard.gesture.swipeSymbols"
   static let swipeSymbolsDirectionKey = "keyboard.gesture.swipeSymbolsDirection"
+  static let letterCornerHintsKey = "keyboard.gesture.letterCornerHints"
   enum SwipeDirection: String { case up, down }
   static let quickPunctuationSymbolsKey = "keyboard.quickPunctuationSymbols"
   static var defaultQuickPunctuationSymbols: [String] { normalizeQuickPunctuationSymbols([]) }
@@ -97,7 +99,7 @@ enum KeyboardLayoutPreference {
     }
   }
 
-  /// 「双拼键位提示」：双拼方案的 26 键在字母键底部画这个键代表的声母和韵母。共享文档里是 `touch_shuangpin_key_hints`，缺省为关；键盘从 App Group 镜像读。
+  /// 「双拼键位提示」：双拼方案和粤语双拼的 26 键在字母键底部画这个键代表的声母和韵母。共享文档里是 `touch_shuangpin_key_hints`，缺省为关；键盘从 App Group 镜像读。
   static let shuangpinKeyHintsDocumentKey = "touch_shuangpin_key_hints"
   static let shuangpinKeyHintsKey = "keyboard.shuangpin.keyHints"
 
@@ -183,6 +185,11 @@ enum KeyboardLayoutPreference {
     get { defaults.object(forKey: glideTypingKey) as? Bool ?? false }
     set { defaults.set(newValue, forKey: glideTypingKey) }
   }
+  /// 中英混合滑行只在本机启用，缺省关闭，不改变现有中文滑行。
+  static var bilingualGlide: Bool {
+    get { defaults.object(forKey: bilingualGlideKey) as? Bool ?? false }
+    set { defaults.set(newValue, forKey: bilingualGlideKey) }
+  }
   /// 「横滑键盘移动光标」：无组字时从普通字符键横滑移动文档光标。默认关，与滑行输入一样只保存在本机 App Group。
   static var cursorSwipe: Bool {
     get { defaults.object(forKey: cursorSwipeKey) as? Bool ?? false }
@@ -197,6 +204,11 @@ enum KeyboardLayoutPreference {
   static var swipeSymbols: Bool {
     get { defaults.object(forKey: swipeSymbolsKey) as? Bool ?? true }
     set { defaults.set(newValue, forKey: swipeSymbolsKey) }
+  }
+  /// 「显示字母键角标」：26 键字母键右上角画角标符号。默认开，与 Android 的 `platform.android.letter_corner_hints`、HarmonyOS 的 `letterCornerHints` 相同；关掉只是不画，长按和「滑动输入符号」照样输入角标（#10587）。只存在本机 App Group，不随设置同步，与「滑动输入符号」一样。
+  static var letterCornerHints: Bool {
+    get { defaults.object(forKey: letterCornerHintsKey) as? Bool ?? true }
+    set { defaults.set(newValue, forKey: letterCornerHintsKey) }
   }
   /// 三端 26 键默认上滑输入角标，保留用户明确选择的下滑方向；只保存在本机 App Group。
   static var swipeSymbolsDirection: SwipeDirection {
@@ -239,6 +251,32 @@ enum KeyboardLayoutPreference {
   static func adoptOneHandedOnDockedTablet() -> KeyboardOneHandedMode {
     if !defaults.bool(forKey: oneHandedDockedTabletKey) { oneHanded = .off }
     return oneHanded
+  }
+  static let bottomLiftKey = "keyboard.bottomLift"
+  static let widthPercentKey = "keyboard.widthPercent"
+  static let positionXKey = "keyboard.positionX"
+  /// `placement` 读写的三个键。App「开发者 → 重置所有设置」由 Rust 整份恢复共享文档，只存本机的这三项要另外清掉（`DeveloperDiagnostics.resetLocalPreferences`），与 Android 的 `AndroidLocalSettings.restoreDefaults` 一样回到全宽、不抬高、居中。
+  static let placementKeys = [bottomLiftKey, widthPercentKey, positionXKey]
+  /// 「键盘调整」里的底部抬高、宽度和水平位置（`KeyboardPlacement`）。与单手模式一样只存在本设备的 App Group 里，不进共享文档，也不随设置同步；高度仍是共享的 `touch_keyboard_height_adjustment`（`heightAdjustment`）。存储值不是数字时按缺省，超出范围的限制到范围内。
+  static var placement: KeyboardPlacement {
+    get {
+      KeyboardPlacement(
+        bottomLift: storedInt(bottomLiftKey) ?? KeyboardPlacement.standard.bottomLift,
+        widthPercent: storedInt(widthPercentKey) ?? KeyboardPlacement.standard.widthPercent,
+        positionX: storedInt(positionXKey) ?? KeyboardPlacement.standard.positionX)
+    }
+    set {
+      defaults.set(newValue.bottomLift, forKey: bottomLiftKey)
+      defaults.set(newValue.widthPercent, forKey: widthPercentKey)
+      defaults.set(newValue.positionX, forKey: positionXKey)
+    }
+  }
+
+  private static func storedInt(_ key: String) -> Int? {
+    guard let value = defaults.object(forKey: key) as? NSNumber, value.doubleValue.isFinite,
+          CFGetTypeID(value) != CFBooleanGetTypeID() else { return nil }
+    // 先收到一个远大于各项范围的区间再转整数：`Int(Double)` 遇到超出 `Int` 的值（如 1e300）会直接崩掉键盘，而 `KeyboardPlacement` 随后照样把它限制到范围内。
+    return Int(SharedNumber.clamped(value.doubleValue, to: -1_000_000...1_000_000).rounded())
   }
   static var geometry: KeyboardGeometry { KeyboardGeometry(keySpacing: keySpacing, rowSpacing: rowSpacing, showsBottomLanguage: !hideLanguageKey) }
 
@@ -321,6 +359,25 @@ enum KeyboardOneHandedMode: String, CaseIterable {
   /// 「单手模式」图块和侧边列下一次要写入的值，与 Android 的 `toggleOneHanded` 一致：单击在关闭和右侧之间切换；换边（长按图块，或点侧边列的「换到另一侧」）在左右之间切换，从关闭状态换边则在左侧打开。
   func toggled(swapSide: Bool) -> KeyboardOneHandedMode {
     swapSide ? (self == .left ? .right : .left) : (self == .off ? .right : .off)
+  }
+}
+
+/// 「键盘调整」存下的整块键盘的摆放：底部抬高（pt）、宽度（占键盘视图宽度的百分比）和水平位置（左右两侧空出的宽度里左侧占的千分比，500 居中）。三端同一套取值与缺省，各端只存本机。构造时把每一项限制到它的范围内。
+struct KeyboardPlacement: Equatable {
+  static let bottomLiftRange = 0...160
+  static let widthPercentRange = 60...100
+  static let positionXRange = 0...1000
+  /// 缺省：不抬高、全宽、居中。「重置」回到它。
+  static let standard = KeyboardPlacement(bottomLift: 0, widthPercent: 100, positionX: 500)
+
+  let bottomLift: Int
+  let widthPercent: Int
+  let positionX: Int
+
+  init(bottomLift: Int, widthPercent: Int, positionX: Int) {
+    self.bottomLift = min(max(bottomLift, Self.bottomLiftRange.lowerBound), Self.bottomLiftRange.upperBound)
+    self.widthPercent = min(max(widthPercent, Self.widthPercentRange.lowerBound), Self.widthPercentRange.upperBound)
+    self.positionX = min(max(positionX, Self.positionXRange.lowerBound), Self.positionXRange.upperBound)
   }
 }
 

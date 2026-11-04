@@ -17,6 +17,7 @@
 #include <minwindef.h>
 #include <winuser.h>
 #include "Ipc.h"
+#include "quick_phrase_cursor_pipe.h"
 #include "fmt/xchar.h"
 #include "../Utils/PerfTimer.h"
 
@@ -63,6 +64,11 @@ HRESULT CMetasequoiaIME::_HandleCandidateFinalize(TfEditCookie ec, _In_ ITfConte
     DWORD_PTR candidateLen = keystrokeBufLen;
     CStringRange candidateString(keyStrokebuffer);
     const std::wstring &pendingCommitCandidate = prefetchedText;
+    // 点选上屏后联想：没有组字，Server 已经在它的会话里选中，送来的文字插在光标处。
+    if (!pendingCommitCandidate.empty() && !_IsComposing() && _IsPredictionVisible())
+    {
+        return _CommitPredictionCandidate(ec, pContext, pendingCommitCandidate);
+    }
     // A host session owns the composition, and _HandleCompositionInput returns
     // before AddVirtualKey for those profiles, so the legacy keystroke buffer
     // stays empty while the user is composing. Gating the Server's reply on
@@ -105,7 +111,8 @@ HRESULT CMetasequoiaIME::_HandleCandidateFinalize(TfEditCookie ec, _In_ ITfConte
                 return hr;
             }
             // 候选窗里点选的候选是 Server 的会话选的，宿主会话还留着整段原文和候选。不丢掉的话下一个字母接着它组字，Shift 或回车还会把这段已经上屏的拼音再交出来一次（全拼：点「你好」「世界」后按 Shift 多出 nihaoshijie）。韩文汉字也是这样；Server 拒绝点注音的行，那样什么也不上屏，所以只有这样上屏的点选会走到这里。
-            if (hostOwnsComposition)
+            // 宿主会话先按文字跟着选同一个词，和空格、数字键一样一起前进，上屏后联想才会接着出来；跟不上（找不到、同形不止一个、上屏的文字不同）再丢掉它的组字。
+            if (hostOwnsComposition && !_FollowServerClickInHost(pendingCommitCandidate))
             {
                 (void)_CancelHostComposition();
             }
@@ -127,6 +134,8 @@ HRESULT CMetasequoiaIME::_HandleCandidateFinalize(TfEditCookie ec, _In_ ITfConte
             serverCandidateString = receivedData->candidate_string;
         }
 
+        if (const auto suffix = FanyImeQuickPhraseCursorPipe::SuffixUnits(serverMsgType, false))
+            return _CommitServerExactText(ec, pContext, serverCandidateString, suffix);
         if (serverMsgType == Global::DataFromServerMsgType::TransportUnavailable)
         {
             // Transport state is never candidate text.  Propagate failure so
@@ -286,13 +295,15 @@ NoPresenter:
 //
 //----------------------------------------------------------------------------
 
-HRESULT CMetasequoiaIME::_CommitServerExactText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text)
+HRESULT CMetasequoiaIME::_CommitServerExactText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text,
+                                                     std::optional<std::size_t> cursorSuffix)
 {
     GlobalIme::word_for_creating_word = L"";
     _creatingWordRestoreHistory.clear();
     GlobalIme::pending_create_word_preedit.clear();
     // Server 取消了它的组字；TIP 的宿主会话还留着同一段拼音和候选，不丢掉的话下一个字母会接着它组字。
     (void)_CancelHostComposition();
+    if (cursorSuffix) return _CommitTextWithCursor(ec, pContext, text, *cursorSuffix);
     if (!text.empty())
     {
         CStringRange exactText;
@@ -403,14 +414,14 @@ HRESULT CMetasequoiaIME::_HandleCandidateWorker(TfEditCookie ec, _In_ ITfContext
     const WCHAR *pCandidateString = nullptr;
     CStringRange candidateString;
 
-    if (nullptr == _pCandidateListUIPresenter)
+    if (nullptr == _pCandidateListUIPresenter && !SupportsQuickPhraseCursor())
     {
         hrReturn = S_OK;
         goto Exit;
     }
 
-    candidateLen = _pCandidateListUIPresenter->_GetSelectedCandidateString(&pCandidateString);
-    if (0 == candidateLen)
+    candidateLen = _pCandidateListUIPresenter ? _pCandidateListUIPresenter->_GetSelectedCandidateString(&pCandidateString) : 0;
+    if (0 == candidateLen && !SupportsQuickPhraseCursor())
     {
         hrReturn = S_FALSE;
         goto Exit;
@@ -425,6 +436,8 @@ HRESULT CMetasequoiaIME::_HandleCandidateWorker(TfEditCookie ec, _In_ ITfContext
         {
             const FanyImeNamedpipeDataToTsf *reply =
                 TryReadDataFromServerPipeWithTimeout(requestId, /*abortTransportOnTimeout=*/false);
+            if (const auto suffix = FanyImeQuickPhraseCursorPipe::SuffixUnits(reply->msg_type, false))
+                return _CommitServerExactText(ec, pContext, reply->candidate_string, suffix);
             if (reply->msg_type == Global::DataFromServerMsgType::CommitExactText)
             {
                 const std::wstring exactText(reply->candidate_string);
@@ -502,6 +515,8 @@ HRESULT CMetasequoiaIME::_SelectHighlightedHostCandidate(TfEditCookie ec, _In_ I
     msime::tsf::EngineResult selected;
     if (!msime::tsf::EngineSessionAdapter::parse_result(raw, &selected, &error))
         return S_FALSE;
+    if (selected.has_commit && selected.commit_cursor_suffix)
+        return _ApplyHostCompositionResult(ec, pContext, selected);
     if (selected.has_commit && !selected.commit.empty())
     {
         const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, selected.commit.data(),

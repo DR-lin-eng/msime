@@ -26,7 +26,7 @@ struct DeveloperOptionsView: View {
     ScrollView {
       VStack(spacing: 28) {
         DesignGroup(title: "调试", footer: logSaveFailed ? SettingsSaveFailure.message : nil) {
-          DesignToggleRow(title: "记录输入日志", subtitle: "仅保存在本机，不会上传",
+          DesignToggleRow(title: "记录输入日志", info: "仅保存在本机，不会上传",
                           isOn: logBinding)
             .accessibilityIdentifier("developerDiagnosticLogToggle")
           DesignDivider()
@@ -42,7 +42,7 @@ struct DeveloperOptionsView: View {
                                 identifier: "diagnosticBundleExport", action: export)
             .disabled(exporting || resetting)
           DesignDivider()
-          DesignInlineButtonRow(title: "重置所有设置", subtitle: "恢复为出厂设置，词库不受影响",
+          DesignInlineButtonRow(title: "重置所有设置", info: "恢复为出厂设置，词库不受影响",
                                 buttonTitle: resetting ? "重置中…" : "重置", identifier: "resetAllSettings") {
             confirmsReset = true
           }
@@ -216,16 +216,17 @@ private enum DeveloperDiagnostics {
     return true
   }
 
-  /// 「重置所有设置」还要覆盖只存在本设备 App Group、不在 `restoreDefaults` 替换的文档里的设置，与 Android 连同共享设置一起重置本机设置一样：按键反馈、隐私模式、单手模式、工具栏的常用语 / 输入方式按钮和显示方式、键盘几何尺寸的镜像、iPad 和手势开关（滑行输入、横滑光标、滑动输入符号、长按空格语音；「九键滑动输入数字」的文档字段由 `restoreDefaults` 恢复，这里删它的镜像）、中英模式记忆、键盘每次按键都读的候选与组字开关、候选栏使用主题配色、手写和 App 主题。删掉一个键，读取方就回到它的默认值。在恢复成功之后运行；放在主 actor 上，因为其中一些类型隔离在主 actor。
+  /// 「重置所有设置」还要覆盖只存在本设备 App Group、不在 `restoreDefaults` 替换的文档里的设置，与 Android 连同共享设置一起重置本机设置一样：按键反馈、隐私模式、单手模式、工具栏的常用语 / 输入方式按钮和显示方式、键盘几何尺寸的镜像、iPad 和手势开关（滑行输入、横滑光标、滑动输入符号、显示字母键角标、长按空格语音；「九键滑动输入数字」的文档字段由 `restoreDefaults` 恢复，这里删它的镜像）、中英模式记忆、键盘每次按键都读的候选与组字开关、候选栏使用主题配色、手写和 App 主题。删掉一个键，读取方就回到它的默认值。在恢复成功之后运行；放在主 actor 上，因为其中一些类型隔离在主 actor。
   @MainActor static func resetLocalPreferences() {
     KeyboardLayoutPreference.resetToDefaults()
     let local: [(UserDefaults, [String])] = [
       (KeyboardLayoutPreference.defaults, [KeyboardLayoutPreference.tabletSplitKey, KeyboardLayoutPreference.tabletFullKeysKey,
-                                           KeyboardLayoutPreference.glideTypingKey, KeyboardLayoutPreference.cursorSwipeKey,
+                                           KeyboardLayoutPreference.glideTypingKey, KeyboardLayoutPreference.bilingualGlideKey,
+                                           KeyboardLayoutPreference.cursorSwipeKey,
                                            KeyboardLayoutPreference.oneHandedKey,
                                            KeyboardLayoutPreference.spaceVoiceKey, KeyboardLayoutPreference.swipeSymbolsKey,
-                                           KeyboardLayoutPreference.swipeSymbolsDirectionKey,
-                                           NineKeySwipeDigits.mirrorKey]),
+                                           KeyboardLayoutPreference.swipeSymbolsDirectionKey, KeyboardLayoutPreference.letterCornerHintsKey,
+                                           NineKeySwipeDigits.mirrorKey] + KeyboardLayoutPreference.placementKeys),
       (KeyboardFeedbackPreference.defaults, [KeyboardFeedbackPreference.soundKey, KeyboardFeedbackPreference.hapticsKey,
                                              KeyboardFeedbackPreference.strengthKey]),
       (KeyboardPrivacyPreference.defaults, [KeyboardPrivacyPreference.incognitoKey]),

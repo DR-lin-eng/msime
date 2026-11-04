@@ -17,14 +17,14 @@ import { EnglishLetterCaseState, LetterCaseMode } from './input/EnglishLetterCas
 import { LetterKeyFacePolicy } from './input/LetterKeyFacePolicy';
 import { ChineseHelpcodePolicy } from './input/ChineseHelpcodePolicy';
 import { KeyAccessibilityPolicy } from './input/KeyAccessibilityPolicy';
-import { CandidateGlossPolicy } from './candidate/CandidateGlossPolicy';
+import { CandidateGlossPolicy, CandidatePronunciationPolicy } from './candidate/CandidateGlossPolicy';
 import { CorrectionMarkPolicy, CorrectionSurfaceColors } from './candidate/CorrectionMarkPolicy';
 import { CandidatePresentationPolicy } from './candidate/CandidatePresentationPolicy';
-import { KeyboardLayoutDragPolicy } from './input/KeyboardLayoutDragPolicy';
 import { ExpandedCandidateCell, ExpandedCandidateLayout } from './candidate/ExpandedCandidateLayout';
+import { CandidateScalePolicy } from './candidate/CandidateScalePolicy';
 import { ExpandedCandidateBatchPolicy } from './candidate/ExpandedCandidateBatchPolicy';
 import { CandidatePanelSelectionPolicy } from './candidate/CandidatePanelSelectionPolicy';
-import { ShuangpinKeyHintPolicy } from './input/ShuangpinKeyHintPolicy';
+import { CANTONESE_PROFILE, ShuangpinKeyHintPolicy } from './input/ShuangpinKeyHintPolicy';
 import { ReturnDispatch, ReturnKeyAction } from './input/ReturnKeyAction';
 import { InputDiagnosticPolicy } from './input/InputDiagnosticPolicy';
 import { LocalInputMode, LocalInputModeDefinition } from './input/LocalInputMode';
@@ -43,6 +43,7 @@ import { SchemeTraits } from './SchemeTraits';
 import { HardwareKeyRouter } from './HardwareKeyRouter';
 import { KoreanCompositionPolicy } from './input/KoreanCompositionPolicy';
 import { CandidateManagementAction, ManagementAction } from './candidate/CandidateManagementAction';
+import { NextWordPredictionPolicy } from './candidate/NextWordPredictionPolicy';
 import { CandidateFontFamilyPolicy } from './candidate/CandidateFontFamilyPolicy';
 import { CandidateChipWidth } from './candidate/CandidateChipWidth';
 import { CandidateContextMenuPolicy, PointerAction, PointerButton }
@@ -87,6 +88,7 @@ import { GlideArming, GlideKeyRect, GlidePoint, GlideTypingPolicy } from './inpu
 import { PendingTouches, TouchKey, TouchPoint, TouchPointPolicy } from './input/TouchPointPolicy';
 import { LetterHintTable } from './input/LetterHintTable';
 import { HintKeyRect, LetterHintGesture } from './input/LetterHintGesture';
+import { HelpcodeSwipeGesture } from './input/HelpcodeSwipePolicy';
 import { KeyPreviewFrame, KeyPreviewLayout } from './KeyPreviewLayout';
 import {
   EmojiCatalogModel, EmojiCategory, EmojiItem, EMOJI_PAGE_SIZE, EMOJI_RECENTS_ICON
@@ -108,6 +110,7 @@ import { DesktopSurface } from './DesktopSurface';
 import { SurfaceRoutingPolicy } from './SurfaceRoutingPolicy';
 import { ClipboardHistoryItem, ClipboardFailure } from './clipboard/ClipboardHistoryStore';
 import { ClipboardHistoryPolicy } from './clipboard/ClipboardHistoryPolicy';
+import { ClipboardSelectionPolicy } from './clipboard/ClipboardSelectionPolicy';
 import {
   CLOUD_CLIPBOARD_SEND, CLOUD_CLIPBOARD_TAB, CloudClipboardItem, CloudClipboardPolicy,
   CloudClipboardSendOutcome, CloudClipboardState
@@ -121,7 +124,7 @@ import {
   HandwritingRecognitionQueue, HandwritingRecognitionTicket
 } from './input/HandwritingRecognitionQueue';
 import { HarmonyVoiceRecognizer } from './input/HarmonyVoiceRecognizer';
-import { VoiceRecognitionPolicy, VOICE_DONE_NOTICE_MS, VOICE_SILENCE_STOP_MS } from './input/VoiceRecognitionPolicy';
+import { VoiceRecognitionPolicy, VOICE_DONE_NOTICE_MS, VOICE_PAUSE_DEFAULT_MS } from './input/VoiceRecognitionPolicy';
 import { VoiceInputConfigurationPolicy } from './input/VoiceInputConfiguration';
 import { ReplyKeyboardPolicy, ReplyStyle } from './ReplyKeyboardPolicy';
 import { CommunityReplyTemplate } from './CommunityReplyLibraryPolicy';
@@ -133,8 +136,8 @@ import { KeyboardFormFactorPolicy } from './KeyboardFormFactorPolicy';
 import display from '@ohos.display';
 import { KeyboardIconPaths } from './KeyboardIconPaths';
 import { BrandTile } from './faces/BrandTile';
-import { HeightBar } from './faces/HeightBar';
 import { KeyboardLineIcon } from './faces/KeyboardLineIcon';
+import { AdjustAvailability, AdjustButtonRow, AdjustFrame, AdjustHandles, AdjustRise, AdjustSpan, AdjustValues, KeyboardAdjustPolicy } from './KeyboardAdjustPolicy';
 import { MiniKeyboardPreview, MoreSkinsTile } from './faces/MiniKeyboardPreview';
 import { PagedTiles } from './faces/PagedTiles';
 import { PanelTile } from './faces/PanelTile';
@@ -146,7 +149,7 @@ import { PrivacyGate } from './PrivacyGate';
 import { AiGenerationGate } from './AiGenerationGate';
 import { PhraseList, PHRASE_LIST_ERROR, PHRASE_LIST_LOADING, PHRASE_LIST_READY } from './faces/PhraseList';
 import { VoiceListening } from './faces/VoiceListening';
-import { VoiceListeningPolicy, VoiceListeningSession } from './faces/VoiceListeningPolicy';
+import { VOICE_MASCOT_FILE, VoiceListeningPolicy, VoiceListeningSession } from './faces/VoiceListeningPolicy';
 
 import { TextPolicy } from './TextPolicy';
 import { ToolbarTools, TouchToolbarPolicy } from './TouchToolbarPolicy';
@@ -194,6 +197,8 @@ interface KeyOptions {
   hint?: string;
   /** 触屏键盘字母键右上角的符号提示（`LetterHintTable`），滑动或长按会输入它；其他键上为空或不设。有提示的键按下时也会显示预览气泡。 */
   cornerHint?: string;
+  /** 画不画 `cornerHint`，缺省画。「显示字母键角标」关掉时为假：键面不画角标、字母回到正中，`cornerHint` 照旧交给触摸，长按和滑动照样输入它（#10587）。 */
+  showCornerHint?: boolean;
   /**
    * 字母键的小写字母。设了它，键面和读屏文字在绘制时按当前大小写现算，`face` 和 `label` 不再用：自动大写在每次文字变化后异步切换大小写，若把大小写放进 `ForEach` 的键标识，每次切换都会重建全部字母键，手指正按着的那个键也被换掉，这次按键就丢了。
    */
@@ -269,6 +274,8 @@ const KEY_HINT_LINE_HEIGHT_VP: number = 12;
 // 角标提示距键上边和右边的距离（Android 的 `KeyHintButton.CORNER_HINT_TOP_DP` / `CORNER_HINT_RIGHT_DP`）。
 const CORNER_HINT_TOP_VP: number = 3;
 const CORNER_HINT_RIGHT_VP: number = 5;
+// 键面文字跟随系统字体放大的上限，与 Android 的 `KeyboardTypographyPolicy.MAX_KEYBOARD_FONT_SCALE` 相同。字号是 fp、会随系统字体放大，键高和给角标留的顶部（CORNER_HINT_TOP_VP + KEY_HINT_LINE_HEIGHT_VP）是 vp、不变；不设上限时系统字体一调大，字母就顶进右上角的角标，和它挤在一起。
+const KEY_MAX_FONT_SCALE: number = 1.15;
 // The glide trail's stroke, about as wide as a fingertip's line reads without hiding the key faces under it.
 const GLIDE_TRAIL_WIDTH_VP: number = 4;
 /** `.cursor { width: 1.5px }` in the source's candidate stylesheets. */
@@ -330,6 +337,7 @@ const LAYER_FONT_SIZE: number = 18;
 const NINE_KEY_FONT_SIZE: number = 17;
 const NINE_KEY_LETTER_WEIGHT: number = 500;
 // 展开的候选网格：列宽至少 64vp、列间距 6vp，格高 44vp、圆角 8、词 17fp，最多 40 格，下方是 40vp 高、放「返回」和删除键的底栏。
+// 44vp 高度和 17fp 文字是默认候选字号 100% 时的设计尺寸；网格通过 `CandidateScalePolicy.expandedFontSize` / `expandedCellHeight` 随候选字号和候选栏大小缩放（#10400）。
 const EXPANDED_MIN_COLUMN_VP: number = 64;
 const EXPANDED_GAP_VP: number = 6;
 const EXPANDED_PADDING_VP: number = 2;
@@ -364,6 +372,22 @@ const SURFACE_CLIPBOARD: string = 'clipboard';
 const SURFACE_TOOLS: string = 'tools';
 const SURFACE_MODES: string = 'modes';
 const SURFACE_GEOMETRY: string = 'geometry';
+/** 键盘调整遮罩上的柄和「移动」键，`adjustTouch` 按它决定拖动改哪几项。 */
+const ADJUST_TOP: string = 'top';
+const ADJUST_BOTTOM: string = 'bottom';
+const ADJUST_LEFT: string = 'left';
+const ADJUST_RIGHT: string = 'right';
+const ADJUST_MOVE: string = 'move';
+const ADJUST_RESET: string = 'reset';
+const ADJUST_CONFIRM: string = 'confirm';
+/** 键盘调整遮罩的尺寸（vp）：四角括号的边长和线宽，柄里横线、竖线的长度，柄的触摸区长边，三个按钮的图标、字号和图标与文字的间距。线的粗细和间距、柄的短边、按钮的宽和间距在 `KeyboardAdjustPolicy`，按钮那一排的换算要用到它们。 */
+const ADJUST_CORNER_VP: number = 20;
+const ADJUST_CORNER_STROKE_VP: number = 3;
+const ADJUST_GRIP_LENGTH_VP: number = 24;
+const ADJUST_HANDLE_LONG_VP: number = 96;
+const ADJUST_BUTTON_ICON_VP: number = 30;
+const ADJUST_BUTTON_FONT_SIZE: number = 14;
+const ADJUST_BUTTON_GAP_VP: number = 6;
 const SURFACE_EXPANDED: string = 'expanded';
 const SURFACE_VARIANTS: string = 'variants';
 const SURFACE_VOICE: string = 'voice';
@@ -460,6 +484,9 @@ const CLIP_CARD_FONT_SIZE: number = 14.5;
 const CLIP_CARD_LINE_HEIGHT_VP: number = 21;
 const CLIP_CARD_LINE_GAP_VP: number = 2;
 const CLIP_META_FONT_SIZE: number = 11.5;
+// 多选时选中卡片右上角的序号 ①②③④（#10411），正文右边让出这么宽，长文字不压在角标底下。
+const CLIP_BADGE_FONT_SIZE: number = 18;
+const CLIP_BADGE_SPACE_VP: number = 20;
 const CLIPBOARD_TAB_CLOUD: string = 'cloud';
 // Enough results to scroll through; a one-letter search would otherwise lay out the whole catalog.
 const EMOJI_SEARCH_LIMIT: number = 512;
@@ -515,6 +542,8 @@ struct KeyboardView {
   @State engineScheme: number = 0;
   /** Whether the scheme's openable candidate list (the Korean Hanja list, the Zhuyin list) is on the strip, as the Engine last reported it. */
   @State candidateListOpen: boolean = false;
+  /** 候选栏上是上屏后联想（#9433）而不是组字的候选：回车按空闲处理，长按不管理，候选栏按偏好放关闭键。 */
+  @State prediction: boolean = false;
   /** Read-only English completions for the word being typed; empty whenever one is not. */
   @State @Watch('syncStripHeight') englishSuggestions: string[] = [];
   /** 光标前打到 `xxx@` 时给出的邮箱后缀，先于英文补全显示；没有时为空。 */
@@ -645,6 +674,10 @@ struct KeyboardView {
   @State cloudSending: boolean = false;
   /** The local history entry a long press offered to send to the cloud clipboard, or empty. */
   @State clipSendTarget: string = '';
+  /** 触屏剪贴板的多选（#10411）：点「多选」进入，点卡片按先后选中并在右上角标出 ①②③④，「插入」把选中的几条按序号一次插入，「取消」退出。只作用于本机历史，与 Android 的多选入口一致。 */
+  @State clipSelecting: boolean = false;
+  /** 按点选先后排列的选中文字（本机历史按文字去重，文字就是条目的标识）。 */
+  @State clipSelection: string[] = [];
   @State expanded: ExpandedCandidate[] = [];
   /** 展开网格已经建了 `expanded` 开头的多少格，规则在 `ExpandedCandidateBatchPolicy`。 */
   @State expandedBuilt: number = 0;
@@ -691,6 +724,8 @@ struct KeyboardView {
   @State voiceHeard: string = '';
   /** 麦克风电平 0–1，聆听面板的光圈跟着它缩放；只在录音中更新，收尾、完成和取消时回到 0。 */
   @State voiceLevel: number = 0;
+  /** 聆听面板的指示区画水杉娘（非按住的会话）还是圆盘，由 `refreshVoiceMascot` 按两个按住标志算出。 */
+  @State voiceMascot: boolean = true;
   @State voiceEnabled: boolean = KeyboardSession.shared.voiceInputEnabled();
   @State replySource: string = '';
   @State replyStyle: string = '高情商';
@@ -709,8 +744,12 @@ struct KeyboardView {
   @State geometryWidth: number = KeyboardSession.shared.preferences().widthPercent;
   @State geometryKeySpacing: number = KeyboardSession.shared.preferences().keySpacingTenths;
   @State geometryRowSpacing: number = KeyboardSession.shared.preferences().rowSpacingTenths;
-  /** 屏幕上按键行的高度调整值：已保存的值，或高度条打开期间正在预览的值。 */
+  /** 屏幕上按键行的高度调整值：已保存的值，或键盘调整打开期间正在预览的值。 */
   @State geometryHeight: number = KeyboardSession.shared.preferences().heightAdjustment;
+  /** 键盘调整的底部抬高、宽度和水平位置（`KeyboardAdjustPolicy`，存在本机的按键反馈文件里）：已保存的值，或键盘调整打开期间正在预览的值。 */
+  @State geometryLift: number = KeyboardSession.shared.feedbackSettings().bottomLift;
+  @State geometryWidthPercent: number = KeyboardSession.shared.feedbackSettings().widthPercent;
+  @State geometryPositionX: number = KeyboardSession.shared.feedbackSettings().positionX;
   /** 「常用语」面板的条目及其读取状态（`PhraseList` 的 `PHRASE_LIST_*` 状态）。 */
   @State phrases: string[] = [];
   @State phraseState: string = PHRASE_LIST_LOADING;
@@ -767,6 +806,8 @@ struct KeyboardView {
     !TouchToolbarPolicy.rowHidden(KeyboardSession.shared.preferences().toolbarTools);
   /** 面板上一次定高时多出的行数（手写区、数字行），`syncStripHeight` 只在它和现在不一样时改面板高度。视图出现时换成扩展能力建面板时用的值（`KeyboardSession.firstTouchPanel`）。 */
   private extraRowsWere: number = 0;
+  /** 面板上一次定高时算进去的底部抬高（vp），`syncStripHeight` 只在它和现在不一样时改面板高度（转屏、浮动开关会让它生效或不生效）。视图出现时换成扩展能力建面板时用的值（`KeyboardSession.firstTouchLift`）。 */
+  private liftWas: number = 0;
 
   /** 按下的键变暗和缩小的程度：触屏上是设计稿的 .86 和 .96；2in1 上保持不变，它的设备形态在进程存续期间不会改变。 */
   private readonly keyPressedBrightness: number = KeyboardFormFactor.isDesktop() ? 1 : KEY_PRESSED_BRIGHTNESS;
@@ -802,8 +843,12 @@ struct KeyboardView {
   private voiceGeneration: number = 0;
   /** 录音是否由语音快捷键按住；快捷键会自己结束录音，所以说话停顿不能结束它。 */
   private voiceHeldByKey: boolean = false;
-  /** 当前识别服务是否返回中间文字，用于提示停顿自动结束或点「说完了」；在 `voiceBusy` 之前更新，供手机聆听面板读取。 */
-  private voiceStreams: boolean = true;
+  /** 停顿之后录音会不会自己结束（`VoiceRecordingBehaviourPolicy.endsOnPause`），用于提示停顿自动结束或点「说完了」；在 `voiceBusy` 之前更新，供手机聆听面板读取。 */
+  private voiceEndsOnPause: boolean = true;
+  /** 这次聆听由键盘的停顿计时结束：触屏上的本地识别和系统识别（`VoiceRecordingBehaviourPolicy.keyboardStopsOnPause`），开始聆听时固定。 */
+  private voicePauseEnds: boolean = false;
+  /** 这次聆听的停顿时间（`VoiceRecordingBehaviourPolicy.pauseMillis`），开始聆听时固定，改设置从下一次聆听生效。 */
+  private voicePauseMs: number = VOICE_PAUSE_DEFAULT_MS;
   private voiceSilenceTimer: number = -1;
   /** 经过 VAD 的本地整段模型此刻是否听到说话；其他识别器从不报，始终为 false。 */
   private voiceSpeaking: boolean = false;
@@ -812,14 +857,15 @@ struct KeyboardView {
   private polishGeneration: number = 0;
   /** 每次加载常用语和离开面板时递增，只绘制最新的结果。 */
   private phraseGeneration: number = 0;
-  /** 高度条打开时已保存的高度调整值，「取消」及其他任何离开高度条的方式都会恢复到它。 */
-  private heightSnapshot: number = 0;
-  /** 高度条的拖柄是否正被拖动；手指抬起时拖动结束。 */
-  private heightDragging: boolean = false;
-  /** 本次拖动开始时的调整值。 */
-  private heightDragBase: number = 0;
-  /** 拖动开始以来手指的累计竖直位移，不取整，这样慢速拖动会逐步累积而不是被取整抹掉。 */
-  private heightDragOffset: number = 0;
+  /** 键盘调整里正被拖动的柄或「移动」键（`ADJUST_*`），没有在拖时为空串。 */
+  private adjustDragHandle: string = '';
+  /** 按下那一刻手指的屏幕坐标（vp），之后的位移都相对它算：改高度、抬高时面板跟着变，柄在窗口里的位置会变，屏幕坐标不会。 */
+  private adjustDragOrigin: [number, number] = [0, 0];
+  /** 按下那一刻的四项和面板宽度（vp），整个拖动都从这里换算，慢速拖动不会被逐次取整抹掉。 */
+  private adjustDragBase: AdjustValues = KeyboardAdjustPolicy.DEFAULTS;
+  /** 打开键盘调整时的四项，离开时按它判断哪几项动过（`KeyboardAdjustPolicy.saved`）。 */
+  private adjustOriginal: AdjustValues = KeyboardAdjustPolicy.DEFAULTS;
+  private adjustDragWidthVp: number = 0;
   /** 「手写」磁贴切换前的方案，再次点按回到它；键盘不是由该磁贴切换过来时为 null。 */
   private schemeBeforeHandwriting: SchemeDefinition | null = null;
   /** 「手写」磁贴切换前键盘是否在英文（英文 26 键、英文 9 键），再次点按时一并回到英文（#9703）。 */
@@ -843,14 +889,16 @@ struct KeyboardView {
   /** The keyboard's top-left in window coordinates, which the trail canvas is drawn from. */
   private glideOriginX: number = 0;
   private glideOriginY: number = 0;
-  /** 键盘宽度，用于把按键预览气泡限制在键盘内。 */
-  private rootWidth: number = 0;
+  /** 键盘宽度（vp，`keyboardStack` 量到的面板宽），用于把按键预览气泡限制在键盘内；键盘调整的外框和左右沿拖动也按它换算（`adjustPanelWidthVp`），所以是状态，量到新宽度时外框跟着重画。 */
+  @State rootWidth: number = 0;
   /** 按下字母键时其上方的按键预览气泡（按键弹出预览），以相对键盘左上角的 vp 计；未显示时为 null。 */
   @State keyPreview: KeyPreviewFrame | null = null;
   /** 气泡所属按键对应的手指，这样别处抬起的手指不会撤掉仍被按住的键的气泡；未显示时为 -1。 */
   private keyPreviewFinger: number = -1;
   /** 字母键上可能输入角标提示而不是字母的触摸。 */
   private letterHints: LetterHintGesture = new LetterHintGesture();
+  /** 中文组字中的 26 键竖向滑动辅助码；与角标手势分开跟踪，长按仍保留角标。 */
+  private helpcodeSwipes: HelpcodeSwipeGesture = new HelpcodeSwipeGesture();
   /** 26 键字母键和 `;` 的按下点，等这一键的点击取走（#10018，`TouchPointPolicy`）。 */
   private pendingTouches: PendingTouches = new PendingTouches();
   /** 微软双拼第二行末尾 `;` 键的位置（窗口坐标），同 `glideKeys`；没量到时为 null。 */
@@ -877,6 +925,7 @@ struct KeyboardView {
     const opened: TouchPanelShape = KeyboardSession.shared.firstTouchPanel();
     this.stripWasShown = opened.strip;
     this.extraRowsWere = opened.extraRows;
+    this.liftWas = KeyboardSession.shared.firstTouchLift();
     this.readOrientation();
     display.on('change', this.displayChanged);
     this.english = KeyboardSession.shared.isEnglish();
@@ -891,6 +940,7 @@ struct KeyboardView {
       if (!enabled) {
         this.clips = [];
         this.confirmingClear = false;
+        this.endClipSelection();
         this.clipboardNotice = '剪贴板历史已关闭，历史记录已清空';
         if (this.surface === SURFACE_CLIPBOARD) {
           this.show(SURFACE_NONE);
@@ -954,8 +1004,9 @@ struct KeyboardView {
       }
       if (action === VoiceHotkeyAction.LOCK) {
         this.voiceNotice = '已锁定录音，松开按键不会结束。';
-        // 锁定后松开按键不再结束录音，会话从此按点按开始对待：面板给「说完了」和「取消」，流式识别停顿后自动结束。快捷键的 STOP、CANCEL 不看这个标志，照常生效。
+        // 锁定后松开按键不再结束录音，会话从此按点按开始对待：面板给「说完了」和「取消」；触屏上本地识别和系统识别停顿后自动结束（`voicePauseEnds`，见 `VoiceRecordingBehaviourPolicy.keyboardStopsOnPause`），豆包流式和上传式识别点「说完了」结束，指示区换成水杉娘。快捷键的 STOP、CANCEL 不看这个标志，照常生效。
         this.voiceHeldByKey = false;
+        this.refreshVoiceMascot();
       }
     };
     KeyboardSession.shared.onPanelKey = (key: EmojiPanelKey): boolean => this.panelKey(key);
@@ -1017,7 +1068,17 @@ struct KeyboardView {
         this.replyNotice = '输入位置已变化，请重新选择回复方式';
       }
     };
+    KeyboardSession.shared.onEditorAttached = (): void => {
+      // 换输入框时系统不一定先发 inputStop（那会经 `onPanelHidden` 离开），键盘也不一定收起，只来一次新的 inputStart：键盘调整开着就在这里离开，按确认保存（见 `show`），不把遮罩带进新的输入框。
+      if (this.surface === SURFACE_GEOMETRY) {
+        this.show(SURFACE_NONE);
+      }
+    };
     KeyboardSession.shared.onPanelHidden = (): void => {
+      // 收起键盘、换输入框（detach）或切到别的应用时离开键盘调整，按确认保存（见 `show`）；不离开的话下次显示时遮罩还盖着。
+      if (this.surface === SURFACE_GEOMETRY) {
+        this.show(SURFACE_NONE);
+      }
       // 面板收起时视图不会销毁（aboutToDisappear 不会执行）。还在走的空格长按计时要取消，否则收起后它照样到点开始录音。
       this.cancelSpaceLongPress();
       if (!VoiceRecognitionPolicy.cancelsOnHide(this.touchDesign(), this.voiceBusy, this.voiceFinishing)) {
@@ -1049,6 +1110,7 @@ struct KeyboardView {
       this.enumerationCommaSlash = state.enumerationCommaSlash;
       this.engineScheme = state.scheme;
       this.candidateListOpen = state.candidateListOpen;
+      this.prediction = state.prediction;
       this.japanese = state.scheme === JAPANESE_SCHEME && !state.english
         && KeyboardScheme.isNineKeyLayout(this.scheme.touchKeyboardLayout);
       this.shuangpinProfile = state.shuangpinProfile;
@@ -1065,7 +1127,7 @@ struct KeyboardView {
       this.applyAutomaticCase();
       if (state.candidates.length === 0
         && !(this.surface === SURFACE_EXPANDED && this.nineKeyPanel())) {
-        // 这份列表属于一个已不存在的组合；继续显示它，就是为用户已经完成或放弃的输入提供选项。功能面板和高度条与组合无关：用硬件键盘输入组合时面板会让开，组合结束后再回来；高度条只能通过它自己的按钮离开。全拼九键的三栏面板例外：筛选可能把候选滤空，组字还在，要留着面板让用户撤掉那一笔，组字结束时 nineKeyPanel() 为假再收起。
+        // 这份列表属于一个已不存在的组合；继续显示它，就是为用户已经完成或放弃的输入提供选项。功能面板和键盘调整与组合无关：用硬件键盘输入组合时面板会让开，组合结束后再回来；键盘调整不因组合结束而关上。全拼九键的三栏面板例外：筛选可能把候选滤空，组字还在，要留着面板让用户撤掉那一笔，组字结束时 nineKeyPanel() 为假再收起。
         if (!this.isTools() && this.surface !== SURFACE_GEOMETRY) {
           this.show(SURFACE_NONE);
         }
@@ -1134,6 +1196,7 @@ struct KeyboardView {
     KeyboardSession.shared.onViewPreferencesReloaded = undefined;
     KeyboardSession.shared.onReplyContextChanged = undefined;
     KeyboardSession.shared.onPanelHidden = undefined;
+    KeyboardSession.shared.onEditorAttached = undefined;
     KeyboardSession.shared.onPanelKey = undefined;
     KeyboardSession.shared.invalidateReplyContext(false);
     this.cancelHoverTip();
@@ -1250,6 +1313,10 @@ struct KeyboardView {
 
   /** 提示跟随当前选中的方案，切换后立即更新，不等下一次按键的引擎回报。 */
   private letterHint(letter: string): string {
+    if (ShuangpinKeyHintPolicy.cantoneseFace(this.scheme.preferenceId, this.engineScheme)) {
+      return ShuangpinKeyHintPolicy.hint(CANTONESE_PROFILE, letter, this.english, 1, this.localMode,
+        this.shuangpinKeyHints);
+    }
     if (this.scheme.engineScheme !== 'shuangpin') {
       return '';
     }
@@ -1450,6 +1517,10 @@ struct KeyboardView {
       // The stroke already typed what it meant; see glideSwallowsTap.
       return;
     }
+    if (this.helpcodeSwipes.swallows(letter)) {
+      // 这次触摸已经上滑或下滑输入了辅助码，ArkUI 随后到达的点击不能再输入小写字母。
+      return;
+    }
     if (this.letterHints.swallows(letter)) {
       // 该键上的滑动或长按已在手指抬起时输入了角标提示。
       return;
@@ -1644,6 +1715,8 @@ struct KeyboardView {
         width: Number(event.target.area.width),
         height: Number(event.target.area.height)
       };
+      this.helpcodeSwipes.down(touch.id, letter, touch.windowX, touch.windowY,
+        this.helpcodeSwipeEnabled());
       this.letterHints.down(touch.id, letter, hint, touch.windowY, rect);
       this.armHintHold(touch.id);
       if (this.feedback.keyPopup) {
@@ -1658,6 +1731,15 @@ struct KeyboardView {
         if (this.glideActive) {
           this.abandonLetterHint(touch.id);
           continue;
+        }
+        if (this.helpcodeSwipes.tracking(touch.id)) {
+          const helpcode: string = this.helpcodeSwipes.move(touch.id, touch.windowX, touch.windowY);
+          if (helpcode.length > 0) {
+            this.cancelHintHold(touch.id);
+            this.letterHints.cancel(touch.id);
+            this.relabelKeyPreview(touch.id, helpcode);
+            continue;
+          }
         }
         const fired: string | null = this.letterHints.move(touch.id, touch.windowX, touch.windowY,
           this.feedback.swipeSymbols, this.feedback.swipeSymbolsDirection);
@@ -1678,12 +1760,21 @@ struct KeyboardView {
       }
       this.cancelHintHold(finger);
       this.hideKeyPreview(finger);
+      const touch: TouchObject = event.changedTouches[0];
+      const helpcode: string = this.helpcodeSwipes.up(finger, touch.windowX, touch.windowY);
+      if (helpcode.length > 0) {
+        this.letterHints.cancel(finger);
+        // 抬手事件可能落到手指离开时所在的键；辅助码必须沿用按下时跟踪的原键。
+        this.typeHelpcodeSwipe(helpcode);
+        return;
+      }
       const typed: string | null = this.letterHints.up(finger);
       if (typed !== null) {
         this.typeLetterHint(letter, typed);
       }
     } else if (event.type === TouchType.Cancel) {
       for (const touch of event.changedTouches) {
+        this.helpcodeSwipes.cancel(touch.id);
         this.abandonLetterHint(touch.id);
       }
     }
@@ -1696,6 +1787,20 @@ struct KeyboardView {
     KeyboardSession.shared.insert(hint);
   }
 
+  /** 竖向滑动辅助码沿已有的 Shift+字母路径送入 Engine；引擎从大写字母本身读取辅助码。 */
+  private typeHelpcodeSwipe(letter: string): void {
+    const input: string = ChineseHelpcodePolicy.letterInput(letter, true);
+    if (input.length === 0) {
+      return;
+    }
+    KeyboardSession.shared.softKeyPress(KeyIdPolicy.character(letter));
+    KeyboardSession.shared.press(input.charCodeAt(0), true);
+    if (this.caseMode === LetterCaseMode.SHIFTED && !this.letterCase.isAutomatic()) {
+      this.letterCase.reset();
+      this.caseMode = this.letterCase.mode();
+    }
+  }
+
   private armHintHold(finger: number): void {
     this.cancelHintHold(finger);
     const timer: number = setTimeout((): void => {
@@ -1703,6 +1808,7 @@ struct KeyboardView {
       if (this.glideActive) {
         return;
       }
+      this.helpcodeSwipes.hold(finger);
       const hint: string | null = this.letterHints.hold(finger);
       const rect: HintKeyRect | null = this.letterHints.rect(finger);
       if (hint !== null && rect !== null) {
@@ -1726,6 +1832,13 @@ struct KeyboardView {
     this.cancelHintHold(finger);
     this.hideKeyPreview(finger);
     this.letterHints.cancel(finger);
+    this.helpcodeSwipes.cancel(finger);
+  }
+
+  /** 只在鸿蒙手机 26 键全拼或双拼已有组字时启用；其它键面继续保留角标滑动。 */
+  private helpcodeSwipeEnabled(): boolean {
+    return this.touchDesign() && this.qwertyLettersShowing()
+      && KeyboardSession.shared.entersHelpcode(true);
   }
 
   /** 为这根手指在 `rect`（窗口坐标）上方显示气泡；密码框除外，在那里它会把每个字符展示给任何看着屏幕的人。 */
@@ -1780,6 +1893,7 @@ struct KeyboardView {
     this.hintHoldTimers.forEach((timer: number): void => clearTimeout(timer));
     this.hintHoldTimers.clear();
     this.letterHints.clear();
+    this.helpcodeSwipes.clear();
     this.pendingTouches.clear();
     this.eighteenSwipes.clear();
     this.eighteenSwipeKey = '';
@@ -1960,7 +2074,7 @@ struct KeyboardView {
   }
 
   private keyFaceHasCornerHint(options: KeyOptions): boolean {
-    return options.cornerHint !== undefined && options.cornerHint.length > 0;
+    return options.showCornerHint !== false && options.cornerHint !== undefined && options.cornerHint.length > 0;
   }
 
   @Builder
@@ -1981,7 +2095,10 @@ struct KeyboardView {
             .fontSize($$.size)
             .minFontSize(KEY_HINT_FONT_SIZE)
             .maxFontSize($$.size)
-            .heightAdaptivePolicy(TextHeightAdaptivePolicy.LAYOUT_CONSTRAINT_FIRST)
+            .maxFontScale(KEY_MAX_FONT_SCALE)
+            // 有角标时字母只能用角标下面剩的高度，按高度约束缩字（LAYOUT_CONSTRAINT_FIRST）。没有角标时按单行缩字（MAX_LINES_FIRST）：「123」「发送」这类功能键在收窄的键盘里比键帽宽，高度约束优先只看高度，不缩字，字会被截掉；按单行优先才会在 10 到原字号之间缩到放得下。
+            .heightAdaptivePolicy(this.keyFaceHasCornerHint($$) ? TextHeightAdaptivePolicy.LAYOUT_CONSTRAINT_FIRST
+              : TextHeightAdaptivePolicy.MAX_LINES_FIRST)
             .layoutWeight(this.keyFaceHasCornerHint($$) ? 1 : 0)
             .fontWeight($$.fontWeight ?? 400)
             .maxLines(1)
@@ -1993,6 +2110,7 @@ struct KeyboardView {
         if ($$.hint !== undefined && $$.hint.length > 0) {
           Text($$.hint)
             .fontSize(KEY_HINT_FONT_SIZE)
+            .maxFontScale(KEY_MAX_FONT_SCALE)
             .minFontSize(6)
             .maxFontSize(KEY_HINT_FONT_SIZE)
             .heightAdaptivePolicy(TextHeightAdaptivePolicy.LAYOUT_CONSTRAINT_FIRST)
@@ -2012,6 +2130,7 @@ struct KeyboardView {
       if (this.keyFaceHasCornerHint($$)) {
         Text($$.cornerHint)
           .fontSize(KEY_HINT_FONT_SIZE)
+          .maxFontScale(KEY_MAX_FONT_SCALE)
           .height(KEY_HINT_LINE_HEIGHT_VP)
           .maxLines(1)
           .fontColor(this.skin.secondary)
@@ -2846,10 +2965,9 @@ struct KeyboardView {
       // 仍在读取中的常用语列表属于发起请求的那次访问。
       this.phraseGeneration += 1;
     }
-    if (this.surface === SURFACE_GEOMETRY && surface !== SURFACE_GEOMETRY
-      && this.geometryHeight !== this.heightSnapshot) {
-      // 以「完成」以外的方式离开高度条不保留任何改动：预览恢复为已保存的高度。
-      this.previewHeight(this.heightSnapshot);
+    if (this.surface === SURFACE_GEOMETRY && surface !== SURFACE_GEOMETRY) {
+      // 以任何方式离开键盘调整（确认、切到别的面板、收起键盘、换输入框、切应用）都按确认保存，没有「取消」，与 Android 的决定相同（`2026-10-08-touch-keyboard-height-reverts`）。
+      this.saveAdjust();
     }
     if (surface !== SURFACE_VOICE) {
       if (VoiceRecognitionPolicy.cancelsOnLeave(this.touchDesign(), this.voiceBusy,
@@ -3080,38 +3198,205 @@ struct KeyboardView {
     this.show(SURFACE_NONE);
   }
 
-  /** 功能面板的「键盘高度」：工具栏变成高度条，下方是实时按键，从已保存的高度开始。 */
-  private openHeightMode(): void {
-    this.heightSnapshot = this.geometryHeight;
-    this.heightDragging = false;
+  /** 功能面板的「键盘调整」：整块键盘上盖一层遮罩（`adjustOverlay`），下面照常画作实时预览，从已保存的四项开始。 */
+  private openAdjustMode(): void {
+    this.adjustDragHandle = '';
+    this.adjustOriginal = this.adjustValues();
     this.show(SURFACE_GEOMETRY);
   }
 
-  /** 按某个调整值绘制按键但不保存：面板随之调整大小，所以预览就是真实高度。 */
-  private previewHeight(adjustment: number): void {
-    this.geometryHeight = KeyboardGeometry.heightAdjustment(adjustment);
-    this.resizeTouchPanel();
+  /** 此刻的四项：已保存的值，或键盘调整打开期间正在预览的值。 */
+  private adjustValues(): AdjustValues {
+    return {
+      height: this.geometryHeight,
+      lift: this.geometryLift,
+      widthPercent: this.geometryWidthPercent,
+      positionX: this.geometryPositionX
+    };
   }
 
-  /** 高度条拖柄的一步：手指上移 1vp，按键行就高 1vp，范围以共享校验接受的为限。 */
-  private dragHeight(deltaVp: number): void {
-    if (!this.heightDragging) {
-      this.heightDragging = true;
-      this.heightDragBase = this.geometryHeight;
-      this.heightDragOffset = 0;
-    }
-    this.heightDragOffset += deltaVp;
-    const adjustment: number = KeyboardLayoutDragPolicy.height(this.heightDragBase, this.heightDragOffset);
-    if (adjustment !== this.geometryHeight) {
-      this.previewHeight(adjustment);
+  /** 此刻哪几项生效（`KeyboardAdjustPolicy.availability`）：浮动、手机横屏和 2in1 上只有高度；单手或分离时没有宽度和位置。 */
+  private adjustAvailability(): AdjustAvailability {
+    return KeyboardAdjustPolicy.availability(this.floatingDrawn(), this.phoneLandscape, KeyboardFormFactor.isDesktop(),
+      this.oneHandActive(), this.splitDrawn());
+  }
+
+  /** 遮罩上画哪些柄和「移动」键。 */
+  private adjustHandles(): AdjustHandles {
+    return KeyboardAdjustPolicy.handles(this.adjustAvailability());
+  }
+
+  /** 键盘外框在面板里的位置：根节点和遮罩按它在两侧和底下让出键盘底色。 */
+  private adjustFrame(): AdjustFrame {
+    return KeyboardAdjustPolicy.frame(this.adjustValues(), this.adjustAvailability(), this.adjustPanelWidthVp());
+  }
+
+  /** 键盘调整换算宽度和位置用的面板宽（vp）：量到的 `rootWidth`，还没量到时退回屏幕宽。不直接用 `screenWidthVp`：停靠面板的宽度是扩展能力建面板时的屏幕宽（`fitTouchPanel` 一直按它 resize），平板转屏或折叠屏开合之后与此刻的屏幕宽不同，按屏幕宽换算会让出比面板还宽的两侧，拖左右沿时对边也不再不动。 */
+  private adjustPanelWidthVp(): number {
+    return this.rootWidth > 0 ? this.rootWidth : this.screenWidthVp;
+  }
+
+  /** 中间一排按钮的宽和间距（`KeyboardAdjustPolicy.buttonRow`）：外框窄时先收间距再收按钮，不压到左右柄上。 */
+  private adjustButtonRow(): AdjustButtonRow {
+    const frame: AdjustFrame = this.adjustFrame();
+    const handles: AdjustHandles = this.adjustHandles();
+    return KeyboardAdjustPolicy.buttonRow(this.adjustPanelWidthVp() - frame.left - frame.right,
+      handles.move ? 3 : 2, handles.left && handles.right);
+  }
+
+  /** 此刻算进面板高度的底部抬高（vp），不生效时为 0。 */
+  private bottomLiftVp(): number {
+    return KeyboardAdjustPolicy.liftVp(this.geometryLift, this.adjustAvailability());
+  }
+
+  /** 按四项绘制但不保存：高度或抬高变了时面板随之改高度，所以预览就是真实大小。 */
+  private previewAdjust(values: AdjustValues): void {
+    const height: number = KeyboardGeometry.heightAdjustment(values.height);
+    const lift: number = KeyboardAdjustPolicy.lift(values.lift);
+    const resize: boolean = height !== this.geometryHeight || lift !== this.geometryLift;
+    this.geometryHeight = height;
+    this.geometryLift = lift;
+    this.geometryWidthPercent = KeyboardAdjustPolicy.widthPercent(values.widthPercent);
+    this.geometryPositionX = KeyboardAdjustPolicy.position(values.positionX);
+    if (resize) {
+      this.resizeTouchPanel();
     }
   }
 
-  /** 「完成」：保存预览的高度并回到工具栏。 */
-  private finishHeightMode(): void {
-    this.applyGeometry(this.geometryKeySpacing, this.geometryRowSpacing, this.geometryHeight);
-    this.heightSnapshot = this.geometryHeight;
-    this.show(SURFACE_NONE);
+  /**
+   * 保存预览的四项：高度变了才写共享偏好（`applyGeometry`）；其余三项只取此刻生效且动过的（`KeyboardAdjustPolicy.saved`），写本机的按键反馈文件（`KeyboardSession.saveKeyboardAdjust`，没变时不写），不生效的项保留已存的值，与 Android 相同。之后把视图里的三项换成存下的值，回到它们生效的模式时按存下的画。
+   */
+  private saveAdjust(): void {
+    this.adjustDragHandle = '';
+    if (this.geometryHeight !== this.settings.heightAdjustment) {
+      this.applyGeometry(this.geometryKeySpacing, this.geometryRowSpacing, this.geometryHeight);
+    }
+    const feedback: FeedbackSettings = KeyboardSession.shared.feedbackSettings();
+    const stored: AdjustValues = {
+      height: this.geometryHeight,
+      lift: feedback.bottomLift,
+      widthPercent: feedback.widthPercent,
+      positionX: feedback.positionX
+    };
+    const saved: AdjustValues = KeyboardAdjustPolicy.saved(stored, this.adjustOriginal, this.adjustValues(),
+      this.adjustAvailability());
+    if (KeyboardSession.shared.saveKeyboardAdjust(saved.lift, saved.widthPercent, saved.positionX)) {
+      this.feedback = KeyboardSession.shared.feedbackSettings();
+    }
+    this.previewAdjust(saved);
+  }
+
+  /** 从会话读回已保存的四项：高度来自共享偏好，其余三项来自会话持有的按键反馈副本。 */
+  private readAdjustValues(): void {
+    const feedback: FeedbackSettings = KeyboardSession.shared.feedbackSettings();
+    this.geometryHeight = this.settings.heightAdjustment;
+    this.geometryLift = feedback.bottomLift;
+    this.geometryWidthPercent = feedback.widthPercent;
+    this.geometryPositionX = feedback.positionX;
+  }
+
+  /**
+   * 遮罩上一个柄或「移动」键的触摸：按下记下起点、四项和面板宽度，移动时按相对起点的屏幕位移换算（`KeyboardAdjustPolicy`）并预览，抬起或取消时结束。不在这里保存，离开键盘调整时才存。
+   */
+  private adjustTouch(handle: string, event: TouchEvent): void {
+    const touch: TouchObject | undefined = event.touches.length > 0 ? event.touches[0] : undefined;
+    if (event.type === TouchType.Down && touch !== undefined) {
+      this.adjustDragHandle = handle;
+      this.adjustDragOrigin = [touch.displayX, touch.displayY];
+      this.adjustDragBase = this.adjustValues();
+      this.adjustDragWidthVp = this.adjustPanelWidthVp();
+    } else if (event.type === TouchType.Move && touch !== undefined && this.adjustDragHandle === handle) {
+      this.dragAdjust(handle, touch.displayX - this.adjustDragOrigin[0], touch.displayY - this.adjustDragOrigin[1]);
+    } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      this.adjustDragHandle = '';
+    }
+    event.stopPropagation();
+  }
+
+  /** 一次拖动位移（vp，向右、向下为正）换成四项：每个柄只动它那条边，对边在屏幕上不动；「移动」只改抬高和位置，大小不变。 */
+  private dragAdjust(handle: string, dx: number, dy: number): void {
+    const base: AdjustValues = this.adjustDragBase;
+    const width: number = this.adjustDragWidthVp;
+    if (handle === ADJUST_TOP) {
+      const next: AdjustValues = {
+        height: KeyboardAdjustPolicy.dragTop(base.height, dy),
+        lift: base.lift,
+        widthPercent: base.widthPercent,
+        positionX: base.positionX
+      };
+      this.previewAdjust(next);
+    } else if (handle === ADJUST_BOTTOM) {
+      const rise: AdjustRise = KeyboardAdjustPolicy.dragBottom(base.height, base.lift, dy);
+      const next: AdjustValues = {
+        height: rise.height,
+        lift: rise.lift,
+        widthPercent: base.widthPercent,
+        positionX: base.positionX
+      };
+      this.previewAdjust(next);
+    } else if (handle === ADJUST_LEFT || handle === ADJUST_RIGHT) {
+      const span: AdjustSpan = handle === ADJUST_LEFT
+        ? KeyboardAdjustPolicy.dragLeft(width, base.widthPercent, base.positionX, dx)
+        : KeyboardAdjustPolicy.dragRight(width, base.widthPercent, base.positionX, dx);
+      const next: AdjustValues = {
+        height: base.height,
+        lift: base.lift,
+        widthPercent: span.widthPercent,
+        positionX: span.positionX
+      };
+      this.previewAdjust(next);
+    } else if (handle === ADJUST_MOVE) {
+      const availability: AdjustAvailability = this.adjustAvailability();
+      const next: AdjustValues = {
+        height: base.height,
+        lift: KeyboardAdjustPolicy.movedLift(base.lift, dy, availability),
+        widthPercent: base.widthPercent,
+        positionX: KeyboardAdjustPolicy.movedPosition(width, base.widthPercent, base.positionX, dx, availability)
+      };
+      this.previewAdjust(next);
+    }
+  }
+
+  /** 「重置」和「确认」：重置把四项预览回默认、不保存；确认离开键盘调整，离开时保存（见 `show`）。 */
+  private adjustButtonClick(kind: string): void {
+    if (kind === ADJUST_RESET) {
+      this.previewAdjust(KeyboardAdjustPolicy.DEFAULTS);
+    } else if (kind === ADJUST_CONFIRM) {
+      this.show(SURFACE_NONE);
+    }
+  }
+
+  /** 柄的读屏名称，三端相同。 */
+  private adjustHandleLabel(handle: string): string {
+    return handle === ADJUST_TOP ? KeyboardAdjustPolicy.TOP_LABEL
+      : handle === ADJUST_BOTTOM ? KeyboardAdjustPolicy.BOTTOM_LABEL
+        : handle === ADJUST_LEFT ? KeyboardAdjustPolicy.LEFT_LABEL : KeyboardAdjustPolicy.RIGHT_LABEL;
+  }
+
+  /** 柄的读屏说明：当前值，再说怎么调。 */
+  private adjustHandleDescription(handle: string): string {
+    if (handle === ADJUST_TOP) {
+      return `${KeyboardAdjustPolicy.heightValue(this.geometryHeight)}，${KeyboardAdjustPolicy.TOP_DESCRIPTION}`;
+    }
+    if (handle === ADJUST_BOTTOM) {
+      return `${KeyboardAdjustPolicy.liftValue(this.geometryLift)}，${KeyboardAdjustPolicy.BOTTOM_DESCRIPTION}`;
+    }
+    return `${KeyboardAdjustPolicy.widthValue(this.geometryWidthPercent)}，${KeyboardAdjustPolicy.SIDE_DESCRIPTION}`;
+  }
+
+  private adjustButtonLabel(kind: string): string {
+    return kind === ADJUST_RESET ? KeyboardAdjustPolicy.RESET_LABEL
+      : kind === ADJUST_MOVE ? KeyboardAdjustPolicy.MOVE_LABEL : KeyboardAdjustPolicy.CONFIRM_LABEL;
+  }
+
+  private adjustButtonDescription(kind: string): string {
+    return kind === ADJUST_RESET ? KeyboardAdjustPolicy.RESET_DESCRIPTION
+      : kind === ADJUST_MOVE ? KeyboardAdjustPolicy.MOVE_DESCRIPTION : KeyboardAdjustPolicy.CONFIRM_DESCRIPTION;
+  }
+
+  private adjustButtonIcon(kind: string): string {
+    return kind === ADJUST_RESET ? KeyboardIconPaths.ADJUST_RESET
+      : kind === ADJUST_MOVE ? KeyboardIconPaths.ADJUST_MOVE : KeyboardIconPaths.ADJUST_CONFIRM;
   }
 
   private isCurrentScheme(candidate: SchemeDefinition): boolean {
@@ -3142,7 +3427,7 @@ struct KeyboardView {
     const dispatch: ReturnDispatch = ReturnKeyAction.dispatch(
       this.japanese, this.editing.length > 0, this.candidates.length,
       KeyboardSession.shared.japaneseConversionActive(), this.koreanFace(), this.vietnameseFace(),
-      this.strokeFace());
+      this.strokeFace(), this.prediction);
     if (dispatch === ReturnDispatch.COMMIT_RAW) {
       KeyboardSession.shared.commitRaw();
     } else if (dispatch === ReturnDispatch.FINISH_THEN_EDITOR) {
@@ -3209,7 +3494,6 @@ struct KeyboardView {
     this.geometryWidth = this.settings.widthPercent;
     this.geometryKeySpacing = this.settings.keySpacingTenths;
     this.geometryRowSpacing = this.settings.rowSpacingTenths;
-    this.geometryHeight = this.settings.heightAdjustment;
     this.shuangpinKeyHints = this.settings.shuangpinKeyHints;
     this.quanpinShift = this.settings.quanpinShift;
     this.toolbarTools = this.settings.toolbarTools;
@@ -3226,6 +3510,10 @@ struct KeyboardView {
     this.languageKeyLeft = this.settings.languageKeyLeft;
     // 取会话持有的副本而不是再读一次磁盘：会话在构建和每次获得焦点时读取，读不到时保留上次的值，视图跟着它就不会因一次读取失败把隐私模式等显示成关闭。
     this.feedback = KeyboardSession.shared.feedbackSettings();
+    if (this.surface !== SURFACE_GEOMETRY) {
+      // 键盘调整开着时保留正在预览的四项：设置页中途保存引起的重载不能把预览盖回旧值，离开时按确认存下（与 Android 相同）。
+      this.readAdjustValues();
+    }
     this.traditional = KeyboardSession.shared.usesTraditional();
     this.chinesePunctuation = KeyboardSession.shared.usesChinesePunctuation();
     this.punctuationLocked = !KeyboardSession.shared.punctuationToggles();
@@ -3464,7 +3752,7 @@ struct KeyboardView {
       + `${this.quanpinShift}:${this.engineScheme}:${this.scheme.preferenceId}:${this.symbols}:${this.moreSymbols}:`
       + `${this.twentySixKeyStyle}:${this.fourteenKeyStyle}:${this.nineKeyStyle}:${this.numberRow}:`
       + `${this.twentySixSymbolFirst}:${this.numberPadSpace}:${this.languageKeyLeft}:`
-      + `${this.standardRowsField}:${this.skin.key()}`;
+      + `${this.feedback.letterCornerHints}:${this.standardRowsField}:${this.skin.key()}`;
   }
 
   /**
@@ -3519,8 +3807,10 @@ struct KeyboardView {
 
   /** 画出来的组字，见 CandidatePreeditStylePolicy：2in1 的候选窗口照「候选窗口预编辑」；手机没有这个设置，拼写写在输入框里时候选栏不画读音，写不进去（14/18 键、日语、不接受预上屏文字的编辑框）时照旧画。 */
   private visibleComposition(): VisibleComposition {
+    // 上屏后联想没有拼写：触屏的读音行不画空串和光标（设备上见过一根孤零零的光标竖在联想上方）。
     return CandidatePreeditStylePolicy.visible(KeyboardFormFactor.isDesktop()
-      ? this.settings.candidateShowPreedit : !this.compositionInField, this.phrasePrefix, this.editing, this.localMode);
+      ? this.settings.candidateShowPreedit : !this.compositionInField && !this.prediction,
+      this.phrasePrefix, this.editing, this.localMode);
   }
 
   /** One candidate row without the reserved gloss line; see KeyboardMetrics.candidateRowHeightVp. */
@@ -3553,6 +3843,7 @@ struct KeyboardView {
       letter: letter,
       hint: this.letterHint(letter),
       cornerHint: this.letterCornerHint(letter),
+      showCornerHint: this.feedback.letterCornerHints,
       size: this.letterFontSize(),
       emphasized: false,
       width: 0,
@@ -3561,7 +3852,7 @@ struct KeyboardView {
   }
 
   /**
-   * 字母键角上的符号提示，与 Android 的 `ImeLetterRows` 在其标准字母键上的绘制一致：26 键字母行的每个键面都有，韩文字母除外（注音有自己的行）；无论「滑动输入符号」是否开启都绘制，因为长按总会输入它。仅限触屏键盘；2in1 的屏幕键盘保持原样。
+   * 字母键角上的符号提示，与 Android 的 `ImeLetterRows` 在其标准字母键上的绘制一致：26 键字母行的每个键面都有，韩文字母除外（注音有自己的行）；无论「滑动输入符号」是否开启都给出，因为长按总会输入它。画不画另由「显示字母键角标」决定（`KeyOptions.showCornerHint`），这里给出的符号照样交给触摸。仅限触屏键盘；2in1 的屏幕键盘保持原样。
    */
   private letterCornerHint(letter: string): string {
     if (!this.touchDesign() || this.koreanFace()) {
@@ -3578,7 +3869,7 @@ struct KeyboardView {
   /**
    * 第二行字母是否以 ; 键结尾。
    *
-   * 微软双拼用分号拼 ing，所以这个键要能在字母行里直接按到，而不是藏在符号层后面。触屏上设计稿把这一行画成两端各缩进半个键的九个字母，; 键只在微软双拼正在组合时才出现，与 Android 一致（`MicrosoftShuangpinKeyPolicy`）。两笔式在那里没有字母，越南语和威利转写也不用它，所以韩语、越南语和藏文把这一行画成九个键。
+   * 微软双拼用分号拼 ing，粤语双拼用它拼 ing 和 ik，所以这个键要能在字母行里直接按到，而不是藏在符号层后面。触屏上设计稿把这一行画成两端各缩进半个键的九个字母，; 键只在微软双拼和粤语双拼下出现，与 Android 一致（`MicrosoftShuangpinKeyPolicy`）。两笔式在那里没有字母，越南语和威利转写也不用它，所以韩语、越南语和藏文把这一行画成九个键。
    */
   private secondRowSemicolon(): boolean {
     if (this.symbols || this.koreanFace() || this.vietnameseFace() || this.tibetanFace()) {
@@ -3587,8 +3878,7 @@ struct KeyboardView {
     if (!this.touchDesign()) {
       return true;
     }
-    return !this.english && this.localMode === 'none'
-      && this.scheme.preferenceId === KeyboardScheme.MICROSOFT.preferenceId;
+    return !this.english && this.localMode === 'none' && KeyboardScheme.showsSemicolonFinal(this.scheme);
   }
 
   /** 第二行字母是否两端各缩进半个键：即触屏键盘的九字母行。 */
@@ -3598,6 +3888,12 @@ struct KeyboardView {
 
   /** What a screen reader says for a letter key under the current case. */
   private letterLabel(letter: string): string {
+    // 粤语双拼的 `;` 读出它打的韵母，而不是「字母 ;」。
+    const semicolonFinal: string | null = letter === ';' && this.touchDesign()
+      ? KeyboardScheme.semicolonFinalLabel(this.scheme) : null;
+    if (semicolonFinal !== null) {
+      return semicolonFinal;
+    }
     if (this.koreanFace()) {
       // The jamo itself, which is what a screen reader set to Korean reads.
       return this.letterFace(letter);
@@ -3651,7 +3947,8 @@ struct KeyboardView {
       secondary: this.skin.secondary,
       accent: this.skin.accent,
       selected: TRANSPARENT,
-      selectedText: this.skin.accent,
+      // 首选画在字母键色的底片上，字用皮肤的首选字色（浅色季节配色加深到 WCAG AA）。
+      selectedText: this.skin.candidateAccent,
       selectedNumber: this.skin.accent,
       hover: TRANSPARENT,
       showSelectedBar: false
@@ -3762,8 +4059,9 @@ struct KeyboardView {
     if (!this.touchDesign()) {
       return true;
     }
+    // 键盘调整盖在整块键盘上，下面画的是收起遮罩之后的样子，所以也不算面板：工具栏隐藏时预览里同样没有这一行，高度才对得上。
     const panelOpen: boolean = this.surface !== SURFACE_NONE && this.surface !== SURFACE_NINE_KEY_HOLD
-      && this.surface !== SURFACE_VARIANTS;
+      && this.surface !== SURFACE_VARIANTS && this.surface !== SURFACE_GEOMETRY;
     // 长空格样式把符号入口放在工具栏上，与 Android 一样这一行一直画着；看的是这块键盘而不是此刻的中/英（`longSpaceToolbarRow`），切到英文 26 键时也留着，面板高度不跳。
     return TouchToolbarPolicy.stripShown(TouchToolbarPolicy.rowHidden(this.toolbarTools) && !this.longSpaceToolbarRow(),
       this.stripIdle(), panelOpen);
@@ -3772,20 +4070,22 @@ struct KeyboardView {
   /** 工具条出现或消失时让面板跟着改高度，没变时什么也不做：组字时每打一个字母都会走到这里。 */
   private syncStripHeight(): void {
     this.rememberPanelFace();
-    if (this.stripShown() !== this.stripWasShown || this.extraRows() !== this.extraRowsWere) {
+    if (this.stripShown() !== this.stripWasShown || this.extraRows() !== this.extraRowsWere
+      || this.bottomLiftVp() !== this.liftWas) {
       this.resizeTouchPanel();
     }
   }
 
-  /** 按当前的行距、高度调整和工具条显示与否给手机面板定高度；2in1 上会话不做任何事。 */
+  /** 按当前的行距、高度调整、底部抬高和工具条显示与否给手机面板定高度；2in1 上会话不做任何事。 */
   private resizeTouchPanel(): void {
     this.rememberPanelFace();
     this.stripWasShown = this.stripShown();
     this.extraRowsWere = this.extraRows();
+    this.liftWas = this.bottomLiftVp();
     KeyboardSession.shared.resizeTouchKeyboard(KeyboardMetrics.totalHeightVp(
       this.geometryRowSpacing, this.geometryHeight, KeyboardSession.shared.glossRows(),
       this.settings.candidateFontSize, this.settings.candidatePreeditFontSize, false, this.stripWasShown,
-      this.extraRowsWere, this.settings.candidateScalePercent));
+      this.extraRowsWere, this.settings.candidateScalePercent, this.liftWas));
   }
 
   /** 把这一刻的键面里决定第一帧高度的两件事交给会话记下（只在变了时写盘），下次冷启动时扩展能力照它建面板（`TouchLayoutStylePolicy.firstPanel`）。2in1 不走触屏面板，不记。 */
@@ -3807,12 +4107,17 @@ struct KeyboardView {
 
   /** canvas 在候选条里至少要让出的内容高度：34vp 的候选通道，读音行占位时再加它和间距，都按「候选栏大小」缩放。皮肤的留白按它缩放，高亮因此不会画到面板外面。 */
   private stripCanvasContentHeight(): number {
-    return this.stripSized(CHIP_HEIGHT_VP) + (this.readingRowShown() ? this.stripSized(PREEDIT_LINE_VP) + this.stripSized(CANDIDATE_BAR_GAP_VP) : 0);
+    return this.chipHeight() + (this.readingRowShown() ? this.stripSized(PREEDIT_LINE_VP) + this.stripSized(CANDIDATE_BAR_GAP_VP) : 0);
   }
 
   /** 触屏工具条的高度：设计的 50vp 乘以「候选栏大小」（`candidate_scale_percent`，#10137）。工具栏和候选栏共用这一行，组字开始、结束时按键不动。 */
   private stripHeight(): number {
-    return KeyboardMetrics.stripHeightVp(this.settings.candidateScalePercent);
+    return KeyboardMetrics.touchStripHeightVp(this.settings.candidateScalePercent, KeyboardSession.shared.glossRows());
+  }
+
+  /** 候选胶囊的高度：34vp，释义和英文音标都打开时再加第二行注释（`KeyboardMetrics.touchExtraDetailVp`），按「候选栏大小」缩放。 */
+  private chipHeight(): number {
+    return this.stripSized(CHIP_HEIGHT_VP + KeyboardMetrics.touchExtraDetailVp(KeyboardSession.shared.glossRows()));
   }
 
   /** 候选栏里的一段长度或字号按「候选栏大小」缩放：读音行、候选通道、注释行和细线跟着工具条一起变矮或变高。 */
@@ -4217,10 +4522,11 @@ struct KeyboardView {
   }
 
   /**
-   * Translations, comments and code hints, selected row included: the palette's `secondary`, which already carries its own transparency, so nothing dims it again. The 2in1 window takes it from the candidate palette and the touch strip from the keyboard's, as the design's `candSelTr` and `kb.sub` do.
+   * 释义、注释和编码提示的颜色：调色板的 `secondary`，它自带透明度，不再减淡。2in1 候选窗取候选区调色板，触屏条取键盘的，对应设计稿的 `candSelTr` 和 `kb.sub`。2in1 的选中行按 `GlobalTheme.candidateDetail` 取选中序号色（和 macOS 的 candSelTr 一样），默认浅色的次要色在选中淡底上只有约 4.0:1，选中序号色到 4.5:1；皮肤包自己给了释义色时照旧用它。
    */
-  private candidateDetailColor(): string {
-    return this.candidateColors().secondary;
+  private candidateDetailColor(highlighted: boolean): string {
+    const colors: CandidateColors = this.candidateColors();
+    return KeyboardFormFactor.isDesktop() ? GlobalTheme.candidateDetail(colors, highlighted) : colors.secondary;
   }
 
   @Builder
@@ -4235,29 +4541,38 @@ struct KeyboardView {
       }
       if (candidate.hint.length > 0) {
         Text(candidate.hint).fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 2 })
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted))).padding({ left: 2 })
       }
       // Only where there is no gloss line, the vertical 2in1 list; everywhere else the 훈음 is on the line under the Hanja.
       if (candidate.hunEum.length > 0 && !this.candidateUsesGlossLine()) {
         Text(candidate.hunEum)
           .fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 4 })
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted))).padding({ left: 4 })
       }
-      if (candidate.annotation.length > 0 && !this.candidateUsesGlossLine()) {
+      // 只为音标预留了一行（`translationRows()` 为 0）时下面没有释义行，译文和竖排一样接在词旁边，和触屏胶囊的 `chipAnnotationBeside` 同一条规则。
+      if (candidate.annotation.length > 0
+        && (!this.candidateUsesGlossLine() || KeyboardSession.shared.translationRows() === 0)) {
         if (candidate.annotationIsTranslation) {
           Text(candidate.annotation)
             .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
-            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor()))
+            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted)))
             .padding({ left: CandidateTranslationStyle.gap(this.settings.candidateFontSize) })
         } else {
           Text(candidate.annotation)
             .fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 4 })
+            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted))).padding({ left: 4 })
         }
       } else if (candidate.annotation.length > 0 && !candidate.annotationIsTranslation) {
         Text(candidate.annotation)
           .fontSize(Math.max(KEY_HINT_FONT_SIZE, this.settings.candidateFontSize - 8))
-          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor())).padding({ left: 4 })
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted))).padding({ left: 4 })
+      }
+      // 竖排 2in1 候选窗没有释义行，音标和释义一样接在旁边。
+      if (candidate.pronunciation.length > 0 && !this.candidateUsesGlossLine()) {
+        Text(candidate.pronunciation)
+          .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
+          .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted)))
+          .padding({ left: CandidateTranslationStyle.gap(this.settings.candidateFontSize) })
       }
     }
     .alignItems(VerticalAlign.Center)
@@ -4278,6 +4593,7 @@ struct KeyboardView {
       + CandidateGlossPolicy.accessibilitySuffix(
         candidate.annotationIsTranslation ? null : annotation,
         candidate.annotationIsTranslation ? annotation : null, true)
+      + CandidatePronunciationPolicy.accessibilitySuffix(candidate.pronunciation)
       + CorrectionMarkPolicy.accessibilitySuffix(candidate.confidentCorrection);
     return KeyAccessibilityPolicy.candidate(index + 1, candidate.text, candidate.hint, suffix);
   }
@@ -4294,7 +4610,7 @@ struct KeyboardView {
 
   /** 候选窗与触屏胶囊上候选字的颜色：在线占位行画次要色，首选纠错行画标记色，其余按固定词与高亮的规则。 */
   private candidateWordColor(candidate: CandidateEntry): string {
-    if (CandidatePresentationPolicy.aiPlaceholder(candidate.source)) return this.candidateDetailColor();
+    if (CandidatePresentationPolicy.aiPlaceholder(candidate.source)) return this.candidateDetailColor(candidate.highlighted);
     return CorrectionMarkPolicy.tint(candidate.confidentCorrection, candidate.highlighted,
       CandidateSkinPolicy.rowTextColor(candidate.highlighted, candidate.fixedPosition > 0,
         this.candidateTextColor(), this.candidateSelectedTextColor()),
@@ -4339,15 +4655,28 @@ struct KeyboardView {
       if (this.candidateUsesGlossLine()) {
         Column() {
           this.candidatePrimaryLine(candidate)
-          Text(this.candidateGlossLine(candidate).length > 0 ? this.candidateGlossLine(candidate) : ' ')
-            .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
-            .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor()))
-            // The line is reserved whether or not this candidate has a gloss, so the row heights stay level.
-            .opacity(this.candidateGlossLine(candidate).length > 0 ? 1 : 0)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .height(KeyboardMetrics.glossHeightVp(KeyboardSession.shared.glossRows(),
-              this.settings.candidateFontSize))
+          if (KeyboardSession.shared.translationRows() > 0) {
+            Text(this.candidateGlossLine(candidate).length > 0 ? this.candidateGlossLine(candidate) : ' ')
+              .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
+              .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted)))
+              // The line is reserved whether or not this candidate has a gloss, so the row heights stay level.
+              .opacity(this.candidateGlossLine(candidate).length > 0 ? 1 : 0)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .height(KeyboardMetrics.glossHeightVp(KeyboardSession.shared.translationRows(),
+                this.settings.candidateFontSize))
+          }
+          // 音标在释义下面单独一行，和 macOS、Android 相同；这一行同样按设置预留，音标没到或这个词查不到时留空，行高不跳。
+          if (KeyboardSession.shared.pronunciationRows() > 0) {
+            Text(candidate.pronunciation.length > 0 ? candidate.pronunciation : ' ')
+              .fontSize(CandidateTranslationStyle.fontSize(this.settings.candidateFontSize))
+              .fontColor(this.candidateDetailTint(candidate, this.candidateDetailColor(candidate.highlighted)))
+              .opacity(candidate.pronunciation.length > 0 ? 1 : 0)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .height(KeyboardMetrics.glossHeightVp(KeyboardSession.shared.pronunciationRows(),
+                this.settings.candidateFontSize))
+          }
         }
         .alignItems(HorizontalAlign.Start)
       } else {
@@ -4372,6 +4701,9 @@ struct KeyboardView {
           event.action as number as PointerAction)) {
           return;
         }
+        if (!KeyboardSession.shared.candidateManagementAllowed()) {
+          return;
+        }
         event.stopPropagation();
         this.punctuation = false;
         this.touchCandidateMenu = false;
@@ -4380,7 +4712,7 @@ struct KeyboardView {
   }
 
   /**
-   * 触屏键盘的工具条，始终为 `KeyboardMetrics.stripHeightVp` 高（设计的 50vp 乘以「候选栏大小」），按键因此从不移动：正在调高度时是高度条，没有输入时是工具栏，其他时候是候选栏。
+   * 触屏键盘的工具条，始终为 `KeyboardMetrics.stripHeightVp` 高（设计的 50vp 乘以「候选栏大小」），按键因此从不移动：没有输入时是工具栏，其他时候是候选栏。键盘调整时它照常画在遮罩下面。
    */
   @Builder
   touchStrip() {
@@ -4390,23 +4722,7 @@ struct KeyboardView {
       onSize: (width: number): void => { this.availableWidth = width; },
       onPanelReady: (key: string, ready: boolean): void => this.canvasReady('strip', key, ready) }) {
     Column() {
-      if (this.surface === SURFACE_GEOMETRY) {
-        HeightBar({
-          percent: KeyboardGeometry.heightPercent(this.geometryHeight),
-          foreground: this.skin.keyForeground,
-          secondary: this.skin.secondary,
-          accent: this.skin.actionBackground,
-          onAccent: this.skin.actionForeground,
-          onDrag: (deltaVp: number): void => this.dragHeight(deltaVp),
-          onRelease: (): void => {
-            this.heightDragging = false;
-          },
-          // 离开高度条会恢复已保存的高度；见 `show()`。
-          onCancel: (): void => this.show(SURFACE_NONE),
-          onReset: (): void => this.previewHeight(KeyboardGeometry.DEFAULT_HEIGHT_ADJUSTMENT_VP),
-          onDone: (): void => this.finishHeightMode()
-        })
-      } else if (this.stripIdle()) {
+      if (this.stripIdle()) {
         this.toolbarRow()
       } else {
         this.candidateBar()
@@ -4438,8 +4754,6 @@ struct KeyboardView {
         BrandTile({
           active: this.brandActive(),
           toggleBackground: this.skin.toggleBackground,
-          logoCirc: this.skin.logoCirc,
-          logoBg: this.skin.logoBg,
           framePath: KeyboardIconPaths.BRAND_FRAME,
           strokePath: KeyboardIconPaths.BRAND_STROKE,
           sizeScale: KeyboardMetrics.toolbarScale(this.settings.candidateScalePercent),
@@ -4720,12 +5034,25 @@ struct KeyboardView {
         this.hanjaButton()
       }
       if (this.candidates.length > 0 && !this.showsHandwritingCandidates()) {
-        Divider()
-          .vertical(true)
-          .strokeWidth(1)
-          .height(this.stripSized(BAR_DIVIDER_HEIGHT_VP))
-          .color(this.skin.hair)
-        this.expandChevron()
+        // 上屏后联想按用户选的样式在展开键左边放关闭键（`next_word_prediction_buttons`）；两个键并排时分隔线只画在 × 左边，与 Android 相同。
+        if (this.predictionCloseShown()) {
+          Divider()
+            .vertical(true)
+            .strokeWidth(1)
+            .height(this.stripSized(BAR_DIVIDER_HEIGHT_VP))
+            .color(this.skin.hair)
+          this.closePredictionButton()
+        }
+        if (this.expandChevronAllowed()) {
+          if (!this.predictionCloseShown()) {
+            Divider()
+              .vertical(true)
+              .strokeWidth(1)
+              .height(this.stripSized(BAR_DIVIDER_HEIGHT_VP))
+              .color(this.skin.hair)
+          }
+          this.expandChevron()
+        }
       }
     }
     .width('100%')
@@ -4739,9 +5066,28 @@ struct KeyboardView {
       KeyboardSession.shared.glossesExpected() ? this.stripSized(CHIP_WORD_MAX_WITH_GLOSS) : this.stripSized(CHIP_WORD_MAX_ALONE));
   }
 
-  /** 通道的可见宽度：工具条宽度减去细线和展开箭头。 */
+  /** 通道的可见宽度：工具条宽度减去细线和展开箭头（联想时还有关闭键）。 */
   private chipLaneWidth(): number {
-    return Math.max(0, this.availableWidth - 1 - BAR_BUTTON_VP);
+    const buttons: number = (this.expandChevronAllowed() ? 1 : 0) + (this.predictionCloseShown() ? 1 : 0);
+    return Math.max(0, this.availableWidth - buttons * (1 + BAR_BUTTON_VP));
+  }
+
+  /** 候选栏右端放不放关闭键：只在上屏后联想时，并且样式带 ×。 */
+  private predictionCloseShown(): boolean {
+    return NextWordPredictionPolicy.showsClose(KeyboardSession.shared.predictionButtons(), this.prediction);
+  }
+
+  /** 候选栏右端放不放展开键：联想时「只有关闭」不放，其余照旧。 */
+  private expandChevronAllowed(): boolean {
+    return NextWordPredictionPolicy.allowsExpand(KeyboardSession.shared.predictionButtons(), this.prediction);
+  }
+
+  /** 关闭上屏后联想：展开面板开着时先收起，再送 Cancel；引擎清掉建议、不往输入框写字，候选清空后工具条换回工具栏。 */
+  private closePrediction(): void {
+    if (this.surface === SURFACE_EXPANDED) {
+      this.show(SURFACE_NONE);
+    }
+    KeyboardSession.shared.dismissPrediction();
   }
 
   /** 一个注释列的文字宽度（`CandidateChipWidth`：可见通道放三列），不预期出现注释时为 0。 */
@@ -4766,7 +5112,7 @@ struct KeyboardView {
   /** 胶囊在词旁绘制的内容：Engine 的注解，或在没有注释行承载时的翻译。 */
   private chipAnnotationBeside(candidate: CandidateEntry): boolean {
     return candidate.annotation.length > 0
-      && (!candidate.annotationIsTranslation || !KeyboardSession.shared.glossesExpected());
+      && (!candidate.annotationIsTranslation || KeyboardSession.shared.translationRows() === 0);
   }
 
   /** 一个候选：词在上、注释在下，底色为按键色；为高亮项时用强调色、字重 600。 */
@@ -4805,7 +5151,7 @@ struct KeyboardView {
         }
       }
       .alignItems(VerticalAlign.Center)
-      if (KeyboardSession.shared.glossesExpected()) {
+      if (KeyboardSession.shared.translationRows() > 0) {
         // 无论该候选有无注释都预留位置，这样通道上的词保持齐平。
         Text(this.candidateGlossLine(candidate).length > 0 ? this.candidateGlossLine(candidate) : ' ')
           .fontSize(this.stripSized(CHIP_GLOSS_FONT_SIZE))
@@ -4817,9 +5163,20 @@ struct KeyboardView {
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .constraintSize({ maxWidth: this.chipGlossMaxWidth(candidate) })
       }
+      // 英文音标在释义下面单独一行，同样按设置预留，音标没到或这个词查不到时留空。
+      if (KeyboardSession.shared.pronunciationRows() > 0) {
+        Text(candidate.pronunciation.length > 0 ? candidate.pronunciation : ' ')
+          .fontSize(this.stripSized(CHIP_GLOSS_FONT_SIZE))
+          .lineHeight(this.stripSized(CHIP_GLOSS_LINE_VP))
+          .fontColor(this.candidateDetailTint(candidate, this.skin.secondary))
+          .opacity(candidate.pronunciation.length > 0 ? 1 : 0)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: this.chipGlossMaxWidth(candidate) })
+      }
     }
     .constraintSize({ minWidth: this.chipMinWidth(candidate) })
-    .height(this.stripSized(CHIP_HEIGHT_VP))
+    .height(this.chipHeight())
     .padding({ left: CHIP_PADDING_VP, right: CandidateLayoutPolicy.dip(
       this.settings.candidateSkinLayout?.horizontal.itemPaddingRight, this.chipFontSize(), CHIP_PADDING_VP) })
     .justifyContent(FlexAlign.Center)
@@ -4892,6 +5249,34 @@ struct KeyboardView {
     .width('100%')
     .height(this.stripSized(CHIP_HEIGHT_VP))
     .align(Alignment.Start)
+  }
+
+  /** 上屏后联想的关闭键 ×，与展开键同宽同高。 */
+  @Builder
+  closePredictionButton() {
+    Column() {
+      KeyboardLineIcon({
+        d: KeyboardIconPaths.CLOSE,
+        iconSize: this.toolbarSized(KeyboardIconPaths.CLOSE_SIZE_VP),
+        stroke: KeyboardIconPaths.CHEVRON_STROKE,
+        color: this.skin.keyForeground
+      })
+    }
+    .width(BAR_BUTTON_VP)
+    .height(this.toolbarSized(BAR_BUTTON_VP))
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .flexShrink(0)
+    .stateStyles({
+      normal: {
+        .opacity(1)
+      },
+      pressed: {
+        .opacity(BAR_BUTTON_PRESSED_OPACITY)
+      }
+    })
+    .accessibilityText(KeyAccessibilityPolicy.closePrediction())
+    .onClick(() => this.closePrediction())
   }
 
   /** 候选栏的展开箭头，网格打开期间翻转显示。 */
@@ -6499,7 +6884,8 @@ struct KeyboardView {
    * 数字行的数字，与 Android 数字行相同：没有组字时和 123 层的数字一样输入；组字中先交给引擎，当前页有对应候选的 1–9 由引擎选词，引擎不收（0，或没有对应候选，或韩语、越南语等引擎自己先上屏了组字）时先结束还在的组合再上屏这个数字（`KeyboardSession.pressElseCommitThenType`）。按下记 `Digit0`–`Digit9`。
    */
   private typeNumberRowDigit(digit: string): void {
-    if (!KeyboardSession.shared.composing()) {
+    // 上屏后联想时数字行的数字和组字时一样先交给运行时：本页有对应的一条就选中它，越过本页的照常输入。走符号键那条路的话，标点入口拒收数字，联想的候选又让它以为还在组字、不补写这个数字，按下去什么也没有。
+    if (!KeyboardSession.shared.composing() && !KeyboardSession.shared.predicting()) {
       this.tapSymbol(digit);
       return;
     }
@@ -6921,14 +7307,19 @@ struct KeyboardView {
 
   /** Whether Return currently confirms a composition rather than acting on the field. */
   private returnComposing(): boolean {
-    return this.japanese ? this.editing.length > 0 : this.candidates.length > 0;
+    return this.japanese ? this.editing.length > 0 : this.composingCandidates() > 0;
+  }
+
+  /** 回车要确认的候选数：上屏后联想的候选不算，联想时回车照常换行或执行编辑器动作。空格不同，联想时照样选高亮的一条（运行时接管），读屏名称仍是「选定」。 */
+  private composingCandidates(): number {
+    return NextWordPredictionPolicy.composingCandidates(this.candidates.length, this.prediction);
   }
 
   private returnFace(): string {
     if (this.japanese) {
       return JapaneseNineKeyActions.returnTitle(this.editing.length > 0);
     }
-    return this.candidates.length > 0
+    return this.composingCandidates() > 0
       ? '确认' : ReturnKeyAction.title(KeyboardSession.shared.returnAction(), false);
   }
 
@@ -7188,7 +7579,52 @@ struct KeyboardView {
     this.clips = this.clipboardEnabled ? KeyboardSession.shared.clipboardHistory() : [];
     this.clipboardNotice = this.clipboardEnabled ? '' : CLIPBOARD_HISTORY_OFF;
     this.confirmingClear = false;
+    this.endClipSelection();
     this.openCloudClipboard();
+  }
+
+  /** 进入多选：长按管理行和清空的确认先收起。只在本机历史开着、有记录时可进，与 Android 的「多选」入口一致。 */
+  private beginClipSelection(): void {
+    if (!this.clipboardEnabled || this.clips.length === 0 || this.cloudTabActive()) {
+      return;
+    }
+    this.clipSendTarget = '';
+    this.confirmingClear = false;
+    this.clipSelection = [];
+    this.clipSelecting = true;
+    this.clipboardNotice = ClipboardSelectionPolicy.notice(0);
+  }
+
+  private endClipSelection(): void {
+    if (!this.clipSelecting) {
+      return;
+    }
+    this.clipSelecting = false;
+    this.clipSelection = [];
+    this.clipboardNotice = '';
+  }
+
+  /** 本机记录在多选里的序号（从 0 起），没选中时为 -1。 */
+  private clipOrdinal(text: string): number {
+    return ClipboardSelectionPolicy.ordinal(this.clipSelection, text);
+  }
+
+  /** 多选时点一张卡片：按先后选中或取消；到了 20 项上限时说明原因。 */
+  private toggleClipSelection(text: string): void {
+    const next: string[] = ClipboardSelectionPolicy.toggled(this.clipSelection, text);
+    this.clipboardNotice = next === this.clipSelection
+      ? `最多只能选择 ${ClipboardSelectionPolicy.MAX_SELECTIONS} 项` : ClipboardSelectionPolicy.notice(next.length);
+    this.clipSelection = next;
+  }
+
+  /** 「插入」：按序号把选中的几条首尾相接，经和单条插入同一个 `KeyboardSession.insert` 一次上屏，然后退出多选。 */
+  private insertClipSelection(): void {
+    if (!this.clipSelecting || !ClipboardSelectionPolicy.canInsert(this.clipSelection.length)) {
+      return;
+    }
+    const text: string = ClipboardSelectionPolicy.insertionText(this.clipSelection);
+    this.endClipSelection();
+    KeyboardSession.shared.insert(text);
   }
 
   /** Whether the clipboard surface is on screen, as the phone's own face or as the 2in1 emoji surface's clipboard tab. */
@@ -7698,6 +8134,38 @@ struct KeyboardView {
     this.pendingRemoval = -1;
     this.managing = -1;
     this.touchCandidateMenu = false;
+    if (action.id === 'READ_ALOUD') {
+      // 和「加入生词本」一样先核对这一格还是打开菜单时的那个候选，再读打开菜单时共享层答的那段英文。
+      if (index < 0 || index >= this.candidates.length || action.spoken === undefined ||
+        this.candidates[index].text !== action.candidate) {
+        return;
+      }
+      KeyboardSession.shared.readAloud(action.spoken).then((notice: string | null): void => {
+        if (notice !== null) {
+          this.diagnostic = notice;
+          this.clearDiagnosticLater();
+        }
+      });
+      return;
+    }
+    if (action.id === 'ADD_TO_PERSONAL_WORDBOOK') {
+      // 和上屏释义一样先核对这一格还是打开菜单时的那个候选（原文和释义都要相同），再交出它的原文和释义；提示等共享层答了再显示。
+      if (index < 0 || index >= this.candidates.length) {
+        return;
+      }
+      const candidate: CandidateEntry = this.candidates[index];
+      if (!CandidateManagementAction.samePersonalWordbookSubject(action,
+        CandidateManagementAction.personalWordbookAction(candidate.annotation, candidate.annotationIsTranslation,
+          candidate.text))) {
+        return;
+      }
+      KeyboardSession.shared.addToPersonalWordbook(candidate.text, candidate.annotation.trim())
+        .then((notice: string): void => {
+          this.diagnostic = notice;
+          this.clearDiagnosticLater();
+        });
+      return;
+    }
     switch (action.id) {
       case 'INSERT_GLOSS': {
         // The strip can be rebuilt while the menu is open, and then this index is somebody else's
@@ -7745,7 +8213,8 @@ struct KeyboardView {
   }
 
   private openTouchCandidateMenu(index: number): void {
-    if (index < 0 || index >= this.candidates.length) {
+    // 上屏后联想的候选只是建议，不能固定、调序或删除，长按什么也不做，与 Android 相同。
+    if (index < 0 || index >= this.candidates.length || !KeyboardSession.shared.candidateManagementAllowed()) {
       return;
     }
     this.touchCandidateMenu = false;
@@ -7754,7 +8223,9 @@ struct KeyboardView {
     // A 2in1 touch screen keeps the gloss alone, because its right click already opens management. A phone has no right click, so its long press is the only way to 优先显示, 固定排位 and 删除词条, and opens the whole menu the way Android's does.
     const glossOnly: boolean = KeyboardFormFactor.isDesktop();
     if (glossOnly && CandidateManagementAction.touchActions(
-      candidate.annotation, candidate.annotationIsTranslation).length === 0) {
+      candidate.annotation, candidate.annotationIsTranslation, candidate.text,
+      KeyboardSession.shared.readAloudText(
+        candidate.text, candidate.annotationIsTranslation ? candidate.annotation : '')).length === 0) {
       return;
     }
     this.punctuation = false;
@@ -7803,11 +8274,15 @@ struct KeyboardView {
       keyPopup: current.keyPopup,
       swipeSymbols: current.swipeSymbols,
       swipeSymbolsDirection: current.swipeSymbolsDirection,
+      letterCornerHints: current.letterCornerHints,
       oneHanded: current.oneHanded,
       incognito: current.incognito,
       floating: current.floating,
       floatingX: current.floatingX,
-      floatingY: current.floatingY
+      floatingY: current.floatingY,
+      bottomLift: current.bottomLift,
+      widthPercent: current.widthPercent,
+      positionX: current.positionX
     };
     return next;
   }
@@ -7827,11 +8302,15 @@ struct KeyboardView {
       keyPopup: current.keyPopup,
       swipeSymbols: current.swipeSymbols,
       swipeSymbolsDirection: current.swipeSymbolsDirection,
+      letterCornerHints: current.letterCornerHints,
       oneHanded: mode,
       incognito: current.incognito,
       floating: current.floating,
       floatingX: current.floatingX,
-      floatingY: current.floatingY
+      floatingY: current.floatingY,
+      bottomLift: current.bottomLift,
+      widthPercent: current.widthPercent,
+      positionX: current.positionX
     };
     this.setFeedback(next);
   }
@@ -7857,6 +8336,8 @@ struct KeyboardView {
   private setFloating(on: boolean): void {
     KeyboardSession.shared.setFloatingKeyboard(on);
     this.feedback = KeyboardSession.shared.feedbackSettings();
+    // 浮动时底部抬高不生效，停靠后回来：面板高度跟着变。
+    this.syncStripHeight();
   }
 
   /**
@@ -8190,6 +8671,8 @@ struct KeyboardView {
     if (this.voiceBusy) {
       return;
     }
+    // 指示区按这次尝试的方式定下来：录音开不了（已关闭、没有麦克风权限、会话不可用）时面板显示原因，也用这一次的指示区，不沿用上一次会话的（#10313）。
+    this.voiceMascot = VoiceListeningPolicy.showsMascot(this.spaceVoiceHeld, fromHotkey);
     if (!KeyboardSession.shared.voiceInputEnabled()) {
       this.voiceEnabled = false;
       this.voiceNotice = '语音输入已在设置中关闭';
@@ -8210,7 +8693,12 @@ struct KeyboardView {
     this.voiceSpeaking = false;
     this.voiceHeldByKey = fromHotkey;
     const voiceConfiguration = KeyboardSession.shared.voiceInputConfiguration();
-    this.voiceStreams = VoiceRecordingBehaviourPolicy.streamsPartialResults(voiceConfiguration);
+    this.voiceEndsOnPause = VoiceRecordingBehaviourPolicy.endsOnPause(voiceConfiguration);
+    // 停顿时间和判停灵敏度在开始聆听时固定（#10310）。本地识别用设置里的停顿时间，系统识别沿用固定的 1500 毫秒；判停灵敏度只给点按开始、按停顿结束的本地识别，按住说话的录音由松手结束，保留原来的 VAD 阈值。
+    this.voicePauseEnds = this.touchDesign() && VoiceRecordingBehaviourPolicy.keyboardStopsOnPause(voiceConfiguration);
+    this.voicePauseMs = VoiceRecordingBehaviourPolicy.pauseMillis(voiceConfiguration);
+    voiceConfiguration.local_stop_sensitivity =
+      VoiceRecordingBehaviourPolicy.stopSensitivity(voiceConfiguration, this.voicePauseEnds && !fromHotkey);
     this.voiceText = '';
     this.voiceHeard = '';
     this.voiceLevel = 0;
@@ -8230,7 +8718,7 @@ struct KeyboardView {
           this.voiceHeard = this.voiceText;
         }
       }
-      if (!final && text.length > 0) {
+      if (!final && text.length > 0 && this.voicePauseEnds) {
         this.armVoiceSilence();
       }
       if (final && this.voiceGeneration > 0) {
@@ -8318,7 +8806,7 @@ struct KeyboardView {
   }
 
   /**
-   * 流式识别听到文字后停顿 `VOICE_SILENCE_STOP_MS` 自动结束；上传式识别没有中间文字，用户点「说完了」结束。按住空格或快捷键的录音在松手时结束，VAD 仍听到说话时顺延静音计时。
+   * 本地识别和系统识别听到文字后停顿 `voicePauseMs` 自动结束（本地识别是用户设的停顿时间，系统识别固定 1500 毫秒）。豆包流式和上传式识别由用户点「说完了」结束，不经这里（`VoiceRecordingBehaviourPolicy.keyboardStopsOnPause`）。按住空格或快捷键的录音在松手时结束，VAD 仍听到说话时顺延静音计时。
    */
   private armVoiceSilence(): void {
     if (!this.touchDesign() || this.voiceHeldByKey || !this.voiceBusy || this.voiceFinishing) {
@@ -8332,11 +8820,11 @@ struct KeyboardView {
         return;
       }
       this.stopVoice();
-    }, VOICE_SILENCE_STOP_MS);
+    }, this.voicePauseMs);
   }
 
   /**
-   * 经过 VAD 的本地整段模型报告说话状态变化。这类模型只在一段说完后才出文字，连续说话超过 `VOICE_SILENCE_STOP_MS` 时没有新文字可以续上静音计时，所以已经开始的计时在每次变化时从头再计：开始说话时推迟，说完时从这一刻起再等一个完整的停顿。还没听到文字时计时尚未开始，这里不启动它。
+   * 经过 VAD 的本地整段模型报告说话状态变化。这类模型只在一段说完后才出文字，连续说话超过停顿时间时没有新文字可以续上静音计时，所以已经开始的计时在每次变化时从头再计：开始说话时推迟，说完时从这一刻起再等一个完整的停顿。还没听到文字时计时尚未开始，这里不启动它。
    */
   private voiceSpeechChanged(speaking: boolean): void {
     this.voiceSpeaking = speaking;
@@ -8431,7 +8919,7 @@ struct KeyboardView {
     if (this.voiceHeldByKey) {
       return '松开结束录音';
     }
-    return this.voiceStreams ? '停顿后自动上屏，也可点「说完了」' : '说完后点「说完了」，识别后自动上屏';
+    return this.voiceEndsOnPause ? '停顿后自动上屏，也可点「说完了」' : '说完后点「说完了」，识别后自动上屏';
   }
 
   /** 提示行放的是转写文字（已上屏的内容或收尾时最后听到的），放不下一行时从开头省略。 */
@@ -8474,6 +8962,18 @@ struct KeyboardView {
     this.show(SURFACE_NONE);
   }
 
+  /** 两个按住标志不是状态变量，快捷键 LOCK 清掉 `voiceHeldByKey` 之后调这里，让面板按新的会话方式换指示区（#10313）；开始录音时 `startVoice` 直接按这次尝试算。 */
+  private refreshVoiceMascot(): void {
+    this.voiceMascot = VoiceListeningPolicy.showsMascot(this.spaceVoiceHeld, this.voiceHeldByKey);
+  }
+
+  /** 聆听面板人物的图片地址：表情包里的 `01.webp`，与 Android、iOS 同一张；表情包读不到时为空，面板画圆盘。清单由 `MascotStickerStore` 缓存，只读一次。 */
+  private voiceMascotUri(): string {
+    const sticker: MascotSticker | undefined = KeyboardSession.shared.mascotStickers.list()
+      .find((candidate: MascotSticker): boolean => candidate.file === VOICE_MASCOT_FILE);
+    return sticker === undefined ? '' : KeyboardSession.shared.mascotStickers.uri(sticker);
+  }
+
   @Builder
   voiceFace() {
     if (this.touchDesign()) {
@@ -8490,6 +8990,9 @@ struct KeyboardView {
           hintTail: this.voiceListeningHintTail(),
           hintPrefix: this.voiceListeningHintPrefix(),
           level: this.voiceLevel,
+          mascot: this.voiceMascot,
+          mascotUri: this.voiceMascot ? this.voiceMascotUri() : '',
+          recording: this.voiceBusy && !this.voiceFinishing,
           primaryLabel: VoiceListeningPolicy.primaryLabel(this.voiceListeningSession()),
           primaryEnabled: !this.voiceFinishing,
           cancelLabel: VoiceListeningPolicy.cancelLabel(this.voiceListeningSession()),
@@ -9213,9 +9716,12 @@ struct KeyboardView {
     const managed: CandidateEntry | null =
       this.managing >= 0 && this.managing < this.candidates.length
         ? this.candidates[this.managing] : null;
+    // 「朗读」要读的英文：显示着的英文释义（Engine 的注释不算），或候选本身是英文。
+    const spoken: string | null = managed === null ? null : KeyboardSession.shared.readAloudText(
+      managed.text, managed.annotationIsTranslation ? managed.annotation : '');
     if (this.touchCandidateMenu) {
       return managed === null ? [] : CandidateManagementAction.touchActions(
-        managed.annotation, managed.annotationIsTranslation);
+        managed.annotation, managed.annotationIsTranslation, managed.text, spoken);
     }
     // The gloss is what the source offers here, and until now this host could show a translation without ever letting anyone type it: macOS has Option and a digit, and a touch keyboard has no modifiers to spare.
     return CandidateManagementAction.managementActions(
@@ -9223,7 +9729,8 @@ struct KeyboardView {
       managed === null ? 0 : managed.fixedPosition,
       CandidateManagementAction.candidateActionsAvailable(
         KeyboardScheme.engineSchemeName(this.engineScheme), managed === null ? 0 : managed.source),
-      CandidateManagementAction.hasMultipleCodePoints(managed === null ? '' : managed.text));
+      CandidateManagementAction.hasMultipleCodePoints(managed === null ? '' : managed.text),
+      managed === null ? '' : managed.text, spoken);
   }
 
   @Builder
@@ -9338,10 +9845,21 @@ struct KeyboardView {
     return Math.max(0, (this.expandedInnerWidth() - EXPANDED_GAP_VP * (columns - 1)) / columns);
   }
 
+  /** 展开单元格文字大小：17fp 设计尺寸按候选栏实际字号缩放，该字号已经包含候选栏大小（#10400）。 */
+  private expandedFontSize(): number {
+    return CandidateScalePolicy.expandedFontSize(EXPANDED_FONT_SIZE, this.settings.candidateFontSize);
+  }
+
+  /** 展开单元格高度：44vp 设计高度随候选栏大小和字号比例增长，最低保持 44vp（#10400）。 */
+  private expandedCellHeight(): number {
+    return CandidateScalePolicy.expandedCellHeight(EXPANDED_CELL_HEIGHT_VP, this.settings.candidateFontSize,
+      this.settings.candidateScalePercent);
+  }
+
   /** 一个格子跨几列：普通词一列，长的（如整句或日文转换结果）多列，这样能完整读到，而不是只截到开头几个字。 */
   private expandedSpan(index: number): number {
     if (index < 0 || index >= this.expanded.length) return 1;
-    const natural: number = ExpandedCandidateLayout.width(this.expanded[index].text, EXPANDED_FONT_SIZE,
+    const natural: number = ExpandedCandidateLayout.width(this.expanded[index].text, this.expandedFontSize(),
       EXPANDED_CELL_PADDING_VP, this.expandedInnerWidth());
     return ExpandedCandidateLayout.span(natural, this.expandedColumnWidth(), EXPANDED_GAP_VP, this.expandedColumns());
   }
@@ -9434,13 +9952,13 @@ struct KeyboardView {
             ForEach(row, (cell: ExpandedCandidateCell) => {
               Text(this.expanded[cell.index].text)
                 .width(this.expandedCandidateWidth(cell.span))
-                .height(EXPANDED_CELL_HEIGHT_VP)
+                .height(this.expandedCellHeight())
                 .padding({ left: EXPANDED_CELL_PADDING_VP, right: EXPANDED_CELL_PADDING_VP })
                 .borderRadius(EXPANDED_CELL_RADIUS_VP)
                 .backgroundColor(this.settings.candidateCanvas !== null
                   ? (this.expandedHighlighted(cell.index) ? this.candidateColors().selected : TRANSPARENT)
                   : this.expandedHighlighted(cell.index) ? this.skin.toggleBackground : this.skin.keyBackground)
-                .fontSize(EXPANDED_FONT_SIZE)
+                .fontSize(this.expandedFontSize())
                 .fontWeight(this.expandedHighlighted(cell.index) ? 600 : 400)
                 .fontColor(CorrectionMarkPolicy.cellTextColor(this.expanded[cell.index].confidentCorrection,
                   this.expandedHighlighted(cell.index), this.expandedSurfaceColors()))
@@ -9668,7 +10186,7 @@ struct KeyboardView {
         KeyboardSession.shared.openSettings('dictionary');
         break;
       case FunctionPanelPolicy.KEYBOARD_HEIGHT:
-        this.openHeightMode();
+        this.openAdjustMode();
         break;
       case FunctionPanelPolicy.SETTINGS:
         // 原版的托盘和工具栏让打字时一键就能打开整个设置应用；手机两者都没有，这就是它进入设置的途径。
@@ -9911,45 +10429,73 @@ struct KeyboardView {
   clipboardFace() {
     Column({ space: CLIP_CARD_GAP_VP }) {
       Row({ space: CLIP_HEADER_ACTION_GAP_VP }) {
-        // 密码框完全不显示标签：云端分区是唯一的另一个分区，而它在那里从不提供。
-        if (this.cloudVisible) {
-          Text('本机')
+        if (this.clipSelecting) {
+          // 多选时这一行换成计数、「取消」和「插入」，先后和 Android 多选顶行一致；「插入」只在选中 1 到 4 项时可点，不可点时标成禁用，读屏读得出它点不了。导出和删除是 Android 独有的，这里不提供。
+          Text(`${this.clipSelection.length} 项已选择`)
             .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
-            .fontColor(this.cloudTabActive() ? this.skin.keyForeground : this.skin.accent)
-            .opacity(this.cloudTabActive() ? CLIP_IDLE_TAB_OPACITY : 1)
-            .accessibilityText(this.cloudTabActive() ? '剪贴板分类 本机' : '剪贴板分类 本机，已选中')
-            .onClick(() => this.selectClipboardTab(CLIPBOARD_TAB_LOCAL))
-          Text(CLOUD_CLIPBOARD_TAB)
-            .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
-            .fontColor(this.cloudTabActive() ? this.skin.accent : this.skin.keyForeground)
-            .opacity(this.cloudTabActive() ? 1 : CLIP_IDLE_TAB_OPACITY)
-            .accessibilityText(this.cloudTabActive() ? `剪贴板分类 ${CLOUD_CLIPBOARD_TAB}，已选中`
-              : `剪贴板分类 ${CLOUD_CLIPBOARD_TAB}`)
-            .onClick(() => this.selectClipboardTab(CLIPBOARD_TAB_CLOUD))
-        }
-        Blank()
-        if (this.cloudTabActive()) {
-          Text('刷新')
+            .fontColor(this.skin.keyForeground)
+          Blank()
+          Text('取消')
             .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
             .fontColor(this.skin.accent)
-            .opacity(this.cloudLoading ? 0.4 : 1)
-            .accessibilityText('刷新云剪贴板')
-            .onClick(() => {
-              if (!this.cloudLoading) {
-                this.refreshCloudClipboard();
-              }
-            })
+            .accessibilityText('退出多选')
+            .onClick(() => this.endClipSelection())
+          Text('插入')
+            .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+            .fontColor(this.skin.accent)
+            .enabled(ClipboardSelectionPolicy.canInsert(this.clipSelection.length))
+            .opacity(ClipboardSelectionPolicy.canInsert(this.clipSelection.length) ? 1 : 0.4)
+            .accessibilityText(this.clipSelection.length > ClipboardSelectionPolicy.MAX_INSERTIONS
+              ? `插入不可用，${ClipboardSelectionPolicy.INSERTION_LIMIT_HINT}` : '按序号插入选中的剪贴板记录')
+            .onClick(() => this.insertClipSelection())
         } else {
-          // 保存和清空作用于本机历史，所以云端分区不提供它们。
-          Text('保存当前')
-            .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
-            .fontColor(this.skin.accent)
-            .accessibilityText('保存剪贴板当前内容')
-            .onClick(() => this.captureClipboard())
-          Text(this.confirmingClear ? '确认清空' : '清空')
-            .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
-            .fontColor(this.skin.accent)
-            .onClick(() => this.clearClipboard())
+          // 密码框完全不显示标签：云端分区是唯一的另一个分区，而它在那里从不提供。
+          if (this.cloudVisible) {
+            Text('本机')
+              .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+              .fontColor(this.cloudTabActive() ? this.skin.keyForeground : this.skin.accent)
+              .opacity(this.cloudTabActive() ? CLIP_IDLE_TAB_OPACITY : 1)
+              .accessibilityText(this.cloudTabActive() ? '剪贴板分类 本机' : '剪贴板分类 本机，已选中')
+              .onClick(() => this.selectClipboardTab(CLIPBOARD_TAB_LOCAL))
+            Text(CLOUD_CLIPBOARD_TAB)
+              .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+              .fontColor(this.cloudTabActive() ? this.skin.accent : this.skin.keyForeground)
+              .opacity(this.cloudTabActive() ? 1 : CLIP_IDLE_TAB_OPACITY)
+              .accessibilityText(this.cloudTabActive() ? `剪贴板分类 ${CLOUD_CLIPBOARD_TAB}，已选中`
+                : `剪贴板分类 ${CLOUD_CLIPBOARD_TAB}`)
+              .onClick(() => this.selectClipboardTab(CLIPBOARD_TAB_CLOUD))
+          }
+          Blank()
+          if (this.cloudTabActive()) {
+            Text('刷新')
+              .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+              .fontColor(this.skin.accent)
+              .opacity(this.cloudLoading ? 0.4 : 1)
+              .accessibilityText('刷新云剪贴板')
+              .onClick(() => {
+                if (!this.cloudLoading) {
+                  this.refreshCloudClipboard();
+                }
+              })
+          } else {
+            // 保存、多选和清空作用于本机历史，所以云端分区不提供它们。
+            Text('保存当前')
+              .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+              .fontColor(this.skin.accent)
+              .accessibilityText('保存剪贴板当前内容')
+              .onClick(() => this.captureClipboard())
+            if (this.clipboardEnabled && this.clips.length > 0) {
+              Text('多选')
+                .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+                .fontColor(this.skin.accent)
+                .accessibilityText('多选剪贴板记录')
+                .onClick(() => this.beginClipSelection())
+            }
+            Text(this.confirmingClear ? '确认清空' : '清空')
+              .fontSize(KeyboardMetrics.LANGUAGE_FONT_SIZE)
+              .fontColor(this.skin.accent)
+              .onClick(() => this.clearClipboard())
+          }
         }
       }
       .width('100%')
@@ -10009,21 +10555,22 @@ struct KeyboardView {
     }
   }
 
-  /** 触屏剪贴板卡片：正文最多两行，下方一小行说明是否已固定、来源和时间。 */
+  /** 触屏剪贴板卡片：正文最多两行，下方一小行说明是否已固定、来源和时间。`selected` 是多选中选中的那几张，卡片铺强调色，文字换成强调色上的文字色。 */
   @Builder
-  clipCardBody(text: string, meta: string) {
+  clipCardBody(text: string, meta: string, selected: boolean) {
     Column({ space: CLIP_CARD_LINE_GAP_VP }) {
       Text(text)
         .fontSize(CLIP_CARD_FONT_SIZE)
         .lineHeight(CLIP_CARD_LINE_HEIGHT_VP)
-        .fontColor(this.clipboardSkin().keyForeground)
+        .fontColor(selected ? this.clipboardSkin().onAccent : this.clipboardSkin().keyForeground)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%')
       if (meta.length > 0) {
         Text(meta)
           .fontSize(CLIP_META_FONT_SIZE)
-          .fontColor(this.clipboardSkin().secondary)
+          .fontColor(selected ? this.clipboardSkin().onAccent : this.clipboardSkin().secondary)
+          .opacity(selected ? 0.8 : 1)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
@@ -10092,7 +10639,7 @@ struct KeyboardView {
             ListItem() {
               if (this.touchDesign()) {
                 Column() {
-                  this.clipCardBody(entry.text, this.cloudClipMeta(entry))
+                  this.clipCardBody(entry.text, this.cloudClipMeta(entry), false)
                 }
                 .width('100%')
                 .padding({ left: CLIP_CARD_PADDING_H_VP, right: CLIP_CARD_PADDING_H_VP,
@@ -10228,9 +10775,34 @@ struct KeyboardView {
           scroller: this.clipListScroller }) {
             ForEach(this.visibleClips(), (entry: ClipboardHistoryItem, index: number) => {
               ListItem() {
-              if (this.touchDesign()) {
+              if (this.touchDesign() && this.clipSelecting) {
+                // 多选：选中的卡片铺强调色，右上角是点选先后的序号；取消一项后，后面各项的序号随这次重画依次前移（#10411）。长按不再打开管理行。
+                Stack({ alignContent: Alignment.TopEnd }) {
+                  Column() {
+                    this.clipCardBody(entry.text, this.clipMeta(entry), this.clipOrdinal(entry.text) >= 0)
+                  }
+                  .width('100%')
+                  .padding({ left: CLIP_CARD_PADDING_H_VP, right: CLIP_CARD_PADDING_H_VP + CLIP_BADGE_SPACE_VP,
+                    top: CLIP_CARD_PADDING_V_VP, bottom: CLIP_CARD_PADDING_V_VP })
+                  if (this.clipOrdinal(entry.text) >= 0) {
+                    Text(ClipboardSelectionPolicy.ordinalLabel(this.clipOrdinal(entry.text)))
+                      .fontSize(CLIP_BADGE_FONT_SIZE)
+                      .fontColor(this.clipboardSkin().onAccent)
+                      .margin({ top: 4, right: 6 })
+                      .accessibilityLevel('no')
+                  }
+                }
+                .width('100%')
+                .backgroundColor(this.clipOrdinal(entry.text) >= 0
+                  ? this.clipboardSkin().accent : this.clipboardSkin().keyBackground)
+                .borderRadius(CLIP_CARD_RADIUS_VP)
+                .accessibilityText(`${ClipboardSelectionPolicy.selectedDescription(this.clipOrdinal(entry.text))}点按选择剪贴板记录：${entry.text}`)
+                .stateStyles({ normal: this.keyIdleStyle, pressed: this.keyPressedStyle })
+                .animation({ duration: KEY_PRESS_MS })
+                .onClick(() => this.toggleClipSelection(entry.text))
+              } else if (this.touchDesign()) {
                 Column() {
-                  this.clipCardBody(entry.text, this.clipMeta(entry))
+                  this.clipCardBody(entry.text, this.clipMeta(entry), false)
                 }
                 .width('100%')
                 .padding({ left: CLIP_CARD_PADDING_H_VP, right: CLIP_CARD_PADDING_H_VP,
@@ -10278,7 +10850,9 @@ struct KeyboardView {
                 radius: KeyboardMetrics.KEY_CORNER_VP })
               }
               }
-            }, (entry: ClipboardHistoryItem): string => `${entry.text}:${entry.pinned}:${entry.at}`)
+            // 键里带上多选状态和序号：`clipCardBody` 的参数按值传入，不随状态刷新，序号或选中状态变了要让这一项整个重建。
+            }, (entry: ClipboardHistoryItem): string =>
+              `${entry.text}:${entry.pinned}:${entry.at}:${this.clipSelecting ? this.clipOrdinal(entry.text) : ''}`)
         }
         .scrollBar(BarState.Off)
         .width('100%')
@@ -11176,6 +11750,182 @@ struct KeyboardView {
     event.stopPropagation();
   }
 
+  /**
+   * 键盘调整的遮罩：盖在键盘外框（`adjustFrame`，两侧和抬起的地方不盖）上的半透明黑色，四角是皮肤强调色的直角括号。上沿正中、下沿正中各一个横向把手，左右两沿垂直居中各一个竖向把手，中间一排「重置」「移动」「确认」。当前不生效的项不画对应的柄（`adjustHandles`）。整层挡住触摸，下面的键盘只是预览。
+   */
+  @Builder
+  adjustOverlay() {
+    Column() {
+      Stack() {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor(KeyboardAdjustPolicy.MASK_COLOR)
+          .accessibilityLevel('no')
+        this.adjustCorners()
+        Column() {
+          this.adjustEdge(ADJUST_TOP)
+          Row() {
+            // 左右柄一起画或一起不画；不画时按钮那一排用满外框宽（`adjustButtonRow` 也按此换算），不留占位。
+            if (this.adjustHandles().left) {
+              this.adjustEdge(ADJUST_LEFT)
+            }
+            Row({ space: this.adjustButtonRow().gap }) {
+              this.adjustButton(ADJUST_RESET)
+              if (this.adjustHandles().move) {
+                this.adjustButton(ADJUST_MOVE)
+              }
+              this.adjustButton(ADJUST_CONFIRM)
+            }
+            .layoutWeight(1)
+            .justifyContent(FlexAlign.Center)
+            if (this.adjustHandles().right) {
+              this.adjustEdge(ADJUST_RIGHT)
+            }
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .alignItems(VerticalAlign.Center)
+          if (this.adjustHandles().bottom) {
+            this.adjustEdge(ADJUST_BOTTOM)
+          } else {
+            Column().width(ADJUST_HANDLE_LONG_VP).height(KeyboardAdjustPolicy.HANDLE_SHORT_VP)
+          }
+        }
+        .width('100%')
+        .height('100%')
+        .alignItems(HorizontalAlign.Center)
+      }
+      .width('100%')
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: this.adjustFrame().left, right: this.adjustFrame().right, bottom: this.adjustFrame().lift })
+    .hitTestBehavior(HitTestMode.Block)
+  }
+
+  /** 四角的直角括号，标出键盘外框；不接触摸，读屏跳过。 */
+  @Builder
+  adjustCorners() {
+    Column() {
+      Row() {
+        this.adjustCorner(true, true)
+        Blank()
+        this.adjustCorner(true, false)
+      }
+      .width('100%')
+      Blank()
+      Row() {
+        this.adjustCorner(false, true)
+        Blank()
+        this.adjustCorner(false, false)
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .height('100%')
+    .hitTestBehavior(HitTestMode.None)
+    .accessibilityLevel('no-hide-descendants')
+  }
+
+  /** 一角的括号。浮动时外框的下面两角就是卡片的圆角（`build` 按 `FloatingKeyboardPolicy.CORNER_RADIUS_VP` 裁剪，浮动时不抬高、不收窄），直角括号的拐角会被裁掉，只剩两截短线；这两角改画同样半径的圆角括号，贴着卡片边走。上面两角在拖动条下面，不是卡片的角，仍是直角。 */
+  @Builder
+  adjustCorner(top: boolean, left: boolean) {
+    Column()
+      .width(ADJUST_CORNER_VP)
+      .height(ADJUST_CORNER_VP)
+      .borderWidth({
+        top: top ? ADJUST_CORNER_STROKE_VP : 0,
+        bottom: top ? 0 : ADJUST_CORNER_STROKE_VP,
+        left: left ? ADJUST_CORNER_STROKE_VP : 0,
+        right: left ? 0 : ADJUST_CORNER_STROKE_VP
+      })
+      .borderRadius({
+        bottomLeft: !top && left && this.floatingDrawn() ? FloatingKeyboardPolicy.CORNER_RADIUS_VP : 0,
+        bottomRight: !top && !left && this.floatingDrawn() ? FloatingKeyboardPolicy.CORNER_RADIUS_VP : 0
+      })
+      .borderColor(this.skin.accent)
+  }
+
+  /**
+   * 一条边上的把手：上下沿是三道横线，左右沿是两道竖线，触摸区比线大得多。按住拖动只改这条边（`dragAdjust`）。
+   *
+   * 上沿柄的线贴着外框上沿画（`KeyboardAdjustPolicy.TOP_GRIP_INSET_VP`），落在工具栏图标上方那一条空白里，与 Android 相同；居中的话线会画进工具栏那一行、压在图标上，收窄后图标挤得更密时尤其明显（iOS 验收时就是这样）。触摸区照旧 32vp 高，遮罩整层挡住触摸，盖到工具栏上不碍事。
+   */
+  @Builder
+  adjustEdge(handle: string) {
+    Stack({ alignContent: handle === ADJUST_TOP ? Alignment.Top : Alignment.Center }) {
+      if (handle === ADJUST_TOP || handle === ADJUST_BOTTOM) {
+        // 三道线连同间距的厚度取 gripSpanVp(3)：测试按它断言横线底边在工具栏图标之上，画出来的就是这个厚度。
+        Column({ space: KeyboardAdjustPolicy.GRIP_GAP_VP }) {
+          this.adjustGripLine(true)
+          this.adjustGripLine(true)
+          this.adjustGripLine(true)
+        }
+        .height(KeyboardAdjustPolicy.gripSpanVp(3))
+      } else {
+        Row({ space: KeyboardAdjustPolicy.GRIP_GAP_VP }) {
+          this.adjustGripLine(false)
+          this.adjustGripLine(false)
+        }
+        .width(KeyboardAdjustPolicy.gripSpanVp(2))
+      }
+    }
+    .width(handle === ADJUST_TOP || handle === ADJUST_BOTTOM ? ADJUST_HANDLE_LONG_VP : KeyboardAdjustPolicy.HANDLE_SHORT_VP)
+    .height(handle === ADJUST_TOP || handle === ADJUST_BOTTOM ? KeyboardAdjustPolicy.HANDLE_SHORT_VP : ADJUST_HANDLE_LONG_VP)
+    .padding({ top: handle === ADJUST_TOP ? KeyboardAdjustPolicy.TOP_GRIP_INSET_VP : 0 })
+    .accessibilityGroup(true)
+    .accessibilityText(this.adjustHandleLabel(handle))
+    .accessibilityDescription(this.adjustHandleDescription(handle))
+    .onTouch((event: TouchEvent): void => this.adjustTouch(handle, event))
+  }
+
+  @Builder
+  adjustGripLine(horizontal: boolean) {
+    Column()
+      .width(horizontal ? ADJUST_GRIP_LENGTH_VP : KeyboardAdjustPolicy.GRIP_THICKNESS_VP)
+      .height(horizontal ? KeyboardAdjustPolicy.GRIP_THICKNESS_VP : ADJUST_GRIP_LENGTH_VP)
+      .borderRadius(KeyboardAdjustPolicy.GRIP_THICKNESS_VP / 2)
+      .backgroundColor(KeyboardAdjustPolicy.INK_COLOR)
+  }
+
+  /** 中间一排的按钮：白色线条图标加文字。「移动」按住拖动整块键盘，其余两个点按。 */
+  @Builder
+  adjustButton(kind: string) {
+    Column({ space: ADJUST_BUTTON_GAP_VP }) {
+      KeyboardLineIcon({
+        d: this.adjustButtonIcon(kind),
+        iconSize: ADJUST_BUTTON_ICON_VP,
+        stroke: KeyboardIconPaths.ADJUST_STROKE,
+        color: KeyboardAdjustPolicy.INK_COLOR
+      })
+      Text(this.adjustButtonLabel(kind))
+        .fontSize(ADJUST_BUTTON_FONT_SIZE)
+        .fontColor(KeyboardAdjustPolicy.INK_COLOR)
+        .maxLines(1)
+    }
+    .width(this.adjustButtonRow().width)
+    .padding({ top: ADJUST_BUTTON_GAP_VP, bottom: ADJUST_BUTTON_GAP_VP })
+    .accessibilityGroup(true)
+    .accessibilityText(this.adjustButtonLabel(kind))
+    .accessibilityDescription(this.adjustButtonDescription(kind))
+    .stateStyles({
+      normal: {
+        .opacity(1)
+      },
+      pressed: {
+        .opacity(0.6)
+      }
+    })
+    .onClick((): void => this.adjustButtonClick(kind))
+    .onTouch((event: TouchEvent): void => {
+      if (kind === ADJUST_MOVE) {
+        this.adjustTouch(kind, event);
+      }
+    })
+  }
+
   @Builder
   keyboardStack() {
     Stack({ alignContent: Alignment.Top }) {
@@ -11199,6 +11949,9 @@ struct KeyboardView {
           .hitTestBehavior(HitTestMode.None)
           .onReady(() => this.drawGlideTrail())
       }
+      if (this.surface === SURFACE_GEOMETRY && this.touchDesign()) {
+        this.adjustOverlay()
+      }
       if (this.punctuation || this.brackets || this.managing >= 0
         || this.expandedGloss >= 0) {
         Column() {
@@ -11208,8 +11961,8 @@ struct KeyboardView {
         }
         .width('100%')
         .padding({
-          left: this.overlayHorizontalInset(),
-          right: this.overlayHorizontalInset(),
+          left: this.overlayHorizontalInset() + this.adjustFrame().left,
+          right: this.overlayHorizontalInset() + this.adjustFrame().right,
           top: this.overlayTopInset()
         })
       }
@@ -11267,7 +12020,7 @@ struct KeyboardView {
   @Builder
   keyboard() {
     if (this.touchDesign()) {
-      // 设计稿的框架：50vp 工具条上方 8vp，下方固定 10vp，按键行之间是用户设定的行距，底部 6vp，两侧 4vp。`KeyboardMetrics.totalHeightVp` 正是按此确定面板大小。工具栏隐藏或工具全关、空闲时不画工具条和它下面的间距（`stripShown`），面板同样按此变矮。
+      // 设计稿的框架：50vp 工具条上方 8vp，下方固定 10vp，按键行之间是用户设定的行距，底部 6vp（加上键盘调整的底部抬高），两侧 4vp。`KeyboardMetrics.totalHeightVp` 正是按此确定面板大小。工具栏隐藏或工具全关、空闲时不画工具条和它下面的间距（`stripShown`），面板同样按此变矮。
       Column() {
         if (this.stripShown()) {
           this.touchStrip()
@@ -11279,11 +12032,14 @@ struct KeyboardView {
         .margin({ top: this.stripShown() ? KeyboardMetrics.STRIP_GAP_VP : 0 })
       }
       .width('100%')
+      // 键盘调整时遮罩下的工具条和按键只是预览：读屏整块跳过，免得双击落到遮罩下的「表情」或按键上，读屏只走遮罩上的柄和按钮（`adjustOverlay`），与 Android 的 IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS、iOS 的 accessibilityViewIsModal 相同。
+      .accessibilityLevel(this.surface === SURFACE_GEOMETRY ? 'no-hide-descendants' : 'auto')
+      // 键盘调整收窄或挪开时两侧多让出 `adjustFrame` 的左右，底部抬高时下面多让出抬高的那一段：让出的地方只有键盘底色，点了不落到按键上。
       .padding({
-        left: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP,
-        right: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP,
+        left: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP + this.adjustFrame().left,
+        right: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP + this.adjustFrame().right,
         top: KeyboardMetrics.TOUCH_ROOT_TOP_PADDING_VP,
-        bottom: KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP
+        bottom: KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP + this.adjustFrame().lift
       })
     } else {
       Column({ space: this.rowSpacing() }) {
@@ -11319,19 +12075,9 @@ struct KeyboardView {
   @Builder
   keyFaces() {
       if (this.surface === SURFACE_GEOMETRY) {
-        // 按键作为上方工具条中正在拖动的高度的实时预览；覆盖其上的图层接收所有触摸，所以设置高度时不会输入任何内容。
-        Stack() {
-          Column({ space: this.rowSpacing() }) {
-            this.handedKeys()
-          }
-          .width('100%')
-          .height(this.surfaceHeight())
-          Column()
-            .width('100%')
-            .height('100%')
-            .backgroundColor('#01000000')
-            .hitTestBehavior(HitTestMode.Block)
-            .accessibilityText('键盘高度预览')
+        // 键盘调整时按键作实时预览；盖在整块键盘上的遮罩（`adjustOverlay`）接收所有触摸，所以调整时不会输入任何内容。
+        Column({ space: this.rowSpacing() }) {
+          this.handedKeys()
         }
         .width('100%')
         .height(this.surfaceHeight())

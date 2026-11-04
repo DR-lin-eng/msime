@@ -44,7 +44,7 @@
 #define MyVersionDirBase "msime_v" + MyAppVersion
 ; 64 位 TIP 的系统目录副本，见 [Files] 的 TSF 一节。
 #define MySystemTipDir "{sys}\IME\" + MyEditionInstallDir
-; [Code] 里要看到真正 System32 的 Exec（查、删 MySystemTipDir，按路径停 64 位进程）。Inno 6 在 64 位安装模式下，[Code] 的文件函数和 Exec 都绕开 WOW64 重定向；Inno 7 的 Setup 默认是 32 位进程，Exec 不再绕开，只有 ExecWithNativeSysDir 绕开，用 Exec 会启动 SysWOW64 里的 32 位 cmd 和 PowerShell。CI 用 6.7.1，本机构建优先用 7（Compile-Installer.ps1）。
+; [Code] 里要看到真正 System32 的 Exec（查、删 MySystemTipDir，按路径停 64 位进程）。Inno 6 在 64 位安装模式下，[Code] 的文件函数和 Exec 都绕开 WOW64 重定向；Inno 7 的 Setup 默认是 32 位进程，Exec 不再绕开，只有 ExecWithNativeSysDir 绕开，用 Exec 会启动 SysWOW64 里的 32 位 cmd 和 PowerShell。CI 的 Win10+ 包用 6.7.1、Win7 包用 6.2.2，本机构建优先用 7（Compile-Installer.ps1）。
 #if Ver >= EncodeVer(7, 0, 0)
 #define ExecNativeSys "ExecWithNativeSysDir"
 #else
@@ -75,19 +75,31 @@ OutputBaseFilename={#MyEditionInstallerBaseName}_v{#MyAppVersion}{#MyOutputSuffi
 SetupIconFile={#MySourceRoot}\MetasequoiaIME.ico
 Compression=lzma2
 SolidCompression=yes
-; 安装和卸载界面自动跟随 Windows 的浅色/深色模式。
+; 安装和卸载界面自动跟随 Windows 的浅色/深色模式。dynamic 是 Inno Setup 6.6 加的；Win7 包用 6.2.2 编译（见 release-windows7.yml），只用 modern。
+#if Ver >= EncodeVer(6, 6, 0)
 WizardStyle=modern dynamic
+#else
+WizardStyle=modern
+#endif
 PrivilegesRequired=admin
 UsedUserAreasWarning=no
 ; TSF 的宿主应用会持有只读词库；发生资源更新时，也要让 Restart Manager 检查这些文件。
 CloseApplicationsFilter=*.exe,*.dll,*.chm,*.db,*.bin,*.dat
 #ifdef Windows7Architecture
 MinVersion=6.1sp1
-#ifdef Windows7X86
-ArchitecturesAllowed=x86os
+; x86os、x64os 是 Inno 6.3 起的写法，Win7 包用的 6.2.2 只认含义相同的 x86、x64。
+#if Ver >= EncodeVer(6, 3, 0)
+#define Win7ArchX86 "x86os"
+#define Win7ArchX64 "x64os"
 #else
-ArchitecturesAllowed=x64os
-ArchitecturesInstallIn64BitMode=x64os
+#define Win7ArchX86 "x86"
+#define Win7ArchX64 "x64"
+#endif
+#ifdef Windows7X86
+ArchitecturesAllowed={#Win7ArchX86}
+#else
+ArchitecturesAllowed={#Win7ArchX64}
+ArchitecturesInstallIn64BitMode={#Win7ArchX64}
 #endif
 #else
 ArchitecturesAllowed=x64compatible
@@ -183,13 +195,17 @@ Source: "{#MySourceRoot}\server_exe\*"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 
-; 资源锁只允许平面目录中的已校验文件。逐项写入编译时摘要，不按时间戳猜测内容相同。
+; 资源锁只允许平面目录中的已校验文件。逐项写入编译时摘要，不按时间戳猜测内容相同。Win7 包用的 Inno 6.2.2 的预处理器没有 GetSHA256OfFile，改用 SHA-1，ResourceNeedsReplacement 按同一个版本条件选对应的运行时函数；这里只判断内容是否相同，不作安全校验。
 #define ResourceFindHandle
 #define ResourceFindResult
 #sub InstallResource
   #define ResourceName FindGetFileName(ResourceFindHandle)
   #define ResourceSource MySourceRoot + "\server_exe\resources\" + ResourceName
+#if Ver >= EncodeVer(6, 3, 0)
 Source: "{#ResourceSource}"; DestDir: "{autopf}\{#MyEditionInstallDir}\server\resources"; Flags: ignoreversion; Check: ResourceNeedsReplacement('{#GetSHA256OfFile(ResourceSource)}')
+#else
+Source: "{#ResourceSource}"; DestDir: "{autopf}\{#MyEditionInstallDir}\server\resources"; Flags: ignoreversion; Check: ResourceNeedsReplacement('{#GetSHA1OfFile(ResourceSource)}')
+#endif
 #endsub
 #for {ResourceFindHandle = ResourceFindResult = FindFirst(MySourceRoot + "\server_exe\resources\*", faReadOnly | faHidden | faSysFile | faArchive); ResourceFindResult; ResourceFindResult = FindNext(ResourceFindHandle)} InstallResource
 #if ResourceFindHandle
@@ -226,6 +242,11 @@ Name: "{group}\{#MyAppName}"; \
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Registry]
+; WER helper 由系统服务按完整路径加载；只登记本安装包自己的架构副本，卸载时删除该值。
+Root: HKLM32; Subkey: "Software\Microsoft\Windows\Windows Error Reporting\RuntimeExceptionHelperModules"; ValueType: dword; ValueName: "{commonpf32}\{#MyEditionInstallDir}\{code:GetVersionDir}\MetasequoiaImeCrashWer.dll"; ValueData: "0"; Flags: uninsdeletevalue
+#ifndef Windows7X86
+Root: HKLM; Subkey: "Software\Microsoft\Windows\Windows Error Reporting\RuntimeExceptionHelperModules"; ValueType: dword; ValueName: "{#MySystemTipDir}\{code:GetVersionDir}\MetasequoiaImeCrashWer.dll"; ValueData: "0"; Flags: uninsdeletevalue
+#endif
 Root: HKLM; Subkey: "{#MyEditionRegistryKey}"; \
     ValueType: string; ValueName: "VersionDir"; ValueData: "{code:GetVersionDir}"; \
     Flags: uninsdeletevalue
@@ -272,10 +293,7 @@ var
   { 卸载时是否连数据目录一起删除，由 DecideUserDataRemoval 在 usUninstall 一开始决定。默认保留。 }
   RemoveUserDataOnUninstall: Boolean;
 
-{ WebView2 Runtime 与 VC 运行库都不随包分发：前者有自己的 Evergreen 更新通道，
-  后者是系统级共享组件，安装器不该替用户装。但缺了任何一个，输入法装完就是坏的，
-  而故障现场在安装结束之后——Server 起不来，或者点设置什么都不出现，用户看不到
-  任何解释。所以在安装开始前查一遍，把原因当场说清楚。
+{ WebView2 Runtime 与 VC 运行库都不随包分发：前者有自己的 Evergreen 更新通道，后者是系统级共享组件，安装器不该替用户装。但缺了任何一个，输入法装完就是坏的，而故障现场在安装结束之后——Server 起不来，或者点表情、手写这些面板什么都不出现，用户看不到任何解释。所以在安装开始前查一遍，把原因当场说清楚。
 
   返回空串表示没装；否则是 pv 里的版本号。}
 function ReadWebView2Version: String;
@@ -388,8 +406,8 @@ begin
   if NeedsWebView2 then
     Prompt := Prompt + #13#10 +
       '● Microsoft Edge WebView2 Runtime' + #13#10 +
-      '   缺少它设置窗口，以及表情 / 手写 / 屏幕键盘 / 语音面板都打不开；' + #13#10 +
-      '   候选窗口由 Direct2D 绘制，不受影响。' + #13#10 +
+      '   缺少它表情 / 手写 / 屏幕键盘 / 语音 / 云剪贴板 / 云词库 / 背单词面板都打不开；' + #13#10 +
+      '   设置窗口、托盘语音输入和候选窗口是原生实现，不受影响。' + #13#10 +
       '   下载：' + WebView2DownloadUrl + #13#10;
   Prompt := Prompt + #13#10 +
     '点击「是」打开下载页面并结束本次安装，装好组件后重新运行本安装程序；' + #13#10 +
@@ -1007,7 +1025,11 @@ begin
   if not FileExists(Destination) then
     exit;
   try
+#if Ver >= EncodeVer(6, 3, 0)
     Result := CompareText(GetSHA256OfFile(Destination), ExpectedHash) <> 0;
+#else
+    Result := CompareText(GetSHA1OfFile(Destination), ExpectedHash) <> 0;
+#endif
   except
     Log('Unable to verify existing resource; normal replacement is required.');
   end;
@@ -1063,7 +1085,7 @@ begin
   ServerDir := ExpandConstant('{autopf}\{#MyEditionInstallDir}\server');
   { Watchdog 必须先停，否则它可能在升级或卸载期间重新启动 Server。}
   StopProcessesUnder(ServerDir, 'MetasequoiaImeWatchdog');
-  { 然后是 Server、WinUI 设置窗口、承载面板的 MSIME.exe 和 AI 助手拉起的 msime-mcp.exe：它们都在 server 目录里，也都不在 Server 的进程树里。}
+  { 然后是 Server、WinUI 设置窗口、承载面板的 MSIME.exe 或 msime-client-panels.exe 和 AI 助手拉起的 msime-mcp.exe：它们都在 server 目录里，也都不在 Server 的进程树里。}
   StopProcessesUnder(ServerDir, '');
 end;
 
@@ -1093,6 +1115,23 @@ begin
   Exec(
     ExpandConstant('{sys}\icacls.exe'),
     '"' + AppDataPath + '" /grant *S-1-5-32-545:(OI)(CI)M /T /C /Q',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+  { 用户数据不能向全部应用包开放；移除旧预览包可能留下的递归授权，桌面用户权限和完整性标签保持原有规则。 }
+  Exec(
+    ExpandConstant('{sys}\icacls.exe'),
+    '"' + AppDataPath + '" /remove:g *S-1-15-2-1 /T /C /Q',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+  Exec(
+    ExpandConstant('{sys}\icacls.exe'),
+    '"' + AppDataPath + '" /remove:g *S-1-15-2-2 /T /C /Q',
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
@@ -1134,15 +1173,50 @@ begin
     )) or
     (ResultCode <> 0)
   then
-    RaiseException(
-      '无法创建输入法登录启动任务（退出码：' +
-      IntToStr(ResultCode) + '）。');
+  begin
+    { 看门狗只是让 Server 在登录时就启动；没有这个任务，TSF 在第一次用到输入法时拉起 Server，Server 再带起看门狗。所以建不成任务不该让安装半途中止：后面的数据目录授权和迁移收尾必须照常执行。360、火绒这类安全软件拦截创建计划任务时，Exec 拿到的是“拒绝访问”（5）。 }
+    Log('Creating the watchdog logon task failed: ' + IntToStr(ResultCode) + ' ' + SysErrorMessage(ResultCode));
+    SuppressibleMsgBox(
+      '没能创建开机自动启动任务（错误代码：' + IntToStr(ResultCode) + '）。' + #13#10#13#10 +
+      '输入法已经装好，不影响使用：开机后第一次切换到 {#MyAppName} 时会自动启动。' + #13#10 +
+      '如果装有安全软件，可能是它拦截了创建计划任务，放行后重新运行安装程序即可恢复开机启动。',
+      mbInformation, MB_OK, IDOK);
+  end;
 end;
 
 procedure TryDeleteTree(const Path: String);
 begin
   { 忽略返回值：被占用文件保留，其他能删除的文件仍继续清理。}
   DelTree(Path, True, True, True);
+end;
+
+{ DataDir\helpcodes 里除 custom 子目录以外的条目：内置辅助码表是安装包的，每次完整安装重写；custom 放用户自己的辅助码表（Engine 和设置窗口先读状态根下的 helpcodes\custom，见 #10707），升级不得清掉。}
+procedure CleanPackageHelpcodes(const HelpcodesPath: String);
+var
+  FindRec: TFindRec;
+  ItemPath: String;
+begin
+  if FindFirst(AddBackslash(HelpcodesPath) + '*', FindRec) then
+  begin
+    try
+      repeat
+        if
+          (FindRec.Name <> '.') and
+          (FindRec.Name <> '..') and
+          (CompareText(FindRec.Name, 'custom') <> 0)
+        then
+        begin
+          ItemPath := AddBackslash(HelpcodesPath) + FindRec.Name;
+          if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+            TryDeleteTree(ItemPath)
+          else
+            DeleteFile(ItemPath);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
 end;
 
 procedure CleanAppDataExceptUserFiles;
@@ -1168,7 +1242,10 @@ begin
         then
         begin
           ItemPath := AddBackslash(AppDataPath) + FindRec.Name;
-          if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+            (CompareText(FindRec.Name, 'helpcodes') = 0) then
+            CleanPackageHelpcodes(ItemPath)
+          else if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
             TryDeleteTree(ItemPath)
           else
             DeleteFile(ItemPath);
@@ -1300,7 +1377,20 @@ begin
   ) and (ResultCode >= 0) and (ResultCode < 8);
 end;
 
-{ 与来源安装包一样是"移动"数据目录：旧目录里的全部用户状态搬到新目录，安装成功后旧目录被删除。但分两步做：这里只复制，原目录保持不动；删除推迟到 ssPostInstall 的最后（FinishDataDirMove），登录任务失败会在那之前中止，旧数据因此在任何半途失败后都还在。来源安装包直接使用破坏性的移动参数，主库可能先被移走而 WAL 或配置失败，两边都不剩完整状态。}
+{ 把 SourceDir 里的 *.txt 复制进 DataDir\helpcodes\custom，同名文件已在时不覆盖（/XC /XN /XO）。以前的版本只从资源目录 server\resources\helpcodes\custom 读自定义辅助码表，而 server 目录每次安装都整个删掉；数据目录换了位置时，旧 DataDir 的 helpcodes 是安装包条目、不随迁移带走。在删它们之前调用，搬不过来只记日志，不挡安装。}
+procedure AdoptCustomHelpcodes(const SourceDir: String);
+var
+  TargetDir: String;
+begin
+  TargetDir := AddBackslash(GetDataDir('')) + 'helpcodes\custom';
+  if (SourceDir = '') or (not DirExists(SourceDir)) or
+    (CompareText(RemoveBackslashUnlessRoot(SourceDir), TargetDir) = 0) then
+    exit;
+  if not RobocopySucceeded('"' + RemoveBackslashUnlessRoot(SourceDir) + '" "' + TargetDir + '" *.txt /XC /XN /XO') then
+    Log('Could not keep the custom helpcode tables in ' + SourceDir + '.');
+end;
+
+{ 与来源安装包一样是"移动"数据目录：旧目录里的全部用户状态搬到新目录，安装成功后旧目录被删除。但分两步做：这里只复制，原目录保持不动；删除推迟到 ssPostInstall 的最后（FinishDataDirMove），前面任何一步抛错都会在那之前中止，旧数据因此在任何半途失败后都还在。来源安装包直接使用破坏性的移动参数，主库可能先被移走而 WAL 或配置失败，两边都不剩完整状态。}
 function MigrateUserDataDir(const OldDir, NewDir: String): String;
 var
   FindRec: TFindRec;
@@ -1413,8 +1503,12 @@ begin
     Result := MigrationError;
     exit;
   end;
+  { 用户自己的辅助码表在删 server 目录、清安装包条目之前搬进 DataDir\helpcodes\custom，轻量包也一样。}
+  AdoptCustomHelpcodes(ExpandConstant('{autopf}\{#MyEditionInstallDir}\server\resources\helpcodes\custom'));
+  if (ResolvePreviousDataDir <> '') and (CompareText(ResolvePreviousDataDir, RemoveBackslashUnlessRoot(GetDataDir(''))) <> 0) then
+    AdoptCustomHelpcodes(AddBackslash(ResolvePreviousDataDir) + 'helpcodes\custom');
 #ifndef LightPackage
-  { 轻量包不带 app_data，只替换 Server/TSF。完整包先清掉安装包自己的条目，用户配置、皮肤和 Server 状态保留。}
+  { 轻量包不带 app_data，只替换 Server/TSF。完整包先清掉安装包自己的条目，用户配置、皮肤、Server 状态和 helpcodes\custom 里用户自己的辅助码表保留。}
   CleanAppDataExceptUserFiles;
 #endif
   TryDeleteTree(ExpandConstant(

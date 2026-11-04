@@ -970,6 +970,7 @@ void CandidateWindow::reposition() {
     if (value->y != invalid_candidate_anchor_y)
       anchor_input.anchor = POINT{value->x, value->y};
     anchor_input.game_host = value->game_host;
+    anchor_input.anchor_top = game_anchor_top_;
     anchor_input.foreground_owned = true;
     anchor_input.client = client_area;
     // client_area 是 PMv2 下的物理像素，缩放取游戏所在显示器的有效 DPI，与它同一单位。
@@ -1028,7 +1029,19 @@ void CandidateWindow::reposition() {
   const bool fullscreen =
       presentation_ != ForegroundPresentation::Windowed && foreground_ &&
       MonitorFromWindow(foreground_, MONITOR_DEFAULTTONEAREST) == target;
-  const auto &work = fullscreen ? monitor.rcMonitor : monitor.rcWork;
+  RECT work = fullscreen ? monitor.rcMonitor : monitor.rcWork;
+  // 游戏会话的候选窗画的是游戏自己的输入，越出客户区就会压在游戏 UI 上。兜底锚点
+  // 只保证锚点落在客户区内（GameCandidateAnchor.h 取 bottom - height/5），没有算上
+  // 卡片自己的高度：DNF 实测客户区 367,205 1280x960，锚点 431,973，242 高的卡片落在
+  // 956，底边 1198 越过客户区底边 1165，正好盖住底部技能栏。前台确属这个客户端时按
+  // 客户区收窄，卡片就始终完整留在游戏画面里。全屏游戏的客户区本就是整块显示器，这
+  // 一步对它们没有影响。
+  if (value->game_host && foreground_owned) {
+    work.left = (std::max)(work.left, client_area.left);
+    work.top = (std::max)(work.top, client_area.top);
+    work.right = (std::min)(work.right, client_area.right);
+    work.bottom = (std::min)(work.bottom, client_area.bottom);
+  }
   // Move a hidden one-pixel window onto the target monitor first. Its own DPI,
   // rather than process-global or previous-monitor DPI, determines the layout.
   if (MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST) != target) {
@@ -2073,7 +2086,7 @@ void CandidateWindow::paint() {
       compat::DrawTextWithWindows7Emoji(device_.GetDWriteFactory(), target,
           text.c_str(), static_cast<UINT32>(text.size()), text_format, text_rect,
           brush(row_text_color), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    // The annotation takes the candidate text's colour, as macOS draws it with titleAttributes: the fixed-position colour on an unselected fixed row, the selected text colour on the selected row. The translation is the theme's secondary colour: a package's translation colour, or else the number colour (selected_number on the selected row); 未高亮的固定排位候选没有皮肤释义色时用它正文色的 0.62 倍透明度。
+    // The annotation takes the candidate text's colour, as macOS draws it with titleAttributes: the fixed-position colour on an unselected fixed row, the selected text colour on the selected row. The translation is the theme's secondary colour: a package's translation colour, or else the number colour (selected_number on the selected row); on an opaque selection fill a package's translation colour is replaced by one derived from the selected text colour, and selected_number is kept only when it reads at 4.5:1 (candidate_row_translation_color); 未高亮的固定排位候选没有皮肤释义色时用它正文色的 0.62 倍透明度。
     const auto annotation_color =
         candidate_row_text_color(palette_, text_color, selected,
                                  value->candidates[i].fixed_position != 0);
@@ -2633,6 +2646,11 @@ void CandidateWindow::show_context_menu(const CandidateClick &click,
               personal_wordbook_(*std::exchange(menu_personal_, std::nullopt));
             return;
           }
+          if (choice.command == CandidateMenuCommand::ReadAloud) {
+            if (read_aloud_.speak && menu_read_aloud_)
+              read_aloud_.speak(*std::exchange(menu_read_aloud_, std::nullopt));
+            return;
+          }
           if (!click_)
             return;
           if (const auto action =
@@ -2646,6 +2664,9 @@ void CandidateWindow::show_context_menu(const CandidateClick &click,
   if (personal_wordbook_ && !candidate->pending && !candidate->translation.empty())
     menu_personal_ = PersonalWordbookRequest{candidate->text, candidate->translation,
                                              candidate->pronunciation};
+  menu_read_aloud_.reset();
+  if (read_aloud_.text && read_aloud_.speak && !candidate->pending)
+    menu_read_aloud_ = read_aloud_.text(candidate->text, candidate->translation);
   flyout_->set_palette(palette_);
   POINT screen = client_point;
   if (!ClientToScreen(window_, &screen))
@@ -2653,7 +2674,8 @@ void CandidateWindow::show_context_menu(const CandidateClick &click,
   // 本页第几个候选：「删除」行据此提示 Ctrl+Shift+Alt+N。
   const auto slot = static_cast<size_t>(candidate - painted_->candidates.begin());
   flyout_->open(screen.x, screen.y, code_points, candidate->actions_available,
-                candidate->fixed_position, slot, menu_personal_.has_value());
+                candidate->fixed_position, slot, menu_personal_.has_value(),
+                menu_read_aloud_.has_value());
 }
 LRESULT CALLBACK CandidateWindow::procedure(HWND window, UINT message,
                                             WPARAM wparam,

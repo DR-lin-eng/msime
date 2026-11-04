@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useId, type RefObject } from "react";
 import type {
   DictionaryEntry,
   DictionaryLookupEntry,
@@ -6,14 +6,12 @@ import type {
   LocalDictionaryKind,
 } from "../dictionary/dictionary-file";
 import { dictionaryKindKeyHint } from "../dictionary/dictionary-messages";
-import {
-  isResourceDictionaryKind,
-  localDictionaryKinds,
-  resourceDictionaryKinds,
-} from "../dictionary/dictionary-kinds";
+import { localDictionaryKinds, resourceDictionaryKinds } from "../dictionary/dictionary-kinds";
 import * as settings from "./settings-style";
 import { SettingsPhraseForm } from "./settings-phrase-form";
+import { InfoTip } from "../core/info-tip";
 import { ActionButton } from "./action-button";
+import { QUICK_PHRASE_DICTIONARY_CURSOR_NOTE } from "./plugin-editor-model";
 import { SettingsEmptyMessage } from "./settings-empty-message";
 
 export interface DictionaryPhraseForm {
@@ -51,41 +49,70 @@ export function DictionaryEntries({
   onEdit,
   onRemove,
 }: DictionaryEntriesProps) {
+  const keyHintId = useId();
+  const keyHint = dictionaryKindKeyHint(kind);
   return (
     <>
       {form && (
+        // 每一栏都是标题在上、输入框在下，栏高一致，按底边对齐后三个框和按钮才齐。
         <SettingsPhraseForm>
-          <label>
-            编码{" "}
+          <label className={settings.field}>
+            编码
             <input
+              className={settings.fieldInput}
               value={form.key}
               readOnly={form.previous?.source === "bundled"}
+              aria-describedby={keyHint ? keyHintId : undefined}
               onChange={(event) => onFormChange({ ...form, key: event.target.value })}
             />
-            <small className={settings.keyHint}>{dictionaryKindKeyHint(kind)}</small>
           </label>
-          <label>
-            {kind === "quick_phrase" ? "短语" : "词条"}{" "}
+          <label className={settings.field}>
+            {/* 光标标记怎么写是解释：在 label 里只能放悬停的「?」，文本框照旧以 label 命名。「?」和标题同一行，放在输入框前面，不在框下面另起一行。 */}
+            <span className={settings.fieldTitleRow}>
+              {kind === "quick_phrase" ? "短语" : "词条"}
+              {kind === "quick_phrase" && (
+                <InfoTip passive subject="短语">
+                  {QUICK_PHRASE_DICTIONARY_CURSOR_NOTE}
+                </InfoTip>
+              )}
+            </span>
             <input
+              className={settings.fieldInput}
               value={form.value}
               readOnly={form.previous?.source === "bundled"}
               onChange={(event) => onFormChange({ ...form, value: event.target.value })}
             />
           </label>
-          <label>
-            权重{" "}
+          <label className={settings.field}>
+            权重
             <input
+              className={settings.fieldNumberInput}
               type="number"
               value={form.weight}
               onChange={(event) => onFormChange({ ...form, weight: Number(event.target.value) })}
             />
           </label>
-          <ActionButton action={onSave} ariaBusy={busy} className="" disabled={busy} label="保存" />
-          <ActionButton action={onCancel} disabled={busy} label="取消" />
+          <div className={settings.phraseFormActions}>
+            <ActionButton
+              action={onSave}
+              ariaBusy={busy}
+              className="primary"
+              disabled={busy}
+              label="保存"
+            />
+            <ActionButton action={onCancel} disabled={busy} label="取消" />
+          </div>
+          {/* 编码长度是输入约束，常驻显示；放在整行末尾独占一行，不塞进「编码」那一栏把它撑高。 */}
+          {keyHint && (
+            <small id={keyHintId} className={settings.keyHint}>
+              {keyHint}
+            </small>
+          )}
         </SettingsPhraseForm>
       )}
       <DictionaryEntryList
         kind={kind}
+        resource={false}
         entries={entries}
         busy={busy}
         emptyMessage={emptyMessage}
@@ -97,9 +124,10 @@ export function DictionaryEntries({
   );
 }
 
-/** 查询结果共用同一列表；资源类型即使来源标记异常也不出现写入操作。 */
+/** 查询结果共用同一列表；资源类型即使来源标记异常也不出现写入操作。`resource` 由调用方说明：粤语既是个人词库也是资源词库，只看种类分不出来。 */
 export function DictionaryEntryList({
   kind,
+  resource,
   entries,
   busy,
   emptyMessage,
@@ -108,6 +136,7 @@ export function DictionaryEntryList({
   onRemove,
 }: {
   kind: DictionaryLookupKind;
+  resource: boolean;
   entries: DictionaryLookupEntry[];
   busy: boolean;
   emptyMessage?: string;
@@ -115,7 +144,6 @@ export function DictionaryEntryList({
   onEdit?: (entry: DictionaryEntry) => void;
   onRemove?: (entry: DictionaryEntry) => void;
 }) {
-  const resource = isResourceDictionaryKind(kind);
   const columns = resource ? settings.phraseResourceColumns : settings.phrasePersonalColumns;
   const reading = kind === "japanese" || kind === "korean_hanja";
 
@@ -124,7 +152,7 @@ export function DictionaryEntryList({
       {emptyMessage || (
         <>
           输入关键词后查看
-          {[...localDictionaryKinds, ...resourceDictionaryKinds].find(
+          {(resource ? resourceDictionaryKinds : localDictionaryKinds).find(
             ([value]) => value === kind,
           )?.[1] ?? "词库"}
           词条
@@ -165,23 +193,20 @@ export function DictionaryEntryList({
                   {entry.source === "bundled" ? "内置" : "个人"}
                 </small>
                 <span className={settings.phraseEntryActions}>
-                  {!isResourceDictionaryKind(entry.kind) &&
-                    entry.source !== "bundled" &&
-                    onEdit &&
-                    onRemove && (
-                      <>
-                        <ActionButton
-                          action={() => onEdit(entry as DictionaryEntry)}
-                          disabled={busy}
-                          label="编辑"
-                        />
-                        <ActionButton
-                          action={() => onRemove(entry as DictionaryEntry)}
-                          disabled={busy}
-                          label="删除"
-                        />
-                      </>
-                    )}
+                  {entry.source !== "bundled" && onEdit && onRemove && (
+                    <>
+                      <ActionButton
+                        action={() => onEdit(entry as DictionaryEntry)}
+                        disabled={busy}
+                        label="编辑"
+                      />
+                      <ActionButton
+                        action={() => onRemove(entry as DictionaryEntry)}
+                        disabled={busy}
+                        label="删除"
+                      />
+                    </>
+                  )}
                 </span>
               </>
             )}

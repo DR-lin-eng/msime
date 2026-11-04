@@ -18,6 +18,8 @@ struct DesktopCandidateSettings {
   std::optional<float> skin_radius;
   double min_width = 0;
   bool follow_cursor = true;
+  // 游戏兜底锚点放客户区上部（game_compatibility.overlay_anchor_top）。
+  bool game_anchor_top = false;
   bool mouse_wheel = false;
   bool keymap_enabled = false;
   // 配色／皮肤值与图像缓存各有代次，普通轮询不会重建字体或重载图片。
@@ -33,6 +35,8 @@ struct DesktopCandidateCallbacks {
   CandidateWindow::LeaseCheck lease_current;
   // 右键菜单「加入生词本」；为空时菜单没有这一项。
   CandidateWindow::PersonalWordbook personal_wordbook = {};
+  // 右键菜单「朗读」；为空时菜单没有这一项。
+  CandidateWindow::ReadAloud read_aloud = {};
 };
 // 单个 Server 的候选 UI 路由器；协调线程不建窗，各桌面线程先绑定桌面再创建任何 UI。
 // stop() 必须先于 Server 与点击工作线程的停止；析构也执行相同收尾。

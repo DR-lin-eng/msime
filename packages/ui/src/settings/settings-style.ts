@@ -52,9 +52,11 @@ export const phoneKeyboardPreviewHint =
 /** 一张卡片末尾整行居中的警示文字按钮，例如「恢复默认」：不再另写标题和说明。 */
 export const centeredDangerRow =
   "flex min-h-[var(--p-row-h)] w-full cursor-pointer items-center justify-center border-0 bg-transparent [padding:var(--p-row-pad)] [font-size:var(--p-row-fs)] text-[var(--danger-text)] active:bg-[var(--p-hover)] disabled:cursor-default disabled:opacity-50";
-/** 滑块后的数值：宽到能放下两位数字，数值变化时轨道不会移动。HarmonyOS 用次要颜色以 13px 显示在固定 46px 宽的列中，足以放下 18px 这样带单位的值。 */
+/** 滑块后的数值：宽到能放下两位数字，数值变化时轨道不会移动。HarmonyOS 用次要颜色以 13px 显示在至少 46px 宽的列中，放得下 18px、50% 这样带单位的短读数；「1500 毫秒」这类更长的读数让这一列变宽，不折成两行。 */
 export const sliderValue =
-  "min-w-[2ch] text-right tabular-nums harmony:w-[46px] harmony:shrink-0 harmony:text-[13px] harmony:text-[var(--p-sub)]";
+  "min-w-[2ch] text-right tabular-nums whitespace-nowrap harmony:min-w-[46px] harmony:shrink-0 harmony:text-[13px] harmony:text-[var(--p-sub)]";
+/** `SliderRow` 的 `widestValue`：最宽读数和当前读数叠在同一格里，列宽取两者较宽的那个，当前读数靠右。 */
+export const sliderValueStack = "inline-grid justify-items-end [&>*]:[grid-area:1/1]";
 /** 组内彼此相关的行，例如一组带标签的行；分隔方式与组分隔自身各行相同（见 `groupRows`：1px 上边框，HarmonyOS 手机上则是缩进的 .5px 细线）。 */
 export const rowStack =
   "flex min-w-0 flex-col gap-[var(--p-row-gap)] [&>:not([hidden])~:not([hidden])]:[border-top:1px_solid_var(--p-row-divider)] harmony:[&>:not([hidden])~:not([hidden])]:[border-top:0] harmony:[&>:not([hidden])~:not([hidden])]:[background-image:linear-gradient(var(--p-row-divider),var(--p-row-divider))] harmony:[&>:not([hidden])~:not([hidden])]:[background-position:right_top] harmony:[&>:not([hidden])~:not([hidden])]:[background-size:calc(100%_-_var(--p-row-divider-inset))_var(--p-row-divider-w)] harmony:[&>:not([hidden])~:not([hidden])]:[background-repeat:no-repeat]";
@@ -209,8 +211,13 @@ export const importPreview =
   "flex max-h-70 flex-col gap-[7px] overflow-y-auto rounded-lg border border-edge bg-raised px-3 py-2.5 [&>span]:text-xs [&>span]:text-muted [&>div]:flex [&>div]:flex-col [&>div]:gap-0.5 [&>div]:border-t [&>div]:border-[var(--divider-color)] [&>div]:pt-[7px] [&>div_span]:wrap-anywhere [&_code]:text-[11px] [&_code]:text-muted";
 
 export const field = compactFieldLabel;
-export const fieldInput =
-  "settings-field-input min-w-25 rounded-md border border-edge bg-[var(--dropdown-bg)] px-2 py-1.5 text-body";
+const fieldInputBox =
+  "settings-field-input rounded-md border border-edge bg-[var(--dropdown-bg)] px-2 py-1.5 text-body";
+export const fieldInput = `${fieldInputBox} min-w-25`;
+/** 数字框只装几位数，固定窄宽。不在 fieldInput 上叠宽度：它的 min-w-25 比这里的宽度还大，会把框重新撑开。 */
+export const fieldNumberInput = `${fieldInputBox} w-21`;
+/** 字段标题和它旁边的「?」同处一行，压在输入框上面，不另起一行。 */
+export const fieldTitleRow = "flex items-center gap-1";
 export const fieldSelect = `${fieldInput} min-w-[150px]`;
 export const dictionaryKindSelect = "min-w-44";
 export const dictionaryFooter =
@@ -218,7 +225,10 @@ export const dictionaryFooter =
 /** A prompt edited in place, the full width of its group. */
 export const promptInput = `${fieldInput} min-h-32 w-full resize-y leading-relaxed`;
 export const phraseForm = "mt-3.5 flex flex-wrap items-end gap-2.5";
-export const keyHint = "text-[11px] text-muted";
+/** 词条编辑行末尾的编码提示：独占整行，不参与按底边对齐，免得把「编码」那一栏撑高。 */
+export const keyHint = "mt-0 basis-full text-[11px] text-muted";
+/** 词条编辑行的保存、取消：去掉 secondary 自带的上边距，两个按钮同高。 */
+export const phraseFormActions = "flex gap-2 [&_button]:mt-0 [&_button]:h-8 [&_button]:py-0";
 export const bundledBadge =
   "rounded border border-edge px-1 py-px text-[11px] leading-none text-muted";
 const listRow =

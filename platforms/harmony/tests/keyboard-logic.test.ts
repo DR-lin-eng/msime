@@ -39,7 +39,6 @@ import {
 import { KeyboardMetrics } from "../entry/src/main/ets/keyboard/KeyboardMetrics";
 import { CandidateScalePolicy } from "../entry/src/main/ets/keyboard/candidate/CandidateScalePolicy";
 import { NativeReplyPolicy } from "../entry/src/main/ets/keyboard/NativeReplyPolicy";
-import { KeyboardLayoutDragPolicy } from "../entry/src/main/ets/keyboard/input/KeyboardLayoutDragPolicy";
 import {
   ClipboardHistoryStore,
   ClipboardHistoryItem,
@@ -262,13 +261,17 @@ import {
 } from "../entry/src/main/ets/keyboard/input/VoiceCaptureDevicePolicy";
 import {
   CandidateGlossPolicy,
+  CandidatePronunciationPolicy,
   GlossToken,
 } from "../entry/src/main/ets/keyboard/candidate/CandidateGlossPolicy";
 import {
   CorrectionMarkPolicy,
   CorrectionSurfaceColors,
 } from "../entry/src/main/ets/keyboard/candidate/CorrectionMarkPolicy";
-import { ShuangpinKeyHintPolicy } from "../entry/src/main/ets/keyboard/input/ShuangpinKeyHintPolicy";
+import {
+  CANTONESE_PROFILE,
+  ShuangpinKeyHintPolicy,
+} from "../entry/src/main/ets/keyboard/input/ShuangpinKeyHintPolicy";
 import { EditorPolicy, EditorTraits } from "../entry/src/main/ets/keyboard/input/EditorPolicy";
 import { EditEchoLedger } from "../entry/src/main/ets/keyboard/input/EditEchoLedger";
 import { CaretContextEcho } from "../entry/src/main/ets/keyboard/input/CaretContextEcho";
@@ -350,11 +353,7 @@ import {
   VoiceInputConfigurationPolicy,
   DoubaoCredentialPolicy,
 } from "../entry/src/main/ets/keyboard/input/VoiceInputConfiguration";
-import {
-  CrashDestination,
-  CrashReport,
-  TelemetryPolicy,
-} from "../entry/src/main/ets/telemetry/TelemetryPolicy";
+import { CrashReport, TelemetryPolicy } from "../entry/src/main/ets/telemetry/TelemetryPolicy";
 import { NoticePolicy } from "../entry/src/main/ets/notices/NoticePolicy";
 import {
   HttpRequestLike,
@@ -1256,6 +1255,123 @@ group("offline dictionaries fill only what the user's own translator left", () =
   );
 });
 
+group("本地识别的停顿时间按用户设置读，缺键和不合规的值按原来的 1500 毫秒（#10310）", () => {
+  check(VoiceRecognitionPolicy.pauseMillis(undefined) === 1500, "缺键按 1500");
+  for (const value of [500, 800, 2500, 5000]) {
+    check(VoiceRecognitionPolicy.pauseMillis(value) === value, `${value} 毫秒原样使用`);
+  }
+  for (const value of [0, 400, 550, 5100, 1500.5, "2000", null, true, -100]) {
+    check(VoiceRecognitionPolicy.pauseMillis(value) === 1500, `${JSON.stringify(value)} 按 1500`);
+  }
+});
+
+group("判停灵敏度越高，VAD 阈值越高，越容易判定说完（#10310）", () => {
+  check(LocalAsrPolicy.vadThreshold(50) === 0.5, "缺省的 50 就是原来写死的 0.5");
+  check(LocalAsrPolicy.vadThreshold(0) === 0.5, "不按停顿结束的会话传 0，沿用 0.5");
+  check(
+    Math.abs(LocalAsrPolicy.vadThreshold(10) - 0.1) < 1e-9 &&
+      Math.abs(LocalAsrPolicy.vadThreshold(90) - 0.9) < 1e-9,
+    "两端是 0.1 和 0.9",
+  );
+  for (let sensitivity = 11; sensitivity <= 90; sensitivity += 1) {
+    if (
+      !(LocalAsrPolicy.vadThreshold(sensitivity) > LocalAsrPolicy.vadThreshold(sensitivity - 1))
+    ) {
+      check(false, `${sensitivity} 的阈值应高于 ${sensitivity - 1}`);
+    }
+  }
+  for (const value of [9, 91, 50.5, -1, Number.NaN]) {
+    check(LocalAsrPolicy.vadThreshold(value) === 0.5, `${value} 越界或非整数时沿用 0.5`);
+  }
+});
+
+group(
+  "本地识别和系统识别由键盘按停顿结束，豆包流式和上传式服务不由键盘掐断（#10310、#9886）",
+  () => {
+    const base: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
+    const factoryDoubao: VoiceInputConfiguration = {
+      ...base,
+      asr_provider: "doubao",
+      asr_token: "",
+      asr_tokens: {},
+      asr_app_key: "",
+    };
+    const configuredDoubao: VoiceInputConfiguration = {
+      ...base,
+      asr_provider: "doubao",
+      asr_token: "synthetic-token",
+    };
+    for (const voice of [
+      { ...base, asr_provider: "local" },
+      { ...base, asr_provider: "system" },
+      { ...base, asr_provider: "" },
+      factoryDoubao,
+    ]) {
+      const name =
+        voice === factoryDoubao ? "没填凭据的豆包（走系统识别）" : voice.asr_provider || "空的服务";
+      check(
+        VoiceRecordingBehaviourPolicy.keyboardStopsOnPause(voice),
+        `${name} 由键盘的停顿计时结束`,
+      );
+      check(VoiceRecordingBehaviourPolicy.endsOnPause(voice), `${name} 的面板提示停顿后自动上屏`);
+    }
+    check(
+      VoiceRecordingBehaviourPolicy.usesSystemRecognizer(factoryDoubao) &&
+        !VoiceRecordingBehaviourPolicy.usesSystemRecognizer(configuredDoubao) &&
+        !VoiceRecordingBehaviourPolicy.usesSystemRecognizer({ ...base, asr_provider: "local" }),
+      "只有没填凭据的豆包退回系统识别",
+    );
+    for (const voice of [
+      configuredDoubao,
+      ...["openai", "siliconflow", "groq", "everyapi", "mistral", "bailian"].map(
+        (provider): VoiceInputConfiguration => ({ ...base, asr_provider: provider }),
+      ),
+    ]) {
+      check(
+        !VoiceRecordingBehaviourPolicy.keyboardStopsOnPause(voice),
+        `${voice.asr_provider} 不经键盘的停顿计时`,
+      );
+      check(
+        !VoiceRecordingBehaviourPolicy.endsOnPause(voice),
+        `${voice.asr_provider} 说完后点「说完了」`,
+      );
+    }
+  },
+);
+
+group(
+  "停顿时间只给本地识别用设置里的值，系统识别固定 1500 毫秒；判停灵敏度只给按停顿结束的本地识别（#10310）",
+  () => {
+    const base: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
+    const local: VoiceInputConfiguration = {
+      ...base,
+      asr_provider: "local",
+      pause_millis: 3000,
+      stop_sensitivity: 80,
+    };
+    const system: VoiceInputConfiguration = { ...local, asr_provider: "system" };
+    check(VoiceRecordingBehaviourPolicy.pauseMillis(local) === 3000, "本地识别用设置里的停顿时间");
+    check(
+      VoiceRecordingBehaviourPolicy.pauseMillis({ ...local, pause_millis: undefined }) === 1500,
+      "本地识别缺键按 1500",
+    );
+    check(VoiceRecordingBehaviourPolicy.pauseMillis(system) === 1500, "系统识别不读本地停顿时间");
+    check(
+      VoiceRecordingBehaviourPolicy.stopSensitivity(local, true) === 80,
+      "点按开始的本地识别用存下的灵敏度",
+    );
+    check(VoiceRecordingBehaviourPolicy.stopSensitivity(local, false) === 0, "按住说话不用灵敏度");
+    check(VoiceRecordingBehaviourPolicy.stopSensitivity(system, true) === 0, "系统识别不用灵敏度");
+    check(
+      VoiceRecordingBehaviourPolicy.stopSensitivity(
+        { ...local, stop_sensitivity: undefined },
+        true,
+      ) === 0,
+      "缺键时交 0，worker 沿用默认阈值",
+    );
+  },
+);
+
 group("a silence timer waits while the VAD still hears speech", () => {
   check(
     VoiceRecognitionPolicy.silenceStops(false),
@@ -1535,6 +1651,12 @@ group("projects the same form factor into every settings capability", () => {
   check(
     phone.touchToolbarTools && !desktop.touchToolbarTools,
     "only the phone keyboard has the toolbar row whose tools and display mode the page offers",
+  );
+  check(
+    phone.voicePauseSettings &&
+      SettingsFormFactorCapabilities.resolve("tablet").voicePauseSettings &&
+      !desktop.voicePauseSettings,
+    "phones and tablets offer the local pause time and stop sensitivity; the 2-in-1 voice panel never ends on a pause",
   );
   check(
     desktop.candidateSkinEditor && !phone.candidateSkinEditor,
@@ -2350,22 +2472,6 @@ group("the language key takes the ambiguous touches between it and the return ke
   );
 });
 
-group("the height bar's drag resizes one vp for one vp", () => {
-  check(
-    KeyboardLayoutDragPolicy.height(0, -12) === 12,
-    "dragging the top edge upward increases keyboard height one-for-one",
-  );
-  check(
-    KeyboardLayoutDragPolicy.height(48, -100) === KeyboardGeometry.MAX_HEIGHT_ADJUSTMENT_VP,
-    "height remains inside the shared preference bounds",
-  );
-  check(
-    KeyboardLayoutDragPolicy.height(10, 0.4) === 10 &&
-      KeyboardLayoutDragPolicy.height(10, -0.6) === 11,
-    "the total travel is rounded once, so slow drags add up rather than rounding away",
-  );
-});
-
 console.log("CandidateWrapPolicy");
 
 group("a single candidate never wraps, however wide", () => {
@@ -2515,7 +2621,7 @@ group("enabled schemes keep the fixed order and never resolve to nothing", () =>
   );
   check(
     KeyboardScheme.enabledFromPreferenceIds(null) === KeyboardScheme.DEFAULT_ENABLED &&
-      KeyboardScheme.DEFAULT_ENABLED.length === KeyboardScheme.SCHEMES.length - 8,
+      KeyboardScheme.DEFAULT_ENABLED.length === KeyboardScheme.SCHEMES.length - 9,
     "a null list means every scheme but the six the user turns on",
   );
 });
@@ -3374,7 +3480,7 @@ group("全拼 14 键的键表与引擎的组码表是同一张", () => {
 group("全拼 14 键是追加在最后的一张卡，只给全拼，默认不启用", () => {
   const fourteen: SchemeDefinition = KeyboardScheme.QUANPIN_FOURTEEN_KEY;
   check(
-    KeyboardScheme.SCHEMES[17] === fourteen && KeyboardScheme.SCHEMES.length === 19,
+    KeyboardScheme.SCHEMES[17] === fourteen && KeyboardScheme.SCHEMES.length === 20,
     "按 append-only 排在笔画之后",
   );
   check(
@@ -6075,8 +6181,15 @@ group("a candidate with a gloss offers the gloss as something to type", () => {
   );
 
   const touch = CandidateManagementAction.touchActions("hello", true);
-  check(touch.length === 1, "a touch long press offers one action, not desktop management");
+  check(
+    touch.length === 2,
+    "a touch long press offers the gloss and 加入生词本, not desktop management",
+  );
   check(touch[0].title === "hello", "the touch action is the bare gloss, as the source draws it");
+  check(
+    touch[1].id === "ADD_TO_PERSONAL_WORDBOOK" && touch[1].title === "加入生词本",
+    "加入生词本 comes last, where the other hosts put it",
+  );
   check(
     CandidateManagementAction.touchActions("hello", false).length === 0,
     "an Engine annotation is not offered as translated text",
@@ -6093,8 +6206,9 @@ group("a candidate with a gloss offers the gloss as something to type", () => {
     full
       .slice(1)
       .map((action: ManagementAction) => action.id)
-      .join(",") === "PROMOTE,FIX_1,FIX_2,FIX_3,FIX_4,FIX_5,CLEAR_POSITION,REMOVE",
-    "then 优先显示, the five slots, 取消固定 and 删除词条, in the source's order",
+      .join(",") ===
+      "PROMOTE,FIX_1,FIX_2,FIX_3,FIX_4,FIX_5,CLEAR_POSITION,REMOVE,ADD_TO_PERSONAL_WORDBOOK",
+    "then 优先显示, the five slots, 取消固定 and 删除词条, in the source's order, and 加入生词本 last",
   );
   check(
     full.find((action: ManagementAction) => action.id === "FIX_2")?.checked === true,
@@ -6102,6 +6216,128 @@ group("a candidate with a gloss offers the gloss as something to type", () => {
   );
   const noGloss = CandidateManagementAction.managementActions("", false, 0, true, false);
   check(noGloss[0].id === "PROMOTE", "a candidate without a translation still gets management");
+  check(
+    !noGloss.some((action: ManagementAction) => action.id === "ADD_TO_PERSONAL_WORDBOOK") &&
+      !CandidateManagementAction.managementActions("wbcd", false, 0, true, true).some(
+        (action: ManagementAction) => action.id === "ADD_TO_PERSONAL_WORDBOOK",
+      ),
+    "without a translation there is nothing to put in the personal wordbook",
+  );
+  // 菜单开着时候选栏可能重建：点下去时那一格的候选原文和释义都要还是打开菜单时的那一个。
+  const opened = CandidateManagementAction.touchActions(" hello ", true, "你好")[1];
+  check(
+    opened.candidate === "你好" && opened.gloss === "hello",
+    "加入生词本 remembers the candidate and the trimmed gloss it was opened for",
+  );
+  check(
+    CandidateManagementAction.samePersonalWordbookSubject(
+      opened,
+      CandidateManagementAction.personalWordbookAction("hello", true, "你好"),
+    ),
+    "the same candidate is still there",
+  );
+  check(
+    !CandidateManagementAction.samePersonalWordbookSubject(
+      opened,
+      CandidateManagementAction.personalWordbookAction("hello", true, "哈喽"),
+    ) &&
+      !CandidateManagementAction.samePersonalWordbookSubject(
+        opened,
+        CandidateManagementAction.personalWordbookAction("hi", true, "你好"),
+      ) &&
+      !CandidateManagementAction.samePersonalWordbookSubject(
+        opened,
+        CandidateManagementAction.personalWordbookAction("hello", false, "你好"),
+      ),
+    "a rebuilt strip with another candidate or gloss in that cell is not added",
+  );
+  check(
+    CandidateManagementAction.managementActions("hello", true, 0, true, true, "你好").slice(-1)[0]
+      .candidate === "你好",
+    "the full menu carries the candidate too",
+  );
+  // 「朗读」排在「加入生词本」前面、和它同一组；共享层答不出能读的英文（或设备不能朗读）时没有这一项。
+  const spokenMenu = CandidateManagementAction.managementActions(
+    "interview",
+    true,
+    0,
+    true,
+    true,
+    "面试",
+    "interview",
+  ).map((action: ManagementAction) => action.id);
+  check(
+    spokenMenu.slice(-2).join(",") === "READ_ALOUD,ADD_TO_PERSONAL_WORDBOOK",
+    "朗读 comes right before 加入生词本 at the end of the full menu",
+  );
+  const spokenTouch = CandidateManagementAction.touchActions(
+    "interview",
+    true,
+    "面试",
+    "interview",
+  );
+  check(
+    spokenTouch.map((action: ManagementAction) => action.id).join(",") ===
+      "INSERT_GLOSS,READ_ALOUD,ADD_TO_PERSONAL_WORDBOOK",
+    "the touch long press puts 朗读 in the same place",
+  );
+  check(
+    spokenTouch[1].title === "朗读" &&
+      spokenTouch[1].spoken === "interview" &&
+      spokenTouch[1].candidate === "面试",
+    "朗读 remembers what to read and the candidate it was opened for",
+  );
+  const englishCandidate = CandidateManagementAction.managementActions(
+    "",
+    false,
+    0,
+    true,
+    true,
+    "hello",
+    "hello",
+  ).map((action: ManagementAction) => action.id);
+  check(
+    englishCandidate.slice(-1)[0] === "READ_ALOUD" &&
+      !englishCandidate.includes("ADD_TO_PERSONAL_WORDBOOK"),
+    "an English candidate without a gloss gets 朗读 alone in the last group",
+  );
+  // 2in1 的触摸长按也要能读到没有释义的英文候选，和右键一样。
+  check(
+    CandidateManagementAction.touchActions("", false, "hello", "hello")
+      .map((action: ManagementAction) => action.id)
+      .join(",") === "READ_ALOUD",
+    "a touch long press on an English candidate without a gloss offers 朗读 alone",
+  );
+  check(
+    !CandidateManagementAction.managementActions("面接", true, 0, true, true, "面试", null).some(
+      (action: ManagementAction) => action.id === "READ_ALOUD",
+    ) && CandidateManagementAction.readAloudAction("", "面试") === null,
+    "nothing to read means no 朗读",
+  );
+  const readAloud = CandidateManagementAction.readAloudAction("interview", "面试");
+  check(
+    readAloud !== null &&
+      !CandidateManagementAction.actionsForFixedPosition(0).some(
+        (action: ManagementAction) => action.menuItemId === readAloud.menuItemId,
+      ) &&
+      readAloud.menuItemId !==
+        CandidateManagementAction.personalWordbookAction("x", true)?.menuItemId &&
+      readAloud.menuItemId !== CandidateManagementAction.glossAction("x")?.menuItemId,
+    "朗读 has a menu id of its own",
+  );
+  const fullMenuIds: number[] = CandidateManagementAction.managementActions(
+    "interview",
+    true,
+    0,
+    true,
+    true,
+    "面试",
+    "interview",
+  ).map((action: ManagementAction) => action.menuItemId);
+  check(
+    fullMenuIds.length > 0 && new Set(fullMenuIds).size === fullMenuIds.length,
+    "every item in the full candidate menu has a distinct menu id",
+  );
   check(
     !noGloss.some((action: ManagementAction) => action.id === "REMOVE"),
     "a single character cannot be deleted",
@@ -8490,6 +8726,69 @@ group(
 );
 
 group(
+  "显示字母键角标 is a device switch in the feedback file, on unless turned off, as on Android (#10587)",
+  () => {
+    check(
+      KeyboardFeedback.DEFAULTS.letterCornerHints === true,
+      "a keyboard that never saw it draws the corner symbols",
+    );
+    const old = KeyboardFeedback.parse(
+      JSON.stringify({ sound: true, haptics: false, strength: "light", swipeSymbols: false }),
+    );
+    check(old.letterCornerHints === true, "a file written before it existed reads as on");
+    const hidden = KeyboardFeedback.parse(
+      JSON.stringify({
+        sound: false,
+        haptics: false,
+        strength: "medium",
+        letterCornerHints: false,
+      }),
+    );
+    check(
+      hidden.letterCornerHints === false && hidden.swipeSymbols === true,
+      "hiding the symbols leaves the swipe switch on",
+    );
+    check(
+      KeyboardFeedback.parse(KeyboardFeedback.serialize(hidden)).letterCornerHints === false,
+      "and survives being written again",
+    );
+    check(
+      KeyboardFeedback.parse(JSON.stringify({ letterCornerHints: "no" })).letterCornerHints ===
+        true,
+      "a value that is not a boolean falls back to on",
+    );
+    check(
+      KeyboardFeedbackBridge.toShared(hidden).letterCornerHints === false,
+      "the page is shown it as stored",
+    );
+    check(
+      KeyboardFeedbackBridge.fromShared(
+        { soundEnabled: false, hapticsEnabled: false, hapticStrength: "medium" },
+        hidden,
+      ).letterCornerHints === false,
+      "a save that does not carry it, as the account sync builds one, keeps the stored value",
+    );
+    check(
+      KeyboardFeedbackBridge.fromShared(
+        {
+          soundEnabled: false,
+          hapticsEnabled: false,
+          hapticStrength: "medium",
+          letterCornerHints: true,
+        },
+        hidden,
+      ).letterCornerHints === true,
+      "a page save turns it back on",
+    );
+    check(
+      KeyboardFeedback.withFloating(hidden, true, 0.5, 0.5).letterCornerHints === false &&
+        KeyboardFeedback.withAdjust(hidden, 0, 100, 0.5).letterCornerHints === false,
+      "moving or adjusting the keyboard keeps it",
+    );
+  },
+);
+
+group(
   "单手模式 and 隐私模式 are device settings in the feedback file, both off as on Android",
   () => {
     check(
@@ -9906,22 +10205,6 @@ group("the recording tones follow the master switch alone", () => {
   );
 });
 
-group("only a streaming provider gets the listening face, whose stop is a pause", () => {
-  const base: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
-  for (const provider of ["system", "local", "doubao", ""]) {
-    check(
-      VoiceRecordingBehaviourPolicy.streamsPartialResults({ ...base, asr_provider: provider }),
-      `${provider || "the default"} streams words as they are heard`,
-    );
-  }
-  for (const provider of ["openai", "siliconflow", "groq", "everyapi", "mistral", "bailian"]) {
-    check(
-      !VoiceRecordingBehaviourPolicy.streamsPartialResults({ ...base, asr_provider: provider }),
-      `${provider} answers only after a stop, so it keeps 停止录音`,
-    );
-  }
-});
-
 group("partial recognizer output reaches the panel only when asked for", () => {
   const base: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
   check(
@@ -10490,6 +10773,59 @@ group("each profile has its own table", () => {
   );
 });
 
+group("Cantonese shuangpin labels its keys with the engine's face (#10438)", () => {
+  // 与 crates/engine/src/cantonese/shuangpin.rs 的 `key_hints_label_every_key_with_what_it_types` 逐键相同：鸿蒙没有接 `msime_client_shuangpin_key_hints`，表是抄过来的，这里钉住不漂移。
+  const expected: [string, string][] = [
+    ["Q", "iu"],
+    ["W", "oe"],
+    ["E", "e"],
+    ["R", "uk yun yut"],
+    ["T", "ek it"],
+    ["Y", "j / eoi eot"],
+    ["U", "kw / u"],
+    ["I", "gw / i"],
+    ["O", "o oi"],
+    ["P", "eon un ung ut"],
+    ["A", "a aa"],
+    ["S", "ok on ong ot"],
+    ["D", "am ap"],
+    ["F", "an at"],
+    ["G", "ak ang eng"],
+    ["H", "aak aang"],
+    ["J", "aan aat"],
+    ["K", "aau au"],
+    ["L", "aai ai"],
+    ["Z", "ei"],
+    ["X", "oek oeng"],
+    ["C", "aam aap"],
+    ["V", "ng / ui yu"],
+    ["B", "ou"],
+    ["N", "in"],
+    ["M", "im ip"],
+    [";", "ik ing"],
+  ];
+  for (const [key, hint] of expected) {
+    const actual = ShuangpinKeyHintPolicy.hint(CANTONESE_PROFILE, key, false, 1, "none", true);
+    check(actual === hint, `cantonese ${key} should read "${hint}", got "${actual}"`);
+  }
+  check(
+    ShuangpinKeyHintPolicy.hint(CANTONESE_PROFILE, "q", false, 1, "none", false) === "",
+    "the same switch turns Cantonese shuangpin hints off",
+  );
+  check(
+    ShuangpinKeyHintPolicy.cantoneseFace("cantonese_shuangpin", 5),
+    "Cantonese shuangpin on a Cantonese session draws its face",
+  );
+  check(
+    !ShuangpinKeyHintPolicy.cantoneseFace("cantonese", 5),
+    "plain Jyutping is spelled out in full and draws none",
+  );
+  check(
+    !ShuangpinKeyHintPolicy.cantoneseFace("cantonese_shuangpin", 0),
+    "a session left on another scheme (no Cantonese dictionary) draws none",
+  );
+});
+
 console.log("EditorPolicy");
 
 function traits(
@@ -11020,6 +11356,57 @@ group("the platform accent", () => {
   );
 });
 
+group("2in1 默认选中行的字和释义对选中淡底到 WCAG AA", () => {
+  // ArkUI 的颜色是 `#RRGGBB` 或 `#AARRGGBB`；半透明的颜色按 alpha 合成到下面的底色上再算对比度。
+  const channels = (color: string): number[] => {
+    const hex = color.slice(1);
+    const rgb = hex.length === 8 ? hex.slice(2) : hex;
+    return [0, 2, 4].map((at) => parseInt(rgb.slice(at, at + 2), 16) / 255);
+  };
+  const alpha = (color: string): number =>
+    color.length === 9 ? parseInt(color.slice(1, 3), 16) / 255 : 1;
+  const over = (top: string, under: number[]): number[] =>
+    channels(top).map((value, index) => value * alpha(top) + under[index] * (1 - alpha(top)));
+  const luminance = (rgb: number[]): number =>
+    rgb.reduce((sum, value, index) => {
+      const linear = value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+      return sum + [0.2126, 0.7152, 0.0722][index] * linear;
+    }, 0);
+  const contrast = (a: number[], b: number[]): number => {
+    const [x, y] = [luminance(a), luminance(b)];
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  };
+  for (const dark of [false, true]) {
+    const colors = GlobalTheme.candidateColors(null, dark);
+    const fill = over(colors.selected, channels(colors.surface));
+    const mode = dark ? "dark" : "light";
+    check(contrast(over(colors.selectedText, fill), fill) >= 4.5, `${mode}: the selected word`);
+    const detail = GlobalTheme.candidateDetail(colors, true);
+    check(
+      detail === colors.selectedNumber,
+      `${mode}: the selected row's gloss is the selected number colour`,
+    );
+    check(contrast(over(detail, fill), fill) >= 4.5, `${mode}: the selected gloss and reading`);
+    check(
+      contrast(over(colors.accent, fill), fill) < 4.5,
+      `${mode}: the accent itself does not reach AA on its wash`,
+    );
+    check(
+      GlobalTheme.candidateDetail(colors, false) === colors.secondary,
+      `${mode}: plain rows keep the secondary colour`,
+    );
+  }
+  // 皮肤包给了自己的释义色（次要色和序号色不同）时，选中行照旧用它。
+  const packaged = GlobalTheme.candidateColors(
+    { ...GlobalTheme.candidatePalette({ number: "#808080", secondary: "#3060A0" })! },
+    false,
+  );
+  check(
+    GlobalTheme.candidateDetail(packaged, true) === "#3060A0",
+    "a package's own gloss colour is kept on the selected row",
+  );
+});
+
 group("unset candidate slots fall back to the native tokens", () => {
   const native = GlobalTheme.candidateColors(null, false);
   check(native.surface === "#FFFFFF" && native.selected === "#222C7A4B", "the native 2in1 card");
@@ -11154,6 +11541,7 @@ const AUTUMN_LIGHT: AppThemeSeed = {
   on_accent: "#FFFFFF",
   background: "#F6E9DC",
   card: "#FFFBF6",
+  candidate_accent: "#9F4214",
 };
 const AUTUMN_DARK: AppThemeSeed = {
   accent: "#F0975F",
@@ -11161,6 +11549,7 @@ const AUTUMN_DARK: AppThemeSeed = {
   on_accent: "#3C2618",
   background: "#21150F",
   card: "#2E1E15",
+  candidate_accent: "#F0975F",
 };
 
 group("color-mix matches the browser the design tokens were read from", () => {
@@ -11237,10 +11626,12 @@ group("a resolved app theme is read once, colours reordered for ArkUI", () => {
         background: "#F6E9DC",
         card: "#FFFBF6",
         hair: "#B5562B33",
+        candidate_accent: "#9F4214",
       },
     }),
   );
   check(seed !== null, "a complete reply is a seed");
+  check(seed !== null && seed.candidate_accent === "#9F4214", "the first-candidate colour is read");
   check(seed !== null && seed.accent_soft === "#22B5562B", "the trailing alpha moves to the front");
   check(
     seed !== null &&
@@ -11346,6 +11737,85 @@ group("the season seed tints the system keyboard, the return key and the logo", 
     plainDark.keyLabelColor(true) === "#183021" &&
       plainDark.keySurfaceBackground(true) === "#5FBF84",
     "and the emphasized key draws exactly that pair",
+  );
+});
+
+group("浅色跟随系统键盘的首选字色对字母键底片和键盘底色都到 WCAG AA", () => {
+  const rgb = (color: string): number[] => {
+    const hex = color.slice(-6);
+    return [0, 2, 4].map((at) => parseInt(hex.slice(at, at + 2), 16) / 255);
+  };
+  const luminance = (value: number[]): number =>
+    value.reduce((sum, channel, index) => {
+      const linear =
+        channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+      return sum + [0.2126, 0.7152, 0.0722][index] * linear;
+    }, 0);
+  const contrast = (a: string, b: string): number => {
+    const [x, y] = [luminance(rgb(a)), luminance(rgb(b))];
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  };
+  // 四季的浅色种子（crates/client-services 的 `APP_THEME_SEEDS`，`candidate_accent` 是同一色相在 OKLCH 里降低明度的结果）；首选画在字母键色的底片上，设置页预览把它画在键盘底色上，两者都要到 4.5:1。
+  const season = (accent: string, background: string, candidate: string): AppThemeSeed => ({
+    ...AUTUMN_LIGHT,
+    accent: accent,
+    background: background,
+    candidate_accent: candidate,
+  });
+  const seasons: [string, AppThemeSeed][] = [
+    ["spring", season("#4E9A3A", "#EAF4E0", "#267308")],
+    ["summer", season("#17704A", "#DDEFE4", "#0F6B46")],
+    ["autumn", AUTUMN_LIGHT],
+    ["winter", season("#3A6A8A", "#E6EEF4", "#346484")],
+  ];
+  for (const [name, seed] of seasons) {
+    const skin = KeyboardSkin.fromTheme("system", "跟随系统", null, false, seed);
+    check(
+      skin.candidateAccent === seed.candidate_accent,
+      `${name}: the first candidate takes candidate_accent`,
+    );
+    check(contrast(skin.candidateAccent, skin.keyBackground) >= 4.5, `${name}: on the key chip`);
+    check(contrast(skin.candidateAccent, skin.background) >= 4.5, `${name}: on the keyboard`);
+    check(
+      contrast(skin.accent, skin.background) < 4.5,
+      `${name}: the accent itself does not reach AA`,
+    );
+    check(
+      skin.accent === seed.accent && skin.actionBackground === seed.accent,
+      `${name}: the accent and the return key are unchanged`,
+    );
+  }
+  const plain = KeyboardSkin.fromTheme("system", "跟随系统", null, false);
+  check(plain.candidateAccent === "#1F6F41", "没有种子时首选用加深的平台绿");
+  check(contrast(plain.candidateAccent, plain.keyBackground) >= 4.5, "fallback: on the key chip");
+  check(contrast(plain.candidateAccent, plain.background) >= 4.5, "fallback: on the keyboard");
+  check(contrast(plain.accent, plain.background) < 4.5, "fallback: #2C7A4B itself is about 4.0:1");
+  check(plain.accent === "#2C7A4B", "fallback: the platform accent is unchanged");
+  check(
+    KeyboardSkin.fromTheme("system", "跟随系统", null, true, AUTUMN_DARK).candidateAccent ===
+      "#F0975F" &&
+      KeyboardSkin.fromTheme("system", "跟随系统", null, true).candidateAccent === "#5FBF84",
+    "dark keeps the accent",
+  );
+  const night: KeyboardThemePalette = {
+    background: "#0F1B22",
+    key: "#1D3340",
+    function_key: "#15252E",
+    text: "#E6F1F4",
+    secondary: "#86A6B0",
+    accent: "#4FD1C5",
+    on_accent: "#000000",
+  };
+  check(
+    KeyboardSkin.fromTheme("night", "夜青", night, false, AUTUMN_LIGHT).candidateAccent ===
+      "#4FD1C5",
+    "a named theme keeps its own accent for the first candidate",
+  );
+  const recoloured: AppThemeSeed = { ...AUTUMN_LIGHT, candidate_accent: "#B5562B" };
+  check(
+    KeyboardSkin.fromTheme("system", "跟随系统", null, false, AUTUMN_LIGHT).key() !==
+      KeyboardSkin.fromTheme("system", "跟随系统", null, false, recoloured).key(),
+    "the first-candidate colour is part of the skin's identity",
   );
 });
 
@@ -11482,7 +11952,7 @@ group("the function panel follows the design's order, then the Harmony extras", 
   const labels: string[] = FunctionPanelPolicy.items().map((item: FunctionPanelItem) => item.label);
   check(
     labels.join(",") ===
-      "全角,中文标点,模糊音,繁体,手写,词库,键盘高度,设置," +
+      "全角,中文标点,模糊音,繁体,手写,词库,键盘调整,设置," +
         "按键音,振动,单手模式,隐私模式,反馈,关于,宣传,候选翻译,符号," +
         "本地输入,语音输入,高情商回复,AI 润色,振动强度,浮动键盘",
     `the tiles in page order: ${labels.join(",")}`,
@@ -11806,7 +12276,7 @@ group("the icon paths are arc-free absolute commands inside their view box", () 
           value <=
             Math.max(KeyboardIconPaths.BRAND_VIEW_WIDTH, KeyboardIconPaths.BRAND_VIEW_HEIGHT),
       ),
-      "inside the 116 x 132 box",
+      "inside the 132 x 132 box",
     );
   }
   check(
@@ -11831,9 +12301,10 @@ group("the icon paths are arc-free absolute commands inside their view box", () 
     "the chevrons are 1.8 at 21 and 20vp",
   );
   check(
-    KeyboardIconPaths.BRAND_STROKE_WIDTH === 9 &&
+    KeyboardIconPaths.BRAND_STROKE_WIDTH === 9.6 &&
+      KeyboardIconPaths.BRAND_STROKE_MITER_LIMIT === 4 &&
       KeyboardIconPaths.BRAND_STROKE_COLOR === "#FFFFFF",
-    "the brand stroke is white at 9",
+    "the brand stroke is msime.svg's, white at 9.6 (8 x 1.2) with SVG's miter limit 4",
   );
 });
 
@@ -12187,6 +12658,50 @@ group("候选栏大小 scales the touch strip together with the toolbar sharing 
     "the 2in1 frame ignores it",
   );
 });
+
+group(
+  "the expanded candidate panel follows the candidate font size and 候选栏大小 like Android (#10400)",
+  () => {
+    const font = (percent: number): number =>
+      CandidateScalePolicy.scaled(CandidateScalePolicy.DEFAULT_CANDIDATE_FONT_SIZE, percent);
+    check(
+      CandidateScalePolicy.expandedFontSize(17, font(100)) === 17 &&
+        CandidateScalePolicy.expandedCellHeight(44, font(100), 100) === 44,
+      "the default font at 100% keeps the 17fp text and 44vp cells",
+    );
+    check(
+      CandidateScalePolicy.expandedFontSize(17, font(200)) === 34 &&
+        CandidateScalePolicy.expandedCellHeight(44, font(200), 200) === 88,
+      "a larger candidate bar scales the text and the cell together",
+    );
+    check(
+      CandidateScalePolicy.expandedFontSize(17, font(50)) === 9 &&
+        CandidateScalePolicy.expandedCellHeight(44, font(50), 50) === 44,
+      "a smaller candidate bar shrinks the text but keeps the 44vp touch target",
+    );
+    check(
+      CandidateScalePolicy.expandedFontSize(17, 24) === 23 &&
+        CandidateScalePolicy.expandedCellHeight(44, 24, 100) === 59,
+      "a larger font preference alone raises the cell by the text's ratio",
+    );
+    check(
+      CandidateScalePolicy.expandedFontSize(17, 12) === 11 &&
+        CandidateScalePolicy.expandedCellHeight(44, 12, 100) === 44,
+      "a smaller font preference keeps the design cell height",
+    );
+    check(
+      CandidateScalePolicy.expandedCellHeight(44, CandidateScalePolicy.scaled(12, 200), 200) === 88,
+      "the candidate bar still raises the cell when the font preference is small",
+    );
+    const largest: number = CandidateScalePolicy.scaled(32, CandidateScalePolicy.MAX_PERCENT);
+    check(
+      CandidateScalePolicy.expandedFontSize(17, largest) === 60 &&
+        CandidateScalePolicy.expandedCellHeight(44, largest, CandidateScalePolicy.MAX_PERCENT) ===
+          156,
+      "both settings at their maximum give the same sizes as Android",
+    );
+  },
+);
 
 group("the panel is as tall as what the view stacks inside it", () => {
   // 设计稿的 Harmony 框架：顶部 8，50vp 的条带，10vp 间距，四行 44vp 及其间三个行间距，底部 6。
@@ -15260,7 +15775,7 @@ group("Korean draws the syllable, not the key letters behind it", () => {
 
 group("the Korean scheme is one more card, and remembers the Chinese scheme it replaced", () => {
   check(
-    KeyboardScheme.SCHEMES[11] === KeyboardScheme.KOREAN && KeyboardScheme.SCHEMES.length === 19,
+    KeyboardScheme.SCHEMES[11] === KeyboardScheme.KOREAN && KeyboardScheme.SCHEMES.length === 20,
     "appended after the first ten, as the shared seventeen-entry picker has it",
   );
   check(
@@ -17870,7 +18385,7 @@ group(
   "Cantonese, Zhuyin and Vietnamese are three more cards, Cantonese and Zhuyin needing a dictionary",
   () => {
     check(
-      KeyboardScheme.SCHEMES.length === 19 &&
+      KeyboardScheme.SCHEMES.length === 20 &&
         KeyboardScheme.SCHEMES[11] === KeyboardScheme.KOREAN &&
         KeyboardScheme.SCHEMES[12] === KeyboardScheme.CANTONESE &&
         KeyboardScheme.SCHEMES[13] === KeyboardScheme.ZHUYIN &&
@@ -18040,9 +18555,57 @@ group("the Dachen keys wear their bopomofo and send their ASCII key", () => {
   );
 });
 
+group("粤语双拼是追加在最后的一张卡：粤拼的方案、布局和词典，默认不启用，带 ; 韵母键", () => {
+  const shuangpin: SchemeDefinition = KeyboardScheme.CANTONESE_SHUANGPIN;
+  check(
+    KeyboardScheme.SCHEMES[KeyboardScheme.SCHEMES.length - 1] === shuangpin &&
+      shuangpin.preferenceId === "cantonese_shuangpin" &&
+      shuangpin.engineScheme === "cantonese" &&
+      shuangpin.touchKeyboardLayout === "twenty_six_key" &&
+      shuangpin.glyph === "粤" &&
+      shuangpin.badge === "双",
+    "按 append-only 排在最后，与共享 TouchKeyboardScheme::ALL 一致",
+  );
+  check(
+    !KeyboardScheme.DEFAULT_ENABLED.includes(shuangpin) &&
+      KeyboardScheme.languageDictionary(shuangpin.engineScheme) === "msime-cantonese.db",
+    "默认不启用，并且和粤拼一样要 msime-cantonese.db",
+  );
+  check(
+    KeyboardScheme.fromPreferenceId("cantonese_shuangpin") === shuangpin &&
+      KeyboardScheme.fromPreferences("cantonese", null, "twenty_six_key") ===
+        KeyboardScheme.CANTONESE &&
+      KeyboardScheme.resolveEnabledSelection(KeyboardScheme.CANTONESE, "cantonese_shuangpin", [
+        KeyboardScheme.QUANPIN,
+        KeyboardScheme.CANTONESE,
+        shuangpin,
+      ]) === shuangpin,
+    "只靠 selected 与粤拼区分，按方案和布局反查时落到粤拼",
+  );
+  const mapping: PreferenceMapping = KeyboardScheme.mapping(shuangpin, "wubi", null);
+  check(
+    mapping.scheme === "cantonese" &&
+      mapping.lastChineseScheme === "cantonese" &&
+      mapping.touchKeyboardLayout === "twenty_six_key",
+    "写进偏好的是粤拼方案和 26 键布局",
+  );
+  check(
+    KeyboardScheme.showsSemicolonFinal(shuangpin) &&
+      KeyboardScheme.showsSemicolonFinal(KeyboardScheme.MICROSOFT) &&
+      !KeyboardScheme.showsSemicolonFinal(KeyboardScheme.CANTONESE) &&
+      !KeyboardScheme.showsSemicolonFinal(KeyboardScheme.XIAOHE),
+    "微软双拼和粤语双拼带 ; 键，普通粤拼和别的双拼不带",
+  );
+  check(
+    KeyboardScheme.semicolonFinalLabel(shuangpin) === "分号，粤语双拼 ing 和 ik" &&
+      KeyboardScheme.semicolonFinalLabel(KeyboardScheme.MICROSOFT) === null,
+    "粤语双拼的 ; 键读出它打的韵母",
+  );
+});
+
 group("Stroke is one more card, opt-in and needing msime-stroke.db", () => {
   check(
-    KeyboardScheme.SCHEMES.length === 19 &&
+    KeyboardScheme.SCHEMES.length === 20 &&
       KeyboardScheme.SCHEMES[15] === KeyboardScheme.TIBETAN &&
       KeyboardScheme.SCHEMES[16] === KeyboardScheme.STROKE,
     "appended after Tibetan, as the shared TouchKeyboardScheme::ALL appends it",
@@ -18830,10 +19393,7 @@ group("usage reporting reads HiAppEvent crash reports without leaking directorie
       },
     }),
   );
-  check(
-    javascript?.message === "TypeError: Cannot read property 'x' of undefined",
-    "a JavaScript crash keeps the error name and the first line of its message",
-  );
+  check(javascript?.message === "TypeError", "JavaScript 崩溃只保留类型，不上传异常消息");
   check(javascript?.stack.startsWith("at view") === true, "and its stack, trimmed");
 
   check(TelemetryPolicy.crashReport("not json") === null, "an unreadable report is ignored");
@@ -18851,69 +19411,80 @@ group("usage reporting reads HiAppEvent crash reports without leaking directorie
   );
 });
 
-group(
-  "a crash belongs to the unfinished keyboard session only before this keyboard begins its own",
-  () => {
-    const report: CrashReport = { pid: 99, time: 1, message: "SIGABRT", stack: "" };
-    check(
-      TelemetryPolicy.destination(report, 99, false) === CrashDestination.Session,
-      "the previous keyboard process's crash, before begin, is that session's crash",
-    );
-    check(
-      TelemetryPolicy.destination(report, 99, true) === CrashDestination.Standalone,
-      "after begin the marker is this run's, so the crash stands alone",
-    );
-    check(
-      TelemetryPolicy.destination(report, 12, false) === CrashDestination.Standalone,
-      "another process's crash (the settings application) never closes the keyboard session",
-    );
-    check(
-      TelemetryPolicy.destination(report, null, false) === CrashDestination.Standalone,
-      "with no remembered keyboard process nothing is attributed",
-    );
-    check(
-      TelemetryPolicy.standaloneRecordName(report) === "harmony-99-1.crash",
-      "a standalone record is named by process and time, so a report delivered twice is written once",
-    );
-    check(
-      TelemetryPolicy.recordText(report) === "SIGABRT\n",
-      "a record is the summary line, then the frames",
-    );
-    check(
-      TelemetryPolicy.rememberedPid('{"pid":4321}') === 4321,
-      "the remembered process id is read",
-    );
-    check(TelemetryPolicy.rememberedPid("{}") === null, "and a file without one is no process");
-  },
-);
+group("鸿蒙共享授权响应不能由错误或布尔缓存绕过", () => {
+  const epoch = "12345678-1234-4234-8234-123456789abc";
+  const response = (enabled: unknown, identity: unknown = epoch, since: unknown = 1000): string =>
+    JSON.stringify({ ok: true, value: { enabled, epoch: identity, since_unix_ms: since } });
+  const current = TelemetryPolicy.sharedConsentReply(response(true));
+  check(current?.epoch === epoch && current.since === 1000, "共享 UUID 与起点原样保留");
+  for (const invalid of [
+    response(false),
+    response("true"),
+    response(true, "1-1-1-1-1"),
+    response(true, "00000000-0000-0000-0000-000000000000"),
+    response(true, epoch, "1000"),
+    response(true, epoch, 0),
+    response(true, epoch, 1.5),
+    "{}",
+    "invalid",
+    JSON.stringify({ ok: false, value: { enabled: true, epoch, since_unix_ms: 1000 } }),
+  ]) {
+    check(TelemetryPolicy.sharedConsentReply(invalid) === null, "错误授权响应保持拒绝");
+  }
+});
 
-group("usage reporting is cleared only by a saved document that turns it off", () => {
-  const saved = '{"ok":true,"value":{"revision":3}}';
-  check(
-    TelemetryPolicy.reportingTurnedOff(
-      '{"format_version":1,"preferences":{"usage_reporting":false}}',
-      saved,
-    ),
-    "an explicit false that was saved turns reporting off",
+group("鸿蒙系统诊断必须处于持续同意的时间范围内", () => {
+  const report: CrashReport = { pid: 42, time: 2000, message: "SIGABRT", stack: "" };
+  check(TelemetryPolicy.diagnosticAllowed(report, 1000, 3000), "同意后发生的诊断允许补报");
+  check(!TelemetryPolicy.diagnosticAllowed(report, 2500, 3000), "重新开启统计不追认关闭期间的故障");
+  check(!TelemetryPolicy.diagnosticAllowed(report, null, 3000), "没有持久同意标记时不追认历史诊断");
+  check(!TelemetryPolicy.diagnosticAllowed(report, 1000, 1500), "未来诊断不能提前认领");
+});
+
+group("鸿蒙卡死独立归属且不携带系统原文", () => {
+  const report = TelemetryPolicy.freezeReport(
+    JSON.stringify({
+      pid: 42,
+      time: 100,
+      bundle_version: "0.1.0",
+      exception: { name: "THREAD_BLOCK_6S", message: "synthetic private content" },
+      hilog: ["synthetic private log"],
+      external_log: ["/private/synthetic.log"],
+    }),
   );
   check(
-    !TelemetryPolicy.reportingTurnedOff('{"format_version":1,"preferences":{}}', saved),
-    "an absent key is the default, which is on",
+    report?.message === "Hang THREAD_BLOCK_6S" && report.outsideSession === true,
+    "卡死不改变输入会话崩溃计数",
   );
   check(
-    !TelemetryPolicy.reportingTurnedOff(
-      '{"format_version":1,"preferences":{"usage_reporting":false}}',
-      '{"ok":false,"error":"conflict"}',
-    ),
-    "a save the store refused changed nothing",
+    report?.stack === "" && !JSON.stringify(report).includes("private"),
+    "系统日志和异常原文不进入记录",
   );
-  check(TelemetryPolicy.flushDue(0, 1000), "a keyboard that has not sent yet sends");
-  check(!TelemetryPolicy.flushDue(1000, 1000 + 60 * 60 * 1000), "an hour later it waits");
   check(
-    TelemetryPolicy.flushDue(1000, 1000 + 6 * 60 * 60 * 1000),
-    "six hours later it sends again",
+    report !== null &&
+      TelemetryPolicy.standaloneRecordName(report) === "harmony-freeze-42-100.crash",
+    "卡死身份稳定且与同刻崩溃区分",
   );
-  check(TelemetryPolicy.flushDue(5000, 1000), "a clock that went back does not stop it for good");
+  const unknown = TelemetryPolicy.freezeReport(
+    JSON.stringify({ pid: 42, time: 101, exception: { name: "synthetic private name" } }),
+  );
+  check(unknown?.message === "Hang unknown", "未知原因不泄露任意字符串");
+  check(TelemetryPolicy.freezeReport("invalid") === null, "拒绝损坏的卡死报告");
+});
+
+group("系统诊断文件名和原始版本在重复投递时保持稳定", () => {
+  const report: CrashReport = { pid: 99, time: 1, message: "SIGABRT", stack: "" };
+  check(
+    TelemetryPolicy.standaloneRecordName(report) === "harmony-99-1.crash",
+    "a standalone record is named by process and time, so a report delivered twice is written once",
+  );
+});
+
+group("遥测补发保持六小时间隔并处理时钟回拨", () => {
+  check(TelemetryPolicy.flushDue(0, 1000), "尚未发送的键盘允许补发");
+  check(!TelemetryPolicy.flushDue(1000, 1000 + 60 * 60 * 1000), "一小时后仍等待");
+  check(TelemetryPolicy.flushDue(1000, 1000 + 6 * 60 * 60 * 1000), "六小时后重新补发");
+  check(TelemetryPolicy.flushDue(5000, 1000), "时钟回拨不能永久阻止补发");
 });
 
 group("notices are shown from client-core's answer and their links leave the application", () => {
@@ -19104,5 +19675,165 @@ group(
     reboot.granted();
     now -= 60 * 1000;
     check(!reboot.active(), "时钟回到记录之前（重启设备）要重新认证");
+  },
+);
+
+// 候选读音：取词规则与 Android 的 CandidatePronunciationPolicy 相同，回答按「语言 + 文字」缓存；英文只收 `/…/`，其他语言收维基词典的 IPA，日文收罗马字。
+group(
+  "candidate pronunciations read English candidates and each gloss in its target language",
+  () => {
+    const key = CandidatePronunciationPolicy.key;
+    check(CandidatePronunciationPolicy.visible(true, true), "开关打开且表在时显示");
+    check(!CandidatePronunciationPolicy.visible(true, false), "缺表时不显示，也不预留那一行");
+    check(!CandidatePronunciationPolicy.visible(false, true), "开关关着时不显示");
+    check(
+      CandidatePronunciationPolicy.lookupText("hello", null, "fr") === key("en", "hello"),
+      "英文候选读它本身，不看释义目标语言",
+    );
+    check(
+      CandidatePronunciationPolicy.lookupText("well-known", null, "en") === key("en", "well-known"),
+      "连字符和撇号仍算英文",
+    );
+    check(
+      CandidatePronunciationPolicy.lookupText("你好", "hello; hi\nsecond", "en") ===
+        key("en", "hello; hi"),
+      "中文候选读英语释义的第一行，首个词组交给共享层",
+    );
+    check(
+      CandidatePronunciationPolicy.lookupText("你好", "bonjour, salut", "fr") ===
+        key("fr", "bonjour, salut"),
+      "法语释义按法语读，不当英文读",
+    );
+    check(
+      CandidatePronunciationPolicy.lookupText("猫", "猫", "ja") === key("ja", "猫"),
+      "日语释义交给共享层读罗马字",
+    );
+    check(
+      CandidatePronunciationPolicy.lookupText("你好", "bonjour", "zh") === "",
+      "没有读音表的语言不查",
+    );
+    check(CandidatePronunciationPolicy.lookupText("你好", null, "en") === "", "没有释义时不查");
+    check(
+      CandidatePronunciationPolicy.lookupText("AI助手", null, "en") === "",
+      "混着汉字的候选不当英文读",
+    );
+    const request = JSON.parse(
+      CandidatePronunciationPolicy.request([
+        key("en", "hello"),
+        "",
+        key("en", "hello"),
+        key("en", "world"),
+        key("fr", "chat"),
+        key("zh", "猫"),
+      ]),
+    );
+    check(request.generation === 0, "音标与代次无关，请求固定写 0");
+    check(
+      JSON.stringify(request.items) ===
+        JSON.stringify([
+          { text: "hello", language: "en" },
+          { text: "world", language: "en" },
+          { text: "chat", language: "fr" },
+        ]),
+      "同一个键只查一次，空的和没有读音表的语言不查",
+    );
+    const many = Array.from({ length: 400 }, (_value: unknown, index: number): string =>
+      key("en", `word${index}`),
+    );
+    check(
+      JSON.parse(CandidatePronunciationPolicy.request(many)).items.length ===
+        CandidatePronunciationPolicy.MAX_ITEMS,
+      "一次最多查 MAX_ITEMS 段",
+    );
+    const readings = CandidatePronunciationPolicy.decode(
+      JSON.stringify({
+        ok: true,
+        value: {
+          generation: 0,
+          pronunciations: [
+            { text: "hello", language: "en", pronunciation: "/həˈləʊ/" },
+            { text: "bad", language: "en", pronunciation: "həˈləʊ" },
+            { text: "bracketed", language: "en", pronunciation: "[x]" },
+            { text: "bonjour", language: "fr", pronunciation: "/bɔ̃.ʒuʁ/" },
+            { text: "кошка", language: "ru", pronunciation: "[ˈkoʂkə]" },
+            { text: "猫", language: "ja", pronunciation: "neko" },
+            { text: "고양이", language: "ko", pronunciation: "goyang-i" },
+            { text: "개", language: "ko", pronunciation: " " },
+            { text: "猫", language: "zh", pronunciation: "māo" },
+            { text: "chat", language: "fr", pronunciation: "ʃa" },
+            { text: "", language: "en", pronunciation: "/x/" },
+          ],
+        },
+      }),
+    );
+    check(readings !== null && readings.get(key("en", "hello")) === "/həˈləʊ/", "合法的音标收下");
+    check(
+      readings !== null &&
+        readings.get(key("fr", "bonjour")) === "/bɔ̃.ʒuʁ/" &&
+        readings.get(key("ru", "кошка")) === "[ˈkoʂkə]" &&
+        readings.get(key("ja", "猫")) === "neko" &&
+        readings.get(key("ko", "고양이")) === "goyang-i",
+      "其他语言的 IPA 和日文、韩文罗马字按语言收下",
+    );
+    check(
+      readings !== null && readings.size === 5,
+      "形状不对的、没有读音表的语言和空文字的回答丢掉",
+    );
+    check(
+      CandidatePronunciationPolicy.decode(JSON.stringify({ ok: false, error: "x" })) === null,
+      "失败的回答不缓存",
+    );
+    check(CandidatePronunciationPolicy.decode("not json") === null, "坏回答不缓存");
+    check(
+      CandidatePronunciationPolicy.accessibilitySuffix("/həˈləʊ/") === "，音标：/həˈləʊ/" &&
+        CandidatePronunciationPolicy.accessibilitySuffix("[ˈkoʂkə]") === "，音标：[ˈkoʂkə]" &&
+        CandidatePronunciationPolicy.accessibilitySuffix("neko") === "，读音：neko" &&
+        CandidatePronunciationPolicy.accessibilitySuffix("goyang-i") === "，读音：goyang-i" &&
+        CandidatePronunciationPolicy.accessibilitySuffix("") === "",
+      "读屏在释义之后念读音，没有读音时不念",
+    );
+    const word = { text: "hi", badge: "", hint: "", annotation: "" };
+    check(
+      CandidateWidthPolicy.chipContentVp({ ...word, pronunciation: "/ˌɪntəˈnæʃənəl/" }, 0, 18, 0) >
+        CandidateWidthPolicy.chipContentVp(word, 0, 18, 0),
+      "2in1 格子放得下比词宽的音标",
+    );
+    // 竖排把音标接在词和释义后面，窗口宽度要加上它，不是和释义取较宽的那个。
+    const glossed = {
+      text: "国际",
+      badge: "",
+      hint: "",
+      annotation: "an international organization of nations",
+    };
+    const longReading = "/ˌɪntəˈnæʃənəlˌɪntəˈnæʃənəl/";
+    check(
+      CandidateWidthPolicy.widthVp([{ ...glossed, pronunciation: longReading }], "guoji", 18, 15) >
+        CandidateWidthPolicy.widthVp([glossed], "guoji", 18, 15),
+      "竖排窗口按音标加宽",
+    );
+    check(
+      CandidateWidthPolicy.widthVp([{ ...glossed, pronunciation: "/x/" }], "guoji", 18, 15) >
+        CandidateWidthPolicy.widthVp([glossed], "guoji", 18, 15),
+      "比释义短的音标也加上去，因为竖排接在释义后面",
+    );
+    check(
+      CandidateWidthPolicy.widthVp([{ ...glossed, pronunciation: "" }], "guoji", 18, 15) ===
+        CandidateWidthPolicy.widthVp([glossed], "guoji", 18, 15),
+      "没有音标时宽度不变",
+    );
+    // 一段带控制字符的文字会让共享层整批拒绝，所以这样的释义不查，也不进请求。
+    check(
+      CandidatePronunciationPolicy.lookupText("爱", "to love\taffection", "en") === "" &&
+        CandidatePronunciationPolicy.lookupText("爱", "love\u0085", "en") === "",
+      "带控制字符的释义不查",
+    );
+    check(
+      JSON.stringify(
+        JSON.parse(
+          CandidatePronunciationPolicy.request([key("en", "love\taffection"), key("en", "hello")]),
+        ).items,
+      ) === JSON.stringify([{ text: "hello", language: "en" }]),
+      "带控制字符的文字不进请求，同一页的其他文字照常查",
+    );
   },
 );

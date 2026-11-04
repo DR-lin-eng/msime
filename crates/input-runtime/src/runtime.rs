@@ -366,6 +366,7 @@ pub fn score_settled_rerank(mut request: SettledRerankRequest) -> SettledRerankS
             request.scheme,
             request.answered_by_pinyin_fallback,
             &rows,
+            pool,
         )
     };
     SettledRerankScore {

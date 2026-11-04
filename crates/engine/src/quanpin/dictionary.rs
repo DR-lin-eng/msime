@@ -52,15 +52,17 @@ use crate::user_dictionary::journal::record_user_insert;
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
 use crate::user_dictionary::typo_profile::PersonalTypoProfile;
 
-#[cfg(test)]
 use super::series::{
     append_unique_words, defer_pooled_sentences, fold_reading, has_corrected_cut,
     lead_literal_abbreviation_phrases, mark_autocorrect_candidates, merge_alternative_rows,
-    merge_alternative_segmentations, merge_series_by_coverage, resolve_series_query,
-    series_cache_key, SeriesResolution, ALTERNATIVE_SEGMENTATION_CANDIDATE_LIMIT,
-    AUTOCORRECT_CUT_KBEST, LONGER_PHRASE_EXTRA_SYLLABLES, LONGER_PHRASE_LIMIT,
-    MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS,
+    merge_alternative_segmentations, merge_series_by_coverage, series_cache_key, SeriesResolution,
+    ALTERNATIVE_SEGMENTATION_CANDIDATE_LIMIT, AUTOCORRECT_CUT_KBEST, LONGER_PHRASE_EXTRA_SYLLABLES,
+    LONGER_PHRASE_LIMIT, MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS,
 };
+
+// 本机的测试夹具仍用不带触点的旧入口（正文走 `resolve_series_query_with_touch`）。
+#[cfg(test)]
+use super::series::resolve_series_query;
 
 #[cfg(test)]
 mod marking_buffer_tests;
@@ -2457,5 +2459,6 @@ mod online_cache_update_tests;
 #[path = "dictionary/partial_sentence_tests.rs"]
 mod partial_sentence_tests;
 
+#[cfg(test)]
 #[path = "dictionary/online_beam_context_tests.rs"]
 mod online_beam_context_tests;

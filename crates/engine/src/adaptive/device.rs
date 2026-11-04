@@ -48,11 +48,12 @@ mod onnx {
                 "libonnxruntime.so".into()
             }
         });
-        // 加载失败返回错误，不触发下载，也不让缺少运行时阻断输入。
-        ort::init_from(library)
+        // 加载失败返回错误，不触发下载，也不让缺少运行时阻断输入。rc.15 起环境要显式传给每个会话。
+        let environment = ort::init_from(library)
             .ok()?
             .with_name("msime-local-prediction")
-            .commit();
+            .build()
+            .ok()?;
         let providers = [
             (
                 "coreml-npu",
@@ -92,12 +93,18 @@ mod onnx {
             }
             // 禁止设备会话把不支持的节点静默交给 CPU，失败后再试下一个后端。
             let attempt = || -> ort::Result<Session> {
-                Session::builder()?
-                    .with_intra_threads(1)?
-                    .with_parallel_execution(false)?
-                    .with_memory_pattern(false)?
-                    .with_config_entry("session.disable_cpu_ep_fallback", "1")?
-                    .with_execution_providers([provider.error_on_failure()])?
+                Session::builder(&environment)
+                    .map_err(ort::Error::<()>::from)?
+                    .with_intra_threads(1)
+                    .map_err(ort::Error::<()>::from)?
+                    .with_parallel_execution(false)
+                    .map_err(ort::Error::<()>::from)?
+                    .with_memory_pattern(false)
+                    .map_err(ort::Error::<()>::from)?
+                    .with_config_entry("session.disable_cpu_ep_fallback", "1")
+                    .map_err(ort::Error::<()>::from)?
+                    .with_execution_providers([provider.error_on_failure()])
+                    .map_err(ort::Error::<()>::from)?
                     .commit_from_memory(include_bytes!("model.onnx"))
             };
             if let Ok(session) = attempt() {
@@ -178,11 +185,12 @@ mod tests {
             eprintln!("skipped: MSIME_TEST_ONNX_RUNTIME 未设置；Docker 设备图验证时必须提供运行时");
             return;
         };
-        ort::init_from(library)
+        let environment = ort::init_from(library)
             .unwrap()
             .with_name("msime-local-prediction")
-            .commit();
-        let mut session = Session::builder()
+            .build()
+            .unwrap();
+        let mut session = Session::builder(&environment)
             .unwrap()
             .with_intra_threads(1)
             .unwrap()

@@ -86,8 +86,12 @@ pub(crate) fn personal_context_rerank_with_history(
     if candidates.len() < 2 || !first.source.is_dictionary() {
         return None;
     }
-    let group_len = leading_group_len(candidates, scheme);
-    let group = &candidates[..group_len];
+    let (seats, group_len) = leading_group(candidates, scheme);
+    let mut rows = [first; MAX_GROUP];
+    for (row, &seat) in rows.iter_mut().zip(&seats[..group_len]) {
+        *row = &candidates[seat];
+    }
+    let group = &rows[..group_len];
     let context_text = if history.is_empty() {
         previous.unwrap_or_default()
     } else {
@@ -125,7 +129,14 @@ pub(crate) fn personal_context_rerank_with_history(
             index,
         );
     }
-    order_scores(group, &mut scored[..group_len], is_pinned)
+    let Some(indices) = order_scores(group, &mut scored[..group_len], is_pinned) else {
+        return None;
+    };
+    Some(PersonalContextRerankOrder {
+        group_len,
+        seats,
+        indices,
+    })
 }
 
 fn personal_probabilities(
@@ -224,10 +235,10 @@ fn blended_order_indices(
 }
 
 fn order_scores(
-    group: &[WordItem],
+    group: &[&WordItem],
     scored: &mut [(f64, usize)],
     is_pinned: &mut dyn FnMut(&str) -> bool,
-) -> Option<PersonalContextRerankOrder> {
+) -> Option<[usize; MAX_GROUP]> {
     // 稳定排序使同分候选保持字典顺序。
     scored.sort_by(|left, right| right.0.total_cmp(&left.0));
 

@@ -68,6 +68,7 @@ fn incomplete_evidence_falls_back_to_the_existing_model() {
             0,
             false,
             &ScoredOrderRows::new(&rows, &scores),
+            0,
         )
         .unwrap()
         .apply(&mut order);
@@ -490,6 +491,7 @@ fn scored_runner_ups_keep_unscored_slots_and_equal_score_order() {
         0,
         false,
         &ScoredOrderRows::new(&rows, &evidence),
+        0,
     )
     .unwrap();
     let mut order: Vec<_> = (0..rows.len()).collect();
@@ -518,9 +520,9 @@ fn scored_runner_ups_keep_the_nine_row_budget_and_bounded_allocations() {
         }
         let scored = ScoredOrderRows::new(&rows, &evidence);
         let mut model = model();
-        assert!(rerank_plan(&mut model, "甲", 0, false, &scored).is_some());
+        assert!(rerank_plan(&mut model, "甲", 0, false, &scored, 0).is_some());
         let (plan, allocations, bytes) =
-            allocations::count_bytes(|| rerank_plan(&mut model, "甲", 0, false, &scored));
+            allocations::count_bytes(|| rerank_plan(&mut model, "甲", 0, false, &scored, 0));
         let mut order: Vec<_> = (0..count).collect();
         plan.unwrap().apply(&mut order);
         assert_eq!(order[0], 8);
@@ -548,11 +550,13 @@ fn scored_runner_ups_keep_the_nine_row_budget_and_bounded_allocations() {
             "",
             0,
             false,
-            &ScoredOrderRows::new(&rows, &evidence)
+            &ScoredOrderRows::new(&rows, &evidence),
+            0,
         )
         .is_none(),
         "第十条的高分不能进入九条评分预算"
     );
+}
 
 /// 只给分、混合权重由测试指定的打分器：「乙」模型分高 1、词网格逐字分低 1。
 struct Weighted {

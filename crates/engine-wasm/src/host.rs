@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use msime_engine::ordering::{
-    rerank_plan, runner_up_order, OrderRow, Reranker, ScoredOrderRows, SentenceModel,
+    rerank_plan, runner_up_order, CandidateScorer, OrderRow, Reranker, ScoredOrderRows,
+    SentenceModel,
 };
 use msime_engine::time::Instant;
 use msime_engine::{
@@ -1102,12 +1103,14 @@ impl WebHost {
                     .iter()
                     .map(|item| item.static_evidence())
                     .collect();
+                let pool = reranker.sentence_pool();
                 if let Some(plan) = rerank_plan(
                     reranker,
                     &self.context,
                     scheme,
                     snapshot.answered_by_pinyin_fallback,
                     &ScoredOrderRows::new(&rows, &evidence),
+                    pool,
                 ) {
                     plan.apply(&mut order);
                 }

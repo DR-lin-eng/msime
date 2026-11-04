@@ -4247,11 +4247,12 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     [NSRunLoop.mainRunLoop addTimer:_settledTimer forMode:NSRunLoopCommonModes];
 }
 
-// 联想属于刚完成上屏的光标位置，鼠标换位置后不能再应用旧回包或点选旧词。
+// 联想属于刚完成上屏的光标位置，鼠标换位置后不能再应用旧回包或点选旧词。应用不报告选区时无从比较，与上游 `MSIMETextClientSelection` 的口径一致：点选照常，锚点只约束报告得了选区的客户端。
 - (BOOL)predictionAnchorCurrent {
     if (!MSIMEStrictBoolean(_view[@"prediction"])) return YES;
-    if ([self secureEventInputActive] || !_predictionAnchorValid ||
-        ![_activeClient respondsToSelector:@selector(selectedRange)]) return NO;
+    if ([self secureEventInputActive]) return NO;
+    if (![_activeClient respondsToSelector:@selector(selectedRange)]) return YES;
+    if (!_predictionAnchorValid) return NO;
     return NSEqualRanges([(id<MSIMETextClient>)_activeClient selectedRange], _predictionAnchor);
 }
 
@@ -6413,7 +6414,9 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     _inputAssistance=[[MSIMEInputAssistance alloc] initWithPasteboard:NSPasteboard.generalPasteboard
         preferences:^NSDictionary * {
             MSIMEInputController *controller=weakController;
-            return controller ? controller->_session.hostOptions[@"preferences"] : nil;
+            id session=controller ? controller->_session : nil;
+            // 测试替身的会话不实现 hostOptions（上游语音启动用例激活控制器时也会挂上本辅助），没有就不启用。
+            return [session respondsToSelector:@selector(hostOptions)] ? [session hostOptions][@"preferences"] : nil;
         } isCurrent:^BOOL {
             MSIMEInputController *controller=weakController;
             if (!controller || controller->_activeClient!=sender || [controller secureEventInputActive] ||
@@ -8080,8 +8083,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (!_session) return NO;
     if (_focusPending) [self prepareSession];
     [self syncPageSize];
-    // 空闲联想只响应点选；普通按键先清掉建议，再按没有组字的规则继续处理。
-    if (MSIMEStrictBoolean(_view[@"prediction"])) [self clearPostCommitPrediction];
+    // 上屏后联想的按键政策在上游 `handleEvent:` 的 `dismissPredictionForKey` 一道门里：数字、空格选联想，其余键收掉联想再照常处理。这里不再抢先清掉建议——那会把上游改成可选中的数字与空格也一起拦下。
     // 展开的候选网格开着时先归它，它不认的键已经收起网格，往下照常处理。
     if (_expandedCandidates && [self handleExpandedCandidateEvent:event client:sender]) return YES;
     NSUInteger deletionSlot = MSIMECandidateDeletionSlot(event);

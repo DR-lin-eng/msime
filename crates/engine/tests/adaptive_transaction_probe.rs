@@ -1,5 +1,8 @@
 use msime_engine::{assets, Command, RuntimePaths, Session, SessionOptions};
 use rusqlite::Connection;
+// 三个测试都用 `flush_personal_learning`/`close_cached_databases` 这对全局操作，并行跑会互相拆掉
+// 对方已学到的状态（CI 上偶发首选退回默认）；锁住串行执行，探针的结论不变。
+static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn fixture() -> (tempfile::TempDir, RuntimePaths) {
     let root = tempfile::tempdir().unwrap();
     let paths = RuntimePaths {
@@ -67,6 +70,7 @@ fn leader(s: &mut Session, context: &str) -> String {
 }
 #[test]
 fn adaptive_transaction_probe() {
+    let _serial = GLOBAL_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_root, paths) = fixture();
     let mut s = session(&paths);
     let context = format!("甲{}", "的".repeat(100));
@@ -94,6 +98,7 @@ fn adaptive_transaction_probe() {
 
 #[test]
 fn learned_ranking_survives_restart_and_respects_pin_and_learning_switch() {
+    let _serial = GLOBAL_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_root, paths) = fixture();
     let mut s = session(&paths);
     for _ in 0..64 {
@@ -132,6 +137,7 @@ fn learned_ranking_survives_restart_and_respects_pin_and_learning_switch() {
 
 #[test]
 fn disabled_learning_never_trains_or_creates_a_personal_journal() {
+    let _serial = GLOBAL_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_root, paths) = fixture();
     let mut opts = SessionOptions::new(paths.clone());
     opts.learning = false;

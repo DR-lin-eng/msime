@@ -14,6 +14,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 
+mod reporting_authority;
+pub use reporting_authority::{ReportingAuthority, ReportingAuthorization};
+mod reporting_consent;
+pub use reporting_consent::UsageReportingConsent;
+
 /// The largest preference document accepted by the shared host boundary. This
 /// covers a validated custom skin photo while preventing a damaged local file
 /// from forcing an unbounded allocation during startup or recovery.
@@ -546,13 +551,13 @@ impl<'de> Deserialize<'de> for TouchNineKeySwipeDigits {
     }
 }
 
-/// 上屏后联想显示时候选栏右端放哪些按键（#10078）。只在 `next_word_prediction` 开着时有意义；普通组字的候选栏不受它影响。目前只有 Android 原生键盘读它，其他宿主原样保留。
+/// 上屏后联想显示时候选栏右端放哪些按键（#10078）。只在 `next_word_prediction` 开着时有意义；普通组字的候选栏不受它影响。只有触屏宿主读它（候选栏右端有按键可放），桌面宿主的候选窗没有这两个键，原样保留。
 ///
 /// 读文档时不认识的值按默认读，不是字符串照样报错，与 [`TouchTwentySixKeyStyle`] 一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NextWordPredictionButtons {
-    /// 现有样式：只有展开键（联想多于一页时才出现），关闭联想靠空格或继续输入。
+    /// 现有样式：只有展开键（联想多于一页时才出现），关闭联想靠继续输入。
     #[default]
     ExpandOnly,
     /// 关闭键 × 加展开键；展开面板打开时 × 仍在 ∧ 左边。
@@ -1420,6 +1425,27 @@ pub struct KoreanPreferences {
     pub layout: KoreanLayout,
 }
 
+/// 桌面宿主的粤拼按什么解释：`Jyutping` 是普通粤拼，前两键不是完整音节、又能解成双拼码时自动按粤语双拼读；`Shuangpin` 从第一键起按粤语双拼两键一音节读，与粤拼同形的码（如 `oi`）也按双拼。触屏宿主不读这一项，粤语双拼在那里是独立的触屏方案（`TouchKeyboardScheme::CantoneseShuangpin`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CantoneseInputMethod {
+    #[default]
+    Jyutping,
+    Shuangpin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CantonesePreferences {
+    pub input_method: CantoneseInputMethod,
+}
+
+impl CantonesePreferences {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// How Vietnamese letters and tones are typed. The Engine code is the declaration order (`vietnamese_input_method`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1528,7 +1554,7 @@ pub enum GrammarModel {
     Baishuang,
 }
 
-/// Candidate sentence-association sources. The dictionary lattice keeps its historical default; neural rerankers are opt-in because they add model work while typing or settling.
+/// 整句联想的候选来源与模型重排。词网格一直默认开；逐键重排（`neural_keyboard`，整句联想「增强」）默认开，挂不挂、挂哪一档由 host-api 在每台设备上按自测速度决定（见 `.agents/notes/implemented/feature/2026-11-02-keystroke-reranker-default-on.md`）；桌面的停顿重排（`neural_desktop`）仍要自己打开，它要另下一个模型。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SentenceAssociationPreferences {
@@ -1537,8 +1563,8 @@ pub struct SentenceAssociationPreferences {
     /// Runs the desktop sentence model as the input runtime's settled reranker once typing pauses, when a host has installed it; the Engine never loads that model.
     #[serde(default)]
     pub neural_desktop: bool,
-    /// 整句联想「增强」: mounts the keyboard sentence model as the input runtime's per-keystroke reranker when the edition ships the model. The Engine's own keyboard-model rerank does not follow it.
-    #[serde(default)]
+    /// 整句联想「增强」：把逐键重排器挂到 input runtime 上（版本带模型时）；引擎自己那层键盘模型不跟它走。默认开，缺键时按开读；host-api 只在这台设备跑得进逐键预算时才真的挂（`ffi::keyboard_reranker`），跑不进时与「标准」相同。默认改成开之前写下的文档里存着当时默认的 `false`，由 [`Preferences::settle_keyboard_reranker_default`] 在读入时一次性改过来。
+    #[serde(default = "enabled_by_default")]
     pub neural_keyboard: bool,
     #[serde(default)]
     pub show_next_on_duplicate: bool,
@@ -1598,7 +1624,7 @@ impl Default for SentenceAssociationPreferences {
         Self {
             word_lattice: true,
             neural_desktop: false,
-            neural_keyboard: false,
+            neural_keyboard: true,
             show_next_on_duplicate: false,
             grammar_model: GrammarModel::None,
             sentence_collocation_weight: SENTENCE_COLLOCATION_WEIGHT_DEFAULT,
@@ -1744,7 +1770,7 @@ pub struct Preferences {
     /// its model is installed.
     #[serde(default)]
     pub sentence_association: SentenceAssociationPreferences,
-    /// 上屏后推荐下一词；Android 原生键盘提供入口，独立于整句候选，默认关闭。
+    /// 上屏后推荐下一词，独立于整句候选，默认关闭；只有声明了 `HostCapabilities::next_word_prediction` 的宿主读它（Android 原生键盘、Windows 原生设置都有入口）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub next_word_prediction: bool,
     /// 上屏后联想时候选栏右端的按键，见 [`NextWordPredictionButtons`]；默认即现有的只有展开键，不写进文档。
@@ -1992,8 +2018,12 @@ pub struct Preferences {
     /// `nine_key_shuangpin_profile` 为 `custom` 时用的表，形状与 `shuangpin_custom_profile` 相同，键是数字：`initials` 放 23 个声母，`finals` 放 33 个韵母，各一个数字；`zero_initials` 放 12 个零声母音节，各两位数字。这里只限制大小，合不合法由 Engine 判定（`msime_engine::validate_nine_key_shuangpin_table`）；表缺失或不合法时宿主按默认的内置方案运行。选别的方案时保留，空表不写进文件。
     #[serde(default, skip_serializing_if = "ShuangpinCustomProfile::is_empty")]
     pub nine_key_shuangpin_custom_profile: ShuangpinCustomProfile,
+    /// 「双拼预编辑」：真时预编辑画原始按键，假时画展开的全拼分词（自然码 `nimf` 画成 `ni'men`）。
     #[serde(default = "enabled_by_default")]
     pub shuangpin_preedit_uses_raw: bool,
+    /// 「双拼预编辑」的第三档「双拼分隔」：`shuangpin_preedit_uses_raw` 为真时按音节在原始按键之间插 `'`（`nimf` 画成 `ni'mf`）；为假（拼音分词）时不读。单独成一个键而不是把上面那个布尔改成三选一：已经发出去的各端都按布尔读 `shuangpin_preedit_uses_raw`（macOS 账号同步的校验还要求它是布尔、键数固定），没有这个键的旧版本照样读得了新文档，读到的就是保留原始按键。等于默认值（关）时不写进文档。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shuangpin_preedit_separated: bool,
     /// 「输入时显示双拼键位提示」：双拼组字时在候选窗旁显示当前方案的键位图，高亮刚按下的键，上屏后隐藏。macOS 和 Windows 画它。
     ///
     /// 没写过时为 `None`，不写进文档：这个开关以前只存在 macOS 本机的 defaults 里（`MSIMEClientShuangpinKeymap`），macOS 在文档从没带过这一项时仍读那里的旧选择，再由下一次保存写进文档；文档带着这一项载入过一次之后 macOS 删掉那个旧键，此后缺这一项在所有宿主上都是关。
@@ -2005,6 +2035,9 @@ pub struct Preferences {
     /// 可选韩语布局；宿主未声明能力时仍运行两套式。
     #[serde(default)]
     pub korean: KoreanPreferences,
+    /// 桌面宿主的粤拼解释方式（普通粤拼或粤语双拼）。等于默认值时不写进文档，没动过这一项的文档与以前的版本相同。
+    #[serde(default, skip_serializing_if = "CantonesePreferences::is_default")]
+    pub cantonese: CantonesePreferences,
     /// 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字，选一个字后剩下的拼写接着组字。默认关闭。
     #[serde(default)]
     pub single_character_only: bool,
@@ -2284,9 +2317,19 @@ pub struct Preferences {
     /// 内部标记，不是设置：这份文档已经按「AI 辅助翻译要显式选择」定过一次。Android 和 iOS 以前不读 `translation_ai`，AI 联想开着、又没选别的翻译服务时就用 AI 翻译候选；现在各端都只认 `translation_ai`，所以读到没有这个标记的文档时，在这两个平台上把当时实际在用 AI 翻译的情形一次性写成显式选择，再标上它（`Preferences::settle_translation_ai_selection`）；之后用户改选别的服务也不会再被改回来。新文档从一开始就带着它（`Default` 为真），缺键时按假读。保存时只会从假变真（`PreferencesStore::save`），恢复默认设置和导入设置文件都不会把它清掉。不在任何设置页上显示。
     #[serde(default, skip_serializing_if = "is_false")]
     pub translation_ai_migrated: bool,
+    /// 内部标记，不是设置：这份文档已经按「整句联想默认『增强』」定过一次。`sentence_association.neural_keyboard` 以前默认关，每个字段都序列化，旧文档里的 `false` 分不出「从没动过」和「自己选了『标准』」，所以读到没有这个标记的文档时，词网格开着就把它一次性打开，再标上它（`Preferences::settle_keyboard_reranker_default`）；词网格关着是用户选了「关闭」，不动。之后用户选回「标准」就一直是「标准」。新文档从一开始就带着它（`Default` 为真），缺键时按假读。保存时只会从假变真（`PreferencesStore::save`），恢复默认设置和导入设置文件都不会把它清掉。不在任何设置页上显示。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keyboard_reranker_migrated: bool,
     /// 向 `https://api.msime.app/v1/telemetry/events` 发送匿名使用报告（每日活跃、会话结束、崩溃摘要；见 `telemetry` 和 PRIVACY.md）。默认开启；关闭后停止全部上报并清空本地队列。读取方把缺失的键当作开启。
     #[serde(default = "enabled_by_default")]
     pub usage_reporting: bool,
+    /// 只属于本机的持续同意历史，由存储在开关保存时维护；提交方不能指定，损坏时不追认旧历史。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "reporting_consent::deserialize"
+    )]
+    pub usage_reporting_consent: Option<UsageReportingConsent>,
     /// 桌面应用检查更新跟哪个发布通道，见 [`UpdateChannel`]。只属于本机：不随设置文件走（`settings_document::LOCAL_SECTIONS`），也不进账号同步。等于稳定版时不写进文档，没有这个键的旧文档按稳定版读。
     #[serde(default, skip_serializing_if = "UpdateChannel::is_default")]
     pub update_channel: UpdateChannel,
@@ -2341,7 +2384,7 @@ pub struct VoiceInputPreferences {
     /// Absolute path to the installed model directory the `local` provider runs (one containing `msime-model.json`, see `voice::local_models`). Nothing is uploaded and no endpoint or token applies. Only the path's shape is checked here, since the same document is read on every OS: any absolute form the host OS uses is accepted, and the recognizer finds its files only through `msime-model.json`, so a path without one is a missing model rather than an invalid document.
     #[serde(default)]
     pub asr_model_path: String,
-    /// Optional `https://` prefix placed in front of every local model download URL (ghproxy-style), for networks where GitHub release downloads are slow or blocked. Empty downloads from the catalog URLs as they are.
+    /// Optional `https://` prefix placed in front of every local model download URL (ghproxy-style), for networks where GitHub release downloads are slow or blocked. Whatever is set here, downloads then try the project mirror (`resource_packs::PROJECT_MIRRORS`, `https://dl.msime.app/gh/`) and finally the catalog URLs as they are; empty skips only the user's own mirror.
     #[serde(default)]
     pub asr_model_mirror: String,
     #[serde(default)]
@@ -2393,6 +2436,24 @@ pub struct VoiceInputPreferences {
     pub doubao_enable_ddc: bool,
     #[serde(default)]
     pub doubao_boosting_table_id: String,
+    /// 点按开始的本地识别出字后停顿多久结束录音（毫秒），500–5000、步进 100，默认 1500，与 Android 本机设置 `platform.android.voice_pause_millis` 同一范围。鸿蒙和 iOS 读它；Android 的这一项在它自己的本机设置里，不读这个字段。`voice_input` 整组不进设置文件导出，账号同步也不导出这一项，所以只留在本机。默认值不写进文档。
+    #[serde(
+        default = "default_voice_pause_millis",
+        skip_serializing_if = "is_default_voice_pause_millis"
+    )]
+    pub pause_millis: u16,
+    /// 判停灵敏度，10–90、默认 50：越高越容易判定说完、结束录音。只作用于按停顿结束的本地整段模型，宿主把它换成 Silero VAD 的判定阈值（灵敏度 ÷ 100，默认正是原来的 0.5）。与 `pause_millis` 一样只留在本机，默认值不写进文档。
+    #[serde(
+        default = "default_voice_stop_sensitivity",
+        skip_serializing_if = "is_default_voice_stop_sensitivity"
+    )]
+    pub stop_sensitivity: u8,
+    /// 语音标点：识别结果上屏前怎么处理标点，`auto`（原样，出厂默认）、`omit_trailing`（去掉句末标点）、`omit_all`（去掉所有标点）、`space`（标点换成空格）。对所有识别服务和润色后的文本都生效，规则在 `msime_client_providers::voice::punctuation`，宿主上屏前经 `msime_client_voice_punctuation` 调用。读的时候不认识的值按 `auto` 处理，所以这里不校验取值，更新版本写下的新选项不会让旧版本读不了偏好。与 `doubao_enable_punc` 无关：那一项只决定豆包请求时要不要标点。默认值不写进文档。
+    #[serde(
+        default = "default_voice_punctuation_mode",
+        skip_serializing_if = "is_default_voice_punctuation_mode"
+    )]
+    pub punctuation_mode: String,
 }
 
 /// EveryAPI 的识别默认模型以前写成 `openai/whisper-large-v3-turbo`，那是照搬 Apple 预设的名字，EveryAPI 从没有它的渠道（请求返回 503 `model_not_found`）。共享设置页切到 EveryAPI 时会把默认模型写进 `asr_model`，所以选过 EveryAPI 的文档里存的就是这个值。
@@ -2452,6 +2513,9 @@ impl Default for VoiceInputPreferences {
             doubao_enable_punc: true,
             doubao_enable_ddc: source_voice_default(),
             doubao_boosting_table_id: String::new(),
+            pause_millis: VOICE_PAUSE_MILLIS_DEFAULT,
+            stop_sensitivity: VOICE_STOP_SENSITIVITY_DEFAULT,
+            punctuation_mode: default_voice_punctuation_mode(),
         }
     }
 }
@@ -2595,6 +2659,10 @@ pub struct GameCompatibilityPreferences {
     pub overlay_processes: Vec<String>,
     /// 从不由水杉显示候选窗的进程基名，优先于 `overlay_processes` 和内置规则。
     pub excluded_processes: Vec<String>,
+    /// 游戏给不出可信光标时，兜底锚点放在客户区上部而不是下部。默认关闭：多数游戏的
+    /// 聊天输入框在左下角，`GameCandidateAnchor.h` 的落点就是按那里定的。少数游戏的
+    /// 输入框在顶部（DNF 的聊天行在画面上沿），对它们左下角的兜底点离输入处最远。
+    pub overlay_anchor_top: bool,
 }
 
 impl Default for GameCompatibilityPreferences {
@@ -2603,6 +2671,7 @@ impl Default for GameCompatibilityPreferences {
             candidate_overlay: true,
             overlay_processes: Vec::new(),
             excluded_processes: Vec::new(),
+            overlay_anchor_top: false,
         }
     }
 }
@@ -3981,6 +4050,19 @@ impl Preferences {
     }
 }
 
+impl Preferences {
+    /// 读入偏好文档时调用一次：文档还没有 `keyboard_reranker_migrated` 标记，就是整句联想默认改成「增强」之前写下的，那时 `sentence_association.neural_keyboard` 默认关、而且总被写进文档。词网格开着（「标准」或「增强」）时把它打开；词网格关着是用户在三档里选了「关闭」，那是明确不要整句联想，不动。不论哪种都标上标记，之后再读不会重来，用户之后选回「标准」的值原样保留。在默认改变之前有意从「增强」退回「标准」的人分不出来，会被打开一次，与智能标点默认开的迁移同样取舍。只改内存里读到的这份，文件等下一次真正的保存才带上新值和标记，在那之前每次读都得到同样的结果。
+    fn settle_keyboard_reranker_default(&mut self) {
+        if self.keyboard_reranker_migrated {
+            return;
+        }
+        if self.sentence_association.word_lattice {
+            self.sentence_association.neural_keyboard = true;
+        }
+        self.keyboard_reranker_migrated = true;
+    }
+}
+
 /// Three voice switches the source ships on and the shared document had off: muting other audio while recording, Doubao's semantic smoothing (DDC), and polishing the recognized text.
 ///
 /// `platforms/windows/installer/config.default.toml` has all three `true`, matching the source's factory configuration, but like smart punctuation that file is only the installed template - the running host reads this document - so the effective first-run value on Windows was `false`. macOS is the port of that desktop product and follows it. None of the three depends on the platform: muting uses CoreAudio on macOS, DDC is a Doubao request flag, and polishing still needs a polish token before anything is sent.
@@ -4188,6 +4270,41 @@ fn default_doubao_auth_mode() -> String {
     "api_key".to_owned()
 }
 
+/// 本地识别停顿时间的范围、步进和默认值（毫秒），与 Android `AndroidLocalSettings.VOICE_PAUSE_*` 相同；默认值就是改成可调之前写死的 1500。
+pub const VOICE_PAUSE_MILLIS_RANGE: std::ops::RangeInclusive<u16> = 500..=5000;
+pub const VOICE_PAUSE_MILLIS_STEP: u16 = 100;
+pub const VOICE_PAUSE_MILLIS_DEFAULT: u16 = 1500;
+/// 判停灵敏度的范围和默认值；默认 50 对应原来写死的 VAD 阈值 0.5。
+pub const VOICE_STOP_SENSITIVITY_RANGE: std::ops::RangeInclusive<u8> = 10..=90;
+pub const VOICE_STOP_SENSITIVITY_DEFAULT: u8 = 50;
+
+fn default_voice_pause_millis() -> u16 {
+    VOICE_PAUSE_MILLIS_DEFAULT
+}
+
+fn is_default_voice_pause_millis(value: &u16) -> bool {
+    *value == VOICE_PAUSE_MILLIS_DEFAULT
+}
+
+fn default_voice_stop_sensitivity() -> u8 {
+    VOICE_STOP_SENSITIVITY_DEFAULT
+}
+
+fn is_default_voice_stop_sensitivity(value: &u8) -> bool {
+    *value == VOICE_STOP_SENSITIVITY_DEFAULT
+}
+
+/// `voice_input.punctuation_mode` 的出厂值：识别结果原样上屏。
+pub const VOICE_PUNCTUATION_MODE_DEFAULT: &str = "auto";
+
+fn default_voice_punctuation_mode() -> String {
+    VOICE_PUNCTUATION_MODE_DEFAULT.into()
+}
+
+fn is_default_voice_punctuation_mode(value: &str) -> bool {
+    value == VOICE_PUNCTUATION_MODE_DEFAULT
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -4285,9 +4402,11 @@ impl Default for Preferences {
             nine_key_shuangpin_profile: NineKeyShuangpinProfile::default(),
             nine_key_shuangpin_custom_profile: ShuangpinCustomProfile::default(),
             shuangpin_preedit_uses_raw: true,
+            shuangpin_preedit_separated: false,
             shuangpin_keymap_hint: None,
             vietnamese: VietnamesePreferences::default(),
             korean: KoreanPreferences::default(),
+            cantonese: CantonesePreferences::default(),
             single_character_only: false,
             caret_edit_suffix: false,
             candidate_page_size: 6,
@@ -4374,7 +4493,9 @@ impl Default for Preferences {
             translation_account: false,
             translation_ai: false,
             translation_ai_migrated: true,
+            keyboard_reranker_migrated: true,
             usage_reporting: true,
+            usage_reporting_consent: None,
             update_channel: UpdateChannel::Stable,
         }
     }
@@ -5000,6 +5121,10 @@ impl Preferences {
     /// 诊断包里的配置快照：整份偏好文档，凭据清单里的每个字段都换成 [`REDACTED`]；此外任何键名符合服务端脱敏规则（含 `token`、`secret`、`password`、`api_key` 或以 `key` 结尾，不分大小写）的值也一律换掉，这样快照上传时一定通过服务端的校验。
     pub fn redacted_for_diagnostics(&self) -> serde_json::Value {
         let mut value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        // 持续授权身份只留本机，诊断包和凭据脱敏快照同样不能导出它。
+        if let Some(object) = value.as_object_mut() {
+            object.remove("usage_reporting_consent");
+        }
         let mut copy = self.clone();
         for (path, _) in copy.credential_slots() {
             let mut cursor = &mut value;
@@ -5130,6 +5255,13 @@ impl Preferences {
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)
         {
             return Err(PreferencesError::InvalidVoiceInput);
+        }
+        if !VOICE_PAUSE_MILLIS_RANGE.contains(&self.voice_input.pause_millis)
+            || !(self.voice_input.pause_millis - VOICE_PAUSE_MILLIS_RANGE.start())
+                .is_multiple_of(VOICE_PAUSE_MILLIS_STEP)
+            || !VOICE_STOP_SENSITIVITY_RANGE.contains(&self.voice_input.stop_sensitivity)
+        {
+            return Err(PreferencesError::InvalidVoicePause);
         }
         if !(50..=200).contains(&self.floating_toolbar.scale_percent)
             || !(12..=48).contains(&self.floating_toolbar.font_size)
@@ -5376,6 +5508,8 @@ pub enum PreferencesError {
     InvalidNetwork,
     #[error("voice recognition or polishing provider is not supported")]
     InvalidVoiceInput,
+    #[error("本地识别停顿时间须为 500–5000 毫秒、步进 100，判停灵敏度须为 10–90")]
+    InvalidVoicePause,
     #[error("custom translation endpoint or API key is invalid")]
     InvalidCustomTranslation,
     #[error("Tencent translation credentials or region are invalid")]
@@ -5535,6 +5669,14 @@ pub struct LoadedPreferences {
     pub snapshot: PreferencesSnapshot,
 }
 
+/// [`PreferencesStore::usage_reporting_consent_reusing`] 读到的持续同意，以及读出它的文档原始字节和代理设置。只有文档里的授权已经确定（关闭，或开启且已有代次）时才带字节，下次字节相同就直接沿用。
+#[derive(Debug, Clone)]
+pub struct LoadedUsageReportingConsent {
+    bytes: Option<Vec<u8>>,
+    network: crate::network::NetworkPreferences,
+    pub consent: Option<UsageReportingConsent>,
+}
+
 pub struct PreferencesStore {
     directory: PathBuf,
     /// 构造时指定的版本；`None` 时以状态目录里的版本记录为准（[`crate::edition::Edition::recorded_in`]），没有记录就是 full。只影响没有偏好文件时读到的默认值和修复时垫底的默认值。
@@ -5602,7 +5744,7 @@ impl PreferencesStore {
         }
         let preferences = current.preferences.clone();
         // 还没有文件，也就没有未知键。
-        self.save_locked(current, &[], 0, preferences)
+        self.save_locked(current, &[], 0, preferences, false)
     }
 
     /// 修复损坏文件时垫底的默认偏好。
@@ -5705,6 +5847,7 @@ impl PreferencesStore {
         snapshot
             .preferences
             .settle_translation_ai_selection(TRANSLATION_AI_WAS_IMPLICIT);
+        snapshot.preferences.settle_keyboard_reranker_default();
         // 读到哪份文档就按哪份文档的代理设置发请求：设置窗口和输入宿主都可能建 HTTP 客户端，
         // 每个进程自己那份 `network::current` 由它读到的最近一版偏好决定（见 `crate::network`）。
         crate::network::install(&snapshot.preferences.network);
@@ -5714,6 +5857,71 @@ impl PreferencesStore {
     pub fn load(&self) -> Result<PreferencesSnapshot, PreferencesError> {
         let _lock = self.lock()?;
         self.read_locked()
+    }
+
+    /// 在偏好锁内读取持续同意；首次使用从当前时间开始历史，不能追认旧诊断。
+    /// 关闭返回 `None`，读写失败保持错误。普通 `load` 不初始化或推进授权历史。
+    pub fn usage_reporting_consent(
+        &self,
+    ) -> Result<Option<UsageReportingConsent>, PreferencesError> {
+        self.usage_reporting_consent_reusing(None)
+            .map(|loaded| loaded.consent)
+    }
+
+    /// 同 [`Self::usage_reporting_consent`]，但偏好文件与 `previous` 读到的逐字节相同时沿用它的结果，不再解析和校验，供每隔几百毫秒轮询授权的观察线程使用。仍在偏好锁内逐字节核对，撤回照样在下一次读取时生效。需要初始化授权历史（开启但还没有代次）或文件不存在时照常走完整路径，结果不带字节，下一次重新解析。交回的结果供下一次传入。
+    pub fn usage_reporting_consent_reusing(
+        &self,
+        previous: Option<LoadedUsageReportingConsent>,
+    ) -> Result<LoadedUsageReportingConsent, PreferencesError> {
+        let _lock = self.lock()?;
+        let bytes = self.read_document_bytes()?;
+        if let Some(previous) =
+            previous.filter(|previous| bytes.is_some() && previous.bytes == bytes)
+        {
+            crate::network::install(&previous.network);
+            return Ok(previous);
+        }
+        let (current, unknown) = self.decode_document(bytes.as_deref())?;
+        let network = current.preferences.network.clone();
+        if !current.preferences.usage_reporting {
+            return Ok(LoadedUsageReportingConsent {
+                bytes,
+                network,
+                consent: None,
+            });
+        }
+        if let Some(consent) = current.preferences.usage_reporting_consent {
+            return Ok(LoadedUsageReportingConsent {
+                bytes,
+                network,
+                consent: Some(consent),
+            });
+        }
+        let revision = current.revision;
+        let preferences = current.preferences.clone();
+        let consent = self
+            .save_locked(current, &unknown, revision, preferences, true)?
+            .preferences
+            .usage_reporting_consent;
+        Ok(LoadedUsageReportingConsent {
+            bytes: None,
+            network,
+            consent,
+        })
+    }
+
+    /// 在同一偏好锁内核对持续同意并执行本地操作；不初始化历史，也不把读失败当关闭。
+    /// 操作可以再取得遥测队列锁，不能联网或从故障处理器调用。
+    pub fn with_usage_reporting_consent<T>(
+        &self,
+        operation: impl FnOnce(bool, Option<UsageReportingConsent>) -> T,
+    ) -> Result<T, PreferencesError> {
+        let _lock = self.lock()?;
+        let snapshot = self.read_locked()?;
+        Ok(operation(
+            snapshot.preferences.usage_reporting,
+            snapshot.preferences.usage_reporting_consent,
+        ))
     }
 
     /// 同 [`Self::load`]，但偏好文件与 `previous` 读到的逐字节相同时沿用它的快照，不再解析和校验：读出的快照只取决于这些字节。代理设置照样按读到的文档装进 [`crate::network`]。交回的结果供下一次传入。Android 键盘显示期间每秒在工作线程上读一次偏好，文件绝大多数时候没变。偏好文件不存在时每次照常取默认快照：那份快照还取决于目录里的版本记录。
@@ -5835,7 +6043,7 @@ impl PreferencesStore {
     ) -> Result<PreferencesSnapshot, PreferencesError> {
         let _lock = self.lock()?;
         let (current, unknown) = self.read_locked_keeping_unknown()?;
-        self.save_locked(current, &unknown, expected_revision, preferences)
+        self.save_locked(current, &unknown, expected_revision, preferences, false)
     }
 
     /// 把 Android 本机旧开关迁进共享偏好；在同一把锁里核对修订号和原始字段。较新版本写入的样式不能被宽松反序列化后的默认值覆盖，迁移数字行时也要原样保留。
@@ -5944,7 +6152,7 @@ impl PreferencesStore {
                 });
             }
         }
-        self.save_locked(current, &unknown, expected_revision, preferences)
+        self.save_locked(current, &unknown, expected_revision, preferences, false)
     }
 
     /// 「恢复默认设置」：在同一把锁里读出当前文档，换成本存储所属版本的默认偏好（[`Preferences::restored_to_defaults_for`]，服务凭据和 `fuzzy_pinyin.seeded` 保留），再按 `expected_revision` 做比较并交换写回。修订号不符时返回 `Conflict`，什么也不写。
@@ -5956,7 +6164,7 @@ impl PreferencesStore {
         let current = self.read_locked()?;
         let restored = current.preferences.restored_to_defaults_for(self.edition());
         // 恢复默认值连同更新版本写下的设置一起清掉：用户要的是整份回到默认。
-        self.save_locked(current, &[], expected_revision, restored)
+        self.save_locked(current, &[], expected_revision, restored, false)
     }
 
     /// `save` 的主体，调用方已持有锁并读出了 `current`。`unknown` 是盘上文档里本版本不认识的键，写入时原样放回。
@@ -5966,10 +6174,23 @@ impl PreferencesStore {
         unknown: &[UnknownPreferenceField],
         expected_revision: u64,
         mut preferences: Preferences,
+        initialize_reporting: bool,
     ) -> Result<PreferencesSnapshot, PreferencesError> {
         if current.revision != expected_revision {
             return Err(PreferencesError::Conflict);
         }
+        // 授权元数据只由存储产生：不能导入、伪造，旧客户端省略字段也不能抹掉持续同意。
+        preferences.usage_reporting_consent = if !preferences.usage_reporting {
+            None
+        } else if current.preferences.usage_reporting {
+            match current.preferences.usage_reporting_consent {
+                Some(consent) => Some(consent),
+                None if initialize_reporting => Some(UsageReportingConsent::new()?),
+                None => None,
+            }
+        } else {
+            Some(UsageReportingConsent::new()?)
+        };
         // Match the Windows baseline: the first transition from disabled to
         // enabled opts every fuzzy rule in once. The marker is separate from
         // the rule set so intentionally clearing every rule does not reseed
@@ -6007,6 +6228,10 @@ impl PreferencesStore {
         // AI 辅助翻译的迁移标记同理：不带上它，下一次读会把用户刚改选的服务又改回 AI 辅助。
         if current.preferences.translation_ai_migrated {
             preferences.translation_ai_migrated = true;
+        }
+        // 整句联想默认「增强」的迁移标记同理：不带上它，下一次读会把用户刚选回的「标准」又改成「增强」。
+        if current.preferences.keyboard_reranker_migrated {
+            preferences.keyboard_reranker_migrated = true;
         }
         // 切换热键在文档里只有规范形一种写法：别名写法在写入处归一，与出厂值等价的写法按出厂值不落盘。
         preferences.keybindings.normalize_toggle_hotkeys();
@@ -6067,13 +6292,15 @@ impl PreferencesStore {
         }
         let backup_path = self.write_backup(&bytes, time::OffsetDateTime::now_utc())?;
         // 本版本不认识的键和列表元素（多半出自更新的版本）照保存时那样放回去：修复只换掉读不了的取值，不顺手抹掉更新的版本的设置。
-        let (preferences, salvaged, unknown) = match &document {
+        let (mut preferences, salvaged, unknown) = match &document {
             Some(document) => {
                 let salvage = salvage_preferences(document, self.default_preferences())?;
                 (salvage.preferences, salvage.kept, salvage.unknown)
             }
             None => (self.default_preferences(), false, Vec::new()),
         };
+        // 修复过的文档不能证明旧授权持续有效；下一次确保接口从当时重新开始。
+        preferences.usage_reporting_consent = None;
         let revision = match document
             .as_ref()
             .and_then(|document| document.get("revision"))
@@ -6376,7 +6603,7 @@ fn acceptable_preferences(candidate: &serde_json::Map<String, serde_json::Value>
         .is_ok_and(|preferences| preferences.validate().is_ok())
 }
 
-/// 读盘时把更新的版本才有的标量取值换成本版本的取值，免得一个键让整份文档读不了；只用于读磁盘，设置提交仍由枚举反序列化严格校验。目前只有韩文布局：更新的版本的未知布局回退到两套式。
+/// 读盘时把更新的版本才有的标量取值换成本版本的取值，免得一个键让整份文档读不了；只用于读磁盘，设置提交仍由枚举反序列化严格校验。目前有韩文布局和粤拼解释方式：更新的版本的未知取值分别回退到两套式和普通粤拼。
 fn settle_newer_values_on_read(document: &mut serde_json::Value) {
     if let Some(layout) = document.pointer_mut("/preferences/korean/layout") {
         if layout
@@ -6384,6 +6611,14 @@ fn settle_newer_values_on_read(document: &mut serde_json::Value) {
             .is_some_and(|value| !matches!(value, "dubeolsik" | "romaja"))
         {
             *layout = "dubeolsik".into();
+        }
+    }
+    if let Some(method) = document.pointer_mut("/preferences/cantonese/input_method") {
+        if method
+            .as_str()
+            .is_some_and(|value| !matches!(value, "jyutping" | "shuangpin"))
+        {
+            *method = "jyutping".into();
         }
     }
 }
@@ -6561,6 +6796,10 @@ fn salvage_preferences(
     if !source.contains_key("translation_ai_migrated") {
         salvaged.remove("translation_ai_migrated");
     }
+    // 整句联想默认「增强」的迁移标记也一样：没有它的损坏文档出自默认改变之前，读回来照旧文档那样迁移一次。
+    if !source.contains_key("keyboard_reranker_migrated") {
+        salvaged.remove("keyboard_reranker_migrated");
+    }
     let mut kept = false;
     let mut not_kept = BTreeSet::new();
     for (key, value) in &source {
@@ -6601,6 +6840,7 @@ fn salvage_preferences(
     unknown.extend(newer_list_values(&serde_json::Value::Object(source)));
     preferences.settle_smart_punctuation_default(SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT);
     preferences.settle_translation_ai_selection(TRANSLATION_AI_WAS_IMPLICIT);
+    preferences.settle_keyboard_reranker_default();
     Ok(Salvage {
         preferences,
         kept,

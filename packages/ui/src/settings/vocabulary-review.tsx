@@ -1,3 +1,4 @@
+import { InfoTip } from "../core/info-tip";
 import { useEffect, useRef, useState } from "react";
 import { useConfirm } from "../core/confirm";
 import { readDictionaryFile } from "../dictionary/dictionary-file";
@@ -8,6 +9,8 @@ import { SettingsEmptyMessage } from "./settings-empty-message";
 import { compactPage } from "../core/page-style";
 import { compactMutedNote } from "../core/text-style";
 import { downloadBlob } from "../core/download-blob";
+import { FluentIcon } from "../core/fluent-icons";
+import { readAloudText } from "./read-aloud";
 
 // The largest word list the page reads. The shared layer takes at most 8 MiB of decoded text (`vocabulary::session::MAX_IMPORT_BYTES`), well under the dictionary import's bound, so this keeps the 1 MiB the page has always read rather than following that one.
 const WORDBOOK_FILE_BYTES = 1_048_576;
@@ -38,6 +41,7 @@ const answerKnown =
   "min-h-[44px] rounded-[10px] border-0 bg-accent text-[15px] font-medium text-white not-disabled:hover:opacity-90";
 const field = "flex items-center justify-between gap-3 py-1.5";
 const cardAside = "mt-2.5 flex justify-center";
+const speakLabel = "inline-flex items-center gap-1.5";
 
 /** A word list the host can draw a session from. */
 export type VocabularyWordbook = {
@@ -102,6 +106,8 @@ export interface VocabularyReviewClient {
   removePersonalWord?(word: string): Promise<VocabularyReviewStatus>;
   /** 生词本导出成的 CSV 文本，还没有生词本时是 null。 */
   exportPersonalWordbook?(): Promise<string | null>;
+  /** 用系统自带的语音合成读出卡片上的英文词头（`HostCapabilities.read_aloud`）。宿主读不了时不提供，卡片上就没有喇叭。读不出来时拒绝，带一句给用户看的话。 */
+  speak?(word: string): Promise<void>;
   reset(): Promise<VocabularyReviewStatus>;
 }
 
@@ -281,9 +287,24 @@ export function VocabularyReviewPage({
   return (
     <section className={page} aria-labelledby="vocabulary-heading">
       <div className="section">
-        <h2 className={heading} id="vocabulary-heading">
-          背单词
-        </h2>
+        {/* 背单词怎么用、进度存在哪里：收进标题旁的「?」，不常驻在统计下面。 */}
+        <div className="flex items-center gap-1.5">
+          <h2 className={heading} id="vocabulary-heading">
+            背单词
+          </h2>
+          <InfoTip subject="背单词">
+            <span className="block">
+              {reviewing
+                ? "复习不会改变打字时的候选或组词。进度保存在本机，不会上传。"
+                : "在这里管理词书；复习在背单词面板里进行。进度保存在本机，不会上传。"}
+            </span>
+            {client.removePersonalWord && (
+              <span className="mt-1.5 block">
+                打字时在候选的操作菜单里选「加入生词本」，候选旁显示的释义就会收进生词本；它只存在这台设备上。
+              </span>
+            )}
+          </InfoTip>
+        </div>
         <div className={metricRow} role="status" aria-live="polite">
           <div className={metric}>
             <span className={metricValue}>{status.due}</span>
@@ -298,11 +319,6 @@ export function VocabularyReviewPage({
             <span className={metricLabel}>未开始</span>
           </div>
         </div>
-        <p className={note}>
-          {reviewing
-            ? "复习不会改变打字时的候选或组词。进度保存在本机，不会上传。"
-            : "在这里管理词书；复习在背单词面板里进行。进度保存在本机，不会上传。"}
-        </p>
         {managing && openPanel && (
           <ActionButton
             action={() => void openPanel()}
@@ -390,7 +406,6 @@ export function VocabularyReviewPage({
           {client.removePersonalWord && (
             <p className={note}>
               {personalBook ? `生词本里有 ${personalBook.total} 个词。` : "生词本还是空的。"}
-              打字时在候选的操作菜单里选「加入生词本」，候选旁显示的释义就会收进生词本；它只存在这台设备上。
             </p>
           )}
           {client.exportPersonalWordbook && personalBook && (
@@ -460,6 +475,28 @@ export function VocabularyReviewPage({
                   </>
                 }
               />
+              {client.speak && readAloudText(card.word) && (
+                <div className={cardAside}>
+                  <ActionButton
+                    action={async () => {
+                      setError("");
+                      try {
+                        await client.speak!(readAloudText(card.word)!);
+                      } catch (reason) {
+                        setError(reason instanceof Error ? reason.message : String(reason));
+                      }
+                    }}
+                    ariaLabel={`朗读 ${card.word}`}
+                    className="secondary"
+                    label={
+                      <span className={speakLabel}>
+                        <FluentIcon name="speaker_2" size={16} />
+                        朗读
+                      </span>
+                    }
+                  />
+                </div>
+              )}
               <div className={answerRow}>
                 <ActionButton
                   action={() => void answer(false)}

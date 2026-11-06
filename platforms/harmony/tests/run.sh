@@ -8,6 +8,15 @@ if [[ ! -x "$tsc" ]]; then
   echo "TypeScript compiler not found at $tsc; run pnpm install at the repository root" >&2
   exit 1
 fi
+# 强制停止后的首次焦点可能在资源暂存或建面板的 await 期间到达；inputStart 必须先订阅，才能由 pending 留住编辑框而不让键盘首帧失去输入客户端。
+ability="$repo_root/platforms/harmony/entry/src/main/ets/inputmethodextability/KeyboardExtensionAbility.ets"
+on_create_body=$(sed -n '/^  async onCreate(want: Want): Promise<void> {$/,/^  onDestroy(): void {$/p' "$ability")
+input_start_line=$(grep -nF "engine.on('inputStart', this.started);" <<< "$on_create_body" | head -n 1 | cut -d: -f1)
+first_await_line=$(grep -nE '\bawait\b' <<< "$on_create_body" | head -n 1 | cut -d: -f1)
+if [[ -z "$input_start_line" || -z "$first_await_line" || "$input_start_line" -ge "$first_await_line" ]]; then
+  echo "KeyboardExtensionAbility must subscribe to inputStart before its first asynchronous cold-start step" >&2
+  exit 1
+fi
 # grep rather than rg: the HarmonyOS CI job installs no ripgrep, and a missing rg made this guard report a regression that was not there.
 if ! grep -qF 'StagedResources.removeDirectory(this.cacheRoot)' \
     "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeySoundPlayer.ets"; then
@@ -51,10 +60,32 @@ for field in this.twentySixKeyStyle this.fourteenKeyStyle this.nineKeyStyle this
     exit 1
   fi
 done
+# 「显示字母键角标」（#10587）同理要在 faceKey() 里，键盘开着切换时已画好的字母键才会收起或画回角标；字母键只把它交给键面的 showCornerHint，cornerHint 照旧给出，长按和滑动照样输入角标。
+if ! grep -qF 'this.feedback.letterCornerHints' <<< "$face_key_body" \
+  || ! grep -qF 'showCornerHint: this.feedback.letterCornerHints,' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'return options.showCornerHint !== false && options.cornerHint !== undefined' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"; then
+  echo "The letter corner hint switch must reach faceKey() and only hide the drawn hint, keeping cornerHint for the gestures" >&2
+  exit 1
+fi
 # 组字中 Shift 加字母是辅助码：引擎只认大写字母，不看 Shift 标志，所以字母键要按 Shift 发大写字母，规则由 keyboard-logic.test.ts 覆盖，这里钉住视图的接线。
 if ! grep -qF 'const input: string = ChineseHelpcodePolicy.letterInput(letter, shifted);' \
   "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"; then
   echo "KeyboardView.tapLetter must send a shifted letter as a capital: the Engine reads helpcode from the case, not from the shift flag" >&2
+  exit 1
+fi
+# 26 键组字时的上滑、下滑辅助码（鸿蒙手机）：规则由 helpcode-swipe.test.ts 覆盖，这里钉住接线。只在 qwerty 26 键且已有全拼或双拼组字时跟踪，触发后沿 press(..., true) 的辅助码路径送大写，并吞掉 ArkUI 之后到达的点击；长按仍交给角标提示。
+keyboard_view="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"
+helpcode_swipe="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/input/HelpcodeSwipePolicy.ts"
+if ! grep -qF 'private helpcodeSwipes: HelpcodeSwipeGesture' "$keyboard_view" 2>/dev/null \
+  || ! grep -qF 'this.helpcodeSwipes.down(' "$keyboard_view" \
+  || ! grep -qF 'this.helpcodeSwipeEnabled()' "$keyboard_view" \
+  || ! grep -qF 'this.typeHelpcodeSwipe(helpcode);' "$keyboard_view" \
+  || ! grep -qF 'KeyboardSession.shared.press(input.charCodeAt(0), true);' "$keyboard_view" \
+  || ! grep -qF 'KeyboardSession.shared.entersHelpcode(true)' "$keyboard_view" \
+  || ! grep -qF 'static swiped(' "$helpcode_swipe"; then
+  echo "Harmony 26-key helpcode swipes must be wired through HelpcodeSwipeGesture and the existing uppercase Engine path" >&2
   exit 1
 fi
 # 123 层和数字九宫格上的辅助码触发键先问 Engine，收下就不按原样上屏。
@@ -203,8 +234,9 @@ ability="$repo_root/platforms/harmony/entry/src/main/ets/inputmethodextability/K
 decide_line=$(grep -nF 'KeyboardSession.shared.decideFirstTouchPanel(' "$ability" | head -n 1 | cut -d: -f1)
 mount_line=$(grep -nF "await panel.setUiContent('keyboard/KeyboardView');" "$ability" | head -n 1 | cut -d: -f1)
 if [[ -z "$decide_line" || -z "$mount_line" ]] || (( decide_line >= mount_line )) \
-  || ! grep -qF 'settings.candidatePreeditFontSize, false, opened.strip, opened.extraRows, settings.candidateScalePercent);' "$ability"; then
-  echo "KeyboardExtensionAbility must decide the first touch panel shape before mounting KeyboardView and size the panel from it" >&2
+  || ! grep -qF 'settings.candidatePreeditFontSize, false, opened.strip, opened.extraRows, settings.candidateScalePercent,' "$ability" \
+  || ! grep -qF 'KeyboardSession.shared.firstTouchLift());' "$ability"; then
+  echo "KeyboardExtensionAbility must decide the first touch panel shape (and the bottom lift it counts) before mounting KeyboardView and size the panel from it" >&2
   exit 1
 fi
 appear_body=$(sed -n '/^  aboutToAppear(): void {$/,/^  }$/p' \
@@ -591,12 +623,47 @@ if ! grep -qF 'this.recordLetterTouch($$.letter, event);' "$view" \
   echo "KeyboardView must record each letter's touch-down against the key it pressed, drop it on Cancel and when the face is replaced, record the semicolon key, take it through takeTouch at the key's current rect, and compute touchLayout on every key without a cache" >&2
   exit 1
 fi
-# 硬件键盘快捷键 LOCK 锁定录音后，松开按键不再结束录音，会话按点按开始对待：面板给「说完了」「取消」，流式识别停顿自动结束。按钮文字由 voice-listening-policy.test.ts 的 `VoiceListeningPolicy.primaryLabel`、`cancelLabel` 覆盖；视图是 ArkTS，这里钉住接线：LOCK 分支清掉 `voiceHeldByKey`，面板按钮从策略取。
+# 硬件键盘快捷键 LOCK 锁定录音后，松开按键不再结束录音，会话按点按开始对待：面板给「说完了」「取消」，触屏上本地识别和系统识别停顿自动结束（`VoiceRecordingBehaviourPolicy.keyboardStopsOnPause`）。按钮文字由 voice-listening-policy.test.ts 的 `VoiceListeningPolicy.primaryLabel`、`cancelLabel` 覆盖；视图是 ArkTS，这里钉住接线：LOCK 分支清掉 `voiceHeldByKey`，面板按钮从策略取。
 lock_branch=$(sed -n '/^      if (action === VoiceHotkeyAction.LOCK) {$/,/^      }$/p' "$view")
 if ! grep -qF 'this.voiceHeldByKey = false;' <<< "$lock_branch" \
   || ! grep -qF 'primaryLabel: VoiceListeningPolicy.primaryLabel(this.voiceListeningSession()),' "$view" \
   || ! grep -qF 'cancelLabel: VoiceListeningPolicy.cancelLabel(this.voiceListeningSession()),' "$view"; then
   echo "A hotkey LOCK must turn the held session into a tap session (clear voiceHeldByKey), and the listening panel must take its button labels from VoiceListeningPolicy" >&2
+  exit 1
+fi
+# 停顿时间和判停灵敏度（#10310）：规则由 keyboard-logic.test.ts 的 `VoiceRecognitionPolicy.pauseMillis`、`LocalAsrPolicy.vadThreshold`、`VoiceRecordingBehaviourPolicy.keyboardStopsOnPause` 覆盖；视图、识别器和 worker 是 ArkTS，这里钉住接线：触屏上只有本地识别和系统识别在出字后按停顿计时（本地识别用用户的停顿时间），判停灵敏度只交给点按开始的本地识别，worker 按它换算 Silero 阈值，设置桥按设备形态报告能力位。
+start_voice_body=$(sed -n '/^  private startVoice(fromHotkey: boolean = false): void {$/,/^  }$/p' "$view")
+if ! grep -qF 'this.voicePauseEnds = this.touchDesign() && VoiceRecordingBehaviourPolicy.keyboardStopsOnPause(voiceConfiguration);' <<< "$start_voice_body" \
+  || ! grep -qF 'this.voicePauseMs = VoiceRecordingBehaviourPolicy.pauseMillis(voiceConfiguration);' <<< "$start_voice_body" \
+  || ! grep -qF 'VoiceRecordingBehaviourPolicy.stopSensitivity(voiceConfiguration, this.voicePauseEnds && !fromHotkey);' <<< "$start_voice_body" \
+  || ! grep -qF 'if (!final && text.length > 0 && this.voicePauseEnds) {' <<< "$start_voice_body" \
+  || ! grep -qF '}, this.voicePauseMs);' "$view" \
+  || ! grep -qF "scratch: config.local_model_scratch ?? '', stopSensitivity: config.local_stop_sensitivity ?? 0" \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/input/HarmonyLocalAsrRecognizer.ets" \
+  || ! grep -qF 'const threshold: number = LocalAsrPolicy.vadThreshold(request.stopSensitivity);' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/workers/LocalAsrWorker.ets" \
+  || ! grep -qF "value['voice_pause_settings'] = projection.voicePauseSettings;" \
+    "$repo_root/platforms/harmony/entry/src/main/ets/pages/Settings.ets"; then
+  echo "Only touch-started local and system recognition may end on a pause (local on the user's pause time), the stop sensitivity must reach the worker's Silero threshold only for tap-started local sessions, and the settings bridge must report voice_pause_settings" >&2
+  exit 1
+fi
+# 聆听面板的水杉娘指示区（#10313）：画不画人物和红线的数值由 voice-listening-policy.test.ts 的 `VoiceListeningPolicy.showsMascot`、`mascotArcs` 覆盖；视图是 ArkTS，这里钉住接线：开始录音在任何提前返回之前就按这次尝试（`fromHotkey`）经策略算出指示区，开不了录音时显示原因的面板也不沿用上一次会话的；LOCK 清掉 `voiceHeldByKey` 之后经 refreshVoiceMascot 重算；面板拿到 mascot、表情包里的图片地址和是否在录音（收尾识别时红线立即收起）；图片解码出来之前画圆盘、画布不画耳部（`onComplete` 在读到数据时也回调一次，只认解码成功）；人物图片和画布不进读屏。
+voice_face_body=$(sed -n '/^  voiceFace() {$/,/^  }$/p' "$view")
+start_voice_body=$(sed -n '/^  private startVoice(fromHotkey: boolean = false): void {$/,/^  }$/p' "$view")
+voice_listening="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/faces/VoiceListening.ets"
+start_voice_head=$(sed -n '1,/voiceInputEnabled()/p' <<< "$start_voice_body")
+if ! grep -qF 'this.refreshVoiceMascot();' <<< "$lock_branch" \
+  || ! grep -qF 'this.voiceMascot = VoiceListeningPolicy.showsMascot(this.spaceVoiceHeld, fromHotkey);' <<< "$start_voice_head" \
+  || ! grep -qF 'this.voiceMascot = VoiceListeningPolicy.showsMascot(this.spaceVoiceHeld, this.voiceHeldByKey);' "$view" \
+  || ! grep -qF 'mascot: this.voiceMascot,' <<< "$voice_face_body" \
+  || ! grep -qF "mascotUri: this.voiceMascot ? this.voiceMascotUri() : ''," <<< "$voice_face_body" \
+  || ! grep -qF 'if (!this.mascotLoaded) {' "$voice_listening" \
+  || ! grep -qF 'if (!this.mascotLoaded) return;' "$voice_listening" \
+  || ! grep -qF 'event.loadingStatus !== 1' "$voice_listening" \
+  || ! grep -qF 'recording: this.voiceBusy && !this.voiceFinishing,' <<< "$voice_face_body" \
+  || ! grep -qF 'VoiceListeningPolicy.mascotArcs(this.recording ? this.shown : 0)' "$voice_listening" \
+  || [[ $(grep -cF ".accessibilityLevel('no')" "$voice_listening") -ne 2 ]]; then
+  echo "The listening panel must pick the mascot from VoiceListeningPolicy.showsMascot before startVoice can return early and again after LOCK, pass the sticker URI and whether it is recording so the arcs drop at once when recognition starts, keep the disc until the image has loaded, and keep the mascot out of the screen reader" >&2
   exit 1
 fi
 # 双拼纠错坐上首选的显式标记（#10018）：引擎只在那一行带 `confident_correction: true`。读法、读屏后缀、标记色以及展开面板选哪套令牌由 keyboard-logic.test.ts 的 `CorrectionMarkPolicy` 覆盖；会话和视图是 ArkTS，这里钉住接线和每处传进去的令牌：会话把引擎行变成候选栏、展开面板的三处都经 `CorrectionMarkPolicy.confident` 读这个键，翻译页的行一律不标；视图在候选窗、触屏胶囊上的候选字经 `candidateWordColor`、注释释义经 `candidateDetailTint` 换成标记色（两处里不再有没经过它的次要色），展开面板格子经 `CorrectionMarkPolicy.cellTextColor` 用 `expandedSurfaceColors`；两套令牌逐项钉住，交换高亮字色与强调色、换掉画布判断都会失败；两处读屏朗读都接上「已纠正」后缀。去掉空白和换行后比较整段调用，参数换行不影响。
@@ -614,16 +681,16 @@ expanded_surface_body=$(view_body 'private expandedSurfaceColors(): CorrectionSu
 if [[ $(grep -cF 'confidentCorrection: CorrectionMarkPolicy.confident(candidate.confident_correction)' "$session") -ne 3 ]] \
   || ! grep -qF 'fixedPosition: 0, source: 0, translation: null, confidentCorrection: false' "$session" \
   || [[ $(grep -oF '.fontColor(this.candidateWordColor(candidate))' <<< "$primary_body" | wc -l) -ne 1 ]] \
-  || [[ $(grep -oF '.fontColor(this.candidateDetailTint(candidate,this.candidateDetailColor()))' <<< "$primary_body" | wc -l) -ne 5 ]] \
-  || grep -qF '.fontColor(this.candidateDetailColor())' <<< "$primary_body" \
-  || ! grep -qF '.fontColor(this.candidateDetailTint(candidate,this.candidateDetailColor()))' <<< "$cell_body" \
-  || grep -qF '.fontColor(this.candidateDetailColor())' <<< "$cell_body" \
+  || [[ $(grep -oF '.fontColor(this.candidateDetailTint(candidate,this.candidateDetailColor(candidate.highlighted)))' <<< "$primary_body" | wc -l) -ne 6 ]] \
+  || grep -qF '.fontColor(this.candidateDetailColor(candidate.highlighted))' <<< "$primary_body" \
+  || ! grep -qF '.fontColor(this.candidateDetailTint(candidate,this.candidateDetailColor(candidate.highlighted)))' <<< "$cell_body" \
+  || grep -qF '.fontColor(this.candidateDetailColor(candidate.highlighted))' <<< "$cell_body" \
   || [[ $(grep -oF '.fontColor(this.candidateWordColor(candidate))' <<< "$chip_body" | wc -l) -ne 1 ]] \
-  || [[ $(grep -oF '.fontColor(this.candidateDetailTint(candidate,this.skin.secondary))' <<< "$chip_body" | wc -l) -ne 3 ]] \
+  || [[ $(grep -oF '.fontColor(this.candidateDetailTint(candidate,this.skin.secondary))' <<< "$chip_body" | wc -l) -ne 4 ]] \
   || grep -qF '.fontColor(this.skin.secondary)' <<< "$chip_body" \
   || ! grep -qF '.fontColor(CorrectionMarkPolicy.cellTextColor(this.expanded[cell.index].confidentCorrection,this.expandedHighlighted(cell.index),this.expandedSurfaceColors()))' <<< "$grid_body" \
   || ! grep -qF 'text:this.candidateTextColor(),highlightedText:this.candidateSelectedTextColor(),accent:this.candidateAccentColor()' <<< "$surface_body" \
-  || ! grep -qF 'if(CandidatePresentationPolicy.aiPlaceholder(candidate.source))returnthis.candidateDetailColor();returnCorrectionMarkPolicy.tint(candidate.confidentCorrection,candidate.highlighted,CandidateSkinPolicy.rowTextColor(candidate.highlighted,candidate.fixedPosition>0,this.candidateTextColor(),this.candidateSelectedTextColor()),this.candidateSurfaceColors());' <<< "$word_body" \
+  || ! grep -qF 'if(CandidatePresentationPolicy.aiPlaceholder(candidate.source))returnthis.candidateDetailColor(candidate.highlighted);returnCorrectionMarkPolicy.tint(candidate.confidentCorrection,candidate.highlighted,CandidateSkinPolicy.rowTextColor(candidate.highlighted,candidate.fixedPosition>0,this.candidateTextColor(),this.candidateSelectedTextColor()),this.candidateSurfaceColors());' <<< "$word_body" \
   || ! grep -qF 'returnCorrectionMarkPolicy.tint(candidate.confidentCorrection,candidate.highlighted,base,this.candidateSurfaceColors());' <<< "$detail_body" \
   || ! grep -qF 'text:this.skin.keyForeground,highlightedText:this.skin.toggleForeground,accent:this.skin.accent' <<< "$expanded_surface_body" \
   || ! grep -qF 'returnCorrectionMarkPolicy.expandedSurface(this.settings.candidateCanvas!==null,this.candidateSurfaceColors(),keyboard);' <<< "$expanded_surface_body" \
@@ -631,6 +698,21 @@ if [[ $(grep -cF 'confidentCorrection: CorrectionMarkPolicy.confident(candidate.
   || ! grep -qF 'CorrectionMarkPolicy.accessibilitySuffix(candidate.confidentCorrection)' <<< "$label_body" \
   || ! grep -qF 'CorrectionMarkPolicy.accessibilitySuffix(this.expanded[index].confidentCorrection)' <<< "$expanded_label_body"; then
   echo "KeyboardSession must read confident_correction through CorrectionMarkPolicy for the strip and the expanded panel, and KeyboardView must draw those rows' word and every detail text in the mark colour from the right surface tokens in the candidate window, the touch chip and the expanded grid, and append the screen reader suffix to both labels" >&2
+  exit 1
+fi
+# 2in1 默认选中行的释义、注释和读音到 WCAG AA：颜色规则由 keyboard-logic.test.ts 的 `GlobalTheme.candidateDetail` 覆盖，视图是 ArkTS，这里钉住 `candidateDetailColor` 只在 2in1 走这条规则、触屏候选条仍画次要色。函数体改回只返回次要色，或者去掉 `KeyboardFormFactor.isDesktop()` 的判断，浅色 2in1 的选中行释义都会退回约 4.0:1。
+detail_color_body=$(view_body 'private candidateDetailColor(highlighted: boolean): string {')
+if ! grep -qF 'returnKeyboardFormFactor.isDesktop()?GlobalTheme.candidateDetail(colors,highlighted):colors.secondary;' <<< "$detail_color_body" \
+  || ! grep -qF 'constcolors:CandidateColors=this.candidateColors();' <<< "$detail_color_body"; then
+  echo "KeyboardView.candidateDetailColor must take the 2in1 selected row's gloss colour from GlobalTheme.candidateDetail and keep the touch strip on the palette's secondary colour" >&2
+  exit 1
+fi
+# 候选英文音标只占了预留的那一行（`translationRows()` 为 0）时下面没有释义行：2in1 横排的 `candidatePrimaryLine` 和触屏胶囊的 `chipAnnotationBeside` 都要把译文画回词旁边，否则打开音标后译文就不见了。规则和高度由 keyboard-logic.test.ts、kb-view.test.ts 覆盖，视图是 ArkTS，这里钉住接线。
+beside_body=$(view_body 'private chipAnnotationBeside(candidate: CandidateEntry): boolean {')
+if ! grep -qF 'if(candidate.annotation.length>0&&(!this.candidateUsesGlossLine()||KeyboardSession.shared.translationRows()===0)){' <<< "$primary_body" \
+  || ! grep -qF '(!candidate.annotationIsTranslation||KeyboardSession.shared.translationRows()===0)' <<< "$beside_body" \
+  || ! grep -qF 'if(KeyboardSession.shared.translationRows()>0){' <<< "$cell_body"; then
+  echo "With only the pronunciation row reserved, the 2in1 candidate cell and the touch chip must draw the translation beside the word rather than on a gloss line that is not there" >&2
   exit 1
 fi
 # 展开候选网格分批建格子：规则由 keyboard-logic.test.ts 的 `ExpandedCandidateBatchPolicy` 覆盖；视图是 ArkTS，node 下编不了，这里钉住接线：网格只画已建到 expandedBuilt 的格子，重取候选按 initialCount 定已建数（同一代比 candidateListIdentity），滚动、视口和内容尺寸变化都去问要不要追加，关面板时清零。
@@ -643,6 +725,16 @@ if ! grep -qF 'constbuilt:number=Math.min(this.expandedBuilt,this.expanded.lengt
   || [[ $(grep -oF 'this.appendExpandedIfNeeded()' <<< "$grid_body" | wc -l) -ne 3 ]] \
   || ! grep -qF 'this.expandedBuilt = 0;' "$view"; then
   echo "The expanded grid must draw only the cells built so far, rebuild them through ExpandedCandidateBatchPolicy when the list is fetched again, append as it scrolls or resizes and reset when the panel closes" >&2
+  exit 1
+fi
+# The expanded grid follows the candidate font size and 候选栏大小 (#10400): the sizes come from keyboard-logic.test.ts's CandidateScalePolicy.expandedFontSize / expandedCellHeight group; the view is ArkTS and does not compile under node, so this pins the wiring: cells draw and measure their span at the scaled font size, and take the scaled height.
+span_body=$(view_body 'private expandedSpan(index: number): number {')
+if ! grep -qF '.height(this.expandedCellHeight())' <<< "$grid_body" \
+  || ! grep -qF '.fontSize(this.expandedFontSize())' <<< "$grid_body" \
+  || ! grep -qF 'ExpandedCandidateLayout.width(this.expanded[index].text,this.expandedFontSize(),' <<< "$span_body" \
+  || ! grep -qF 'return CandidateScalePolicy.expandedFontSize(EXPANDED_FONT_SIZE, this.settings.candidateFontSize);' "$view" \
+  || ! grep -qF 'return CandidateScalePolicy.expandedCellHeight(EXPANDED_CELL_HEIGHT_VP, this.settings.candidateFontSize,' "$view"; then
+  echo "The expanded grid must size its text, span measurement and cell height through CandidateScalePolicy from the candidate font size and 候选栏大小" >&2
   exit 1
 fi
 # 大屏单手的侧边数字键盘（#10203）：宽度、取值和显示条件由 keyboard-logic.test.ts 的 `OneHandedPolicy` 覆盖；视图、会话和设置桥是 ArkTS，node 下编不了，这里钉住接线：会话按 sidePanel 读共享偏好，视图随设置重读、转屏时按按键这一行的宽度重算，handedKeys 只在 sidePadShown 时画面板，数字和小数点走字面上屏，设置桥按设备形态（含可折叠）报告能力位。
@@ -735,12 +827,152 @@ if [[ $(grep -cF 'panel.changeFlag(' "$floating_ability") -ne 1 ]] \
   echo "The floating keyboard must change the panel flag only while the panel is hidden and show it again afterwards, never move a fixed panel, refit the floating panel when the display changes, save the dragged position, suspend one-handed mode while floating or split, and stop drawing the split keyboard while floating" >&2
   exit 1
 fi
+# 触屏剪贴板多选按序号插入（#10411）：上限、序号和拼接由 clipboard-selection.test.ts 的 `ClipboardSelectionPolicy` 覆盖；视图是 ArkTS，node 下编不了，这里钉住接线：多选时点卡片经 toggleClipSelection 选中，角标经 ordinalLabel 画出、读屏前缀经 selectedDescription，「插入」按 canInsert 标成禁用（读屏读得出它点不了）并守住条数、经 insertionText 拼好后走和单条插入同一个 `KeyboardSession.shared.insert` 一次上屏。
+clip_insert=$(sed -n '/^  private insertClipSelection(): void {$/,/^  }$/p' \
+  "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets")
+if ! grep -qF '.onClick(() => this.toggleClipSelection(entry.text))' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'ClipboardSelectionPolicy.ordinalLabel(this.clipOrdinal(entry.text))' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'ClipboardSelectionPolicy.selectedDescription(this.clipOrdinal(entry.text))' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF '.enabled(ClipboardSelectionPolicy.canInsert(this.clipSelection.length))' \
+    "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF 'ClipboardSelectionPolicy.canInsert(this.clipSelection.length)' <<< "$clip_insert" \
+  || ! grep -qF 'ClipboardSelectionPolicy.insertionText(this.clipSelection)' <<< "$clip_insert" \
+  || ! grep -qF 'KeyboardSession.shared.insert(text);' <<< "$clip_insert"; then
+  echo "Harmony clipboard multi-selection must badge entries in tap order and insert 1 to 4 of them in one commit (#10411)" >&2
+  exit 1
+fi
+# 键盘调整遮罩（取代高度条）：四项的范围、生效条件、外框换算、各边拖动约束、存放和面板高度含抬高由 keyboard-adjust.test.ts 覆盖。视图、会话和扩展能力是 ArkTS，这里钉住接线：离开键盘调整的唯一出口 `show` 在离开时保存（没有恢复快照的「取消」路径），收起键盘、换输入框、切应用（`onPanelHidden`）都经它离开；「确认」也走它；设置页中途重载不盖掉预览；根节点按 `adjustFrame` 让出两侧和底部，面板高度和冷启动第一帧都算进抬高；外框和左右沿拖动按量到的面板宽换算（停靠面板是建面板时的屏幕宽，转屏、折叠屏开合后与此刻的屏幕宽不同），中间一排按钮按外框宽缩放；离开时抬高、宽度、位置只存生效且动过的项（`KeyboardAdjustPolicy.saved`，与 Android `keyboardAdjustEdits` 相同），打开时记下原值；调整期间工具条和按键整块不进读屏，读屏只走遮罩上的柄和按钮；旧的高度条不再存在。
+adjust_view="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"
+adjust_show=$(sed -n '/^  private show(surface: string): void {$/,/^  }$/p' "$adjust_view")
+adjust_hidden=$(sed -n '/^    KeyboardSession.shared.onPanelHidden = (): void => {$/,/^    };$/p' "$adjust_view")
+adjust_click=$(sed -n '/^  private adjustButtonClick(kind: string): void {$/,/^  }$/p' "$adjust_view")
+adjust_settings=$(sed -n '/^  private applySettings(): void {$/,/^  }$/p' "$adjust_view")
+adjust_resize=$(sed -n '/^  private resizeTouchPanel(): void {$/,/^  }$/p' "$adjust_view")
+adjust_sync=$(sed -n '/^  private syncStripHeight(): void {$/,/^  }$/p' "$adjust_view")
+adjust_root=$(sed -n '/^  keyboard() {$/,/^  }$/p' "$adjust_view")
+adjust_frame=$(sed -n '/^  private adjustFrame(): AdjustFrame {$/,/^  }$/p' "$adjust_view")
+adjust_touch=$(sed -n '/^  private adjustTouch(handle: string, event: TouchEvent): void {$/,/^  }$/p' "$adjust_view")
+adjust_button=$(sed -n '/^  adjustButton(kind: string) {$/,/^  }$/p' "$adjust_view")
+adjust_save=$(sed -n '/^  private saveAdjust(): void {$/,/^  }$/p' "$adjust_view")
+adjust_open=$(sed -n '/^  private openAdjustMode(): void {$/,/^  }$/p' "$adjust_view")
+if [[ -z "$adjust_show" ]] \
+  || ! grep -qF 'if (this.surface === SURFACE_GEOMETRY && surface !== SURFACE_GEOMETRY) {' <<< "$adjust_show" \
+  || ! grep -qF 'this.saveAdjust();' <<< "$adjust_show" \
+  || ! grep -qF 'if (this.surface === SURFACE_GEOMETRY) {' <<< "$adjust_hidden" \
+  || ! grep -qF 'this.show(SURFACE_NONE);' <<< "$adjust_hidden" \
+  || ! grep -qF 'this.previewAdjust(KeyboardAdjustPolicy.DEFAULTS);' <<< "$adjust_click" \
+  || ! grep -qF 'this.show(SURFACE_NONE);' <<< "$adjust_click" \
+  || grep -qF 'saveAdjust' <<< "$adjust_click" \
+  || ! grep -qF 'if (this.surface !== SURFACE_GEOMETRY) {' <<< "$adjust_settings" \
+  || ! grep -qF 'this.readAdjustValues();' <<< "$adjust_settings" \
+  || grep -qF 'this.geometryHeight = this.settings.heightAdjustment;' <<< "$adjust_settings" \
+  || ! grep -qF 'this.extraRowsWere, this.settings.candidateScalePercent, this.liftWas));' <<< "$adjust_resize" \
+  || ! grep -qF 'this.bottomLiftVp() !== this.liftWas' <<< "$adjust_sync" \
+  || ! grep -qF 'bottom: KeyboardMetrics.TOUCH_ROOT_BOTTOM_PADDING_VP + this.adjustFrame().lift' <<< "$adjust_root" \
+  || ! grep -qF 'left: KeyboardMetrics.TOUCH_ROOT_HORIZONTAL_PADDING_VP + this.adjustFrame().left,' <<< "$adjust_root" \
+  || ! grep -qF 'this.liftWas = KeyboardSession.shared.firstTouchLift();' "$adjust_view" \
+  || ! grep -qF 'this.adjustAvailability(), this.adjustPanelWidthVp());' <<< "$adjust_frame" \
+  || grep -qF 'screenWidthVp' <<< "$adjust_frame" \
+  || ! grep -qF 'this.adjustDragWidthVp = this.adjustPanelWidthVp();' <<< "$adjust_touch" \
+  || ! grep -qF 'return this.rootWidth > 0 ? this.rootWidth : this.screenWidthVp;' "$adjust_view" \
+  || ! grep -qF '@State rootWidth: number = 0;' "$adjust_view" \
+  || ! grep -qF '.width(this.adjustButtonRow().width)' <<< "$adjust_button" \
+  || ! grep -qF 'KeyboardAdjustPolicy.saved(stored, this.adjustOriginal, this.adjustValues(),' <<< "$adjust_save" \
+  || ! grep -qF 'saveKeyboardAdjust(saved.lift, saved.widthPercent, saved.positionX)' <<< "$adjust_save" \
+  || ! grep -qF 'this.adjustOriginal = this.adjustValues();' <<< "$adjust_open" \
+  || ! grep -qF ".accessibilityLevel(this.surface === SURFACE_GEOMETRY ? 'no-hide-descendants' : 'auto')" <<< "$adjust_root" \
+  || grep -qF 'HeightBar' "$adjust_view" \
+  || [[ -e "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/faces/HeightBar.ets" ]]; then
+  echo "The keyboard adjust overlay must save whenever it is left (confirm, another panel, hiding the keyboard, a new field, another app) with no restoring cancel path, keep its preview across a settings reload, inset the root by the adjust frame measured against the panel's real width (not the screen's), shrink the middle buttons to fit a narrow frame, save only the lift, width and position that are effective and changed (as Android does), hide the toolbar and keys from the screen reader while adjusting, count the bottom lift in every panel height, and replace HeightBar entirely" >&2
+  exit 1
+fi
+# 键盘调整在 Android、iOS 上验收时发现、鸿蒙同样有的几处（鸿蒙没有设备，按代码核对）：上沿柄的横线贴着外框上沿画在工具栏图标上方，不居中画进工具栏那一行；中间一排按钮与 iOS 一样 72vp、间距 28vp，窄时先收间距再收按钮（`KeyboardAdjustPolicy.buttonRow`，keyboard-adjust.test.ts 覆盖），不画左右柄时不留占位；浮动时下面两角的括号按卡片圆角画，不被裁掉；没有角标的键面按单行缩字，「123」「发送」在收窄的键盘里缩到放得下而不是被截掉；换输入框只来一次 inputStart、没有 inputStop 时，会话的 `attach` 经 `onEditorAttached` 让视图离开键盘调整并保存。
+adjust_edge=$(sed -n '/^  adjustEdge(handle: string) {$/,/^  }$/p' "$adjust_view")
+adjust_overlay=$(sed -n '/^  adjustOverlay() {$/,/^  }$/p' "$adjust_view")
+adjust_corner=$(sed -n '/^  adjustCorner(top: boolean, left: boolean) {$/,/^  }$/p' "$adjust_view")
+adjust_key_face=$(sed -n '/^  keyFace($$: KeyOptions) {$/,/^  }$/p' "$adjust_view")
+adjust_session="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardSession.ets"
+adjust_attach=$(sed -n '/^  attach(inputClient: inputMethodEngine.InputClient): void {$/,/^  }$/p' "$adjust_session")
+adjust_attached=$(sed -n '/^    KeyboardSession.shared.onEditorAttached = (): void => {$/,/^    };$/p' "$adjust_view")
+if [[ -z "$adjust_edge" || -z "$adjust_overlay" || -z "$adjust_corner" || -z "$adjust_key_face" || -z "$adjust_attach" ]] \
+  || ! grep -qF 'Stack({ alignContent: handle === ADJUST_TOP ? Alignment.Top : Alignment.Center }) {' <<< "$adjust_edge" \
+  || ! grep -qF '.padding({ top: handle === ADJUST_TOP ? KeyboardAdjustPolicy.TOP_GRIP_INSET_VP : 0 })' <<< "$adjust_edge" \
+  || ! grep -qF 'Row({ space: this.adjustButtonRow().gap }) {' <<< "$adjust_overlay" \
+  || grep -qF 'Column().width(KeyboardAdjustPolicy.HANDLE_SHORT_VP)' <<< "$adjust_overlay" \
+  || ! grep -qF 'handles.move ? 3 : 2, handles.left && handles.right);' "$adjust_view" \
+  || ! grep -qF "bottomLeft: !top && left && this.floatingDrawn() ? FloatingKeyboardPolicy.CORNER_RADIUS_VP : 0," <<< "$adjust_corner" \
+  || ! grep -qF "bottomRight: !top && !left && this.floatingDrawn() ? FloatingKeyboardPolicy.CORNER_RADIUS_VP : 0" <<< "$adjust_corner" \
+  || ! grep -qF ".heightAdaptivePolicy(this.keyFaceHasCornerHint(\$\$) ? TextHeightAdaptivePolicy.LAYOUT_CONSTRAINT_FIRST" <<< "$adjust_key_face" \
+  || ! grep -qF ': TextHeightAdaptivePolicy.MAX_LINES_FIRST)' <<< "$adjust_key_face" \
+  || ! grep -qF 'this.onEditorAttached();' <<< "$adjust_attach" \
+  || ! grep -qF 'if (this.surface === SURFACE_GEOMETRY) {' <<< "$adjust_attached" \
+  || ! grep -qF 'this.show(SURFACE_NONE);' <<< "$adjust_attached" \
+  || ! grep -qF 'KeyboardSession.shared.onEditorAttached = undefined;' "$adjust_view"; then
+  echo "The keyboard adjust overlay must draw the top grip against the frame's top edge above the toolbar icons, space the middle buttons like iOS (gaps shrink before widths) with no placeholders for hidden side handles, round the bottom corner brackets to the floating card's corners, shrink one-line key labels to fit the key's width, and leave (saving) when a new editor attaches without the keyboard hiding" >&2
+  exit 1
+fi
+# 长按菜单的「朗读」：排在哪里、带着什么由 keyboard-logic.test.ts 覆盖，出声的固定取值由 read-aloud-policy.test.ts 覆盖；视图、会话和设置桥是 ArkTS，node 下编不了，这里钉住接线：菜单把会话经共享层答的英文交给两种菜单，2in1 触摸长按在只有「朗读」时也打开，点下去时核对候选再读；关掉以后才建好的引擎当场关掉；引擎只用离线模式，从不下载声音；设置桥的 read_aloud 先经共享层核对词头。
+if ! grep -qF "KeyboardSession.shared.readAloudText(" "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF "managed.annotation, managed.annotationIsTranslation, managed.text, spoken);" "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF "managed === null ? '' : managed.text, spoken);" "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF "KeyboardSession.shared.readAloud(action.spoken)" "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF "online: ReadAloudPolicy.OFFLINE," "$repo_root/platforms/harmony/entry/src/main/ets/speech/HarmonyReadAloud.ets" \
+  || grep -qF "downloadVoice" "$repo_root/platforms/harmony/entry/src/main/ets/speech/HarmonyReadAloud.ets" \
+  || ! grep -qF "candidate.text, candidate.annotationIsTranslation ? candidate.annotation : '')).length === 0) {" "$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets" \
+  || ! grep -qF "if (generation !== HarmonyReadAloud.generation) {" "$repo_root/platforms/harmony/entry/src/main/ets/speech/HarmonyReadAloud.ets" \
+  || ! grep -qF "client.readAloudText(ReadAloudPolicy.textRequest(word, ''))" "$repo_root/platforms/harmony/entry/src/main/ets/pages/Settings.ets"; then
+  echo "Harmony read aloud must pass the shared layer's text to both candidate menus (the 2in1 touch long press opens for 朗读 alone too), check the candidate before speaking, close an engine created after shutdown, stay offline without downloading voices, and validate the settings page's word" >&2
+  exit 1
+fi
+# 上屏后联想（#9433）：规则由 next-word-prediction.test.ts 覆盖，视图、会话和扩展能力是 ArkTS，这里钉住接线。回车把联想交给 ReturnKeyAction（FINISH_THEN_EDITOR，照常换行或发送），空格键读屏仍按候选读「选定」；实体空格和数字、触屏数字行的数字在联想时交给运行时去选，引擎没收下的符号照样由键盘写进去；外部改动和选区移动重新聚焦清掉旧联想，键盘自己的回声不算；联想的候选不给长按管理；关闭键 × 和实体 Esc 送 Cancel；2in1 候选窗在联想时也出现；直接写进编辑器的文字先清掉联想。
+nwp_view="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardView.ets"
+nwp_session="$repo_root/platforms/harmony/entry/src/main/ets/keyboard/KeyboardSession.ets"
+nwp_ability="$repo_root/platforms/harmony/entry/src/main/ets/inputmethodextability/KeyboardExtensionAbility.ets"
+nwp_insert=$(sed -n '/^  insert(text: string): void {$/,/^  }$/p' "$nwp_session")
+if ! grep -qF 'this.strokeFace(), this.prediction);' "$nwp_view" \
+  || ! grep -qF 'NextWordPredictionPolicy.composingCandidates(this.candidates.length, this.prediction)' "$nwp_view" \
+  || ! grep -qF 'KeyAccessibilityPolicy.space(this.candidates.length > 0)' "$nwp_view" \
+  || ! grep -qF '|| !KeyboardSession.shared.candidateManagementAllowed()) {' "$nwp_view" \
+  || ! grep -qF '.onClick(() => this.closePrediction())' "$nwp_view" \
+  || ! grep -qF 'KeyboardSession.shared.dismissPrediction();' "$nwp_view" \
+  || ! grep -qF 'this.refocusAfterExternalEdit(false);' "$nwp_session" \
+  || ! grep -qF 'this.refocusAfterExternalEdit(ownEcho);' "$nwp_session" \
+  || ! grep -qF 'prediction: NextWordPredictionPolicy.showing(view.prediction, entries.length)' "$nwp_session" \
+  || ! grep -qF 'this.predictionButtonStyle = NextWordPredictionPolicy.buttons(preferences.next_word_prediction_buttons);' "$nwp_session" \
+  || ! grep -qF 'this.dismissPrediction();' <<< "$nwp_insert" \
+  || ! grep -qF 'NextWordPredictionPolicy.dismissesOnKey(event.key.code,' "$nwp_ability" \
+  || ! grep -qF 'NextWordPredictionPolicy.selectionKey(numpad.keyCode, numpad.unicodeChar,' "$nwp_ability" \
+  || ! grep -qF 'if (session.pressPredictionKey(predictionKey)) {' "$nwp_ability" \
+  || ! grep -qF 'return this.apply(client.character(this.handle, ascii, false));' "$nwp_session" \
+  || ! grep -qF 'if (!KeyboardSession.shared.composing() && !KeyboardSession.shared.predicting()) {' "$nwp_view" \
+  || ! grep -qF ': !this.compositionInField && !this.prediction,' "$nwp_view" \
+  || ! grep -qF 'NextWordPredictionPolicy.composingCandidates(this.currentCandidates.length, this.predicting()) === 0) {' "$nwp_session" \
+  || [[ $(grep -cF 'KeyboardSession.shared.candidateWindowWanted()' "$nwp_ability") -ne 3 ]]; then
+  echo "Harmony post-commit prediction must hand Return to the editor, send physical Space and digits to the runtime, refocus on external edits only, skip candidate management, close on × and Esc, keep the 2in1 candidate window up and clear before direct inserts" >&2
+  exit 1
+fi
 "$tsc" --project "$here/tsconfig.json"
+# Telemetry.ets 是 .ets，不在上面的 tsconfig 里，telemetry-adapter.test.cjs 又用 --noCheck 发射，删掉 TelemetryPolicy 成员后 HAP 编译失败而这里仍然全绿。把它复制成 .ts，连同真实的 TelemetryPolicy.ts、系统模块的 any 声明和同级模块的 any 存根做一次严格类型检查。
+telemetry_check="$repo_root/target/harmony-tests/telemetry-typecheck"
+rm -rf "$telemetry_check"
+mkdir -p "$telemetry_check/telemetry" "$telemetry_check/keyboard" "$telemetry_check/privacy"
+cp "$repo_root/platforms/harmony/entry/src/main/ets/telemetry/Telemetry.ets" "$telemetry_check/telemetry/Telemetry.ts"
+cp "$repo_root/platforms/harmony/entry/src/main/ets/telemetry/TelemetryPolicy.ts" "$telemetry_check/telemetry/TelemetryPolicy.ts"
+printf 'export declare const KeyboardLog: any;\nexport declare function describeError(error: unknown): string;\n' > "$telemetry_check/keyboard/KeyboardLog.d.ts"
+printf 'export declare const HarmonyPrivacyConsent: any;\n' > "$telemetry_check/privacy/HarmonyPrivacyConsent.d.ts"
+"$tsc" --ignoreConfig --noEmit --strict --target es2021 --module commonjs --skipLibCheck \
+  "$here/telemetry-typecheck.d.ts" "$telemetry_check/telemetry/Telemetry.ts" "$telemetry_check/telemetry/TelemetryPolicy.ts"
 node "$here/idle-dictionary-lifecycle.test.cjs"
 # 上面已编译所有 tests/*.test.ts；逐个运行它们的输出。遍历源文件而不是输出目录，可以避免已删除测试遗留的旧 .js 被运行。
 for source in "$here"/*.test.ts; do
   node "$repo_root/target/harmony-tests/tests/$(basename "${source%.ts}").js"
 done
+# 实际 ArkTS 生命周期适配器在替代系统 API 后执行，补上纯策略测试碰不到的请求接线。
+node "$here/telemetry-adapter.test.cjs"
+bash "$here/check-native-capture.sh"
 # The key-sound renderer is plain C++ over miniaudio with no NAPI in it, so the build machine's compiler checks what it writes and what it refuses.
 out="$repo_root/target/harmony-tests"
 miniaudio="$repo_root/platforms/windows/third_party/miniaudio"

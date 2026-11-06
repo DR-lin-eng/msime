@@ -13,6 +13,10 @@ feedback=false
 diagnostics=false
 text_edit_layout=false
 oobe=false
+crash_only=false
+# 单次 instrumentation 默认不设上限：完整套件里 NumberPadDeviceSmoke 一项就要跑约 6.5 分钟，整套的总时长由 workflow 的 timeout-minutes 兜底。需要给单次运行加上限时设置 MSIME_DEVICE_INSTRUMENTATION_TIMEOUT_SECONDS（秒）。
+instrumentation_timeout_seconds=${MSIME_DEVICE_INSTRUMENTATION_TIMEOUT_SECONDS:-}
+[[ -z "$instrumentation_timeout_seconds" || "$instrumentation_timeout_seconds" =~ ^[1-9][0-9]*$ ]] || { echo "MSIME_DEVICE_INSTRUMENTATION_TIMEOUT_SECONDS must be a positive integer" >&2; exit 1; }
 for option in "${@:2}"; do
   case "$option" in
     # --core 跑安装、词库准备、打字主路径及剪贴板保存生命周期；其余键盘套件在 API 28 上仍不支持。
@@ -24,12 +28,15 @@ for option in "${@:2}"; do
     --diagnostics) diagnostics=true ;;
     --text-edit-layout) text_edit_layout=true ;;
     --oobe) oobe=true ;;
-    *) echo "usage: smoke.sh [emulator-5580] [--core] [--settings] [--handwriting] [--statistics] [--feedback] [--diagnostics] [--text-edit-layout] [--oobe]" >&2; exit 1 ;;
+    --crash-only) crash_only=true ;;
+    *) echo "usage: smoke.sh [emulator-5580] [--core] [--settings] [--handwriting] [--statistics] [--feedback] [--diagnostics] [--text-edit-layout] [--oobe] [--crash-only]" >&2; exit 1 ;;
   esac
 done
 [[ "$serial" == emulator-* ]] || { echo "Only the dedicated emulator is supported" >&2; exit 1; }
 avd_name=$("$adb" -s "$serial" emu avd name | tr -d '\r' | head -1)
 [[ "$avd_name" == msime-client-test || "$avd_name" == msime-client-test-api* ]] || { echo "Refusing a non-test AVD" >&2; exit 1; }
+api_level=$("$adb" -s "$serial" shell getprop ro.build.version.sdk | tr -d '\r')
+[[ "$api_level" =~ ^[0-9]+$ ]] || { echo "Could not read Android API level" >&2; exit 1; }
 # 输入法 id 必须写成 `ime list` 给出的短写：系统按字符串原样查找，长写 app.msime.android/app.msime.android.MSIMEInputService 在 `ime enable` 时报 Unknown input method。设备测试里的 `ime` 命令都用同一个短写。
 ime_id=app.msime.android/.MSIMEInputService
 # ---- 失败收集 ----
@@ -178,7 +185,9 @@ check_script() {
 }
 # ---- 前置条件：这里失败，后面的检查都跑不起来 ----
 device_alive || stop "Test AVD has not booted"
-if [[ "$oobe" == true ]]; then
+if [[ "$crash_only" == true ]]; then
+  MSIME_ANDROID_CRASH_REPORTING=1 bash platforms/android/tests/device/build-editor.sh || stop "building the crash reporting test APK failed"
+elif [[ "$oobe" == true ]]; then
   MSIME_ANDROID_OOBE_SMOKE=1 bash platforms/android/tests/device/build-editor.sh || stop "building the device test APKs failed"
 else
   bash platforms/android/tests/device/build-editor.sh || stop "building the device test APKs failed"
@@ -244,17 +253,30 @@ run_instrumentation() {
     platforms/android/tests/device/AndroidManifest.xml)
   [[ "$target" == app.msime.android || "$target" == app.msime.android.test ]] \
     || { echo "Unknown instrumentation target: $component" >&2; return 1; }
+  local limit=()
+  [[ -z "$instrumentation_timeout_seconds" ]] || limit=(timeout --foreground "${instrumentation_timeout_seconds}s")
   if (( sdk >= 31 )) && [[ "$target" == app.msime.android ]]; then
     "$adb" -s "$serial" shell am start -W -n app.msime.android/app.msime.android.home.HomeActivity >/dev/null
-    "$adb" -s "$serial" shell am instrument --no-restart "${@:2}" -w "$component"
+    ${limit[@]+"${limit[@]}"} "$adb" -s "$serial" shell am instrument --no-restart "${@:2}" -w "$component"
   else
-    "$adb" -s "$serial" shell am instrument "${@:2}" -w "$component"
+    ${limit[@]+"${limit[@]}"} "$adb" -s "$serial" shell am instrument "${@:2}" -w "$component"
   fi
 }
 "$adb" -s "$serial" shell ime enable "$ime_id" || stop "enabling $ime_id failed"
 "$adb" -s "$serial" shell ime set "$ime_id" || stop "selecting $ime_id failed"
 confirm_ime || stop "$ime_id did not stay selected"
 "$adb" -s "$serial" shell am force-stop app.msime.android.test
+# 崩溃专项只准备真实产品进程和测试夹具；完整输入套件会覆盖同一批 instrumentation，既浪费设备时间，也会让 UI 套件的已知问题遮住崩溃链路。
+if [[ "$crash_only" == true ]]; then
+  python3 platforms/android/tests/device/telemetry-watch.py "$serial" || stop "Android telemetry watch acceptance failed"
+  if (( api_level >= 30 )); then
+    python3 platforms/android/tests/device/telemetry-consent.py "$serial" || stop "Android system-exit acceptance failed"
+    python3 platforms/android/tests/device/telemetry-anr.py "$serial" || stop "Android ANR acceptance failed"
+    finish "Dedicated Android AVD: crash, system-exit and ANR reporting acceptance passed"
+  fi
+  echo "API $api_level has no ApplicationExitInfo; system-exit and ANR replay are not applicable" >&2
+  finish "Dedicated Android AVD: Java/JNI crash and consent acceptance passed"
+fi
 # ---- 验收：失败记下后继续，只有上面 record_failure 列出的情况才停 ----
 check "System input acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.DeviceSmoke
 [[ ${#failures[@]} -eq 0 ]] || stop "the system input path failed, and every later check types through the same keyboard"
@@ -298,7 +320,7 @@ check "Input failure category acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_i
 check "Composition batch acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.CompositionBatchDeviceSmoke
 # 旧菜单、展开按钮和拼写回调只检查身份，不写编辑器、不停止当前会话。
 check "Stale candidate callback acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.StaleCandidateDeviceSmoke
-# 空闲联想只在点选时上屏，自己的选区回声保留候选，外部移动和隐私模式清除候选。
+# 空闲联想由点选、空格（首条，不另插空格）和本页数字键上屏，越过本页的数字照常输入；自己的选区回声保留候选，外部移动和隐私模式清除候选。
 check "Next word prediction acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.StaleCandidateDeviceSmoke -e next-word true
 # 横向候选条不展开也能越过分页和分批边界，左右返回后按全局身份选词。
 check "Continuous candidate strip acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.CandidatePanelDeviceSmoke -e continuous-strip true
@@ -338,6 +360,8 @@ verdict "Clipboard segment drag acceptance failed" MSIME_DEVICE_SMOKE_PASSED "$r
 
 # 数字默认九宫格涉及常规键面和字面提交，API 28 的核心验收同样覆盖。
 check "Number pad acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.NumberPadDeviceSmoke
+# 随机数字专项复用数字页入口，覆盖真实原生开关和逐次重排，两版设备都执行。
+check "Random digit pad acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.NumberPadDeviceSmoke -e random-digits true
 check "Password number pad acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.NumberPadDeviceSmoke -e password-number-pad true
 # 导航必须在原生宿主中验收：设置列表有「皮肤」一行，底部第二格是没有返回按钮、顶部为「皮肤 / 词库」分类的社区根页，AI 对话从设置压入二级页。
 check "Native chat navigation acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.ChatNavigationDeviceSmoke
@@ -358,6 +382,7 @@ check "Shared voice settings JNI acceptance failed" MSIME_DEVICE_SMOKE_PASSED ru
 # 语音接口提示与运行时共用校验；只传合成地址，不保存或联网。
 check "组合语音入口设置验收失败" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.SettingsDeviceSmoke -e voice-triggers true
 check "Shared voice endpoint JNI acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.VoiceEndpointSettingsDeviceSmoke
+check "Local voice pause settings acceptance failed" MSIME_DEVICE_SMOKE_PASSED run_instrumentation app.msime.android.test/app.msime.android.test.SettingsDeviceSmoke -e local-voice-pause true
 # 账号与云端的 JNI 入口和注入的会话存储（#8201）经真实 JNI 与 Rust 核对；只用合成会话、不联网，最低 API 的核心验收也执行。
 # 其中旧快照队列那一项（迁移计划 P13）要在主进程里真的激活一份整份快照，激活要独占词库维护权；输入法还绑着时 `:ime` 的会话占着词库，Rust 答 snapshot_unavailable。产品里激活只在键盘会话结束以后的 `:ime` 空闲时做，所以这里先停用本输入法让系统解绑它，跑完再启用、选回来，后面的套件照旧用它。
 "$adb" -s "$serial" shell ime disable "$ime_id" >/dev/null || stop "disabling $ime_id before the session store check failed"

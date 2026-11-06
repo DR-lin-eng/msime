@@ -9,6 +9,7 @@
 #include "Ipc.h"
 #include "JapaneseConversionPolicy.h"
 #include "../../../../shared/input/CapsLockTap.h"
+#include "../TsfCrashCapture.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -204,7 +206,7 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
 
     // functions for the composition object.
     void _SetComposition(_In_ ITfComposition *pComposition);
-    void _TerminateComposition(TfEditCookie ec, _In_ ITfContext *pContext, BOOL isCalledFromDeactivate = FALSE);
+    HRESULT _TerminateComposition(TfEditCookie ec, _In_ ITfContext *pContext, BOOL isCalledFromDeactivate = FALSE);
     void _SaveCompositionContext(_In_ ITfContext *pContext);
 
     // key event handlers for composition/candidate/phrase common objects.
@@ -250,8 +252,30 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     HRESULT _HandleEscape(TfEditCookie ec, _In_ ITfContext *pContext);
     HRESULT _HandleToogleIMEMode(TfEditCookie ec, _In_ ITfContext *pContext);
     HRESULT _HandleInsertText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text);
+    // 上屏后联想（msime_client.h 的 View.prediction）。联想由 TIP 自己的宿主会话判断有没有：每次编辑会话结束时 _RefreshPrediction 读宿主会话，有新的一代就在光标处给 Server 发 ShowCandidateWnd，候选窗画的是 Server 会话自己的那一份联想；点选、数字键和空格都由 Server 在它的会话里选中，文字送回来后 _CommitPredictionCandidate 把它插在光标处。联想没有 TSF 组字，也不建候选 UI 元素，所以 _candidateMode 一直是 CANDIDATE_NONE；数字和空格由 PredictionKey 单独认领，回车、标点照常交给应用。
+    void _RefreshPrediction(TfEditCookie ec, _In_ ITfContext *pContext);
+    // 关掉联想：给 Server 发 HideCandidateWnd（Server 据此清掉它会话里的联想），宿主会话里的联想也清掉。没有显示联想时什么也不做。
+    void _DismissPrediction();
+    bool _IsPredictionVisible() const
+    {
+        return _predictionGeneration != 0;
+    }
+    // 光标离开联想显示时的位置（点了别处、应用自己改了文字）就关掉联想；我们自己上屏引起的选区变化正好落在记下的位置上，不算。
+    void _CheckPredictionCaret(TfEditCookie ecReadOnly, _In_ ITfContext *pContext);
+    // 点选联想：Server 已经在自己的会话里选中，text 是要插在光标处的文字。宿主会话按文字跟着选同一个词，联想才能接着往下出；对不上就清掉宿主会话的联想。
+    HRESULT _CommitPredictionCandidate(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text);
+    // 联想显示着时按下的数字键或空格（FUNCTION_PREDICTION_SELECT）：键已经送给 Server，它在自己的会话里选中那一行；这里读回复，选中了就和点选一样插在光标处，没选中什么也不做。
+    HRESULT _HandlePredictionSelectKey(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId);
+    // 正显示的联想这一页的行数，数字键超出它就照常输入（PredictionKey）。
+    std::size_t _PredictionRows() const
+    {
+        return _IsPredictionVisible() ? _predictionRows : 0;
+    }
+    // 候选窗里点选的候选（Server 的会话已经选中、text 是整次上屏的文字）在宿主会话里按文字跟着选上，两边一起前进，宿主会话才会接着出上屏后联想。选中、上屏的文字一致、宿主会话也不再组字时返回 true；否则宿主会话可能已经前进了一部分，调用方要丢掉它的组字。
+    bool _FollowServerClickInHost(const std::wstring &text);
     HRESULT _HandleCommitCandidateAndContinue(TfEditCookie ec, _In_ ITfContext *pContext,
-                                               const std::wstring &payload);
+                                               const std::wstring &payload,
+                                               std::optional<std::size_t> cursorSuffix = std::nullopt);
     HRESULT _HandleHostCandidateNavigation(TfEditCookie, ITfContext *, uint32_t);
     HRESULT _HandleHostOnlineCandidates(TfEditCookie, ITfContext *, const std::wstring &);
     HRESULT _HandleCandidateContinuation(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text);
@@ -344,7 +368,8 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
                                      const std::wstring &prefetchedText);
     HRESULT _HandleCandidateFinalizeForVKReturn(TfEditCookie ec, _In_ ITfContext *pContext);
     // Server 回了 CommitExactText（预选的释义列、Ctrl+Enter 的释义页）：它已经取消了自己的组字，text 是要原样上屏的完整文本。宿主会话也丢掉组字，再把 text 写进组字并结束组字，不补成对标点。
-    HRESULT _CommitServerExactText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text);
+    HRESULT _CommitServerExactText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text,
+                                    std::optional<std::size_t> cursorSuffix = std::nullopt);
     // 宿主会话拥有组字时，在宿主会话里选中 Server 对这个键选的那一项（`serverReply` 是它回复的 candidate_string，`serverMsgType` 是回复类型，见 HostServerSelection.h）；没有回复可读时传 nullptr，选候选窗高亮的那一项。选完了就上屏并结束组字，只选了一段（分段选词）就按宿主会话剩下的原文继续组字。数字键和空格都走这里，宿主会话因此和 Server 一样前进，之后的 Shift、回车不会再把已经上屏或选过的拼音交出来。候选窗与宿主会话的候选列表对不上（代次过期）、回复里什么都没选、宿主会话里找不到唯一的那个词或选择失败时返回 S_FALSE，什么也不写。
     HRESULT _SelectHighlightedHostCandidate(TfEditCookie ec, _In_ ITfContext *pContext, UINT serverMsgType = 0,
                                             _In_opt_ const std::wstring *serverReply = nullptr);
@@ -389,6 +414,7 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     uint64_t _CaptureFocusSessionToken() const;
     bool _IsFocusSessionCurrent(uint64_t focusToken, _In_opt_ ITfContext *expectedContext = nullptr) const;
     uint64_t _CaptureCompositionEpoch() const;
+    void _BeginEditorOperation() { ++_editorOperationSerial; }
     bool _IsCompositionEpochCurrent(uint64_t compositionEpoch) const;
     bool _IsCompositionCurrent(_In_opt_ ITfComposition *expectedComposition) const;
     bool _IsKeyboardCancellationCurrent(ITfContext *, ITfComposition *, uint64_t, uint64_t) const;
@@ -442,22 +468,28 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
         uint64_t compositionEpoch = 0;
         uint64_t deferredReplayToken = 0;
         std::wstring prefetchedText;
+        std::optional<std::size_t> cursorSuffix;
     };
     bool _PostAsyncKeyRequest(UINT message, UINT code, WCHAR wch, uint64_t requestId, std::wstring prefetchedText = {},
                               uint64_t expectedFocusToken = 0, uint64_t expectedCompositionEpoch = 0,
-                              uint64_t deferredReplayToken = 0);
+                              uint64_t deferredReplayToken = 0,
+                              std::optional<std::size_t> cursorSuffix = std::nullopt);
     bool _TakeAsyncKeyRequest(UINT message, UINT token, _Out_ AsyncKeyRequest &request);
     struct WorkerCandidateCommit
     {
         std::wstring text;
         uint64_t focusToken = 0;
         uint64_t compositionEpoch = 0;
+        std::optional<std::size_t> cursorSuffix;
     };
-    bool _PostServerCandidateCommit(_In_z_ const WCHAR *candidateText);
-    bool _PostServerCandidateCommitAndContinue(_In_z_ const WCHAR *payload);
+    bool _PostServerCandidateCommit(_In_z_ const WCHAR *candidateText,
+                                     std::optional<std::size_t> cursorSuffix = std::nullopt);
+    bool _PostServerCandidateCommitAndContinue(_In_z_ const WCHAR *payload,
+                                                std::optional<std::size_t> cursorSuffix = std::nullopt);
     bool _PostServerInsertText(_In_z_ const WCHAR *text);
     bool _PostServerTextDelivery(UINT windowMessage, _In_z_ const WCHAR *text,
-                                 uint64_t expectedFocus = 0, uint64_t expectedEpoch = 0);
+                                 uint64_t expectedFocus = 0, uint64_t expectedEpoch = 0,
+                                 std::optional<std::size_t> cursorSuffix = std::nullopt);
     bool _TakeServerCandidateCommit(UINT token, _Out_ WorkerCandidateCommit &request);
     bool _PeekServerCandidateCommit(UINT token, _Out_ WorkerCandidateCommit &request);
     void _ResetVoiceCompositionAssemble();
@@ -593,6 +625,8 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     BOOL _IsKeyboardDisabled();
 
     HRESULT _AddComposingAndChar(TfEditCookie ec, _In_ ITfContext *pContext, _In_ CStringRange *pstrAddString);
+    HRESULT _CommitTextWithCursor(TfEditCookie ec, ITfContext *context, const std::wstring &text,
+                                   std::size_t suffixUnits, bool *canRefresh = nullptr);
     HRESULT _AddCharAndFinalize(TfEditCookie ec, _In_ ITfContext *pContext, _In_ CStringRange *pstrAddString);
     HRESULT _InsertTextToComposition(TfEditCookie ec, _In_ ITfContext *pContext, _In_ CStringRange *pstrAddString);
     HRESULT _SetCompositionTextAndSelection(TfEditCookie ec, _In_ ITfContext *pContext,
@@ -611,11 +645,13 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     HRESULT _InvokeKeyHandler(_In_ ITfContext *pContext, UINT code, WCHAR wch, DWORD flags, _KEYSTROKE_STATE keyState,
                               uint64_t requestId, std::wstring prefetchedText = {}, UINT localResetToken = 0,
                               uint64_t expectedCompositionEpoch = 0, uint64_t expectedFocusToken = 0,
-                              uint64_t deferredReplayToken = 0);
+                              uint64_t deferredReplayToken = 0,
+                              std::optional<std::size_t> cursorSuffix = std::nullopt);
     HRESULT _RequestDirectPunctuationEditSession(_In_ ITfContext *pContext, UINT code, WCHAR wch, uint64_t requestId,
                                                  std::wstring prefetchedText, uint64_t expectedFocusToken = 0,
                                                  uint64_t expectedCompositionEpoch = 0,
-                                                 uint64_t deferredReplayToken = 0);
+                                                 uint64_t deferredReplayToken = 0,
+                                                 std::optional<std::size_t> cursorSuffix = std::nullopt);
 
     // function for the language property
     BOOL _SetCompositionLanguage(TfEditCookie ec, _In_ ITfContext *pContext);
@@ -705,6 +741,12 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     CANDIDATE_MODE _candidateMode;
     CCandidateListUIPresenter *_pCandidateListUIPresenter;
     BOOL _isCandidateWithWildcard : 1;
+    // 正显示的上屏后联想：宿主会话的代次（0 表示没有显示）、它所在的上下文和显示时光标所在的空区间。区间两端都向后吸附，光标处再插入文字时区间留在原地，光标就和它对不上了。
+    uint64_t _predictionGeneration = 0;
+    std::size_t _predictionRows = 0;
+    ITfContext *_pPredictionContext = nullptr;
+    ITfRange *_pPredictionAnchor = nullptr;
+    void _ForgetPrediction();
 
     // Last smart-punctuation commit, used to detect a backspace rejection.
     // The key event last counted by _NotePassthroughStatistics; a host can query the same event more than once.
@@ -817,7 +859,10 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     std::atomic<bool> _workerCommitReady;
     std::atomic<uint64_t> _expectedWorkerFocusToken;
     std::atomic<uint64_t> _acknowledgedWorkerFocusToken;
+    std::atomic<uint32_t> _workerServerCapabilities{0};
     std::atomic<uint64_t> _compositionEpoch;
+    // 较新的实际编辑作废旧提交的剩余定位步骤；只排队、尚未获得写锁的键不推进。
+    uint64_t _editorOperationSerial = 0;
     std::wstring _voiceCompositionAssemble;
     UINT _voiceCompositionAssembleMsg = 0;
     wchar_t _voiceCompositionAssembleGeneration = 0;
@@ -864,6 +909,7 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     uint64_t _deferredKeyFocusGeneration;
     bool _deferredKeyDrainPosted;
     bool _serverUnavailableFallbackActive;
+    std::unique_ptr<msime::tsf::TsfCrashCapture> _crashCapture;
 
     // True while the current Backspace hold began inside a composition.
     bool _backspaceHoldArmed;
@@ -871,6 +917,8 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     // Bare Shift/Ctrl toggle arming (Weasel-style: release within timeout).
     bool _shiftHotkeyArmed;
     bool _ctrlHotkeyArmed;
+    // RDP 切换后可能残留远程会话释放的修饰键位，直到本地再次观察到该键。
+    std::uint32_t _staleModifierMaskAfterFocusLoss;
     std::chrono::steady_clock::time_point _modifierHotkeyExpire;
     // 单按 Caps Lock 切换中英文的判定，三个桌面宿主共用一套规则（shared/input/CapsLockTap.h）。
     msime::input::CapsLockTap _capsLockTap;

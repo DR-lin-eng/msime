@@ -20,7 +20,7 @@ const MACOS_NATIVE_FORMAT: &str = "app.msime.client.settings";
 /// 只属于本机、不随设置文件走的偏好：语音、AI 辅助和翻译服务的整组配置（里面有服务密钥，地址、模型和密钥要成对才有意义，本地语音模型的路径也只在这台电脑上成立）、诊断日志开关、匿名使用统计的同意与否、剪贴板历史与输入辅助开关、英文在线候选授权，以及云剪贴板中继、云剪贴板 WebDAV 网盘、词库同步的 WebDAV 网盘、云候选的整组配置（地址、请求头和模板可能含凭据，用户保存的设置文件里不该出现它）、网络代理设置（代理地址常写内网主机和端口，只对这台机器的网络成立）和更新通道（加入测试版或每日构建是对这一台电脑的选择，换电脑导入设置文件不该顺带把新电脑换到预发布）。导出时不写，导入时保留本机的值。
 ///
 /// 剪贴板历史开关跟着本机走有两层原因：记不记录这台电脑复制过的内容是本机的隐私选择；它默认关闭，大多数文件里都是关的，如果跟着文件走，导入时会把本机开着的历史关掉，而关掉就会清空已存的历史，这些记录找不回来。
-pub const LOCAL_SECTIONS: [&str; 18] = [
+pub const LOCAL_SECTIONS: [&str; 19] = [
     "voice_input",
     "ai_assistant",
     "custom_translation",
@@ -28,6 +28,7 @@ pub const LOCAL_SECTIONS: [&str; 18] = [
     "niutrans",
     "diagnostic_log",
     "usage_reporting",
+    "usage_reporting_consent",
     "clipboard_history",
     "charging_night_learning",
     "verification_code_suggestions",
@@ -80,7 +81,7 @@ pub fn export_document(preferences: &Preferences) -> Result<String, serde_json::
     serde_json::to_string_pretty(&Value::Object(document))
 }
 
-/// 把设置文件换算成要保存的偏好：文件里的设置覆盖 `current`，[`LOCAL_SECTIONS`] 保留 `current` 的值，`fuzzy_pinyin.seeded` 只会从假变真（本机种过、文件里标着种过，或文件里模糊音开着），`smart_punctuation_migrated` 和 `translation_ai_migrated` 也一样；文件里的输入方案本版本不提供时保留本机的方案（与账号同步下载时的规则一样，见 `edition::filter_downloaded_account_settings`），只有一个方案的版本根本不从文件里取方案。
+/// 把设置文件换算成要保存的偏好：文件里的设置覆盖 `current`，[`LOCAL_SECTIONS`] 保留 `current` 的值，`fuzzy_pinyin.seeded` 只会从假变真（本机种过、文件里标着种过，或文件里模糊音开着），`smart_punctuation_migrated`、`translation_ai_migrated` 和 `keyboard_reranker_migrated` 也一样；文件里的输入方案本版本不提供时保留本机的方案（与账号同步下载时的规则一样，见 `edition::filter_downloaded_account_settings`），只有一个方案的版本根本不从文件里取方案。
 pub fn import_document(
     bytes: &[u8],
     current: &Preferences,
@@ -132,6 +133,9 @@ pub fn import_document(
     // AI 辅助翻译的迁移标记同理：文件里的翻译服务选择照文件的值导入，不再迁移。
     preferences.translation_ai_migrated =
         current.translation_ai_migrated || preferences.translation_ai_migrated;
+    // 整句联想默认「增强」的迁移标记同理：文件里的 `neural_keyboard` 照文件的值导入，不再迁移。
+    preferences.keyboard_reranker_migrated =
+        current.keyboard_reranker_migrated || preferences.keyboard_reranker_migrated;
     narrow_to_edition(&mut preferences, current, edition);
     preferences
         .validate()
@@ -200,7 +204,11 @@ mod tests {
         exported.usage_reporting = false;
         exported.clipboard_history = false;
         exported.voice_input.asr_model_path = "/elsewhere/model".into();
+        // 本地识别的停顿时间和判停灵敏度（#10310）按本机的麦克风和环境调，也不随文件走。
+        exported.voice_input.pause_millis = 800;
+        exported.voice_input.stop_sensitivity = 90;
         let text = export_document(&exported).unwrap();
+        assert!(!text.contains("pause_millis") && !text.contains("stop_sensitivity"));
 
         let mut current = Preferences::default();
         current.voice_input.asr_token = "synthetic-local-token".into();
@@ -208,6 +216,8 @@ mod tests {
         current.usage_reporting = true;
         current.clipboard_history = true;
         current.voice_input.asr_model_path = "/here/model".into();
+        current.voice_input.pause_millis = 4000;
+        current.voice_input.stop_sensitivity = 20;
         current.fuzzy_pinyin.seeded = true;
         let imported = import_document(text.as_bytes(), &current, Edition::full()).unwrap();
 
@@ -262,6 +272,25 @@ mod tests {
         assert!(imported.translation_ai_migrated);
     }
 
+    // 整句联想默认改成「增强」之前导出的文件没有迁移标记，`neural_keyboard` 是当时默认的 `false`。导入照文件的值来（「标准」），本机的标记保留，之后读文档不会再把它改成「增强」。
+    #[test]
+    fn an_old_file_keeps_its_sentence_level_and_this_machine_s_marker() {
+        let mut document: Value =
+            serde_json::from_str(&export_document(&Preferences::default()).unwrap()).unwrap();
+        let preferences = document["preferences"].as_object_mut().unwrap();
+        assert_eq!(
+            preferences.remove("keyboard_reranker_migrated"),
+            Some(Value::Bool(true))
+        );
+        preferences["sentence_association"]["neural_keyboard"] = Value::Bool(false);
+        let text = serde_json::to_string(&document).unwrap();
+
+        let imported =
+            import_document(text.as_bytes(), &Preferences::default(), Edition::full()).unwrap();
+        assert!(!imported.sentence_association.neural_keyboard);
+        assert!(imported.keyboard_reranker_migrated);
+    }
+
     #[test]
     fn a_local_section_written_into_the_file_by_hand_is_ignored() {
         let mut document: Value =
@@ -303,6 +332,24 @@ mod tests {
         .unwrap();
         assert!(imported.charging_night_learning);
         assert!(imported.verification_code_suggestions);
+    }
+
+    #[test]
+    fn reporting_consent_history_cannot_leave_or_enter_via_a_settings_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::preferences::PreferencesStore::new(directory.path());
+        let consent = store.usage_reporting_consent().unwrap();
+        let current = store.load().unwrap().preferences;
+        let text = export_document(&current).unwrap();
+        assert!(!text.contains("usage_reporting_consent"));
+        assert!(!text.contains(&consent.unwrap().epoch.to_string()));
+        let mut document: Value = serde_json::from_str(&text).unwrap();
+        document["preferences"]["usage_reporting_consent"] = serde_json::json!({
+            "epoch": "11111111-1111-4111-8111-111111111111", "since_unix_ms": 1
+        });
+        let imported =
+            import_document(document.to_string().as_bytes(), &current, Edition::full()).unwrap();
+        assert_eq!(imported.usage_reporting_consent, consent);
     }
 
     /// 更新通道只属于本机：导出不写，文件里手写的通道被忽略，导入后本机的通道不变。

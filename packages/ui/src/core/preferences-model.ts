@@ -11,6 +11,7 @@ import type { PunctuationPreferences } from "../settings/punctuation-preferences
 import type { KeybindingPreferences } from "../settings/keybinding-preferences";
 import type { WubiPreferences } from "../settings/wubi-preferences";
 import type { VietnamesePreferences } from "../settings/vietnamese-preferences";
+import type { CantonesePreferences } from "../settings/cantonese-preferences";
 import type { KoreanPreferences } from "../settings/korean-preferences";
 import type { FloatingToolbarPreferences } from "../settings/floating-toolbar-preferences";
 import type { TraditionalChineseVariant } from "../settings/chinese-output-preferences";
@@ -47,6 +48,9 @@ import type {
   TouchToolbarPreferences,
 } from "../settings/touch-keyboard-toolbar-preferences";
 
+/** 共享偏好 `next_word_prediction_buttons` 的取值，与 Rust 的 `NextWordPredictionButtons` 一致。 */
+export type NextWordPredictionButtons = "expand_only" | "close_and_expand" | "close_only";
+
 export type Preferences = PunctuationPreferences &
   PreeditPreferences &
   WubiPreferences &
@@ -73,7 +77,6 @@ export type Preferences = PunctuationPreferences &
     /** 同步「我的词条」的 WebDAV 网盘；缺省表示不同步。三项要么都空，要么都合规，规则与 `cloud_clipboard_webdav` 相同但各配各的，见 `crates/client-core/src/preferences.rs` 的 `DictionarySyncWebDavPreferences` 和 `docs/dictionary-webdav-sync.md`。 */
     dictionary_sync_webdav?: CloudClipboardWebDavPreferences;
     cloud_candidates?: boolean;
-    next_word_prediction?: boolean;
     cloud_candidate_provider?: CloudCandidateProviderPreferences;
     /** 云候选、翻译、AI、语音、账号、更新检查和下载共用的代理设置；本机与局域网目标一律直连。 */
     network?: NetworkProxyPreferences;
@@ -212,10 +215,16 @@ export type Preferences = PunctuationPreferences &
     shuangpin_keymap_hint?: boolean;
     vietnamese?: VietnamesePreferences;
     korean?: KoreanPreferences;
+    /** 桌面宿主的粤拼解释方式；等于默认值（普通粤拼）时文档里没有这一项。 */
+    cantonese?: CantonesePreferences;
     /** 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字；缺省为关。 */
     single_character_only?: boolean;
     /** 移动光标后编辑光标后的部分（桌面宿主）：缺省为关，关着时 Rust 端不写这个键。 */
     caret_edit_suffix?: boolean;
+    /** 上屏后联想：缺省为关。只在声明 `HostCapabilities.next_word_prediction` 的宿主上生效。 */
+    next_word_prediction?: boolean;
+    /** 上屏后联想时候选栏右端的按键（触屏宿主），缺省只有展开键。 */
+    next_word_prediction_buttons?: NextWordPredictionButtons;
     candidate_page_size: number;
     number_row_selection?: boolean;
     candidate_follow_cursor?: boolean;

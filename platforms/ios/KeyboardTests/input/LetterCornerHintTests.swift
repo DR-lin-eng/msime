@@ -105,6 +105,7 @@ final class LetterCornerHintTests: XCTestCase {
 
   func testCornerSymbolFinishesTheCompositionInsteadOfJoiningIt() throws {
     let controller = makeController(.quanpin)
+    controller.viewWillAppear(false)
     for label in ["字母 N", "字母 I"] {
       try key(labelled: label, in: controller).sendActions(for: .primaryActionTriggered)
     }
@@ -136,5 +137,36 @@ final class LetterCornerHintTests: XCTestCase {
     KeyboardLayoutPreference.swipeSymbols = true
     controller.viewWillAppear(false)
     XCTAssertTrue(q.swipesCornerHint)
+  }
+
+  /// 「显示字母键角标」（#10587）默认开；关掉后角标那一行藏起，按键仍带着角标符号，长按和滑动照样输入它；键盘再次出现时已画好的键面当场跟着收起或画回。
+  func testCornerHintSwitchHidesTheSymbolButKeepsItsGestures() throws {
+    let defaults = KeyboardLayoutPreference.defaults
+    let name = KeyboardLayoutPreference.letterCornerHintsKey
+    let stored = defaults.object(forKey: name)
+    addTeardownBlock {
+      if let stored { defaults.set(stored, forKey: name) }
+      else { defaults.removeObject(forKey: name) }
+    }
+    defaults.removeObject(forKey: name)
+    XCTAssertTrue(KeyboardLayoutPreference.letterCornerHints, "shown unless the user turns it off")
+
+    KeyboardLayoutPreference.letterCornerHints = false
+    let controller = makeController(.quanpin)
+    let q = try key(labelled: "字母 Q", in: controller)
+    XCTAssertEqual(cornerLabel(of: q)?.isHidden, true)
+    XCTAssertEqual(q.cornerHint, "1", "the hold and the swipe still type the symbol")
+    XCTAssertNotNil(q.onCornerHint)
+    XCTAssertEqual(q.accessibilityLabel, "字母 Q")
+
+    KeyboardLayoutPreference.letterCornerHints = true
+    controller.viewWillAppear(false)
+    XCTAssertEqual(cornerLabel(of: q)?.isHidden, false)
+    XCTAssertEqual(cornerLabel(of: q)?.text, "1")
+
+    KeyboardLayoutPreference.letterCornerHints = false
+    controller.viewWillAppear(false)
+    XCTAssertEqual(cornerLabel(of: q)?.isHidden, true)
+    XCTAssertEqual(q.cornerHint, "1")
   }
 }

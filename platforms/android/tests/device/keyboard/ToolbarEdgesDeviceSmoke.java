@@ -542,6 +542,9 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
         Field history = field(type, "clipboardHistory");
         Object original = history.get(service);
         boolean enabled = field(type, "clipboardHistoryEnabled").getBoolean(service);
+        // 删除前的系统认证（#10408）会拉起认证界面、异步才删；这里验收的是删除与撤销的渲染，关掉门禁让删除同步完成，门禁本身由 `check-host.sh` 和 `ClipboardDeleteAuthenticationPolicySmoke` 钉住。
+        Field deleteAuthentication = field(type, "clipboardDeleteAuthenticationEnabled");
+        boolean deleteAuthenticationEnabled = deleteAuthentication.getBoolean(service);
         Field connection = field(type, "connection");
         Object originalConnection = connection.get(service);
         try {
@@ -551,6 +554,7 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
                 storeType.getMethod("add", String.class).invoke(store, "合成剪贴板记录 " + index);
             history.set(service, store);
             field(type, "clipboardHistoryEnabled").setBoolean(service, true);
+            deleteAuthentication.setBoolean(service, false);
             Object panels = field(type, "imePanels").get(service);
             method(panels.getClass(), "renderClipboardHistory").invoke(panels);
             ViewGroup surface = (ViewGroup) field(type, "clipboardSurface").get(service);
@@ -623,6 +627,7 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
         } finally {
             history.set(service, original);
             field(type, "clipboardHistoryEnabled").setBoolean(service, enabled);
+            deleteAuthentication.setBoolean(service, deleteAuthenticationEnabled);
             connection.set(service, originalConnection);
             try (var paths = Files.walk(directory.toPath())) {
                 for (var path : paths.sorted(Comparator.reverseOrder()).collect(java.util.stream.Collectors.toList())) Files.delete(path);
@@ -630,11 +635,6 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
         }
     }
 
-    /**
-     * 确认清空的顶行在窄键盘上也要整行落在键盘宽度以内：问句、「取消」「清空」都有宽高，按钮不出右边界（#10030）。
-     *
-     * <p>顶行原来套在 HorizontalScrollView 里按 UNSPECIFIED 宽度量，整行约 270dp；240dp 宽时「清空」被挤到右侧屏外，要横滑才点得到。
-     */
     /** 用真实面板渲染覆盖按钮开启和工具栏隐藏的四种组合，不因快捷入口而删除语音磁贴。 */
     private static void checkVoiceTileRetained(Class<?> type, Object service) throws Exception {
         Object panel = field(type, "imeFunctionPanel").get(service);
@@ -654,6 +654,11 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
         }
     }
 
+    /**
+     * 确认清空的顶行在窄键盘上也要整行落在键盘宽度以内：问句、「取消」「清空」都有宽高，按钮不出右边界（#10030）。
+     *
+     * <p>顶行原来套在 HorizontalScrollView 里按 UNSPECIFIED 宽度量，整行约 270dp；240dp 宽时「清空」被挤到右侧屏外，要横滑才点得到。
+     */
     private static void checkClipboardClearConfirm(Object panels, ViewGroup header, ViewGroup surface,
             float density) throws Exception {
         Field pending = field(panels.getClass(), "clipboardClearPending");
@@ -878,7 +883,7 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
         int previousSeconds = seconds.getInt(service);
         Object history = field(type, "clipboardHistory").get(service);
         Method load = history.getClass().getMethod("load");
-        Method remove = method(type, "removeClipboardItems", java.util.List.class);
+        Method remove = method(type, "removeClipboardItems", java.util.List.class, Runnable.class);
         Method hasUndo = method(type, "hasClipboardUndo");
         Method updateBackToTop = method(panels.getClass(), "updateClipboardBackToTop");
         Button undo = (Button) field(type, "clipboardUndoButton").get(service);
@@ -887,7 +892,9 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
         try {
             check(undo.getVisibility() == View.GONE, "clipboard undo is visible before any deletion");
             seconds.setInt(service, 7);
-            remove.invoke(service, java.util.List.of(target));
+            boolean[] removed = new boolean[1];
+            remove.invoke(service, java.util.List.of(target), (Runnable) () -> removed[0] = true);
+            check(removed[0], "clipboard deletion did not report completion to the selection panel");
             check(!containsText(load.invoke(history), target), "clipboard deletion did not remove the record");
             check(undo.getVisibility() == View.VISIBLE, "clipboard undo did not appear after a deletion");
             check("撤销（7 秒）".contentEquals(undo.getText()),
@@ -940,7 +947,9 @@ public final class ToolbarEdgesDeviceSmoke extends Instrumentation {
             check(undo.getVisibility() == View.GONE && !(Boolean) hasUndo.invoke(service),
                 "clipboard undo stayed after restoring");
 
-            remove.invoke(service, java.util.List.of(target));
+            removed[0] = false;
+            remove.invoke(service, java.util.List.of(target), (Runnable) () -> removed[0] = true);
+            check(removed[0], "the second clipboard deletion did not report completion to the selection panel");
             check(undo.getVisibility() == View.VISIBLE, "clipboard undo did not appear after the second deletion");
             field(type, "clipboardUndoDeadline").setLong(service, android.os.SystemClock.uptimeMillis() - 1);
             method(type, "tickClipboardUndo").invoke(service);

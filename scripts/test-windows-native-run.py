@@ -58,6 +58,7 @@ ARGUMENTS = {
     "input/backspace_selected_phrase.cpp": ["platforms/windows/tests/input/fixtures/msime-phrase-backspace.db"],
     "input/shuangpin_paged_selection.cpp": ["platforms/windows/tests/input/fixtures/msime-shuangpin-paging.db"],
     "input/host_online_candidates.cpp": ["platforms/windows/tests/input/fixtures/msime-pinyin-online.db"],
+    "input/cloud_seat_navigation.cpp": ["platforms/windows/tests/input/fixtures/msime-pinyin-online.db"],
     "core/installer_launch.cpp": ["platforms/windows/installer/msime_setup.iss"],
     "input/zhuyin_keys.cpp": ["platforms/windows/tests/input/fixtures/msime-zhuyin.db"],
     "input/stroke_keys.cpp": ["platforms/windows/tests/input/fixtures/msime-stroke.db"],
@@ -72,6 +73,11 @@ BUILD_DRIVEN = {
 # 不自动链接任意源文件，避免把整个 Windows 构建引进来；缺少宿主库产物时仍跳过相关测试。
 # 值为（相对 platforms/windows 的源文件列表，是否需要共享宿主库）。
 COMPANIONS: dict[str, tuple[list[str], bool]] = {
+    # 回复合成器使用真实宿主库，提交正文与定位尾段必须经过同一份简繁投影。
+    "input/reply_composer.cpp": (
+        ["src/ipc/ReplyComposer.cpp", "src/ipc/ReplyCodec.cpp", "src/ipc/ServerSession.cpp",
+         "src/input/ChineseTextConversion.cpp"], True,
+    ),
     # 两份真实会话共同验证五笔自动上屏的文档写入归属。
     "input/wubi_auto_commit.cpp": (
         ["src/ipc/ReplyComposer.cpp", "src/ipc/ReplyCodec.cpp", "src/ipc/ServerSession.cpp",
@@ -101,6 +107,8 @@ COMPANIONS: dict[str, tuple[list[str], bool]] = {
     # 账号释义的请求和解析经共享 C ABI，策略用例需要链接真实宿主库。
     "candidate/account_gloss_policy.cpp": ([], True),
     "core/uiless_candidates.cpp": (["src/ipc/ReplyCodec.cpp"], False),
+    # 提交定位协议不依赖 Win32，固定包长与 UTF-16 边界在各宿主都执行断言。
+    "core/reply_codec.cpp": (["src/ipc/ReplyCodec.cpp"], False),
     # 候选投影、五笔提示与编辑光标经过繁简转换，需要同一实现及其宿主库依赖。
     "candidate/caret_edit_presentation.cpp": (["src/input/ChineseTextConversion.cpp"], True),
     "candidate/candidate_pointer_input.cpp": (["src/input/ChineseTextConversion.cpp"], True),
@@ -112,6 +120,12 @@ COMPANIONS: dict[str, tuple[list[str], bool]] = {
     "input/preedit_caret.cpp": (["src/input/ChineseTextConversion.cpp"], True),
     "ui/candidate_render_request.cpp": (["src/input/ChineseTextConversion.cpp"], True),
     "core/candidate_continuation_pipe.cpp": (["src/ipc/ReplyCodec.cpp"], False),
+    # 方向键让过云占位席位：真实 Server 会话的回复合成、候选窗投影与 TIP 宿主会话的导航（#10665）。
+    "input/cloud_seat_navigation.cpp": (
+        ["src/ipc/ReplyComposer.cpp", "src/ipc/ReplyCodec.cpp", "src/ipc/ServerSession.cpp",
+         "src/input/ChineseTextConversion.cpp", "tsf/EngineSessionAdapter.cpp", "tsf/EngineResponse.cpp"],
+        True,
+    ),
     # 两份真实引擎会话通过外部候选选择继续组字。
     "input/host_online_candidates.cpp": (
         ["src/ipc/ServerSession.cpp", "src/input/ChineseTextConversion.cpp", "tsf/EngineSessionAdapter.cpp", "tsf/EngineResponse.cpp"], True,

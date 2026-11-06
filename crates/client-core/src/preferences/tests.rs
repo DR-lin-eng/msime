@@ -1943,6 +1943,85 @@ fn local_model_mirror_is_empty_or_an_https_prefix() {
     assert!(loaded.voice_input.asr_model_mirror.is_empty());
 }
 
+/// 本地识别的停顿时间和判停灵敏度（#10310）：缺键按改成可调之前写死的 1500 毫秒和 0.5 阈值对应的 50 读，默认值不写进文档；范围、步进与 Android 本机设置相同，范围外和不在步进上的值整份拒绝。
+#[test]
+fn voice_pause_settings_default_to_the_old_fixed_values_and_follow_the_android_bounds() {
+    let defaults = Preferences::default().voice_input;
+    assert_eq!(defaults.pause_millis, 1500);
+    assert_eq!(defaults.stop_sensitivity, 50);
+    let document = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(document["voice_input"].get("pause_millis").is_none());
+    assert!(document["voice_input"].get("stop_sensitivity").is_none());
+
+    let with = |pause_millis: u16, stop_sensitivity: u8| Preferences {
+        voice_input: VoiceInputPreferences {
+            pause_millis,
+            stop_sensitivity,
+            ..Preferences::default().voice_input
+        },
+        ..Preferences::default()
+    };
+    for (pause, sensitivity) in [(500, 10), (2500, 70), (5000, 90), (1500, 50)] {
+        assert!(
+            with(pause, sensitivity).validate().is_ok(),
+            "{pause} / {sensitivity}"
+        );
+    }
+    for (pause, sensitivity) in [
+        (0, 50),
+        (400, 50),
+        (550, 50),
+        (5100, 50),
+        (1500, 0),
+        (1500, 9),
+        (1500, 91),
+    ] {
+        assert!(
+            matches!(
+                with(pause, sensitivity).validate(),
+                Err(PreferencesError::InvalidVoicePause)
+            ),
+            "{pause} / {sensitivity}"
+        );
+    }
+
+    // 改过的值写进文档并原样读回。
+    let document = serde_json::to_value(with(3000, 80)).unwrap();
+    assert_eq!(document["voice_input"]["pause_millis"], 3000);
+    assert_eq!(document["voice_input"]["stop_sensitivity"], 80);
+    let loaded: Preferences = serde_json::from_value(document).unwrap();
+    assert_eq!(loaded.voice_input.pause_millis, 3000);
+    assert_eq!(loaded.voice_input.stop_sensitivity, 80);
+}
+
+/// 语音标点（#10558）：缺键读成 `auto`，也就是加这个选项之前的行为，默认值不写进文档；选过的值原样读回；不认识的值不让偏好读不了，由消费方按 `auto` 处理。
+#[test]
+fn voice_punctuation_mode_defaults_to_auto_and_tolerates_unknown_values() {
+    assert_eq!(Preferences::default().voice_input.punctuation_mode, "auto");
+    let document = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(document["voice_input"].get("punctuation_mode").is_none());
+
+    let mut legacy = document.clone();
+    legacy["voice_input"]
+        .as_object_mut()
+        .unwrap()
+        .remove("punctuation_mode");
+    let loaded: Preferences = serde_json::from_value(legacy).unwrap();
+    assert_eq!(loaded.voice_input.punctuation_mode, "auto");
+
+    for value in ["omit_trailing", "omit_all", "space", "from_a_newer_version"] {
+        let mut document = document.clone();
+        document["voice_input"]["punctuation_mode"] = value.into();
+        let loaded: Preferences = serde_json::from_value(document).unwrap();
+        assert_eq!(loaded.voice_input.punctuation_mode, value);
+        assert!(loaded.validate().is_ok(), "{value}");
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["voice_input"]["punctuation_mode"],
+            value
+        );
+    }
+}
+
 #[test]
 fn the_shipped_defaults_are_themselves_reachable() {
     let defaults = Preferences::default();
@@ -2192,6 +2271,317 @@ fn usage_reporting_defaults_on_and_survives_a_save() {
 }
 
 #[test]
+fn reporting_consent_is_initialized_once_and_survives_a_new_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let legacy = store.load().unwrap();
+    assert!(legacy.preferences.usage_reporting);
+    assert_eq!(legacy.preferences.usage_reporting_consent, None);
+    assert!(!directory.path().join("preferences.json").exists());
+
+    let consent = store.usage_reporting_consent().unwrap().unwrap();
+    let saved = store.load().unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(saved.preferences.usage_reporting_consent, Some(consent));
+    assert!(consent.since_unix_ms > 0);
+    let path = directory.path().join("preferences.json");
+    let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let reopened = PreferencesStore::new(directory.path());
+    assert_eq!(reopened.usage_reporting_consent().unwrap(), Some(consent));
+    assert_eq!(reopened.load().unwrap(), saved);
+    assert_eq!(
+        std::fs::metadata(path).unwrap().modified().unwrap(),
+        written
+    );
+}
+
+#[test]
+fn reporting_consent_survives_unrelated_and_old_client_saves() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let consent = store.usage_reporting_consent().unwrap();
+    let current = store.load().unwrap();
+    let mut edited = current.preferences;
+    edited.candidate_page_size = 9;
+    edited.usage_reporting_consent = None;
+    let saved = store.save(current.revision, edited).unwrap();
+    assert_eq!(saved.preferences.usage_reporting_consent, consent);
+    let mut old_client = saved.preferences.clone();
+    old_client.usage_reporting_consent = None;
+    assert_eq!(store.save(saved.revision, old_client).unwrap(), saved);
+}
+
+#[test]
+fn reporting_consent_survives_android_layout_migration_without_initializing_history() {
+    for (enabled, initialize) in [(false, false), (true, false), (true, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferencesStore::new(directory.path());
+        store
+            .save(
+                0,
+                Preferences {
+                    usage_reporting: enabled,
+                    ..Preferences::default()
+                },
+            )
+            .unwrap();
+        if initialize {
+            store.usage_reporting_consent().unwrap();
+        }
+        let before = store.load().unwrap();
+        let migrated = store
+            .migrate_android_key_layout(
+                before.revision,
+                true,
+                true,
+                &[],
+                &[],
+                TouchNineKeySwipeDigits::Off,
+            )
+            .unwrap();
+        assert_eq!(
+            migrated.preferences.touch_twenty_six_key_style,
+            TouchTwentySixKeyStyle::LongSpace
+        );
+        assert!(migrated.preferences.touch_number_row);
+        assert_eq!(migrated.preferences.usage_reporting, enabled);
+        assert_eq!(
+            migrated.preferences.usage_reporting_consent,
+            before.preferences.usage_reporting_consent
+        );
+        assert_eq!(
+            PreferencesStore::new(directory.path()).load().unwrap(),
+            migrated
+        );
+    }
+}
+
+#[test]
+fn reporting_consent_rotates_across_an_unobserved_disable_enable() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let first = store.usage_reporting_consent().unwrap().unwrap();
+    let current = store.load().unwrap();
+    let mut edited = current.preferences;
+    edited.usage_reporting = false;
+    let disabled = store.save(current.revision, edited.clone()).unwrap();
+    assert_eq!(disabled.preferences.usage_reporting_consent, None);
+    assert_eq!(store.usage_reporting_consent().unwrap(), None);
+    assert_eq!(store.load().unwrap(), disabled);
+
+    // 模拟没有观察到关闭的另一个进程，并故意提交旧代次；存储不能复活它。
+    edited.usage_reporting = true;
+    edited.usage_reporting_consent = Some(first);
+    let enabled = store.save(disabled.revision, edited).unwrap();
+    let second = enabled.preferences.usage_reporting_consent.unwrap();
+    assert_ne!(second.epoch, first.epoch);
+    assert_eq!(store.usage_reporting_consent().unwrap(), Some(second));
+    assert!(matches!(
+        store.save(current.revision, enabled.preferences),
+        Err(PreferencesError::Conflict)
+    ));
+    assert_eq!(store.usage_reporting_consent().unwrap(), Some(second));
+}
+
+#[test]
+fn reporting_consent_polling_reuses_unchanged_bytes_and_sees_withdrawal() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    // 初始化授权历史会改写文件，结果不带字节，下一次重新解析。
+    let initialized = store.usage_reporting_consent_reusing(None).unwrap();
+    let consent = initialized.consent.unwrap();
+    assert!(initialized.bytes.is_none());
+    let settled = store
+        .usage_reporting_consent_reusing(Some(initialized))
+        .unwrap();
+    assert_eq!(settled.consent, Some(consent));
+    assert!(settled.bytes.is_some());
+    let revision = store.load().unwrap().revision;
+    let reused = store
+        .usage_reporting_consent_reusing(Some(settled.clone()))
+        .unwrap();
+    assert_eq!(reused.consent, Some(consent));
+    assert_eq!(reused.bytes, settled.bytes);
+    assert_eq!(store.load().unwrap().revision, revision);
+
+    let current = store.load().unwrap();
+    let mut edited = current.preferences;
+    edited.usage_reporting = false;
+    store.save(current.revision, edited).unwrap();
+    let withdrawn = store.usage_reporting_consent_reusing(Some(reused)).unwrap();
+    assert_eq!(withdrawn.consent, None);
+    assert_eq!(store.usage_reporting_consent().unwrap(), None);
+}
+
+#[test]
+fn reporting_consent_cannot_be_supplied_by_a_client() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let forged = UsageReportingConsent {
+        epoch: uuid::uuid!("11111111-1111-4111-8111-111111111111"),
+        since_unix_ms: 1,
+    };
+    let preferences = Preferences {
+        usage_reporting_consent: Some(forged),
+        ..Preferences::default()
+    };
+    let saved = store.save(0, preferences).unwrap();
+    assert_eq!(saved.preferences.usage_reporting_consent, None);
+    let actual = store.usage_reporting_consent().unwrap().unwrap();
+    assert_ne!(actual.epoch, forged.epoch);
+    assert_ne!(actual.since_unix_ms, forged.since_unix_ms);
+    let current = store.load().unwrap();
+    let mut edited = current.preferences.clone();
+    edited.usage_reporting_consent = Some(forged);
+    assert_eq!(store.save(current.revision, edited).unwrap(), current);
+}
+
+#[test]
+fn reporting_consent_rejects_damaged_metadata_without_losing_settings() {
+    let invalid = [
+        serde_json::Value::Null,
+        serde_json::json!(true),
+        serde_json::json!("synthetic"),
+        serde_json::json!({}),
+        serde_json::json!({"epoch": "not-a-uuid", "since_unix_ms": 1}),
+        serde_json::json!({"epoch": "00000000-0000-0000-0000-000000000000", "since_unix_ms": 1}),
+        serde_json::json!({"epoch": "11111111-1111-4111-8111-111111111111", "since_unix_ms": 0}),
+        serde_json::json!({"epoch": "11111111-1111-4111-8111-111111111111", "since_unix_ms": -1}),
+        serde_json::json!({"epoch": "11111111-1111-4111-8111-111111111111", "since_unix_ms": "1"}),
+        serde_json::json!({"epoch": "11111111-1111-4111-8111-111111111111", "since_unix_ms": u64::MAX}),
+        serde_json::json!({"epoch": "11111111-1111-4111-8111-111111111111", "since_unix_ms": 1, "future": true}),
+    ];
+    for enabled in [false, true] {
+        for metadata in &invalid {
+            let directory = tempfile::tempdir().unwrap();
+            let store = PreferencesStore::new(directory.path());
+            let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+            document["revision"] = 10.into();
+            document["preferences"]["candidate_page_size"] = 9.into();
+            document["preferences"]["usage_reporting"] = enabled.into();
+            document["preferences"]["usage_reporting_consent"] = metadata.clone();
+            std::fs::write(
+                directory.path().join("preferences.json"),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            let loaded = store.load().unwrap();
+            assert_eq!(loaded.preferences.candidate_page_size, 9);
+            assert_eq!(loaded.preferences.usage_reporting, enabled);
+            assert_eq!(loaded.preferences.usage_reporting_consent, None);
+            assert_eq!(store.usage_reporting_consent().unwrap().is_some(), enabled);
+            let saved = store.load().unwrap();
+            assert_eq!(saved.revision, if enabled { 11 } else { 10 });
+            assert_eq!(saved.preferences.candidate_page_size, 9);
+        }
+    }
+}
+
+#[test]
+fn reporting_consent_does_not_replace_unreadable_preferences() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let path = directory.path().join("preferences.json");
+    let damaged = b"{synthetic-truncated";
+    std::fs::write(&path, damaged).unwrap();
+    assert!(store.usage_reporting_consent().is_err());
+    assert_eq!(std::fs::read(path).unwrap(), damaged);
+}
+
+#[test]
+fn reporting_consent_recovery_starts_a_new_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let first = store.usage_reporting_consent().unwrap().unwrap();
+    let mut document = serde_json::to_value(store.load().unwrap()).unwrap();
+    document["preferences"]["candidate_page_size"] = "synthetic-damaged".into();
+    document["preferences"]["synthetic_future_setting"] = serde_json::json!({"enabled": true});
+    std::fs::write(
+        directory.path().join("preferences.json"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    // 输入路径可以救下可读设置，但授权读取仍须严格拒绝损坏文档。
+    assert!(store.load_for_runtime().unwrap().load_error.is_some());
+    assert!(store.usage_reporting_consent().is_err());
+    let (recovered, _, _) = expect_recovered(store.recover().unwrap());
+    assert!(recovered.preferences.usage_reporting);
+    assert_eq!(recovered.preferences.usage_reporting_consent, None);
+    let second = store.usage_reporting_consent().unwrap().unwrap();
+    assert_ne!(second.epoch, first.epoch);
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("preferences.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        persisted["preferences"]["synthetic_future_setting"],
+        document["preferences"]["synthetic_future_setting"]
+    );
+}
+
+#[test]
+fn reporting_consent_restore_defaults_follows_the_actual_switch_transition() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let first = store.usage_reporting_consent().unwrap();
+    let current = store.load().unwrap();
+    let restored = store.restore_defaults(current.revision).unwrap();
+    assert_eq!(restored.preferences.usage_reporting_consent, first);
+    let mut disabled = restored.preferences;
+    disabled.usage_reporting = false;
+    let saved = store.save(restored.revision, disabled).unwrap();
+    let reopened = store.restore_defaults(saved.revision).unwrap();
+    assert!(reopened.preferences.usage_reporting);
+    assert_ne!(reopened.preferences.usage_reporting_consent, first);
+    assert!(reopened.preferences.usage_reporting_consent.is_some());
+}
+
+#[test]
+fn reporting_consent_initialization_keeps_unknown_preferences() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    document["revision"] = 3.into();
+    document["preferences"]["synthetic_future_setting"] = serde_json::json!({"enabled": true});
+    let path = directory.path().join("preferences.json");
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    assert!(store.usage_reporting_consent().unwrap().is_some());
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["revision"], 4);
+    assert_eq!(
+        saved["preferences"]["synthetic_future_setting"],
+        document["preferences"]["synthetic_future_setting"]
+    );
+}
+
+#[test]
+fn reporting_consent_concurrent_initializers_share_one_epoch() {
+    let directory = tempfile::tempdir().unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let path = directory.path().to_path_buf();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                PreferencesStore::new(path)
+                    .usage_reporting_consent()
+                    .unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results[0].is_some());
+    assert!(results.iter().all(|consent| *consent == results[0]));
+    assert_eq!(
+        PreferencesStore::new(directory.path())
+            .load()
+            .unwrap()
+            .revision,
+        1
+    );
+}
+
+#[test]
 fn update_channel_defaults_to_stable_and_reads_unknown_values_as_stable() {
     let defaults = Preferences::default();
     assert_eq!(defaults.update_channel, UpdateChannel::Stable);
@@ -2319,6 +2709,39 @@ fn shuangpin_keymap_hint_stays_out_of_the_document_until_chosen() {
         serde_json::to_value(store.load().unwrap().preferences).unwrap()["shuangpin_keymap_hint"],
         false
     );
+}
+
+// #10717：「双拼分隔」是 `shuangpin_preedit_uses_raw` 之外单独的一个键，布尔的旧键不变，读旧键的各端和 macOS 账号同步都不受影响。
+#[test]
+fn shuangpin_preedit_separated_is_a_separate_key_left_out_until_chosen() {
+    let defaults = Preferences::default();
+    assert!(defaults.shuangpin_preedit_uses_raw);
+    assert!(!defaults.shuangpin_preedit_separated);
+    let serialized = serde_json::to_value(&defaults).unwrap();
+    assert!(serialized.get("shuangpin_preedit_separated").is_none());
+    assert_eq!(serialized["shuangpin_preedit_uses_raw"], true);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    store
+        .save(
+            0,
+            Preferences {
+                shuangpin_preedit_separated: true,
+                ..defaults
+            },
+        )
+        .unwrap();
+    let loaded = store.load().unwrap().preferences;
+    assert!(loaded.shuangpin_preedit_uses_raw);
+    assert!(loaded.shuangpin_preedit_separated);
+    let document: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("preferences.json")).unwrap(),
+    )
+    .unwrap();
+    // 旧键仍是布尔：没有新键的版本读这份文档得到的是「保留原始按键」。
+    assert_eq!(document["preferences"]["shuangpin_preedit_uses_raw"], true);
+    assert_eq!(document["preferences"]["shuangpin_preedit_separated"], true);
 }
 
 #[test]
@@ -3404,6 +3827,7 @@ fn game_compatibility_defaults_on_and_stays_out_of_the_document() {
             candidate_overlay: false,
             overlay_processes: vec!["Game.EXE".into(), "my game.exe".into()],
             excluded_processes: vec!["launcher.exe".into()],
+            overlay_anchor_top: true,
         },
         ..Preferences::default()
     };
@@ -3414,6 +3838,7 @@ fn game_compatibility_defaults_on_and_stays_out_of_the_document() {
             "candidate_overlay": false,
             "overlay_processes": ["Game.EXE", "my game.exe"],
             "excluded_processes": ["launcher.exe"],
+            "overlay_anchor_top": true,
         })
     );
     let saved = store.save(0, chosen.clone()).unwrap();
@@ -4770,6 +5195,56 @@ fn korean_unknown_disk_layout_falls_back_without_resetting_other_preferences() {
     let saved: serde_json::Value =
         serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
     assert_eq!(saved["preferences"]["korean"]["future_option"], true);
+    assert!(serde_json::from_value::<Preferences>(document["preferences"].clone()).is_err());
+}
+
+#[test]
+fn cantonese_input_method_is_omitted_at_default_and_roundtrips_shuangpin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    // 没选过的文档里没有这一项，旧版本读到的文档与以前相同。
+    assert!(document["preferences"].get("cantonese").is_none());
+    let bytes = serde_json::to_vec(&document).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded.preferences.cantonese.input_method,
+        CantoneseInputMethod::Jyutping
+    );
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    let mut preferences = loaded.preferences;
+    preferences.cantonese.input_method = CantoneseInputMethod::Shuangpin;
+    let saved = store.save(loaded.revision, preferences).unwrap();
+    assert_eq!(store.load().unwrap(), saved);
+    assert_eq!(
+        serde_json::to_value(&saved.preferences).unwrap()["cantonese"]["input_method"],
+        "shuangpin"
+    );
+    let mut preferences = saved.preferences.clone();
+    preferences.cantonese.input_method = CantoneseInputMethod::Jyutping;
+    let reverted = store.save(saved.revision, preferences).unwrap();
+    assert!(serde_json::to_value(&reverted.preferences)
+        .unwrap()
+        .get("cantonese")
+        .is_none());
+}
+
+#[test]
+fn cantonese_unknown_disk_input_method_falls_back_without_resetting_other_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut document = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    document["preferences"]["cantonese"] = serde_json::json!({ "input_method": "future" });
+    document["preferences"]["candidate_page_size"] = 4.into();
+    let bytes = serde_json::to_vec(&document).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded.preferences.cantonese.input_method,
+        CantoneseInputMethod::Jyutping
+    );
+    assert_eq!(loaded.preferences.candidate_page_size, 4);
     assert!(serde_json::from_value::<Preferences>(document["preferences"].clone()).is_err());
 }
 
@@ -6976,6 +7451,154 @@ fn translation_ai_recovery_migrates_a_legacy_document() {
     assert_eq!(store.load().unwrap(), snapshot);
 }
 
+/// 默认改成「增强」之前写下的文档：`neural_keyboard` 存着当时默认的 `false`，没有迁移标记。
+fn keyboard_reranker_legacy_document() -> serde_json::Value {
+    let mut legacy = serde_json::json!({
+        "format_version": 1,
+        "revision": 0,
+        "preferences": Preferences::default(),
+    });
+    let preferences = legacy["preferences"].as_object_mut().unwrap();
+    preferences["sentence_association"]["neural_keyboard"] = false.into();
+    assert_eq!(
+        preferences.remove("keyboard_reranker_migrated"),
+        Some(true.into())
+    );
+    legacy
+}
+
+// 新文档从一开始就是「增强」，并带着标记；缺 `neural_keyboard` 键时按「增强」读，缺整个 `sentence_association` 也是。
+#[test]
+fn keyboard_reranker_defaults_on_when_the_key_is_absent() {
+    let defaults = Preferences::default();
+    assert!(defaults.sentence_association.neural_keyboard);
+    assert!(defaults.sentence_association.word_lattice);
+    assert!(defaults.keyboard_reranker_migrated);
+
+    let association: SentenceAssociationPreferences =
+        serde_json::from_value(serde_json::json!({ "word_lattice": true })).unwrap();
+    assert!(association.neural_keyboard);
+    let association: SentenceAssociationPreferences =
+        serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(association.neural_keyboard);
+
+    let mut document = serde_json::to_value(Preferences::default()).unwrap();
+    document
+        .as_object_mut()
+        .unwrap()
+        .remove("sentence_association");
+    let preferences: Preferences = serde_json::from_value(document).unwrap();
+    assert!(preferences.sentence_association.neural_keyboard);
+}
+
+// 迁移本身：旧文档里词网格开着（「标准」）时改成「增强」；词网格关着（三档里的「关闭」）不动；两种都标上标记，之后选回「标准」不再被改。带着标记的文档里显式的 `false` 原样保留。
+#[test]
+fn keyboard_reranker_settle_turns_on_standard_but_keeps_off() {
+    let legacy: Preferences =
+        serde_json::from_value(keyboard_reranker_legacy_document()["preferences"].clone()).unwrap();
+    assert!(!legacy.keyboard_reranker_migrated);
+    assert!(!legacy.sentence_association.neural_keyboard);
+
+    let mut standard = legacy.clone();
+    standard.settle_keyboard_reranker_default();
+    assert!(standard.sentence_association.neural_keyboard);
+    assert!(standard.keyboard_reranker_migrated);
+    standard.sentence_association.neural_keyboard = false;
+    standard.settle_keyboard_reranker_default();
+    assert!(!standard.sentence_association.neural_keyboard);
+
+    let mut off = legacy.clone();
+    off.sentence_association.word_lattice = false;
+    off.settle_keyboard_reranker_default();
+    assert!(!off.sentence_association.neural_keyboard);
+    assert!(!off.sentence_association.word_lattice);
+    assert!(off.keyboard_reranker_migrated);
+
+    let mut enhanced = legacy;
+    enhanced.sentence_association.neural_keyboard = true;
+    enhanced.settle_keyboard_reranker_default();
+    assert!(enhanced.sentence_association.neural_keyboard);
+}
+
+// 各个已发布版本写下的文档都没有标记、存着默认的「标准」：读入时都按「增强」读，文件不变。
+#[test]
+fn released_documents_read_as_enhanced() {
+    for (release, document) in RELEASED_DOCUMENTS {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferencesStore::new(directory.path());
+        fs::write(store.path(), document).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(
+            loaded.preferences.sentence_association.neural_keyboard,
+            "{release}"
+        );
+        assert!(loaded.preferences.keyboard_reranker_migrated, "{release}");
+        assert_eq!(fs::read(store.path()).unwrap(), document.as_bytes());
+    }
+}
+
+// 经过存储的完整路径：旧文档读入时迁移，文件在下一次真正的保存之前保持原样；用户随后选回「标准」，写入方的偏好里没有标记也照样落盘，再读还是「标准」；恢复默认设置回到「增强」。
+#[test]
+fn keyboard_reranker_migration_runs_once_and_an_explicit_standard_sticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = keyboard_reranker_legacy_document();
+    legacy["revision"] = 3.into();
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.revision, 3);
+    assert!(loaded.preferences.sentence_association.neural_keyboard);
+    assert!(loaded.preferences.keyboard_reranker_migrated);
+    assert_eq!(store.load().unwrap(), loaded);
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+
+    let mut standard = serde_json::to_value(&loaded.preferences).unwrap();
+    standard["sentence_association"]["neural_keyboard"] = false.into();
+    standard
+        .as_object_mut()
+        .unwrap()
+        .remove("keyboard_reranker_migrated")
+        .unwrap();
+    let standard: Preferences = serde_json::from_value(standard).unwrap();
+    assert!(!standard.keyboard_reranker_migrated);
+    let saved = store.save(3, standard).unwrap();
+    assert!(saved.preferences.keyboard_reranker_migrated);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        on_disk["preferences"]["keyboard_reranker_migrated"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        on_disk["preferences"]["sentence_association"]["neural_keyboard"],
+        serde_json::Value::Bool(false)
+    );
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded, saved);
+    assert!(!reloaded.preferences.sentence_association.neural_keyboard);
+
+    let restored = store.save(saved.revision, Preferences::default()).unwrap();
+    assert!(restored.preferences.sentence_association.neural_keyboard);
+}
+
+// 修复损坏文档时，没有标记的旧文档照样迁移一次。
+#[test]
+fn keyboard_reranker_recovery_migrates_a_legacy_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = keyboard_reranker_legacy_document();
+    legacy["preferences"]["learning"] = serde_json::json!("yes");
+    fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(store.load().is_err());
+    let (snapshot, _, salvaged) = expect_recovered(store.recover().unwrap());
+    assert!(salvaged);
+    assert!(snapshot.preferences.sentence_association.neural_keyboard);
+    assert!(snapshot.preferences.keyboard_reranker_migrated);
+    assert_eq!(store.load().unwrap(), snapshot);
+}
+
 // The source ships muting, DDC and text polishing on; `config.default.toml` says so for Windows, and macOS follows the desktop product it ports. Each is a plain voice switch, so no platform reason keeps them off there. The other hosts keep what they have shipped, and a stored value is never reinterpreted.
 #[test]
 fn voice_first_run_follows_the_source_on_desktop_ports() {
@@ -8339,6 +8962,8 @@ const NOT_CREDENTIALS: &[&str] = &[
     "custom_theme.keyboard.keyShape",
     "floating_toolbar.screen_keyboard",
     "keybindings",
+    // 整句联想默认「增强」的一次性迁移标记，名字里的 keyboard 不是凭据。
+    "keyboard_reranker_migrated",
     // 辅助码按键是普通键位偏好，不是服务凭据。
     "quanpin_helpcode.trigger_key",
     "shuangpin_helpcode.trigger_key",
@@ -8437,6 +9062,20 @@ fn every_credential_like_preference_field_is_listed() {
         }
         assert!(!cursor.is_null(), "{path} is not a preference field");
     }
+}
+
+#[test]
+fn diagnostic_snapshot_omits_local_reporting_consent() {
+    let consent = UsageReportingConsent::new().unwrap();
+    let preferences = Preferences {
+        usage_reporting_consent: Some(consent),
+        ..Preferences::default()
+    };
+    let snapshot = preferences.redacted_for_diagnostics();
+    assert!(snapshot.get("usage_reporting_consent").is_none());
+    assert!(!snapshot.to_string().contains(&consent.epoch.to_string()));
+    assert_eq!(snapshot["usage_reporting"], true);
+    assert_eq!(preferences.usage_reporting_consent, Some(consent));
 }
 
 #[test]

@@ -32,6 +32,7 @@
 #include <fcitx/userinterface.h>
 #include "../src/candidates/CandidateActionPolicy.h"
 #include "../src/candidates/PersonalWordbook.h"
+#include "../src/candidates/ReadAloud.h"
 #include "../src/candidates/CandidateLocalModeLabels.h"
 #include "../src/candidates/CandidatePanelStatus.h"
 #include "../src/candidates/CandidateScriptAnnotation.h"
@@ -60,6 +61,7 @@
 #include "../src/core/CandidateSkinCatalog.h"
 #include "../src/core/GlobalTheme.h"
 #include "../src/core/ToggleHotkeyChord.h"
+#include "../src/core/VocabularyDue.h"
 #include "../src/core/DictionaryQuiesceLease.h"
 #include "../src/core/EmojiPluginGroups.h"
 #include "../src/core/RuntimeOptionsRefresh.h"
@@ -81,6 +83,7 @@
 #include "../src/overlay/ShuangpinKeymapX11Surface.h"
 #endif
 #include "../src/core/BackspaceHoldPolicy.h"
+#include "../src/core/NextWordPrediction.h"
 #include "../src/core/SmartPunctuationSpace.h"
 #include "../src/core/SmartPunctuationChoice.h"
 #include "../src/core/SpellingSymbols.h"
@@ -105,6 +108,7 @@
 #include "SystemTheme.h"
 #include "PrecedingCharacters.h"
 #include "../src/voice/VoiceAction.h"
+#include "../src/voice/VoiceHoldChord.h"
 #include "../src/voice/VoiceHotwords.h"
 #include "../src/voice/VoiceProviderOptions.h"
 #include "../src/overlay/WaveOverlayFeedback.h"
@@ -322,9 +326,9 @@ extern "C" bool fcitxVoiceCancelled(void *context) noexcept {
 
 std::unique_ptr<msime::linux_host::WaveOverlaySurface>
 create_fcitx_wave_overlay_surface(
-    msime::linux_host::WaveOverlaySurface::ActionHandler handler) {
+    [[maybe_unused]] msime::linux_host::WaveOverlaySurface::ActionHandler handler) {
   const auto *requested = std::getenv("MSIME_WAVE_OVERLAY_BACKEND");
-  const bool force_auxiliary = requested &&
+  [[maybe_unused]] const bool force_auxiliary = requested &&
       (std::strcmp(requested, "ibus") == 0 ||
        std::strcmp(requested, "auxiliary") == 0);
   const bool wayland_requested = requested && std::strcmp(requested, "wayland") == 0;
@@ -692,8 +696,8 @@ public:
     emoji_next_offset_ = {};
     emoji_complete_ = false;
     emoji_previous_offsets_.clear();
+    if (voice_mailbox_) voice_mailbox_->cancelled.store(true, std::memory_order_relaxed);
     if (voice_job_.valid() && !voice_socket_.empty() && voice_generation_ != 0) {
-      if (voice_mailbox_) voice_mailbox_->cancelled.store(true, std::memory_order_relaxed);
       const auto socket = voice_socket_;
       const auto generation = voice_generation_;
       msime::host_api::discard_string(msime_client_voice_provider_cancel(
@@ -714,21 +718,17 @@ public:
     voice_toggle_held_ = 0;
     voice_ctrl_win_held_ = false;
     voice_rctrl_ralt_held_ = false;
+    voice_hold_started_ = false;
+    voice_ralt_chord_until_up_ = false;
     voice_space_consumed_ = false;
     voice_space_locked_ = false;
     voice_preedit_.clear();
     voice_transcript_.clear();
-    if (voice_job_.valid()) {
-      if (voice_job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        try { voice_job_.get(); } catch (...) {}
-        voice_job_ = {};
-        voice_cancelled_ = false;
-      } else {
-        // Keep the async state alive; destroying an async future here would
-        // synchronously wait for a provider that is being cancelled.
-        voice_cancelled_ = true;
-      }
-    }
+    // detachedJob 的 future 析构不等待 worker；关闭时解除完成入口，避免
+    // 迟到的结果或异常在 refreshVoice() 中重画已经清空的 view_。
+    // worker 持有自己的 mailbox，插件卸载仍由 tracker 等待它退出。
+    voice_job_ = {};
+    voice_cancelled_ = false;
     voice_mailbox_.reset();
     voice_generation_ = 0;
     voice_partial_seen_ = false;
@@ -3405,6 +3405,8 @@ public:
                      !view_.value("candidates", Json::array()).empty()))
       command(MSIME_CANCEL);
     voice_loading_ = true;
+    // 新的一段录音先算作不是按住开始的，由开始它的按住自己改成 true。
+    voice_hold_started_ = false;
     syncMusic();
     voice_cancelled_ = false;
     const auto socket = voice_socket_;
@@ -3558,6 +3560,8 @@ public:
       }
     }
     view_ = result.contains("view") ? result.at("view") : result;
+    if (result.contains("commit") && result["commit"].is_string())
+      prediction_echo_.committed(msime::linux_host::view_is_prediction(view_), monotonicMs());
     render();
     return result.value("handled", false);
   }
@@ -4266,6 +4270,12 @@ public:
   // Japanese converts with Space and commits with Enter; see ../src/core/JapaneseConversion.h.
   msime::linux_host::JapaneseConversion japanese_conversion_;
   msime::linux_host::BackspaceHoldPolicy backspace_hold_;
+  // 自己上屏、出了上屏后联想之后紧跟着的 reset 不收起联想（NextWordPrediction.h）。
+  msime::linux_host::PredictionResetEcho prediction_echo_;
+  static int64_t monotonicMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
   bool smart_punctuation_ = true;
   bool smart_punctuation_repeat_ = true;
   bool smart_punctuation_space_convert_ = false;
@@ -4356,6 +4366,8 @@ public:
   // The HostOptions document of the current session, for msime_client_voice_hotwords.
   Json voice_host_options_;
   bool voice_enabled_ = true;
+  // 「桌面工具」子菜单里「背单词（今日待复习 N）…」的文字，获得焦点和失焦留给托盘时各读一次（FcitxEngine::refreshVocabularyDue），没有这一行时为空。
+  std::optional<std::string> vocabulary_due_;
   bool voice_hotkey_ctrl_f9_ = true;
   msime::host_api::ToggleHotkeyChord voice_toggle_chord_;
   unsigned voice_toggle_held_ = 0;
@@ -4371,6 +4383,10 @@ public:
   fcitx::KeySym toggle_chord_held_ = FcitxKey_None;
   bool voice_ctrl_win_held_ = false;
   bool voice_rctrl_ralt_held_ = false;
+  // 当前这段录音是不是右 Alt（或右 Ctrl+右 Alt）这次按住自己开始的。按住只是接管已有录音时为 false，别处开始新录音时 requestVoice 也把它清掉。按住期间按了组合键，只取消它为 true 的那段（#10580）。
+  bool voice_hold_started_ = false;
+  // 按住期间按了组合键之后右 Alt 还按着：它的自动重复和松开继续吞掉，既不重新开始按住，也不结束录音，到松开为止。
+  bool voice_ralt_chord_until_up_ = false;
   bool voice_space_consumed_ = false;
   bool voice_space_locked_ = false;
   uint64_t voice_failure_id_ = 0;
@@ -4590,7 +4606,10 @@ std::vector<std::pair<int, std::string>> candidateMenuActions(FcitxState &state,
     if (msime::linux_host::candidate_dictionary_removal_available(scheme, item.source(), item.text()))
       actions.emplace_back(2, msime::linux_host::candidate_remove_label);
   }
-  // 「加入生词本」在最后，和 macOS、Windows 的候选菜单一样；不是词库操作，只要这一行显示着释义就有。
+  // 「朗读」「加入生词本」在最后，和 macOS、Windows 的候选菜单一样；都不是词库操作。「朗读」在有能读的英文、本机又装着 spd-say 时出现，「加入生词本」只要这一行显示着释义就有。
+  if (msime::linux_host::read_aloud_available() &&
+      msime::read_aloud::text_for(item.text(), item.display().translation))
+    actions.emplace_back(31, msime::read_aloud::kMenuLabel);
   if (!item.display().translation.empty())
     actions.emplace_back(30, msime::linux_host::candidate_personal_wordbook_label);
   return actions;
@@ -4608,6 +4627,15 @@ void triggerCandidateMenuAction(FcitxState &state, const FcitxCandidate &item, i
   try {
     if (!state.ensure() || state.session_ != session ||
         msime::linux_host::strict_json_value(state.view_, "generation", uint64_t{}) != generation) return;
+    if (action == 31) {
+      // 不经过 Engine，组字不变；起不来 spd-say 时把提示放在候选上方的辅助行。
+      const auto spoken = msime::read_aloud::text_for(text, translation);
+      if (spoken && !msime::linux_host::read_aloud(*spoken)) {
+        state.ic_.inputPanel().setAuxUp(fcitx::Text(msime::linux_host::read_aloud_failure_notice));
+        state.ic_.updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+      }
+      return;
+    }
     if (action == 30) {
       // 不经过 Engine，组字不变；共享层答的那句提示放在候选上方的辅助行，下一次刷新时消失。
       const auto notice = msime::linux_host::add_to_personal_wordbook(
@@ -5828,6 +5856,27 @@ public:
   }
 private:
   const char *panel_;
+  fcitx::FactoryFor<FcitxState> *factory_;
+};
+
+// 「背单词（今日待复习 N）…」：文字取这个上下文获得焦点时读到的计数，点下去打开共享应用的背单词面板。只在有卡在等、没有在组字时列进「桌面工具」子菜单（FcitxEngine::syncVocabularyEntry），不放状态区顶层。
+class FcitxVocabularyAction : public fcitx::Action {
+public:
+  explicit FcitxVocabularyAction(fcitx::FactoryFor<FcitxState> *factory) : factory_(factory) {}
+  std::string shortText(fcitx::InputContext *ic) const override {
+    if (!ic) return {};
+    const auto &label = ic->propertyFor(factory_)->vocabulary_due_;
+    return label ? *label : std::string{};
+  }
+  std::string icon(fcitx::InputContext *) const override { return ""; }
+  void activate(fcitx::InputContext *ic) override {
+    if (!ic || !ic->propertyFor(factory_)->menuTarget()) return;
+    try {
+      if (ic->propertyFor(factory_)->restricted()) return;
+      launchDesktopPanel(msime::vocabulary_due::kPanelRoute);
+    } catch (...) {}
+  }
+private:
   fcitx::FactoryFor<FcitxState> *factory_;
 };
 
@@ -7246,6 +7295,7 @@ public:
              {&desktop_clipboard_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-clipboard"},
              {&desktop_voice_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-voice"},
              {&cloud_dictionary_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-cloud-dictionary"},
+             {&vocabulary_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-vocabulary"},
              {&desktop_cloud_clipboard_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-cloud-clipboard"},
              {&help_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-help"},
              {&feedback_action_, MSIME_EDITION_FCITX5_ADDON "-desktop-feedback"},
@@ -7475,8 +7525,14 @@ public:
     // 与 IBus 宿主相同，使用统计目录按版本分开（LinuxEdition.h）：full 仍是 $XDG_STATE_HOME/msime，其他版本是同级的 msime-<id>。
     root = root.parent_path() / MSIME_EDITION_TELEMETRY_DIRECTORY;
     msime::telemetry::install_crash_handlers();
-    telemetry_job_ = detachedJob([host = msime::telemetry::Host{"linux", MSIME_LINUX_VERSION, root / "fcitx5", std::nullopt, preferences}] {
-      msime::telemetry::begin(host);
+    telemetry_job_ = detachedJob([this, host = msime::telemetry::Host{"linux", MSIME_LINUX_VERSION, root / "fcitx5", std::nullopt, preferences}] {
+      {
+        // 开始与停止在线程间线性化；迟到的启动不能在插件停止后重新武装。
+        std::lock_guard guard(telemetry_lifecycle_);
+        if (telemetry_stopped_) return Json();
+        msime::telemetry::begin(host);
+        telemetry_observer_.emplace();
+      }
       msime::telemetry::flush();
       return Json();
     });
@@ -7497,11 +7553,19 @@ public:
   // The addon's code must not run after Fcitx5 unloads it: wait (bounded, as for the theme worker) for a round in flight, close the session and give the signals back.
   void stopTelemetry() {
     telemetry_timer_.reset();
+    {
+      std::lock_guard guard(telemetry_lifecycle_);
+      telemetry_stopped_ = true;
+      telemetry_observer_.reset();
+      msime::telemetry::end();
+    }
     if (telemetry_job_.valid()) telemetry_job_.wait_for(std::chrono::seconds(2));
-    msime::telemetry::end();
     msime::telemetry::remove_crash_handlers();
   }
   static constexpr uint64_t kTelemetryIntervalUs = 30ull * 60 * 1000000;
+  std::mutex telemetry_lifecycle_;
+  bool telemetry_stopped_ = false;
+  std::optional<msime::telemetry::ConsentObserver> telemetry_observer_;
   std::shared_future<Json> telemetry_job_;
   std::unique_ptr<fcitx::EventSourceTime> telemetry_timer_;
 #endif
@@ -7625,6 +7689,7 @@ public:
     // 获得焦点时 panel_focus_watch_ 已经交出；换到本输入法不经过它。
     releaseMenuContext(event.inputContext());
     auto *state = event.inputContext()->propertyFor(&factory_);
+    refreshVocabularyDue(event.inputContext());
     arrangeStatusArea(event.inputContext());
     try {
       if (state->ensure()) {
@@ -7677,9 +7742,31 @@ public:
   void holdMenuContext(fcitx::InputContext *ic) {
     if (menu_context_ic_.get() != ic) releaseMenuContext(nullptr);
     menu_context_ic_ = ic->watch();
+    refreshVocabularyDue(ic);
     // 失焦了，只往有焦点的输入框里写的那几项（focusOnlyActions 与语音项，以及「工具栏」子菜单里的语音和宣传）随之拿掉，顺带刷新状态区。
     rebuildToolbarMenu(ic);
     arrangeStatusArea(ic);
+  }
+  // 读一次今日待复习，记在这个上下文上，syncVocabularyEntry 和菜单里的文字都用它。只在获得焦点和失焦留给托盘时调（Hyprland 这类桌面上点托盘本身就让应用失焦，这时读到的才是用户点开托盘时的数）：要取进度文件锁、解析选中的一本书，在 Fcitx5 的主线程上同步进行，所以不放在按键或刷新状态区的路径上；从没开过背单词时不取锁也不读书。那两个时刻都没有在组字，受限（密码框）的上下文不列这一行。
+  void refreshVocabularyDue(fcitx::InputContext *ic) {
+    auto *state = ic->propertyFor(&factory_);
+    state->vocabulary_due_.reset();
+    if (state->restricted()) return;
+    try {
+      const bool composing = state->view_.is_object() && state->composingOrCandidates();
+      state->vocabulary_due_ = msime::linux_host::vocabulary_due_label(readOptions(), composing);
+    } catch (...) {}
+  }
+  // 「背单词」一行在「桌面工具」子菜单里的有无：这个上下文今天有卡在等、没有在组字时才列。不放状态区顶层，因为 kimpanel 把顶层动作画成面板上一直在的按钮，那就成了常驻的角标，而这一行只该在用户点开菜单时看得到。子菜单对象是各上下文共用的，跟着最近调用的那个上下文走：arrangeStatusArea 在获得焦点和失焦留给托盘时调，render 在开始或结束组字时调。返回子菜单是否变了。
+  bool syncVocabularyEntry(fcitx::InputContext *ic) {
+    const auto *state = ic->propertyFor(&factory_);
+    const bool listed = state->vocabulary_due_.has_value() &&
+                        !(state->view_.is_object() && state->composingOrCandidates());
+    if (listed == vocabulary_listed_) return false;
+    if (listed) desktop_tools_menu_.insertAction(&desktop_clipboard_action_, &vocabulary_action_);
+    else desktop_tools_menu_.removeAction(&vocabulary_action_);
+    vocabulary_listed_ = listed;
+    return true;
   }
   // 只往有焦点的输入框里写的那几项；托盘留着失焦的上下文时不列它们。语音项另按会话和语音开关决定，见 arrangeStatusArea。
   std::array<fcitx::Action *, 8> focusOnlyActions() {
@@ -7713,6 +7800,7 @@ public:
       if (present) status.addAction(fcitx::StatusGroup::InputMethod, action);
       else status.removeAction(action);
     }
+    syncVocabularyEntry(ic);
     ic->updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
   }
   // 留给托盘的上下文真正关掉会话。获得焦点的不是它时，连它的状态动作一起拿掉，托盘从此列新聚焦的那个。
@@ -7737,6 +7825,11 @@ public:
     state->toggle_chord_held_ = FcitxKey_None;
     state->pending_caret_.clear();
     state->caret_forward_event_.reset();
+    // 自己上屏之后客户端回头送来的 reset 是上屏的回声，不是光标移动，联想留着（NextWordPrediction.h）。
+    if (state->prediction_echo_.keeps(msime::linux_host::view_is_prediction(state->view_),
+                                      FcitxState::monotonicMs()))
+      return;
+    state->prediction_echo_.forget();
     // 为不支持预编辑的客户端画在面板里的韩文音节、注音转换、越南文单词或藏文音节串只存在于这里，所以重置时把它写出去，而不是丢掉用户已经打的字（失焦时的同一规则见 focus_watch_）。
     const bool koreanPanelSyllable =
         state->session_ && state->commitsOnBlur() && !state->view_.value("editing_text", std::string{}).empty() &&
@@ -8048,6 +8141,9 @@ public:
   FcitxDesktopPanelAction desktop_clipboard_action_{&factory_, "clipboard", msime::linux_host::menu_label::kLocalClipboard};
   FcitxDesktopPanelAction desktop_voice_action_{&factory_, "voice", msime::linux_host::menu_label::kVoicePanel};
   FcitxDesktopPanelAction cloud_dictionary_action_{&factory_, "cloud-dictionary", msime::linux_host::menu_label::kCloudDictionary};
+  FcitxVocabularyAction vocabulary_action_{&factory_};
+  // vocabulary_action_ 此刻是否在 desktop_tools_menu_ 里（syncVocabularyEntry）。
+  bool vocabulary_listed_ = false;
   FcitxDesktopPanelAction desktop_cloud_clipboard_action_{&factory_, "cloud-clipboard", msime::linux_host::menu_label::kCloudClipboard};
   FcitxDesktopPanelAction dictionary_action_{&factory_, "dictionary", msime::linux_host::menu_label::kDictionary};
   FcitxDesktopPanelAction settings_action_{&factory_, "settings", msime::linux_host::menu_label::kSettings};
@@ -8176,8 +8272,11 @@ std::string FcitxState::candidateAux() const {
     if (!candidatePreedit.empty()) {
       const auto editing = view_.value("editing_text", std::string());
       const auto caret = std::min(editing.size(), msime::linux_host::strict_json_value(view_, "caret_position", editing.size()));
+      const auto preeditCaret = view_.find("preedit_caret");
       const auto displayed = msime::linux_host::candidate_preedit_with_caret(
-          candidatePreedit, editing, caret);
+          candidatePreedit, editing, caret,
+          preeditCaret == view_.end() ? std::nullopt
+                                      : msime::linux_host::strict_json_integer_optional<std::size_t>(*preeditCaret));
       if (!displayed.empty()) aux += (aux.empty() ? "" : " · ") + displayed;
     }
   }
@@ -8195,6 +8294,8 @@ void FcitxState::render() {
   if (engine_) {
     engine_->english_action_.update(&ic_);
     engine_->width_action_.update(&ic_);
+    // 开始或结束组字时「背单词」一行随之从「桌面工具」子菜单里拿掉或放回；其余时候不动菜单。
+    if (engine_->syncVocabularyEntry(&ic_)) ic_.updateUserInterface(fcitx::UserInterfaceComponent::StatusArea);
   }
   refreshModeIndicator();
   ic_.inputPanel().reset();
@@ -8296,7 +8397,9 @@ FcitxState::ExpandStyle FcitxState::expandStyle() const {
 
 // 这时候还能不能展开着：有展开样式、横排、有焦点、不是受限输入，没有打开候选列表（韩文汉字、注音）或释义页。
 bool FcitxState::expandAllowed() const {
+  // 上屏后联想最多八条，只能点选（NextWordPrediction.h）；展开的网格和卷轴有自己的键盘选择，不给它。
   return session_ && expandStyle() != ExpandStyle::none && !restricted() &&
+      !msime::linux_host::view_is_prediction(view_) &&
       preferences_.value("candidate_layout", std::string("vertical")) == "horizontal" &&
       !translationCandidatesActive() && !msime::linux_host::opened_candidate_list(view_) &&
       !msime::linux_host::korean_hanja_list_open(view_) && !view_.value("candidates", Json::array()).empty();
@@ -8524,11 +8627,21 @@ bool FcitxState::renderNativeCanvas() {
   content.preedit = ic_.inputPanel().preedit().toString();
   if (!content.preedit.empty()) content.preedit_cursor = ic_.inputPanel().preedit().cursor();
   // 拼音行属于画布，客户端内嵌预编辑仍单独保留。
-  if (content.preedit.empty() && preferences_.value("candidate_preedit_style", std::string("pinyin")) == "pinyin")
+  const bool viewPreedit =
+      content.preedit.empty() && preferences_.value("candidate_preedit_style", std::string("pinyin")) == "pinyin";
+  if (viewPreedit)
     content.preedit = view_.value("preedit", std::string{});
-  if (!content.preedit.empty() && content.preedit == view_.value("editing_text", std::string{}))
+  if (!content.preedit.empty() && content.preedit == view_.value("editing_text", std::string{})) {
     content.preedit_cursor = static_cast<int>(std::min(content.preedit.size(),
         host::strict_json_value(view_, "caret_position", content.preedit.size())));
+  } else if (viewPreedit) {
+    // 分词或展开过的拼写（ni'hao）按引擎给的 preedit_caret 放光标，与辅助行（candidateAux）同一条规则。
+    const auto preeditCaret = view_.find("preedit_caret");
+    if (const auto bytes = host::candidate_preedit_caret_bytes(
+            content.preedit, view_.value("editing_text", std::string{}), 0,
+            preeditCaret == view_.end() ? std::nullopt : host::strict_json_integer_optional<std::size_t>(*preeditCaret)))
+      content.preedit_cursor = static_cast<int>(*bytes);
+  }
   if (!ic_.inputPanel().auxUp().empty()) {
     content.preedit = ic_.inputPanel().auxUp().toString() + (content.preedit.empty() ? "" : " · " + content.preedit);
     content.preedit_cursor = -1;
@@ -8951,6 +9064,23 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
     if (event.isRelease()) toggle_chord_held_ = FcitxKey_None;
     return true;
   }
+  // 按住右 Alt（或右 Ctrl+右 Alt）时又按下一个非修饰键，用户按的是组合键而不是要说话（#10580，对齐 Windows #10581）：按住就此结束，这次按住自己开始、还没锁定的录音取消、不上屏。
+  // 按键本身不吞，照常往下走：它的修饰状态里本来就带着 Alt，应用收到的是组合键，不必像 Windows 那样补发修饰键。哪些键算组合键见 voice_hold_becomes_chord。Ctrl+Win 吞的是 Win，不在此列。
+  if ((voice_ralt_held_ || voice_rctrl_ralt_held_) && !event.isRelease() &&
+      msime::linux_host::voice_hold_becomes_chord(static_cast<uint32_t>(sym), voice_hotkey_hold_space_lock_,
+                                                  voice_space_locked_)) {
+    const bool drop = voice_hold_started_ && voice_loading_ && !wave_overlay_.processing();
+    voice_ralt_held_ = false;
+    voice_rctrl_ralt_held_ = false;
+    voice_hold_started_ = false;
+    voice_ralt_chord_until_up_ = true;
+    if (drop) cancelVoice();
+  }
+  // 应用没收到过右 Alt 的按下，它的自动重复和松开也一并吞掉；右 Ctrl 的松开照常交给应用，它的按下应用是收到了的。
+  if (sym == FcitxKey_Alt_R && voice_ralt_chord_until_up_) {
+    if (event.isRelease()) voice_ralt_chord_until_up_ = false;
+    return true;
+  }
   if (sym == FcitxKey_Alt_R && voice_ralt_held_) {
     if (event.isRelease()) {
       voice_ralt_held_ = false;
@@ -9065,6 +9195,48 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
     }
   }
   if (event.isRelease()) return false;
+  // 上屏后联想（NextWordPrediction.h）：下面选词的空格和数字只在组字时生效（composing 不含联想），所以联想时在这里按 id 选：空格选高亮行，数字选当前页上对应的行，点选走 FcitxCandidate::select。别的键先收起建议，再按没有候选的状态走：按住退格、展开候选、小键盘符号和翻页键都不会把建议当成组字，逗号句号照常出中文标点，回车照常换行。Esc 收起后不再交给应用。裸修饰键不算：它们在下面原样交给应用，按下 Alt 或 Super 不该收起建议。
+  if (!key.isModifier()) {
+    prediction_echo_.forget();
+    const bool prediction = msime::linux_host::view_is_prediction(view_);
+    const bool bare = !event.rawKey().states().testAny(fcitx::KeyStates{
+        fcitx::KeyState::Ctrl, fcitx::KeyState::Alt, fcitx::KeyState::Shift, fcitx::KeyState::Super,
+        fcitx::KeyState::Hyper, fcitx::KeyState::Meta, fcitx::KeyState::Mod5});
+    std::optional<size_t> pick;
+    if (prediction && bare) {
+      const auto &candidates = view_.at("candidates");
+      if (sym == FcitxKey_space) {
+        for (size_t index = 0; index < candidates.size(); ++index)
+          if (candidates.at(index).value("highlighted", false)) pick = index;
+        if (!pick && !candidates.empty()) pick = 0;
+      } else if (preferences_.value("number_row_selection", true)) {
+        // 与组字时的数字选词同一套键：数字行按物理键位（XKB 键码 10..19），其余按数字符号和小键盘。
+        const auto code = event.rawKey().code();
+        std::optional<size_t> slot;
+        if (code >= 10 && code <= 19) slot = code == 19 ? size_t{9} : static_cast<size_t>(code - 10);
+        else if (sym >= FcitxKey_1 && sym <= FcitxKey_9) slot = static_cast<size_t>(sym - FcitxKey_1);
+        else if (sym == FcitxKey_0 || sym == FcitxKey_KP_0) slot = size_t{9};
+        else if (sym >= FcitxKey_KP_1 && sym <= FcitxKey_KP_9) slot = static_cast<size_t>(sym - FcitxKey_KP_1);
+        if (slot && *slot < candidates.size()) pick = slot;
+      }
+    }
+    switch (msime::linux_host::prediction_key(prediction, bare && sym == FcitxKey_Escape, pick.has_value())) {
+    case msime::linux_host::PredictionKey::Route:
+      break;
+    case msime::linux_host::PredictionKey::Pick: {
+      const auto &id = view_.at("candidates").at(*pick).at("id");
+      return apply(msime_client_select(
+          session_, msime::linux_host::strict_json_required_integer<uint64_t>(id.at("generation")),
+          msime::linux_host::strict_json_required_integer<size_t>(id.at("index"))));
+    }
+    case msime::linux_host::PredictionKey::DismissThenRoute:
+      command(MSIME_CANCEL);
+      break;
+    case msime::linux_host::PredictionKey::Close:
+      command(MSIME_CANCEL);
+      return true;
+    }
+  }
 #ifdef MSIME_FCITX5_NATIVE_CANVAS
   // 网格开着时先由它处理；横排候选窗的 ↓ 和 Tab 在「展开候选」打开、不止一页时展开网格（只有一页、竖排、候选列表开着时 openExpanded 返回 false，键照下面的规则走）。canvas 包的卷轴不接管键盘，也不由键盘打开。
   if (!expanded_.empty() && expanded_style_ == ExpandStyle::grid && expandedKey(event)) return true;
@@ -9123,8 +9295,10 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
       !states.testAny(fcitx::KeyStates{fcitx::KeyState::Shift, fcitx::KeyState::Super,
                                        fcitx::KeyState::Hyper}) &&
       !restricted() && !privateInput() && ic_.hasFocus()) {
-    if (!voice_loading_ && !requestVoice()) return false;
+    const bool starts = !voice_loading_;
+    if (starts && !requestVoice()) return false;
     voice_rctrl_ralt_held_ = true;
+    voice_hold_started_ = starts;
     return true;
   }
   if (voice_hotkey_ctrl_win_ && voice_enabled_ && !voice_socket_.empty() &&
@@ -9141,8 +9315,10 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
       !states.testAny(fcitx::KeyStates{fcitx::KeyState::Ctrl, fcitx::KeyState::Shift,
                                        fcitx::KeyState::Super, fcitx::KeyState::Hyper}) &&
       !restricted() && !privateInput() && ic_.hasFocus()) {
-    if (!voice_loading_ && !requestVoice()) return false;
+    const bool starts = !voice_loading_;
+    if (starts && !requestVoice()) return false;
     voice_ralt_held_ = true;
+    voice_hold_started_ = starts;
     return true;
   }
   if (event.isRelease() || key.isModifier()) return false;

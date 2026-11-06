@@ -145,6 +145,7 @@ struct DesktopCandidates::State {
         }
         candidates.set_expansion_handler(owner.callbacks.expansion);
         candidates.set_personal_wordbook_handler(owner.callbacks.personal_wordbook);
+        candidates.set_read_aloud_handler(owner.callbacks.read_aloud);
         candidates.set_lease_check([this](const FocusLease &lease) { return lease_current(lease); });
         if (overlay)
           candidates.set_typing_effect_presenter([&](const TypingEffectPresentation &value) {
@@ -163,6 +164,7 @@ struct DesktopCandidates::State {
           if (first || settings->style != applied->style) candidates.set_style(settings->style);
           candidates.set_layout(settings->layout);
           candidates.set_follow_cursor(settings->follow_cursor);
+          candidates.set_game_anchor_top(settings->game_anchor_top);
           candidates.set_mouse_wheel(settings->mouse_wheel);
           if (first || settings->appearance_revision != applied->appearance_revision)
             apply_appearance(candidates, keymap ? &*keymap : nullptr, *settings);

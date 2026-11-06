@@ -532,7 +532,8 @@ final class OneHandModeTests: XCTestCase {
     let a = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 A" })
     let top = KeyAreaStackView.layoutFrame(of: q, in: controller.view)
     let middle = KeyAreaStackView.layoutFrame(of: a, in: controller.view)
-    XCTAssertEqual(middle.minY - top.maxY, 0, accuracy: 0.5)
+    // 行距 0 只收掉本机叠加的行距：上游 #10847 把收紧键帽省下的高度分到每排上下，排与排仍留着 `phoneLetterSpareRowPadding`。
+    XCTAssertEqual(middle.minY - top.maxY, KeyboardFormFactor.phoneLetterSpareRowPadding, accuracy: 0.5)
   }
 
   private func makeController() -> KeyboardViewController {

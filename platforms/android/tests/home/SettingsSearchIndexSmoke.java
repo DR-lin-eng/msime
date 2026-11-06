@@ -58,6 +58,8 @@ public final class SettingsSearchIndexSmoke {
         }
         // #6132：搜「浮动」要找到键盘页。
         check(pages.get("KEYBOARD_OPTIONS").matches("浮动"), "searching 浮动 finds the keyboard page");
+        // 功能面板的「键盘调整」在设置里没有同名的行，搜它要落到放着键盘高度和底部高度的键盘页。
+        check(pages.get("KEYBOARD_OPTIONS").matches("键盘调整"), "searching 键盘调整 finds the keyboard page");
         check(pages.containsKey("FUZZY_PINYIN") && pages.get("FUZZY_PINYIN").matches("前后鼻音"),
             "searching 前后鼻音 finds the fuzzy-pinyin rule page");
         // #10223：两行左侧符号挪进「按键布局」后，键盘页不再收录它们，搜索只指向新位置。
@@ -125,7 +127,7 @@ public final class SettingsSearchIndexSmoke {
             {"KEYBOARD_OPTIONS", "表情"}, {"KEYBOARD_OPTIONS", "常用语"}, {"KEYBOARD_OPTIONS", "剪贴板"},
             {"KEYBOARD_OPTIONS", "皮肤"}, {"KEYBOARD_OPTIONS", "输入方式"}, {"KEYBOARD_OPTIONS", "浮动键盘"},
             {"KEYBOARD_OPTIONS", "文本编辑"}, {"KEYBOARD_OPTIONS", "撤销"}, {"KEYBOARD_OPTIONS", "重做"},
-            {"KEYBOARD_OPTIONS", "语音"},
+            {"KEYBOARD_OPTIONS", "语音"}, {"KEYBOARD_OPTIONS", "随机数字"},
             // 「按键布局」里两行左侧符号的标题来自 KeyLayoutStylesPolicy 的常量；「九键数字键盘左侧符号」是它原来在键盘页的名字（#10223）。
             {"KEY_LAYOUT_STYLES", "九键左侧符号"}, {"KEY_LAYOUT_STYLES", "数字键盘左侧符号"},
             {"KEY_LAYOUT_STYLES", "九键数字键盘左侧符号"},

@@ -100,6 +100,9 @@ docker run --rm --init \
   -w /source \
   -e CARGO_TARGET_DIR=/build/cargo \
   -e CARGO_HOME=/build/cargo-home \
+  -e MSIME_BUILD_REVISION="${MSIME_BUILD_REVISION:-$(git rev-parse HEAD)}" \
+  -e MSIME_BUILD_RUN="${MSIME_BUILD_RUN:-${GITHUB_RUN_ID:-}}" \
+  -e GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
   -e MSIME_PACKAGE_IMAGE="$package_image" \
   -e MSIME_VERSION="$version" \
   -e MSIME_RELEASE_DATE="$release_date" \
@@ -110,17 +113,31 @@ docker run --rm --init \
   -e MSIME_REQUIRE_LANGUAGE_DICTIONARIES="${MSIME_REQUIRE_LANGUAGE_DICTIONARIES:-0}" \
   -e MSIME_REQUIRE_OFFICIAL_PLUGINS="${MSIME_REQUIRE_OFFICIAL_PLUGINS:-0}" \
   -e MSIME_REQUIRE_WORDBOOKS="${MSIME_REQUIRE_WORDBOOKS:-0}" \
-  ${MSIME_BUILD_RUN:+-e MSIME_BUILD_RUN="$MSIME_BUILD_RUN"} \
   ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
   ${CMAKE_BUILD_PARALLEL_LEVEL:+-e CMAKE_BUILD_PARALLEL_LEVEL="$CMAKE_BUILD_PARALLEL_LEVEL"} \
   "$package_image" bash -euo pipefail -c '
     bash platforms/linux/scripts/prepare-package-cache.sh
-    # 在这里去掉 Rust 二进制的符号表，而不是写进 workspace 的 [profile.release]：CMake 用 install(FILES/PROGRAMS) 安装它们，CPACK_STRIP_FILES 管不到；而 debian/rules 和 rpm/msime.spec 构建同样的 crate 时带 line-tables-only 调试信息，由 dh_strip 和 find-debuginfo 拆分成 dbgsym 和 debuginfo 包。
-    export CARGO_PROFILE_RELEASE_STRIP=symbols
-    cargo build --release --locked -p msime-host-api
+    # 先保留行号用于符号归档，CPack 安装步骤只剥离安装副本；原件继续供其余版本使用。
+    export CARGO_PROFILE_RELEASE_STRIP=none
+    export CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+    # 整句联想「增强」的逐键重排跑在 ONNX Runtime 上（host-api 的 onnx-rerank 特性，见 .agents/notes/implemented/architecture/2026-11-01-onnx-rerank-backend.md）：精简构建的静态库按 resources/onnxruntime-minimal.lock.json 取这个容器架构的那一份（在 msime 发 Linux 版的同一个 bookworm 镜像里编的），下载核对后链进 libmsime_host_api.so。RPM 的 Fedora 容器链接同一份：它的 glibc 比 bookworm 新，旧 glibc 上编的静态库照样能链。
+    rust_target="$(uname -m)-unknown-linux-gnu"
+    ORT_LIB_LOCATION=$(python3 scripts/fetch_onnxruntime.py --target "$rust_target" --out "/build/onnxruntime/$rust_target")
+    export ORT_LIB_LOCATION
+    # ort-sys 把静态库复制进自己的输出目录，库换了也不会重新复制；/build/cargo 跨次保留，所以按锁里库的 SHA-256 记一个戳，变了就让它重新复制。
+    ort_stamp=/build/cargo/onnxruntime-library.sha256
+    ort_library_sha=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))[\"targets\"][sys.argv[2]][\"library_sha256\"])" resources/onnxruntime-minimal.lock.json "$rust_target")
+    if [ -d /build/cargo ] && [ "$(cat "$ort_stamp" 2>/dev/null)" != "$ort_library_sha" ]; then
+      cargo clean -p ort-sys --release
+    fi
+    cargo build --release --locked -p msime-host-api --features onnx-rerank
+    mkdir -p /build/cargo
+    printf "%s\n" "$ort_library_sha" > "$ort_stamp"
     cargo build --release --locked -p msime-mcp-server --bin msime-mcp
+    # 两档逐键重排模型（chinese-ime-lm 的 rerank-v2：8x448 与 6x256），按 resources/rerank-model.lock.json 下载核对；CMake 再按同一份锁核对一遍，装在资源目录旁边的 rerank-model/ 与 rerank-model-small/。只有带键盘模型的版本（版本表 features.neural_keyboard）装它们。
+    python3 scripts/fetch_rerank_model.py --out /build/rerank-model >/dev/null
     desktop_args=()
-    crate_roots=(msime-host-api msime-mcp-server)
+    crate_roots=(msime-host-api:onnx-rerank msime-mcp-server)
     if [ "$MSIME_PACKAGE_DESKTOP" = 1 ]; then
       # tauri/custom-protocol is what `tauri build` enables: without it the binary is a dev build that loads devUrl instead of the embedded frontend. TAURI_CONFIG sets the version the app reports, as Build-Client.ps1 does for Windows.
       TAURI_CONFIG="{\"version\":\"$MSIME_VERSION\"}" \
@@ -161,7 +178,14 @@ docker run --rm --init \
       languages_args+=(-DMSIME_LANGUAGE_DICTIONARIES=/source/target/language-dictionaries)
     fi
     # 每轮清空发行附件，保留对象文件；配置缓存单独重建，旧版本号和可选资源不能进入本次包。
-    rm -rf /build/dist
+    rm -rf /build/dist /build/symbols
+    # 符号归档只看本轮的 Rust 最终产物：/build/cargo/release 是持久缓存，deps/ 里留着旧构建的中间副本，关掉桌面时还可能留着以前的 msime-desktop，直接扫它会把旧模块收进归档，旧的已剥离副本还会让 collect 报错。
+    rm -rf /build/symbol-inputs
+    mkdir -p /build/symbol-inputs
+    ln /build/cargo/release/libmsime_host_api.so /build/cargo/release/msime-mcp /build/symbol-inputs/
+    if [ "$MSIME_PACKAGE_DESKTOP" = 1 ]; then
+      ln /build/cargo/release/msime-desktop /build/symbol-inputs/
+    fi
     IFS=, read -r -a editions <<<"$MSIME_PACKAGE_EDITIONS"
     for edition in "${editions[@]}"; do
       # 每个版本一个构建目录：full 仍是 /build/cmake，装在 /usr；其他版本装在版本表给的前缀下。粤语、注音和笔画词库只有用到它们的版本要（cmake/Edition.cmake 对其他版本忽略），所以「必须带齐」也只对 full 生效。单测只跑 full 的。
@@ -177,6 +201,7 @@ docker run --rm --init \
       rm -f "$build/CMakeCache.txt"
       cmake -S platforms/linux -B "$build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DMSIME_RELEASE_CRASH_SYMBOLS=ON \
         -DCMAKE_INSTALL_PREFIX="$prefix" \
         -DMSIME_EDITION="$edition" \
         -DBUILD_TESTING="$testing" \
@@ -187,6 +212,7 @@ docker run --rm --init \
         -DMSIME_PACKAGE_VERSION="$MSIME_VERSION" \
         -DMSIME_RUST_NOTICES=/build/notices/rust-crates-NOTICES.txt \
         -DMSIME_VOICE_RUNTIME_DIR=/build/voice-runtime \
+        -DMSIME_RERANK_MODELS=/build/rerank-model \
         -DMSIME_BUNDLE_HANDWRITING_MODEL=OFF \
         "${desktop_args[@]}" "${glosses_args[@]}" "${plugin_packs_args[@]}" "${edition_languages_args[@]}" "${wordbooks_args[@]}"
       cmake --build "$build"
@@ -194,6 +220,11 @@ docker run --rm --init \
         ctest --test-dir "$build" --output-on-failure
       fi
       [ "$MSIME_PACKAGE_TESTS_ONLY" = 0 ] || continue
+      python3 scripts/crash-symbols.py collect --platform linux --version "$MSIME_VERSION" \
+        --root "$build" --root /build/symbol-inputs \
+        --output "/build/symbols/linux-$MSIME_VERSION-$MSIME_PACKAGE_FORMAT-$edition-$(uname -m)-${MSIME_BUILD_RUN:-local}-${GITHUB_RUN_ATTEMPT:-1}.zip"
+      # Rust 安装副本由 install(CODE) 剥离；原件保留给后续版本归档。
+
       if [ "$MSIME_PACKAGE_FORMAT" = rpm ]; then
         cpack --config "$build/CPackConfig.cmake" -G RPM -B /build/dist
       else

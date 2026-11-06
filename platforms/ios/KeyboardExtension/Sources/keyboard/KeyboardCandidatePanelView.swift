@@ -176,13 +176,10 @@ final class KeyboardCandidatePanelView: CandidateCanvasHostView, UICollectionVie
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-  // 品牌标志位于标题栏开头，与 macOS 候选窗顶行的做法一样：16pt，与拼写之间隔 6pt。它只是装饰（图片视图不接收触摸，也不是无障碍元素），并像快捷栏的品牌按钮一样用皮肤强调色着色。
+  // 品牌标志位于标题栏开头，与 macOS 候选窗顶行的做法一样：16pt，与拼写之间隔 6pt。它只是装饰（图片视图不接收触摸，也不是无障碍元素），和快捷栏的品牌按钮一样是固定配色的完整标志，不随皮肤着色。
   private func makeHeader(preedit: String, preeditScale: CGFloat, onClose: @escaping () -> Void) -> UIView {
-    let brandMark = UIImageView(
-      image: KeyboardViewController.brandTemplate()
-        ?? UIImage(systemName: "leaf.fill")?.withRenderingMode(.alwaysTemplate))
+    let brandMark = UIImageView(image: KeyboardViewController.brandMark(side: 16))
     brandMark.contentMode = .scaleAspectFit
-    brandMark.tintColor = skin.accent
     brandMark.isUserInteractionEnabled = false
     brandMark.isAccessibilityElement = false
     brandMark.accessibilityIdentifier = "candidatePanelBrandIcon"
@@ -386,7 +383,11 @@ final class KeyboardCandidatePanelView: CandidateCanvasHostView, UICollectionVie
     configuration.background.strokeWidth = palette == nil ? 0 : palette?.layout?.borderWidth ?? 1
     configuration.background.strokeColor = palette?.border ?? .clear
     configuration.background.cornerRadius = palette?.layout?.itemRadius ?? canvas?.itemCornerRadius ?? skin.cornerRadius
-    chip.configuration = configuration
+    // 格子随单元格复用，被手指按过的格子再套用 configuration 时 UIKit 会给标题挂 0.25s 的淡入淡出（`CATransition` fade），面板重新载入后新旧两个词叠着渐变。候选按 #10330 立即呈现，换字放在不带动画的块里做完；只用来量尺寸的格子不上屏，不必立即布局。
+    UIView.performWithoutAnimation {
+      chip.configuration = configuration
+      if interactive { chip.layoutIfNeeded() }
+    }
     chip.configurationUpdateHandler = { button in
       button.configuration?.background.backgroundColor = button.isHighlighted ? fill.keyboardPressedBrightness(0.88) : fill
     }

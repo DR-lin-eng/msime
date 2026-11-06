@@ -2,6 +2,39 @@ import UIKit
 import XCTest
 
 final class InputBridgeResponseTests: XCTestCase {
+  func testExplicitCandidateSelectionStateIsDecodedAndPreserved() throws {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: state) }
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    XCTAssertFalse(try bridge.snapshot(from: ["view": [:]]).requiresCandidateSelection)
+    let pending = try bridge.snapshot(from: ["view": ["requires_candidate_selection": true]])
+    XCTAssertTrue(pending.requiresCandidateSelection)
+    XCTAssertTrue(pending.replacingCommit(nil).requiresCandidateSelection)
+    for invalid: Any in ["true", 1, NSNull()] {
+      XCTAssertThrowsError(try bridge.snapshot(from: ["view": ["requires_candidate_selection": invalid]]))
+    }
+  }
+
+  func testQuickPhraseCursorSuffixDecodingAndCommitReplacement() throws {
+    let state = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: state) }
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    for suffix in ["", "🌲e\u{301}\""] {
+      let snapshot = try bridge.snapshot(from: ["commit": "title:\"" + suffix, "commit_cursor_suffix": suffix, "view": [:]])
+      XCTAssertEqual(snapshot.commitCursorSuffix, suffix)
+      XCTAssertEqual(snapshot.replacingCommit(snapshot.commitText).commitCursorSuffix, suffix)
+      XCTAssertNil(snapshot.replacingCommit("changed").commitCursorSuffix)
+      XCTAssertNil(snapshot.replacingCommit(nil).commitCursorSuffix)
+    }
+    for invalid: Any in [NSNull(), 7, false, ["suffix"]] {
+      XCTAssertNil(try bridge.snapshot(from: ["commit_cursor_suffix": invalid, "view": [:]]).commitCursorSuffix)
+    }
+    XCTAssertNil(try bridge.snapshot(from: ["view": [:]]).commitCursorSuffix)
+    let decomposed = MetasequoiaInputSnapshot(commitText: "e\u{301}", commitCursorSuffix: "e\u{301}")
+    XCTAssertNil(decomposed.replacingCommit("é").commitCursorSuffix, "规范等价不表示原来的 UTF-16 位置仍适用")
+    XCTAssertNil(MetasequoiaInputSnapshot(commitCursorSuffix: "").replacingCommit("").commitCursorSuffix)
+  }
+
   func testMalformedEnvelopeReleasesNativeResponseOnce() throws {
     let pointer = strdup("[]")!
     var releases = 0

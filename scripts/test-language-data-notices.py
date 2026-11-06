@@ -20,7 +20,7 @@ LICENCES = {
         "rime/rime-cantonese",
         "259f0e48bba840c3a2e0d117539e96937f3d89bc",
         "sources/cantonese/",
-        ("CanCLID", "Linguistic Society of Hong Kong", "Attribution 4.0 International", "tone digits are removed", "jyut6ping3.maps.dict.yaml (released under the Open Data Commons Open Database License 1.0)", "jyut6ping3.phrase.dict.yaml", "Hong Kong Cantonese Corpus", "Luke Kang Kwong", "K. K. Luke and May L. Y. Wong (2015) The Hong Kong Cantonese Corpus: Design and Uses", "custom/cantonese.txt"),
+        ("CanCLID", "Linguistic Society of Hong Kong", "Attribution 4.0 International", "tone digits are removed", "jyut6ping3.maps.dict.yaml (released under the Open Data Commons Open Database License 1.0)", "jyut6ping3.phrase.dict.yaml", "Hong Kong Cantonese Corpus", "Luke Kang Kwong", "K. K. Luke and May L. Y. Wong (2015) The Hong Kong Cantonese Corpus: Design and Uses", "custom/cantonese.txt", "the character is replaced by the Hong Kong form", "TWVariants.txt and HKVariants.txt", "custom/cantonese-variant-vetoes.txt"),
     ),
     "resources/licenses/libchewing-data-LGPL-2.1.txt": (
         "chewing/libchewing-data",
@@ -59,9 +59,9 @@ NOTICE_CHANNELS = {
 }
 # The overviews say what each text covers, so they also have to name the pinned commit.
 OVERVIEWS = ("platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt", "platforms/linux/data/THIRD_PARTY_NOTICES.txt", "platforms/windows/Collect-Notices.ps1", "docs/third-party.md")
-# 主词库的上游说明：这四个 reference 的提交必须写在里面，换了提交却忘了改说明会在这里失败。
+# 主词库的上游说明：这五个 reference 的提交必须写在里面，换了提交却忘了改说明会在这里失败。新世纪五笔单字表（wubi06-rime）在词库锁换到收录它的发布之前，写在说明末尾「已登记、尚未随当前词库发布的来源」一节。
 ENGINE_NOTICE = "resources/licenses/msime-engine-dictionary-NOTICE.md"
-ENGINE_NOTICE_REFERENCES = ("rime-ice-supplement", "SCOWL", "98wubi-tables", "fcitx5-table-extra")
+ENGINE_NOTICE_REFERENCES = ("rime-ice-supplement", "SCOWL", "98wubi-tables", "fcitx5-table-extra", "wubi06-rime")
 # The vi crate behind Vietnamese mode is MIT. The macOS bundle and the Windows package, where Vietnamese ships and notices are listed by hand, carry its text explicitly.
 VI_LICENCE = "resources/licenses/vi-MIT.txt"
 VI_CHANNELS = ("platforms/macos/CMakeLists.txt", "platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt", "platforms/macos/tests/settings/bundle_contents.py", "platforms/windows/Collect-Notices.ps1", "platforms/windows/tests/tools/collect_notices.ps1")
@@ -98,7 +98,6 @@ ENGINE_LICENCE = "resources/licenses/MPL-2.0.txt"
 ENGINE_LICENCE_MARKERS = ("Mozilla Public License Version 2.0", "Exhibit A - Source Code Form License Notice")
 MOBILE_LICENCE_CHANNELS = {
     "platforms/android/build-apk.sh": ('cp LICENSE "$assets/client-LICENSE.txt"',),
-    "platforms/android/build-client-apk.sh": ('cp LICENSE "$assets/client-LICENSE.txt"',),
     "platforms/android/build-native.sh": ('cp resources/licenses/MPL-2.0.txt "$notices/MPL-2.0.txt"',),
     "platforms/android/java/app/msime/android/home/AboutPage.java": ('"client-LICENSE.txt"', 'assets.list("native-notices")'),
     "platforms/ios/project.yml": ("- path: ../../LICENSE", "- path: ../../resources/licenses/MPL-2.0.txt"),
@@ -120,6 +119,43 @@ failures = []
 def check(condition: bool, message: str) -> None:
     if not condition:
         failures.append(message)
+
+
+# 法日西俄德韩释义行的读音表（scripts/build_target_pronunciations.py）改编自 CC BY-SA 4.0 的维基词典，NOTICE 必须随数据库一起走。它不进上面那些按平台的许可证渠道，而是和英文音标表、离线释义一样放在数据库旁边：资源包的文件清单就是锁的 `built`，随包分发的三个打包脚本各自只连同 NOTICE 一起暂存数据库。这里核对锁里有 NOTICE、生成器写的 NOTICE 带着署名、许可证和改动说明，以及每个打包脚本暂存数据库的地方都带上了 NOTICE。
+TARGET_PRONUNCIATIONS_LOCK = "resources/target-pronunciations.lock.json"
+TARGET_PRONUNCIATIONS_NOTICE = "target-pronunciations-NOTICE.txt"
+TARGET_PRONUNCIATIONS_NOTICE_MARKERS = (
+    "English Wiktionary (https://en.wiktionary.org/), by Wiktionary contributors",
+    "Wiktextract (https://github.com/tatuylonen/wiktextract)",
+    "kaikki.org",
+    "Wiktextract dump date: {dump_date}",
+    "Wiktextract revision: {source_revision}",
+    "Changes:",
+    "Creative Commons Attribution-ShareAlike 4.0 International License (https://creativecommons.org/licenses/by-sa/4.0/)",
+)
+# 随包带着外语读音表的打包脚本：每个都要在暂存数据库的同一处带上 NOTICE。
+TARGET_PRONUNCIATIONS_CHANNELS = (
+    "platforms/macos/stage-resources.sh",
+    "platforms/harmony/stage-resources.sh",
+    "platforms/windows/installer/Prepare-PackageFiles.ps1",
+)
+
+
+def check_target_pronunciation_notice() -> None:
+    lock = json.loads((ROOT / TARGET_PRONUNCIATIONS_LOCK).read_text(encoding="utf-8"))
+    names = [artifact["name"] for artifact in lock.get("built") or []]
+    check(TARGET_PRONUNCIATIONS_NOTICE in names, f"{TARGET_PRONUNCIATIONS_LOCK} does not pin {TARGET_PRONUNCIATIONS_NOTICE}, so the resource pack would install the databases without it")
+    check(any(name.endswith("-phonetic.db") for name in names), f"{TARGET_PRONUNCIATIONS_LOCK} pins no *-phonetic.db")
+    check(lock.get("license") == "CC-BY-SA-4.0", f"{TARGET_PRONUNCIATIONS_LOCK} no longer records CC-BY-SA-4.0")
+    generator = (ROOT / "scripts/build_target_pronunciations.py").read_text(encoding="utf-8")
+    for marker in TARGET_PRONUNCIATIONS_NOTICE_MARKERS:
+        check(marker in generator, f"scripts/build_target_pronunciations.py writes a NOTICE without {marker!r}")
+    for channel in TARGET_PRONUNCIATIONS_CHANNELS:
+        live = [line for line in (ROOT / channel).read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+        staging = [line for line in live if "phonetic.db" in line and ("cp " in line or "Database" in line)]
+        check(bool(staging), f"{channel} no longer stages the target pronunciation tables")
+        for line in staging:
+            check(TARGET_PRONUNCIATIONS_NOTICE in line or "en-phonetic.db" in line, f"{channel} stages the target pronunciation tables without {TARGET_PRONUNCIATIONS_NOTICE}: {line.strip()[:120]}")
 
 
 def main() -> int:
@@ -212,6 +248,8 @@ def main() -> int:
             # project.yml 的 `- path:` 条目要整行相等，`../../LICENSE` 才不会被 `../../LICENSE.md` 之类的路径冒充。
             exact = fragment.startswith("- path: ")
             check(any(fragment == line.strip() if exact else fragment in line for line in live), f"{channel} does not ship the GPL-3.0 or MPL-2.0 text: no live line contains {fragment!r}")
+
+    check_target_pronunciation_notice()
 
     if failures:
         for failure in failures:

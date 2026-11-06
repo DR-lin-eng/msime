@@ -23,7 +23,7 @@ function Assert-Throws {
 try {
     $package = Join-Path $root 'installer'
     # 本项目的 EXE 都带 PDB；RestartAgent 是 Windows App SDK 自带的，没有 PDB。
-    foreach ($exe in @('MetasequoiaImeServer', 'MetasequoiaImeWatchdog', 'msime-mcp', 'msime-client-settings', 'msime-client-prepare', 'MSIME')) {
+    foreach ($exe in @('MetasequoiaImeServer', 'MetasequoiaImeWatchdog', 'msime-mcp', 'msime-client-settings', 'msime-client-prepare', 'MSIME', 'msime-client-panels')) {
         New-File (Join-Path $package "server_exe/$exe.exe")
         New-File (Join-Path $package "server_exe/$exe.pdb")
     }
@@ -31,11 +31,11 @@ try {
         New-File (Join-Path $package $upstream)
     }
     foreach ($arch in @('32', '64')) {
-        foreach ($name in @('MetasequoiaImeTsf.dll', 'MetasequoiaImeTsf.pdb', 'msime_host_api_wubi.dll', 'zlib1.dll', 'libcurl.dll', 'fmt.dll')) {
+        foreach ($name in @('MetasequoiaImeTsf.dll', 'MetasequoiaImeTsf.pdb', 'MetasequoiaImeCrashWer.dll', 'msime_host_api_wubi.dll', 'zlib1.dll', 'libcurl.dll', 'fmt.dll')) {
             New-File (Join-Path $package "tsf_dll/$arch/$name")
         }
     }
-    foreach ($name in @('MetasequoiaImeTsf.dll', 'msime_host_api_wubi_arm64.dll')) { New-File (Join-Path $package "tsf_dll/arm64/$name") }
+    foreach ($name in @('MetasequoiaImeTsf.dll', 'MetasequoiaImeCrashWer.dll', 'msime_host_api_wubi_arm64.dll')) { New-File (Join-Path $package "tsf_dll/arm64/$name") }
 
     $staged = Join-Path $root 'payload'
     & $script -Mode Stage -Edition wubi -Directory $staged -PackageRoot $package -RepoRoot $repoRoot
@@ -43,12 +43,33 @@ try {
     $expected = @(
         'server_exe/MetasequoiaImeServer.exe', 'server_exe/MetasequoiaImeWatchdog.exe', 'server_exe/msime-mcp.exe',
         'server_exe/msime-client-settings.exe', 'server_exe/msime-client-prepare.exe', 'server_exe/MSIME.exe',
+        'server_exe/msime-client-panels.exe',
         'tsf_dll/32/MetasequoiaImeTsf.dll', 'tsf_dll/32/msime_host_api_wubi.dll',
         'tsf_dll/64/MetasequoiaImeTsf.dll', 'tsf_dll/64/msime_host_api_wubi.dll',
+        'tsf_dll/32/MetasequoiaImeCrashWer.dll', 'tsf_dll/64/MetasequoiaImeCrashWer.dll',
+        'tsf_dll/arm64/MetasequoiaImeCrashWer.dll',
         'tsf_dll/arm64/MetasequoiaImeTsf.dll', 'tsf_dll/arm64/msime_host_api_wubi_arm64.dll'
     ) | Sort-Object
     if (($actual -join ',') -cne ($expected -join ',')) {
         throw "Stage 提交的文件不对：`n实际 $($actual -join ', ')`n预期 $($expected -join ', ')"
+    }
+    foreach ($arch in @('32', '64', 'arm64')) {
+        $relative = "tsf_dll/$arch/MetasequoiaImeCrashWer.dll"
+        $source = Join-Path $package $relative
+        $returned = Join-Path $staged "wubi/$relative"
+        # 缺少自有 helper 时不能重建部分签名请求，也不能接受不完整的返回包。
+        Move-Item -LiteralPath $source -Destination "$source.moved"
+        try {
+            Assert-Throws "缺少 $arch helper 时 Stage" { & $script -Mode Stage -Edition wubi -Directory $staged -PackageRoot $package -RepoRoot $repoRoot } $relative
+            $preserved = @(Get-ChildItem -LiteralPath (Join-Path $staged 'wubi') -Recurse -File)
+            if ($preserved.Count -ne $expected.Count -or -not (Test-Path -LiteralPath $returned -PathType Leaf)) {
+                throw 'helper 缺失破坏了上一次签名请求'
+            }
+        } finally { Move-Item -LiteralPath "$source.moved" -Destination $source }
+        Move-Item -LiteralPath $returned -Destination (Join-Path $root "helper-$arch.moved")
+        try {
+            Assert-Throws "少送回 $arch helper 时 Restore" { & $script -Mode Restore -Edition wubi -Directory $staged -PackageRoot $package -RepoRoot $repoRoot } $relative
+        } finally { Move-Item -LiteralPath (Join-Path $root "helper-$arch.moved") -Destination $returned }
     }
 
     # 别的版本的宿主 DLL 不是本版本的二进制，按版本表取名。

@@ -131,7 +131,7 @@ public final class NineKeySidebarPolicy {
         return tallReturn ? TALL_RETURN_LETTER_SYMBOLS : DEFAULT_LETTER_SYMBOLS;
     }
 
-    /** 右侧大回车外框接到出厂字母表末尾的那个 ！ 在表里的位置（{@link #letterSymbols(List, boolean)}）；数字键面、别的样式和自定义的表没有接，返回 -1。它接替拼音九键右列的 ！，带着那个键上滑输入 0、长按选上标 ⁰ 或下标 ₀ 的手势；自定义表里的 ！ 是普通符号，不带。 */
+    /** 右侧大回车外框接到出厂字母表末尾的那个 ！ 在表里的位置（{@link #letterSymbols(List, boolean)}）；数字键面、别的样式和自定义的表没有接，返回 -1。它接替拼音九键右列的 ！，带着那个键滑出 0（方向跟「九键滑动输入数字」，#10441）、长按选上标 ⁰ 或下标 ₀ 的手势；自定义表里的 ！ 是普通符号，不带。 */
     public static int appendedExclamationIndex(boolean digits, List<String> letterStored, boolean tallReturn) {
         return !digits && tallReturn && !custom(letterStored, DEFAULT_LETTER_SYMBOLS)
             ? TALL_RETURN_LETTER_SYMBOLS.size() - 1 : -1;
@@ -206,6 +206,11 @@ public final class NineKeySidebarPolicy {
         if (symbols.size() <= limit) return String.join(" ", symbols);
         List<String> head = new ArrayList<>(symbols.subList(0, BoundsPolicy.nonNegative(limit)));
         return String.join(" ", head) + " 等 " + symbols.size() + " 个";
+    }
+
+    /** 编辑页「当前顺序」每行符号前的序号：第 `position` 位（从 0 起）写成「1.」「2.」…，三端同一写法（iOS `NineKeySidebar.ordinal`、共享设置页 `nineKeySidebarOrdinal`）。读屏描述、挪动和拖动的规则与其余排序面板共用 `home/ReorderPolicy`。 */
+    public static String ordinal(int position) {
+        return (position + 1) + ".";
     }
 
     /** 返回尚未加入当前符号栏的可选项，保持选择面板的固定顺序。 */

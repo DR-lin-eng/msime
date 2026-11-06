@@ -2,6 +2,7 @@
 #import <InputMethodKit/InputMethodKit.h>
 #import <CoreText/CoreText.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <AVFoundation/AVFoundation.h>
 #import "MSIMEClientSession.h"
 #import "../settings/RuntimeOptions.h"
 #import "../../../../shared/apple/TextClient.h"
@@ -64,6 +65,7 @@
 #include "../core/ModifierTap.h"
 #include "../core/EditableShiftFocus.h"
 #include "../core/VimMode.h"
+#include "../../../common/VocabularyDueMenu.h"
 #import "../settings/ShuangpinKeymapPanel.h"
 #import "../core/FloatingToolbarPanel.h"
 #import "InputModeHUDPanel.h"
@@ -97,6 +99,7 @@
 #import <IOKit/hid/IOHIDKeys.h>
 #import <IOKit/hid/IOHIDManager.h>
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -227,6 +230,29 @@ static void MSIMEAddToPersonalWordbook(NSString *directory, NSString *candidate,
     });
 }
 
+// 候选菜单「朗读」要读的英文：经 `msime_client_read_aloud_text` 按候选原文和这一帧显示着的释义问共享层，没有能读的时为 nil，菜单就不出这一项。不读写文件，打开菜单时调用。
+static NSString *MSIMEReadAloudText(NSString *candidate, NSString *gloss) {
+    NSDictionary *request = @{ @"candidate": candidate ?: @"", @"gloss": gloss ?: @"" };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+    if (!data || data.length > 65536) return nil;
+    auto response = msime::host_api::own_string(
+        msime_client_read_aloud_text(static_cast<const uint8_t *>(data.bytes), data.length));
+    if (!response) return nil;
+    NSData *body = [NSData dataWithBytes:response.get() length:strlen(response.get())];
+    NSDictionary *envelope = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+    if (![envelope isKindOfClass:NSDictionary.class] || !MSIMEStrictBoolean(envelope[@"ok"])) return nil;
+    NSString *text = envelope[@"value"];
+    return [text isKindOfClass:NSString.class] && text.length ? text : nil;
+}
+
+// 读「朗读」用的英文声音：先找美式英语，再找任何一个已安装的英文声音。AVSpeechSynthesizer 只用设备上装着的声音，不联网。一个都没有时为 nil。
+static AVSpeechSynthesisVoice *MSIMEReadAloudVoice(void) {
+    if (AVSpeechSynthesisVoice *voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"en-US"]) return voice;
+    for (AVSpeechSynthesisVoice *voice in AVSpeechSynthesisVoice.speechVoices)
+        if ([voice.language hasPrefix:@"en"]) return voice;
+    return nil;
+}
+
 // The local calendar day of this moment, as the statistics store names days.
 static NSString *MSIMETypingStatisticsLocalDay(void) {
     NSDateComponents *components = [NSCalendar.currentCalendar components:NSCalendarUnitYear | NSCalendarUnitMonth |
@@ -338,6 +364,23 @@ static BOOL MSIMEStrictBoolean(id value) {
     if (![value isKindOfClass:NSNumber.class] ||
         CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID()) return NO;
     return CFBooleanGetValue((CFBooleanRef)(__bridge CFTypeRef)value);
+}
+
+// 上屏后联想（View.prediction）：上屏之后的空闲建议，不是组字。点选、数字键和空格选它，其余按键先清掉它再照常处理（msime_client.h）。
+static BOOL MSIMEViewPrediction(NSDictionary *view) {
+    return [view isKindOfClass:NSDictionary.class] && MSIMEStrictBoolean(view[@"prediction"]);
+}
+
+// 候选是否属于正在进行的组字。联想的候选不算，与 runtime 的 `has_composition` 一致；判断「有没有组字」的地方都用它，不直接数候选。
+static BOOL MSIMEViewHasCompositionCandidates(NSDictionary *view) {
+    return [view isKindOfClass:NSDictionary.class] && [view[@"candidates"] isKindOfClass:NSArray.class] &&
+        [view[@"candidates"] count] && !MSIMEViewPrediction(view);
+}
+
+// 客户端此刻的选区；应用不报告时是 NSNotFound。
+static NSRange MSIMETextClientSelection(id client) {
+    return client && [client respondsToSelector:@selector(selectedRange)] ? [(id<MSIMETextClient>)client selectedRange]
+                                                                          : NSMakeRange(NSNotFound, 0);
 }
 
 static BOOL MSIMEStrictUnsignedIntegerValue(id value, NSUInteger *result) {
@@ -1773,6 +1816,8 @@ static NSImage *MSIMECandidateLogoImage() {
     // Whether the client may still hold marked text this controller's compositions wrote; see MSIMEApplyTransitionTrackingMarkedText. Wrongly YES costs one redundant clear, wrongly NO leaves a composition stranded in the document, so anything that might mark text sets it.
     BOOL _clientHasMarkedText;
     NSObject *_candidateMenuToken;
+    // 候选菜单「朗读」用的合成器，第一次朗读时建，之后一直用它，新的一次先打断上一次。
+    AVSpeechSynthesizer *_readAloudSynthesizer;
     NSPanel *_panel;
     NSRect _candidateAnchorCaret;
     BOOL _candidateAnchorValid;
@@ -1783,6 +1828,8 @@ static NSImage *MSIMECandidateLogoImage() {
     NSString *_preferencesDirectory;
     NSTimer *_preferencesTimer;
     MSIMEPreferenceLoadState _preferenceLoadState;
+    // 只记宿主设置是否已应用，不保留跨激活回放的文档。
+    BOOL _hostPreferencesApplied;
     MSIMEAppearancePreferences *_appearance;
     BOOL _wubiCodeHintEnabled;
     msime::input::EnglishPunctuationState _englishPunctuation;
@@ -1879,6 +1926,8 @@ static NSImage *MSIMECandidateLogoImage() {
     // The ASCII form of the Chinese mark a punctuation commit has just left in the document (from the mark map, not the key pressed), and the client it landed in. A space arriving next rewrites that mark as ASCII; anything else disarms.
     unichar _spaceConvertMark;
     __weak id _spaceConvertClient;
+    // 最近一次 apply: 上屏的是带尾段的光标请求（插入点落在尾段前，不在上屏末字后）。每次 apply: 先清零；`noteCommittedChinesePunctuation:` 和 `handleSmartPunctuation:` 在 apply: 之后据此不再武装空格改写和连按改中文。
+    BOOL _applyPositionedCaret;
     // After a space has turned a Chinese mark into ASCII, the same key within the repeat window writes the Chinese mark back (Windows Kind::AsciiConverted). The key, the mark that was actually replaced, when, and in which client; anything else disarms.
     unichar _spaceRevertKey;
     unichar _spaceRevertChinese;
@@ -1912,6 +1961,11 @@ static NSImage *MSIMECandidateLogoImage() {
     id _editableShiftLocalMouseMonitor;
     id _editableShiftGlobalMouseMonitor;
     NSTimer *_editableShiftMouseTimer;
+    // 上屏后联想显示期间的全局鼠标监视器。IMK 在没有预编辑时不报告光标移动，用户在文档里点到别处只能从这里发现。
+    id _predictionMouseMonitor;
+    // 联想出现时客户端报告的选区，_predictionSelectionKnown 为 NO 表示应用不报告或还没记下。之后对不上就是光标被挪走了，见 predictionCaretMoved。
+    NSRange _predictionSelection;
+    BOOL _predictionSelectionKnown;
     // 单按 Caps Lock 切换中英文：大写锁定打开的那一刻布防，轮询到松开时认定是轻点还是长按。
     msime::input::CapsLockTap _capsLockTap;
     NSTimer *_capsLockTapTimer;
@@ -1946,6 +2000,8 @@ static NSImage *MSIMECandidateLogoImage() {
     // 候选释义的显示开关，来自共享偏好；缺省对齐 Windows v0.11.1 出厂配置（显示词性、显示全部释义）。
     BOOL _glossShowPos;
     BOOL _glossSingleSense;
+    // 共享偏好里「显示读音」的开关（`candidate_pronunciation`），只决定横排为读音预留的行。读音本身仍按 _pronunciationTargets 查和画：那份来自组字时的翻译查询，没在组字时查询为空，每次上屏后都会被清掉，不能拿来定预留，否则每次组字的第一个键都先按矮一行摆窗口。
+    BOOL _glossPronunciation;
     // 候选徽标：AI 来源角标与固定排位角标的完整串（含前导空格），以及算出它们的原始偏好。
     NSString *_aiBadgeString;
     NSString *_fixedBadgeString;
@@ -1962,7 +2018,7 @@ static NSImage *MSIMECandidateLogoImage() {
     // depend on the composition, so the cache outlives it. Japanese is read on demand from the system tokenizer.
     NSArray<NSString *> *_pronunciationTargets;
     NSOperationQueue *_pronunciationQueue;
-    NSMutableDictionary<NSString *, NSString *> *_englishPronunciations;
+    NSMutableDictionary<NSString *, NSString *> *_sharedPronunciations;
     NSMutableSet<NSString *> *_pronunciationPending;
     NSMutableDictionary<NSString *, NSString *> *_romajiCache;
     MSIMECustomTranslationBatch *_customBatch;
@@ -2127,7 +2183,7 @@ static NSImage *MSIMECandidateLogoImage() {
         if (ascii && MSIMEKeyProducesEnumerationComma(key, mark, marks)) ascii = key;
     }
     if (!_appearance.smartPunctuation || !_appearance.smartPunctuationSpaceConvert || !ascii ||
-        _pendingPairedClosing || ![self schemeAllowsSmartPunctuationGestures]) {
+        _pendingPairedClosing || _applyPositionedCaret || ![self schemeAllowsSmartPunctuationGestures]) {
         [self clearSmartPunctuationSpaceConversion];
         return;
     }
@@ -2152,7 +2208,7 @@ static NSImage *MSIMECandidateLogoImage() {
         ![self schemeAllowsSmartPunctuationGestures])
         return NO;
     if ([_view[@"editing_text"] length] ||
-        ([_view[@"candidates"] isKindOfClass:NSArray.class] && [_view[@"candidates"] count]))
+        MSIMEViewHasCompositionCandidates(_view))
         return NO;
     uint32_t preceding = MSIMETextClientPrecedingUnicodeScalar(client);
     if (!preceding) {
@@ -2202,7 +2258,7 @@ static NSImage *MSIMECandidateLogoImage() {
         ![self schemeAllowsSmartPunctuationGestures] || NSProcessInfo.processInfo.systemUptime - armedAt > 2.0)
         return NO;
     if ([_view[@"editing_text"] length] ||
-        ([_view[@"candidates"] isKindOfClass:NSArray.class] && [_view[@"candidates"] count]))
+        MSIMEViewHasCompositionCandidates(_view))
         return NO;
     const uint32_t preceding = MSIMETextClientPrecedingUnicodeScalar(client);
     // A host that reads back nothing is rewritten with posted events on the shadow's word, as the conversion was.
@@ -2241,7 +2297,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     const unichar character = [event.characters characterAtIndex:0];
     if (!MSIMESmartPunctuationSpaceKey(character)) return NO;
     const BOOL hasComposition = [_view[@"editing_text"] length] ||
-        ([_view[@"candidates"] isKindOfClass:NSArray.class] && [_view[@"candidates"] count]);
+        MSIMEViewHasCompositionCandidates(_view);
     // Korean and Vietnamese marks are ASCII already, and the repeat gesture that would turn them Chinese never arms there: the key goes to the Engine, which writes the mark after the open composition or leaves it to the application. Zhuyin's marks are bopomofo keys or its Shift overlay, which the Engine writes in any state, so the contextual ASCII route below never takes them either.
     if (![self schemeUsesChinesePunctuation] || MSIMEViewScheme(_view) == msime::mac::scheme::Zhuyin) {
         [self resetSmartPunctuationState];
@@ -2271,7 +2327,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     const BOOL repeat = _lastSmartPunctuation == character && !_smartPunctuationRejected &&
         _smartPunctuationClient == client && NSProcessInfo.processInfo.systemUptime - _lastSmartPunctuationTime <= 2.0;
     if (repeat && gestures && _appearance.smartPunctuationRepeatToChinese &&
-        ![_view[@"editing_text"] length] && [_view[@"candidates"] isKindOfClass:NSArray.class] && ![_view[@"candidates"] count]) {
+        ![_view[@"editing_text"] length] && [_view[@"candidates"] isKindOfClass:NSArray.class] && !MSIMEViewHasCompositionCandidates(_view)) {
         const uint32_t preceding = MSIMETextClientPrecedingUnicodeScalar(client);
         NSString *expected = MSIMEFullWidthSmartMark(character, _appearance.runtimeFullWidthInput);
         NSString *chinese = MSIMEChinesePunctuationForSmart(character);
@@ -2341,6 +2397,8 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
             literal[@"commit"] = MSIMEFullWidthSmartMark(character, _appearance.runtimeFullWidthInput);
             [self apply:literal];
         }
+        // 光标短语带尾段上屏后插入点在模板中间，前一个字是模板原文，不是这次的标点，连按不能去改它。
+        if (_applyPositionedCaret) arm = NO;
         if (!arm) {
             [self resetSmartPunctuationState];
             return YES;
@@ -2816,9 +2874,12 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     const uint64_t sequence = _applySequence;
     [self apply:selected];
     NSDictionary *nextView = selected[@"view"];
+    // 没有上屏时会话回的 `commit` 是 JSON null（NSNull），不能直接取 length：异常会让 IMK 把这次空格当作没处理交给应用，文档里多出一个空格，网格也不再打开（#10583）。
+    id commit = selected[@"commit"];
+    const BOOL committed = [commit isKindOfClass:NSString.class] && [(NSString *)commit length];
     // 上屏回调可能重入输入或切换客户端，旧选择不能重新打开已经结束的网格。
     if (_applySequence == sequence + 1 && _activeClient == client && _session == session &&
-        MSIMEStrictBoolean(selected[@"handled"]) && ![selected[@"commit"] length] &&
+        MSIMEStrictBoolean(selected[@"handled"]) && !committed &&
         [nextView[@"session"] isEqual:sessionID] && [_view[@"session"] isEqual:sessionID] &&
         [nextView[@"editing_text"] length] &&
         [MSIMEExpandedComposition(_view) isEqual:MSIMEExpandedComposition(nextView)])
@@ -4186,11 +4247,12 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     [NSRunLoop.mainRunLoop addTimer:_settledTimer forMode:NSRunLoopCommonModes];
 }
 
-// 联想属于刚完成上屏的光标位置，鼠标换位置后不能再应用旧回包或点选旧词。
+// 联想属于刚完成上屏的光标位置，鼠标换位置后不能再应用旧回包或点选旧词。应用不报告选区时无从比较，与上游 `MSIMETextClientSelection` 的口径一致：点选照常，锚点只约束报告得了选区的客户端。
 - (BOOL)predictionAnchorCurrent {
     if (!MSIMEStrictBoolean(_view[@"prediction"])) return YES;
-    if ([self secureEventInputActive] || !_predictionAnchorValid ||
-        ![_activeClient respondsToSelector:@selector(selectedRange)]) return NO;
+    if ([self secureEventInputActive]) return NO;
+    if (![_activeClient respondsToSelector:@selector(selectedRange)]) return YES;
+    if (!_predictionAnchorValid) return NO;
     return NSEqualRanges([(id<MSIMETextClient>)_activeClient selectedRange], _predictionAnchor);
 }
 
@@ -4760,7 +4822,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
                                                  scheme:(uint8_t)schemeIndex
                                       lastChineseScheme:msime::mac::cycle::LastChineseSchemeCode(_appearance.lastChineseScheme.UTF8String)
                                          hasComposition:[_view[@"editing_text"] length] > 0 ||
-                                                        [_view[@"candidates"] count] > 0];
+                                                        MSIMEViewHasCompositionCandidates(_view)];
     const auto step = msime::mac::cycle::ParseReply(reply);
     if (!step.claimed) return NO;
     // 先把正在组的东西原样上屏，再换模式：换方案会重建会话，留下的组字会跟着一起丢。
@@ -4935,6 +4997,14 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     NSMenuItem *voice = [[NSMenuItem alloc] initWithTitle:@"开始/结束语音输入" action:@selector(showVoicePanel) keyEquivalent:@""];
     voice.target = self;
     [menu addItem:voice];
+    // 背单词今日待复习：有卡在等、而且没在组字时才列出这一行，点下去打开现有的背单词面板。计数在用户点开菜单时现读，组字时连读都不读。
+    const BOOL composing = [_view[@"editing_text"] length] ||
+        MSIMEViewHasCompositionCandidates(_view);
+    if (const auto label = msime::vocabulary_due::menu_label(composing ? 0 : [self vocabularyDueCount], composing)) {
+        NSMenuItem *vocabulary = [[NSMenuItem alloc] initWithTitle:@(label->c_str()) action:@selector(showVocabulary:) keyEquivalent:@""];
+        vocabulary.target = self;
+        [menu addItem:vocabulary];
+    }
 
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:[MSIMEEditionDisplayName() stringByAppendingString:@"设置…"] action:@selector(showAppearance:) keyEquivalent:@""];
@@ -4974,6 +5044,30 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     MSIMEOpenDesktopCloudClipboard(MSIMERuntimeOptionsPath(), NSWorkspace.sharedWorkspace, ^{
         if (!MSIMEOpenBackendClipboard(NSClassFromString(@"MSIMEBackendAccountWindow"))) [weakSelf showAccount:sender];
     });
+}
+// 今日待复习的张数（msime_client_vocabulary_due_count），读不出来时是 -1。目录与设置应用的背单词页相同：偏好目录、设置应用的 Contents/Resources（内置词书在它的 wordbooks/ 下）和偏好目录下的插件目录。
+- (int32_t)vocabularyDueCount {
+    NSString *directory = _preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"];
+    if (![directory isKindOfClass:NSString.class] || !directory.isAbsolutePath) return -1;
+    NSURL *settings = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:MSIMEClientApplicationIdentifier];
+    // 找不到设置应用时退回输入法自己的资源目录：那里没有内置词书，选中内置书时计数是 0、这一行不出现，导入的词书照样计数。发布的输入法总是随设置应用一起安装，只有开发和测试环境会走到这里。
+    NSString *resources = settings ? [NSBundle bundleWithURL:settings].resourcePath : nil;
+    if (!resources.isAbsolutePath) resources = NSBundle.mainBundle.resourcePath;
+    if (!resources.isAbsolutePath) return -1;
+    const std::string day = msime::vocabulary_due::local_day(time(nullptr));
+    if (day.empty()) return -1;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:@{
+        @"directory": directory,
+        @"resources": resources,
+        @"plugins": [directory stringByAppendingPathComponent:@"plugins"],
+        @"day": @(day.c_str()),
+    } options:0 error:nil];
+    if (!body) return -1;
+    return msime_client_vocabulary_due_count(static_cast<const uint8_t *>(body.bytes), body.length);
+}
+- (void)showVocabulary:(id)sender {
+    (void)sender;
+    MSIMEOpenDesktopRoute(@(msime::vocabulary_due::kPanelRoute), NSWorkspace.sharedWorkspace, ^{ NSBeep(); });
 }
 - (void)showCloudDictionary:(id)sender {
     (void)sender;
@@ -5298,26 +5392,42 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     return [_session respondsToSelector:@selector(hostOptions)] ? _session.hostOptions : MSIMELoadRuntimeOptions();
 }
 // 共享偏好文档是方案的权威来源：设置页、`msime config set`、云端同步和本输入法自己都写它，NSUserDefaults 里的 `MSIMEClientInputScheme` 只有本输入法自己写。外观设置在载入文档之前退回那份本地值，而文档平时在激活之后才于后台载入，所以输入法进程重新启动后（重新登录、重启、更新），控制器会先按本输入法上次写下的旧方案把菜单栏选到它的模式、把它记为已同步，期间的任何一次保存还会把它写回文档。用户在设置页选了全拼，下次再用又回到双拼，就是这样来的（#4288）。因此在本进程第一次按外观设置行事之前——客户端获得焦点、或者系统先报告了模式——同步载入一次文档；之后的改动照旧由每秒一次的轮询带来。读不到文档时什么也不做，交给那次后台载入。
-- (void)applySharedInputPreferencesBeforeFirstUse {
-    if (!_appearance || (_appearance.sharedInputPreferencesApplied && _englishOnlinePreferenceLoaded)) return;
+- (NSString *)initialPreferencesDirectory {
     NSString *directory = _preferencesDirectory;
     if (!directory) {
         id configured = [self runtimeOptions][@"preferences_directory"];
         if ([configured isKindOfClass:NSString.class] && [configured isAbsolutePath]) directory = configured;
     }
+    return directory;
+}
+- (NSDictionary *)applySharedInputPreferencesBeforeFirstUse {
+    if (!_appearance || (_appearance.sharedInputPreferencesApplied && _englishOnlinePreferenceLoaded)) return nil;
+    NSString *directory = [self initialPreferencesDirectory];
     if (!directory) {
         _englishOnlineCandidatesEnabled = MSIMEStrictBoolean([self runtimeOptions][@"preferences"][@"english_online_candidates"]);
         _englishOnlinePreferenceLoaded = YES;
-        return;
+        return nil;
     }
-    // 与 applyPreferencesToSessionNow 一样在主线程直接读：只在本进程第一次用到时读这一次，不经过后台轮询的读取入口。
+    // 同步读取只把文档交给当前调用栈；模式报告提前读过的值不能留到下一次激活再回放。
     NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:directory error:nil];
     NSDictionary *preferences = [snapshot isKindOfClass:NSDictionary.class] ? snapshot[@"preferences"] : nil;
-    if ([preferences isKindOfClass:NSDictionary.class]) {
-        _englishOnlineCandidatesEnabled = MSIMEStrictBoolean(preferences[@"english_online_candidates"]);
-        _englishOnlinePreferenceLoaded = YES;
-        if (!_appearance.sharedInputPreferencesApplied) [_appearance applySharedInputPreferences:preferences];
+    if (![preferences isKindOfClass:NSDictionary.class]) return nil;
+    _englishOnlineCandidatesEnabled = MSIMEStrictBoolean(preferences[@"english_online_candidates"]);
+    _englishOnlinePreferenceLoaded = YES;
+    if (!_appearance.sharedInputPreferencesApplied) [_appearance applySharedInputPreferences:preferences];
+    return snapshot;
+}
+- (void)applyInitialHostPreferencesFromSnapshot:(NSDictionary *)snapshot {
+    if (_hostPreferencesApplied) return;
+    // 输入设置若已由更早的模式报告读取，首次取得客户端时另读当前文档，不保存旧快照。
+    if (!snapshot && _appearance.sharedInputPreferencesApplied && _englishOnlinePreferenceLoaded) {
+        NSString *directory = [self initialPreferencesDirectory];
+        if (directory) snapshot = [MSIMEClientSession loadPreferencesInDirectory:directory error:nil];
     }
+    // 系统模式报告可能已选了别的方案，此处只补宿主设置，不重放输入设置。
+    NSDictionary *preferences = [snapshot isKindOfClass:NSDictionary.class] ? snapshot[@"preferences"] : nil;
+    if ([preferences isKindOfClass:NSDictionary.class])
+        [self applySharedToolbarPreferences:preferences applyInputPreferences:NO];
 }
 // 在系统输入菜单里打开一个按需模式。只有 Engine 会话会碰到 TIS；测试的替身会话只走测试设的 enabler，没有就什么也不做，所以测试不会改开发者的输入菜单。返回 NO 表示模式没有打开——没有发出请求，或者系统拒绝了——这次切换不记为已同步，下一次同步再试；以前不论 TIS 返回什么都算成功，启用失败一次，这个模式就再也不会被打开。
 - (BOOL)enableOptInInputMode:(NSString *)identifier {
@@ -5392,7 +5502,18 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     MSIMESystemInputModeState &state = MSIMESharedSystemInputModeState();
     // 切进水杉后的第一次采纳要在清掉标记之前读到它：切回时系统落在 中 上，不是用户在水杉里越过 双 选了 中（#10199，见 MSIMESystemInputModeState 的 switchedIn）。只看 current 是否为空不够，激活校准和随后选回 双 都会先写 current。
     const BOOL switchedIn = state.switchedIn;
+    const BOOL restoring = MSIMESystemInputModeRestoring(state, NSProcessInfo.processInfo.systemUptime);
     if (!MSIMEAdoptReportedInputMode(state, value)) return;
+    NSString *reported = [[(NSString *)value componentsSeparatedByString:@"."] lastObject];
+    // 唤醒或解锁后系统恢复输入源时报告的模式：只记下，不改方案和中英状态，把菜单栏选回控制器自己的模式（MSIMESystemInputModeState 的 restoringUntil）。
+    if (restoring) {
+        MSIMEFinishSystemInputModeRestore(state);
+        msime_macos_diagnostic_writef("input_mode_report mode=%s action=ignored reason=system_restore", reported.UTF8String ?: "");
+        [self ensureAppearance];
+        [self applySharedInputPreferencesBeforeFirstUse];
+        [self syncSystemInputModeForClient:sender];
+        return;
+    }
     state.switchedIn = false;
     [self ensureAppearance];
     [self applySharedInputPreferencesBeforeFirstUse];
@@ -5406,6 +5527,9 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         MSIMESchemeForReportedInputMode(mode, scheme, _appearance.lastChineseScheme, [self inputModeAvailability], switchedIn);
     // A mode whose scheme cannot run here (粤, 注 or 笔 without its dictionary) leaves the scheme alone. Adopting it only made the Engine fall back to the Chinese scheme used before it, so the menu bar said 粤 while the keys typed that scheme - shuangpin, for one user who had never picked Cantonese. The mode can be selectable without the dictionary: on macOS 27.0.1 the system turned 粤 on by itself after --register-input-source enabled the bundle, and it came back each time the user removed it.
     if (target && !MSIMEInputSchemeAvailable(target, [self inputSchemeHostOptions])) target = nil;
+    // 诊断日志记下每一次被采纳的报告和它把方案改成了什么：模式名和方案名都不是输入内容。方案莫名其妙被改掉时（开盖后变成注音），这一行能说明是谁报告了哪个模式。
+    msime_macos_diagnostic_writef("input_mode_report mode=%s action=adopted scheme=%s target=%s switched_in=%d", reported.UTF8String ?: "",
+                                  scheme.UTF8String ?: "", target.UTF8String ?: "-", switchedIn ? 1 : 0);
     if (target && ![target isEqualToString:scheme]) {
         // The composition was typed under the old scheme and a scheme switch discards it, so commit it first, as the scheme menu does. A Korean syllable is text the user already wrote.
         if (_session && _activeClient && [_view[@"editing_text"] length]) {
@@ -5468,7 +5592,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (void)showSystemCharacterPalette { [NSApp orderFrontCharacterPalette:nil]; }
 - (void)checkForUpdates:(id)sender {
     (void)sender;
-    // 带 feed 的发布包由 Sparkle 直接更新输入法本体；设置应用的「关于」页只能给出 DMG 的下载链接。
+    // 带 feed 的发布包由 Sparkle 直接更新输入法本体；设置应用的「关于」页只能给出安装包的下载链接。
     if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) {
         [[MSIMEUpdateController sharedController] checkForUpdates:nil];
         return;
@@ -5503,6 +5627,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [_inputAssistance stop];
     [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     [self stopEditableShiftMouseMonitoring];
+    [self stopPredictionMouseMonitoring];
     [self stopSettledScoring];
     [_capsLockTapTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -6252,13 +6377,14 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self ensureAppearance];
     msime_macos_diagnostic_write("focus_in");
     if (_activeClient && _activeClient != sender) [self apply:[_session setFocused:NO error:nil]];
-    [self applySharedInputPreferencesBeforeFirstUse];
+    NSDictionary *initialHostSnapshot = [self applySharedInputPreferencesBeforeFirstUse];
     [_appearance activateInputModeForApplication:[sender respondsToSelector:@selector(bundleIdentifier)] ? [sender bundleIdentifier] : nil];
     // 系统可能仍在从强制 ASCII 的应用恢复输入源；离开激活调用栈后再核对实际模式，避免重复选择把它退回 U.S.（#8993）。
     [self scheduleSystemInputModeSyncForClient:sender];
     _capsLock = ([NSEvent modifierFlags] & NSEventModifierFlagCapsLock) != 0;
     [self syncCapsLock];
     _toolbar = [MSIMEFloatingToolbarPanel sharedPanel];
+    [self applyInitialHostPreferencesFromSnapshot:initialHostSnapshot];
     [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
     [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
                             darkSkin:[_appearance toolbarSkinForDark:YES]];
@@ -6288,7 +6414,9 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     _inputAssistance=[[MSIMEInputAssistance alloc] initWithPasteboard:NSPasteboard.generalPasteboard
         preferences:^NSDictionary * {
             MSIMEInputController *controller=weakController;
-            return controller ? controller->_session.hostOptions[@"preferences"] : nil;
+            id session=controller ? controller->_session : nil;
+            // 测试替身的会话不实现 hostOptions（上游语音启动用例激活控制器时也会挂上本辅助），没有就不启用。
+            return [session respondsToSelector:@selector(hostOptions)] ? [session hostOptions][@"preferences"] : nil;
         } isCurrent:^BOOL {
             MSIMEInputController *controller=weakController;
             if (!controller || controller->_activeClient!=sender || [controller secureEventInputActive] ||
@@ -6483,6 +6611,59 @@ static NSDictionary *MSIMESessionOptions(NSDictionary *runtimeOptions, NSString 
     if (helpcodeResources.isAbsolutePath && !requested[@"helpcode_fallback_resources"])
         requested[@"helpcode_fallback_resources"] = helpcodeResources;
     return requested;
+}
+
+// 偏好里的方案缺它的资源包时（发布包不带的五笔码表，粤拼、注音、笔画的语言词库），会话回退到默认方案、偏好照旧，用户看到选着五笔却打出全拼。设置应用只在启动时补装一次，失败也没有提示，升级换了词库锁或从菜单栏、工具栏切到这个方案后就一直缺着，所以输入法收到会话报出的 `missing_resource_pack` 时自己在后台下载，通道和镜像与设置应用相同（偏好的 update_channel 和 voice_input.asr_model_mirror）。同一个资源包同时只装一次，失败后十分钟内不再试，免得每次聚焦都重新联网。装好后下一次聚焦时会话找到它，换回用户选的方案。只在主线程调用。
+static void MSIMEEnsureMissingResourcePack(id pack, NSDictionary *preferences, NSString *stateRoot) {
+    if (![pack isKindOfClass:NSString.class] || ![@[ @"wubi", @"language-dictionaries" ] containsObject:pack] ||
+        ![stateRoot isKindOfClass:NSString.class] || !stateRoot.isAbsolutePath)
+        return;
+    static NSMutableSet<NSString *> *installing;
+    static NSMutableDictionary<NSString *, NSDate *> *failedAt;
+    if (!installing) installing = [NSMutableSet set];
+    if (!failedAt) failedAt = [NSMutableDictionary dictionary];
+    if ([installing containsObject:pack]) return;
+    NSDate *failed = failedAt[pack];
+    if (failed && -failed.timeIntervalSinceNow < 600) return;
+    NSMutableDictionary *request = [@{@"state_root" : stateRoot, @"pack" : pack} mutableCopy];
+    id channel = [preferences isKindOfClass:NSDictionary.class] ? preferences[@"update_channel"] : nil;
+    if ([channel isKindOfClass:NSString.class] && [@[ @"stable", @"beta", @"nightly" ] containsObject:channel])
+        request[@"channel"] = channel;
+    id voice = [preferences isKindOfClass:NSDictionary.class] ? preferences[@"voice_input"] : nil;
+    id mirror = [voice isKindOfClass:NSDictionary.class] ? voice[@"asr_model_mirror"] : nil;
+    if ([mirror isKindOfClass:NSString.class] &&
+        [mirror stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length)
+        request[@"sources"] = @[ mirror ];
+    NSData *body = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+    if (!body) return;
+    NSString *name = [pack copy];
+    [installing addObject:name];
+    msime_macos_diagnostic_writef("resource_pack_install_start pack=%s reason=scheme_fallback", name.UTF8String);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        auto raw = msime::host_api::own_string(
+            msime_client_resource_pack_install(static_cast<const uint8_t *>(body.bytes), body.length, nullptr, nullptr));
+        id response = raw ? [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:raw.get() length:std::strlen(raw.get())]
+                                                             options:0
+                                                               error:nil]
+                          : nil;
+        const BOOL installed = [response isKindOfClass:NSDictionary.class] && [response[@"ok"] isEqual:@YES];
+        // 只记共享层的错误码（local_model_network 之类），冒号后的细节可能带路径，不写进诊断日志。
+        id error = [response isKindOfClass:NSDictionary.class] ? response[@"error"] : nil;
+        NSString *reason = [error isKindOfClass:NSString.class]
+            ? [[(NSString *)error componentsSeparatedByString:@":"].firstObject copy]
+            : @"no_response";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [installing removeObject:name];
+            if (installed) {
+                [failedAt removeObjectForKey:name];
+                msime_macos_diagnostic_writef("resource_pack_installed pack=%s", name.UTF8String);
+            } else {
+                failedAt[name] = [NSDate date];
+                msime_macos_diagnostic_writef("resource_pack_install_failed pack=%s error=%s", name.UTF8String,
+                                              reason.UTF8String);
+            }
+        });
+    });
 }
 
 // The current preferences are available before the first HostSession is
@@ -6757,7 +6938,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         inputPreferences[@"tsf_preedit_style"] = @"raw";
     if (!session) {
         if (inputPreferences) [_appearance applySharedInputPreferences:inputPreferences];
-        [self applySharedToolbarPreferences:snapshot[@"preferences"]];
+        [self applySharedToolbarPreferences:preferences];
         return;
     }
     NSError *updateError = nil;
@@ -6766,7 +6947,9 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (result && !updateError) {
         _preferenceLoadState.applied(revision);
         if (inputPreferences) [_appearance applySharedInputPreferences:inputPreferences];
-        [self applySharedToolbarPreferences:snapshot[@"preferences"]];
+        [self applySharedToolbarPreferences:preferences];
+        // 在上一行配置好诊断日志之后：选着的方案缺资源包、会话回退了，就在后台补装。
+        MSIMEEnsureMissingResourcePack(result[@"missing_resource_pack"], preferences, _preferencesDirectory);
         // After the preferences, which the session's resolved effect refines with the selected pack.
         [self refreshTypingEffectSettings];
         _view = [session viewWithError:nil] ?: result[@"view"];
@@ -6839,7 +7022,15 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 
 - (void)applySharedToolbarPreferences:(NSDictionary *)preferences {
-    if (MSIMEConfigureDiagnosticLog(_preferencesDirectory, preferences))
+    [self applySharedToolbarPreferences:preferences applyInputPreferences:YES];
+}
+- (void)applySharedToolbarPreferences:(NSDictionary *)preferences applyInputPreferences:(BOOL)applyInputPreferences {
+    if ([preferences isKindOfClass:NSDictionary.class]) {
+        // 首个按键可能先于 activateServer:；组件和尺寸不能发给尚未创建的工具栏。
+        if (!_toolbar) _toolbar = [MSIMEFloatingToolbarPanel sharedPanel];
+        _hostPreferencesApplied = YES;
+    }
+    if (MSIMEConfigureDiagnosticLog([self initialPreferencesDirectory], preferences))
         msime_macos_diagnostic_write("preferences_applied");
     if ([preferences isKindOfClass:NSDictionary.class]) {
         _englishOnlinePreferenceLoaded = YES;
@@ -6897,6 +7088,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if ([singleSense isKindOfClass:NSNumber.class] &&
         CFGetTypeID((__bridge CFTypeRef)singleSense) == CFBooleanGetTypeID())
         _glossSingleSense = [singleSense boolValue];
+    id pronunciation = preferences[@"candidate_pronunciation"];
+    if ([pronunciation isKindOfClass:NSNumber.class] &&
+        CFGetTypeID((__bridge CFTypeRef)pronunciation) == CFBooleanGetTypeID())
+        _glossPronunciation = [pronunciation boolValue];
     // 候选角标同样只改画法：记下原始偏好，变了才重算完整徽标串。缺键时保留出厂默认。
     BOOL badgeChanged = NO;
     id fixedBadge = preferences[@"candidate_fixed_badge"];
@@ -6959,7 +7154,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     id pageSize = preferences[@"candidate_page_size"];
     NSUInteger strictPageSize = 0;
     if (MSIMEStrictUnsignedIntegerValue(pageSize, &strictPageSize) && strictPageSize >= msime::mac::kMinimumCandidatePageSize && strictPageSize <= msime::mac::kMaximumCandidatePageSize && strictPageSize != _requestedPageSize) _requestedPageSize = 0;
-    [_appearance applySharedInputPreferences:preferences];
+    if (applyInputPreferences) [_appearance applySharedInputPreferences:preferences];
     [_appearance applySharedCandidatePreferences:preferences];
     if (!_appearance.inputModeHUD) [[MSIMEInputModeHUDPanel sharedPanel] orderOut:nil];
     // 共享文档里的开关在载入它的这一刻生效，不等下一次切换中英文：组字中推迟应用文档的分支只走到这里，不会调 sync。关上时总是隐藏；打开时只有持有客户端的控制器按当前模式显示，输入法不在前台时收到的通知不把它放回菜单栏。文档只在有控制器持有客户端时才被载入（每秒一次的轮询和保存后的重新载入都要求 _activeClient），所以在设置应用里拨开关时要等回到输入框、输入法重新获得焦点才生效。
@@ -7039,6 +7234,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self discardExpandedCandidates];
     [self resetModifierTap];
     [self abandonCapsLockTap];
+    [self stopPredictionMouseMonitoring];
     MSIMESetBackendSelectionObservation([NSNotificationCenter defaultCenter], self, @selector(handwritingCandidateSelected:), NO);
     _preferenceLoadState.reset();
     // A focus-out is the reference's ClientSuspended, which never changes floating-toolbar visibility: the toolbar keeps this controller as its owner and stays on screen until the next activateServer: hands it on or the user selects another input source.
@@ -7233,11 +7429,13 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 
 // 预留的释义行：横排每一行都留，竖排只给视图标了 translation_reserved 的那一行留（候选词翻译范围是「仅当前高亮」时的高亮行），行数相同。
+// 打开释义读音时（共享偏好的 `candidate_pronunciation`，见 _glossPronunciation）每行释义下面还有一行读音（MSIMECandidateGlossDisplay），支持的七种目标语言都有读音，所以每种目标语言留两行。读音是异步查回来的，不留这一行的话，每个键先按矮一行的高度摆窗口，读音到了窗口变高；光标靠近屏幕底边时先摆在光标下方、读音一到放不下又翻到上方，每打一个键候选窗上下跳一次。
 - (CGFloat)glossHeightReservedForFont:(NSFont *)glossFont {
     const NSUInteger readingLines = MSIMEKoreanHanjaListOpen(_view) ? 1 : 0;
     const BOOL translations = (_appearance.candidateTranslations || _appearance.candidateEnglishGloss) &&
         !(_glossEnabled && !_glossEnabled.boolValue && !_appearance.candidateEnglishGloss);
-    const NSUInteger lines = readingLines + (translations ? MIN(MAX(_glossTargetLanguages.count, (NSUInteger)1), (NSUInteger)2) : 0);
+    const NSUInteger glossLines = translations ? MIN(MAX(_glossTargetLanguages.count, (NSUInteger)1), (NSUInteger)2) : 0;
+    const NSUInteger lines = readingLines + glossLines * (_glossPronunciation ? 2 : 1);
     if (lines == 0) return 0;
     NSMutableArray<NSString *> *placeholder = [NSMutableArray arrayWithCapacity:lines];
     for (NSUInteger line = 0; line < lines; ++line) [placeholder addObject:@"X"];
@@ -7431,8 +7629,13 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     _smartPunctuationShadowWritten = NO;
     // 在水杉里按过键，之后系统报告的 中 就是用户自己的选择，不再按刚切回处理（#10199）。只看按下：切换输入源用的 Caps Lock、Ctrl 松开是 flagsChanged，可能先于切回时的报告送到。
-    if (event.type == NSEventTypeKeyDown && sender && !selfPosted) MSIMESharedSystemInputModeState().switchedIn = false;
-    if (event.type == NSEventTypeKeyDown && sender) {
+    // 唤醒或解锁后的第一次按键同样说明用户已经在用水杉了，之后的报告不再按系统恢复处理。
+    if (event.type == NSEventTypeKeyDown && sender && !selfPosted) {
+        MSIMESharedSystemInputModeState().switchedIn = false;
+        MSIMESharedSystemInputModeState().restoringUntil = 0;
+    }
+    // 新客户端先走焦点接管并恢复共享设置，再由下面的按键唤醒工具栏。
+    if (event.type == NSEventTypeKeyDown && sender && sender == _activeClient) {
         [self ensureAppearance];
         if (_appearance.floatingToolbarEnabled)
             [[MSIMEFloatingToolbarPanel sharedPanel] wakeForInputDelegate:self];
@@ -7635,8 +7838,12 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         MSIMEFocusedController = self;
         // Whatever the previous client was last given says nothing about this one.
         [self invalidateSmartPunctuationShadow];
-        [self applySharedInputPreferencesBeforeFirstUse];
+        NSDictionary *initialHostSnapshot = [self applySharedInputPreferencesBeforeFirstUse];
+        [self applyInitialHostPreferencesFromSnapshot:initialHostSnapshot];
         [_appearance activateInputModeForApplication:[sender respondsToSelector:@selector(bundleIdentifier)] ? [sender bundleIdentifier] : nil];
+        // 所有权交接不依赖显示开关：关闭时也接管并隐藏旧控制器的常驻工具栏。
+        _toolbar = [MSIMEFloatingToolbarPanel sharedPanel];
+        [_toolbar activateForDelegate:self visible:_appearance.floatingToolbarEnabled];
         [self syncSystemInputModeForClient:sender];
         // Punctuation and width are per app, so the new client's values reach the Engine before it types.
         [self syncPunctuation];
@@ -7680,6 +7887,11 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     else if (voiceShortcut.action == MSIMEVoiceHoldShortcut::Action::Cancel) {
         [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     }
+    // 按住右 Option 时按了组合键（#10580）：丢掉这次按住开始的录音，不上屏。代次变了说明那段录音已经结束、现在的录音不是它开始的，不动。
+    // 不 return，这个键接着往下走，带着 Option 交给应用。
+    else if (voiceShortcut.action == MSIMEVoiceHoldShortcut::Action::ChordCancel && _voiceHoldGeneration == _voiceGeneration) {
+        [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
+    }
     if (voiceShortcut.consumed) return YES;
     if ([self observeModifierTap:event client:sender]) {
         [self toggleInputModeFromModifierTap];
@@ -7687,8 +7899,9 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     if (event.type != NSEventTypeKeyDown) return NO;
     [_appearance lockActiveInputMode];
+    if ([self dismissPredictionForKey:event client:sender]) return YES;
     if (event.keyCode == 51) {
-        const BOOL compositionActive = [_view[@"editing_text"] length] || [_view[@"candidates"] count] ||
+        const BOOL compositionActive = [_view[@"editing_text"] length] || MSIMEViewHasCompositionCandidates(_view) ||
             [_view[@"phrase_prefix"] length];
         BOOL suppressEscapedRepeat = NO;
         if (!event.isARepeat) {
@@ -7870,8 +8083,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (!_session) return NO;
     if (_focusPending) [self prepareSession];
     [self syncPageSize];
-    // 空闲联想只响应点选；普通按键先清掉建议，再按没有组字的规则继续处理。
-    if (MSIMEStrictBoolean(_view[@"prediction"])) [self clearPostCommitPrediction];
+    // 上屏后联想的按键政策在上游 `handleEvent:` 的 `dismissPredictionForKey` 一道门里：数字、空格选联想，其余键收掉联想再照常处理。这里不再抢先清掉建议——那会把上游改成可选中的数字与空格也一起拦下。
     // 展开的候选网格开着时先归它，它不认的键已经收起网格，往下照常处理。
     if (_expandedCandidates && [self handleExpandedCandidateEvent:event client:sender]) return YES;
     NSUInteger deletionSlot = MSIMECandidateDeletionSlot(event);
@@ -7951,7 +8163,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         !(event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
                                  NSEventModifierFlagOption | NSEventModifierFlagCommand))) {
         const BOOL hasComposition = [_view[@"editing_text"] length] ||
-            ([_view[@"candidates"] isKindOfClass:NSArray.class] && [_view[@"candidates"] count]);
+            MSIMEViewHasCompositionCandidates(_view);
         _punctuationKeyInFlight = (unichar)keypadPunctuation;
         NSDictionary *transition = hasComposition || keypadPunctuation == '.'
             ? [_session punctuationASCII:(uint8_t)keypadPunctuation error:nil]
@@ -8011,7 +8223,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         (segmentChord == NSEventModifierFlagControl || segmentChord == NSEventModifierFlagShift);
     const BOOL segmentBackspaceKey = event.keyCode == 51 && segmentChord == NSEventModifierFlagControl;
     if ((segmentCaretKey || segmentBackspaceKey) &&
-        !MSIMESchemeTrait(_view, msime::mac::scheme::LocksCaret) && _session && _activeClient && ([_view[@"editing_text"] length] || [_view[@"candidates"] count] ||
+        !MSIMESchemeTrait(_view, msime::mac::scheme::LocksCaret) && _session && _activeClient && ([_view[@"editing_text"] length] || MSIMEViewHasCompositionCandidates(_view) ||
                                       [_view[@"phrase_prefix"] length])) {
         const uint32_t segment = segmentBackspaceKey ? MSIME_BACKSPACE_SEGMENT
             : event.keyCode == 123 ? MSIME_MOVE_LEFT_SEGMENT : MSIME_MOVE_RIGHT_SEGMENT;
@@ -8239,7 +8451,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         !(_capsLock && MSIMEStrictBoolean(MSIMEStatisticsHostOptions(_session)[@"preferences"][@"caps_lock_ascii_punctuation"])) &&
         !MSIMESpellingSymbolString(_view, event.characters)) {
         const BOOL opening = [event.characters isEqualToString:@"{"];
-        const BOOL composing = [_view[@"editing_text"] length] || [_view[@"candidates"] count] ||
+        const BOOL composing = [_view[@"editing_text"] length] || MSIMEViewHasCompositionCandidates(_view) ||
             [_view[@"phrase_prefix"] length];
         // 只跨过本宿主补出的、并且仍在光标后的右引号，不触碰文档原有的文字。
         if (!opening && !composing && _appearance.pairedPunctuation && _pairedPunctuation.matches("」")) {
@@ -8317,14 +8529,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             event.keyCode, event.isARepeat,
             (event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
                                     NSEventModifierFlagOption | NSEventModifierFlagCommand)) != 0,
-            [_view[@"editing_text"] length] > 0 || [_view[@"candidates"] count] > 0 ||
+            [_view[@"editing_text"] length] > 0 || MSIMEViewHasCompositionCandidates(_view) ||
                 [_view[@"phrase_prefix"] length] > 0,
             vimListed, _appearance.englishMode))
         [self setEnglishInputMode:YES];
     switch (event.keyCode) {
         case 48:
             // With no candidate panel on screen (the caret rect was invalid or there is no screen to show it on) Tab and Shift+Tab are the application's, whatever navigation.tab says. A composition still being edited is finished first, for every scheme and not only a Korean syllable, so the key does not move focus away from marked text that would then dangle in the old field. With nothing composed the session is left alone.
-            if ([_view[@"editing_text"] length] || [_view[@"candidates"] count] || [_view[@"phrase_prefix"] length])
+            if ([_view[@"editing_text"] length] || MSIMEViewHasCompositionCandidates(_view) || [_view[@"phrase_prefix"] length])
                 [self apply:[_session command:MSIME_FINISH_COMPOSITION error:nil]];
             return NO;
         case 51: command = MSIME_BACKSPACE; break;
@@ -8439,6 +8651,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 
 - (void)apply:(NSDictionary *)transition {
     ++_applySequence;
+    _applyPositionedCaret = NO;
     if (!transition || !_activeClient) return;
     // An Engine answer replaces the view the sense page was drawn over, so the page goes with it.
     [self discardGlossSensePage];
@@ -8473,12 +8686,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         }
     }
     NSString *commitForTracking = transition[@"commit"];
+    id cursorSuffix = transition[@"commit_cursor_suffix"];
+    const BOOL hasCursorRequest = [commitForTracking isKindOfClass:NSString.class] &&
+        [cursorSuffix isKindOfClass:NSString.class] && [commitForTracking hasSuffix:cursorSuffix];
     if ([commitForTracking isKindOfClass:NSString.class] && commitForTracking.length)
         _armedGlossColumn = 0;
-    // The Engine commits the opening mark alone; closing the pair is this host's job, the way the
-    // Windows TIP appends its closing mark and the Linux host appends its own. What differs is the
-    // caret: those two move it back a character and IMK cannot. So the opening goes in as committed
-    // text and the closing becomes the tail of the marked text until the composition ends.
+    // 引擎只提交开符号，宿主负责补闭符号。IMK 没有直接设置插入点的接口，
+    // 成对标点沿用兼容路径：开符号正常提交，闭符号留在组字尾段，组字结束再提交。
+    // 显式光标模板另走核对文档范围后的定位，不改变普通成对标点的客户端兼容性。
     // With pairing on, every press of a quote key starts a fresh pair.
     //
     // The Engine alternates the quote keys - one press gives “, the next ”, because that is what a
@@ -8502,7 +8717,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     // 直角引号同理：」改回「，』改回『，但只在按的正是出这个字的引号键时改——corner 样式的 `'` `"`；`{` 只出前半个「，`}` 固定出的」是用户要打的后半个，不改。注音的大千键位 `]` `}` 自己出」』（引擎的 `SHIFT_PUNCTUATION`），那是用户要打的后半个，改回前半个就成了再开一对。
     static NSDictionary<NSString *, NSString *> *const reopenings = @{@"”": @"“", @"’": @"‘", @"」": @"「", @"』": @"『"};
     const BOOL cornerQuoteMark = MSIMEIsCornerQuoteMark(mark);
-    if (_appearance.pairedPunctuation && [mark isKindOfClass:NSString.class] && quoteKey && reopenings[mark] &&
+    if (!hasCursorRequest && _appearance.pairedPunctuation && [mark isKindOfClass:NSString.class] && quoteKey && reopenings[mark] &&
         (!cornerQuoteMark || MSIMEKeyProducesCornerQuote(punctuationKey, [mark characterAtIndex:0], MSIMEViewScheme(_view))) &&
         !_pendingPairedClosing && !MSIMEPairedPunctuationExcludedHost()) {
         NSMutableDictionary *reopened = [transition mutableCopy];
@@ -8516,7 +8731,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     // 注音 `[` `{` `]` `}` 出的「』」『同样不补后半个：这个宿主只在出这个字的键上配对，`]` `}` 到了引擎照样再出一个，补了就成了「内容」」。没有按键的整段上屏（例如候选）照旧按字补。
     const BOOL cornerQuoteFromOtherKey = cornerQuoteMark && punctuationKey &&
         !MSIMEKeyProducesCornerQuote(punctuationKey, [mark characterAtIndex:0], MSIMEViewScheme(_view));
-    if ([mark isKindOfClass:NSString.class] && mark.length && !cornerQuoteFromOtherKey &&
+    if (!hasCursorRequest && [mark isKindOfClass:NSString.class] && mark.length && !cornerQuoteFromOtherKey &&
         _appearance.pairedPunctuation && !_pendingPairedClosing && !MSIMEPairedPunctuationExcludedHost()) {
         for (NSArray<NSString *> *pair in MSIMEPunctuationPairs())
             if ([mark isEqualToString:pair[0]]) { openedClosing = pair[1]; break; }
@@ -8525,7 +8740,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     _hostOpenedClosing = nil;
     static NSDictionary<NSString *, NSString *> *const hostOpenings = @{@"}": @"{", @"｝": @"｛", @"」": @"「"};
     NSString *hostOpening = hostOpenedClosing ? hostOpenings[hostOpenedClosing] : nil;
-    if (hostOpening && !openedClosing && [commitForTracking isKindOfClass:NSString.class] &&
+    if (!hasCursorRequest && hostOpening && !openedClosing && [commitForTracking isKindOfClass:NSString.class] &&
         [commitForTracking hasSuffix:hostOpening] &&
         _appearance.pairedPunctuation && !_pendingPairedClosing && !MSIMEPairedPunctuationExcludedHost())
         openedClosing = hostOpenedClosing;
@@ -8538,11 +8753,19 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         for (NSArray<NSString *> *pair in MSIMEPunctuationPairs())
             if ([commitForTracking hasPrefix:pair[0]] && [commitForTracking hasSuffix:pair[1]]) { _pairedPunctuation.push(pair[1].UTF8String); break; }
     }
+    if ([cursorSuffix isKindOfClass:NSString.class] && !hasCursorRequest) {
+        NSMutableDictionary *withoutCursor = [transition mutableCopy];
+        [withoutCursor removeObjectForKey:@"commit_cursor_suffix"];
+        transition = withoutCursor;
+        cursorSuffix = nil;
+    }
     NSDictionary *displayTransition = transition;
     if (_appearance.traditionalOutput && !MSIMEStrictBoolean(transition[@"word_character_converted"]) &&
         MSIMEScriptConversionApplies(transition[@"commit_context"]) && [transition[@"commit"] isKindOfClass:NSString.class]) {
         NSMutableDictionary *converted = [transition mutableCopy];
         converted[@"commit"] = MSIMEChineseOutputString(transition[@"commit"], YES);
+        if ([cursorSuffix isKindOfClass:NSString.class])
+            converted[@"commit_cursor_suffix"] = MSIMEChineseOutputString(cursorSuffix, YES);
         displayTransition = converted;
     }
     const uint64_t applySequence = _applySequence;
@@ -8561,22 +8784,33 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (openedClosing) _pendingPairedClosing = openedClosing;
 
     if ([displayTransition[@"commit"] isKindOfClass:NSString.class]) {
-        NSString *landed = pendingClosing.length ? pendingClosing : displayTransition[@"commit"];
-        if (landed.length) [self noteSmartPunctuationShadow:[landed characterAtIndex:landed.length - 1]];
+        // 带尾段的光标请求（后缀加上待补的后半个标点，与 `TextClient.mm` 定位时一致）把插入点放在尾段前，定位失败时才留在末尾，所以上屏末字不一定在插入点左边：改由文档回答，并作废那些假定插入点紧跟上屏末字的手势状态，与 Windows 的光标上屏一致。调用方在 apply: 之后据 `_applyPositionedCaret` 不再重新武装。
+        NSString *cursorTail = displayTransition[@"commit_cursor_suffix"];
+        if ([cursorTail isKindOfClass:NSString.class] && (cursorTail.length || pendingClosing.length)) {
+            _applyPositionedCaret = YES;
+            [self invalidateSmartPunctuationShadow];
+            [self resetSmartPunctuationState];
+            [self clearSmartPunctuationSpaceConversion];
+            [self clearSmartPunctuationSpaceRevert];
+        } else {
+            NSString *landed = pendingClosing.length ? pendingClosing : displayTransition[@"commit"];
+            if (landed.length) [self noteSmartPunctuationShadow:[landed characterAtIndex:landed.length - 1]];
+        }
     }
     id<MSIMETextClient> textClient = (id<MSIMETextClient>)_activeClient;
     BOOL (^isCurrent)(void) = ^BOOL {
         return applySequence == self->_applySequence &&
             textClient == (id<MSIMETextClient>)self->_activeClient;
     };
+    // 未产生新转换的透传键也会改变文档或选区，定位与空格改写都不能越过它。
+    BOOL (^canEditCommittedText)(void) = ^BOOL {
+        return isCurrent() && inputSequence == self->_spacingInputSequence;
+    };
     MSIMEApplyTransitionWithCommitObserver(displayTransition, textClient, preeditStyle, pendingClosing,
         &_clientHasMarkedText, isCurrent, ^(NSString *text) {
-            BOOL (^canFormat)(void) = ^BOOL {
-                return isCurrent() && inputSequence == self->_spacingInputSequence;
-            };
             if (sourceOverride == msime::mac::TypingSource::Unknown)
-                [self formatCrossCommitText:text context:transition[@"commit_context"] client:textClient isCurrent:canFormat];
-        });
+                [self formatCrossCommitText:text context:transition[@"commit_context"] client:textClient isCurrent:canEditCommittedText];
+        }, canEditCommittedText);
     if (isCurrent() && openedClosing) {
         _clientHasMarkedText = YES;
         [textClient setMarkedText:openedClosing selectionRange:NSMakeRange(0, 0)
@@ -8617,9 +8851,90 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             }
         }
     } else { _predictionAnchorValid = NO; }
+    [self trackPredictionAfterTransition:transition previousView:previousView];
     [self refreshFloatingToolbarState];
     [self renderCandidates];
     [self synchronizeCandidateServices];
+}
+
+// 上屏后联想出现、或点选之后换成下一批时，记下此刻的选区并在显示期间监听别处的点击；联想结束就停掉监听。
+- (void)trackPredictionAfterTransition:(NSDictionary *)transition previousView:(NSDictionary *)previousView {
+    if (!MSIMEViewPrediction(_view)) {
+        _predictionSelectionKnown = NO;
+        [self stopPredictionMouseMonitoring];
+        return;
+    }
+    if (MSIMEViewPrediction(previousView) && ![transition[@"commit"] isKindOfClass:NSString.class]) return;
+    // 不跟随光标时候选窗钉在组字开头；联想属于上屏之后的插入点，要从那里重新定位。
+    [self resetCandidateAnchor];
+    _predictionSelection = MSIMETextClientSelection(_activeClient);
+    _predictionSelectionKnown = _predictionSelection.location != NSNotFound;
+    [self startPredictionMouseMonitoring];
+}
+
+- (void)startPredictionMouseMonitoring {
+    if (_predictionMouseMonitor) return;
+    __weak MSIMEInputController *weakSelf = self;
+    // 只有别的应用里的点击会到全局监视器，点自己的候选窗不经过这里。等应用处理完这次点击再问选区。
+    _predictionMouseMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp |
+        NSEventMaskOtherMouseUp handler:^(NSEvent *event) {
+        (void)event;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            [weakSelf predictionClientWasClicked];
+        });
+    }];
+}
+
+- (void)stopPredictionMouseMonitoring {
+    if (_predictionMouseMonitor) [NSEvent removeMonitor:_predictionMouseMonitor];
+    _predictionMouseMonitor = nil;
+}
+
+// 用户在文档里点了一下：光标挪走了（或应用不报告选区、说不准）就切断联想，免得在新位置点选旧位置的后续词。
+- (void)predictionClientWasClicked {
+    if (!_session || !_activeClient || !MSIMEViewPrediction(_view)) {
+        [self stopPredictionMouseMonitoring];
+        return;
+    }
+    if (_predictionSelectionKnown && ![self predictionCaretMoved]) return;
+    [self refocusAfterPredictionCaretMove];
+}
+
+// 选区和联想出现时不同，说明光标被用户或应用挪走了。联想出现时应用没报告选区则无从比较，答 NO。
+- (BOOL)predictionCaretMoved {
+    if (!_predictionSelectionKnown) return NO;
+    return !NSEqualRanges(MSIMETextClientSelection(_activeClient), _predictionSelection);
+}
+
+// 光标离开了联想所接的位置：像 Android 的外部选区变化一样重新聚焦同一个会话，清掉联想，也切断旧的词序上下文；普通 Cancel 会保留它。
+- (void)refocusAfterPredictionCaretMove {
+    [self stopPredictionMouseMonitoring];
+    [self confirmFieldTraitsBeforeFocus];
+    [self apply:[_session setFocused:YES error:nil]];
+}
+
+// 上屏后联想和普通候选一样选：点选、1–9 选候选窗上这一页对应的一行、空格选高亮的一行，这些键照常走下面的选词路径（按候选身份上屏）。其余的键先收掉联想，再照没有联想时的规则处理：回车、标点（走中文标点，`, . - = [ ]` 不翻页）、退格和越过这一页的数字照常输入，方向键交给应用。会挪动光标或改动文档的键（见 PredictionKeyMovesCaret）和光标已被挪走时重新聚焦，其余键送 Cancel，保留刚上屏的词序。
+// Esc 只关闭联想、不交给应用；Vim 模式名单里的应用照常收到这次 Esc 并切到英文，联想不能多占一次 Esc。返回 YES 表示这一键已经用完。
+- (BOOL)dismissPredictionForKey:(NSEvent *)event client:(id)sender {
+    if (!_session || sender != _activeClient || !MSIMEViewPrediction(_view)) return NO;
+    const NSEventModifierFlags modifiers = event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
+                                                                 NSEventModifierFlagOption | NSEventModifierFlagCommand);
+    // 光标已经离开联想所接的位置时，旧位置的联想不能再被选进新位置。
+    const BOOL caretMoved = [self predictionCaretMoved];
+    if (!caretMoved && !modifiers && _panel.isVisible) {
+        if (event.keyCode == 49) return NO;
+        const int slot = msime::mac::PhysicalCandidateDigitSlot(event.keyCode);
+        if (slot >= 0 && slot <= 8 && MSIMERenderedCandidateIdentity(_panel, slot)) return NO;
+    }
+    const BOOL refocus = caretMoved || msime::mac::PredictionKeyMovesCaret(event.keyCode, (modifiers & NSEventModifierFlagCommand) != 0,
+                                                                          (modifiers & NSEventModifierFlagControl) != 0);
+    NSDictionary *cancelled = refocus ? nil : [_session command:MSIME_CANCEL error:nil];
+    if (cancelled) [self apply:cancelled];
+    else [self refocusAfterPredictionCaretMove];
+    // 会话没能收掉联想时吞下这一键：落到下面的选词路径会把用户没选的建议上屏。
+    if (MSIMEViewPrediction(_view)) return YES;
+    if (event.keyCode != 53 || modifiers) return NO;
+    return ![_appearance vimModeEnabledForApplication:[sender respondsToSelector:@selector(bundleIdentifier)] ? [sender bundleIdentifier] : nil];
 }
 
 // Everything that follows the candidates on screen. Each one returns at once when its request has not changed.
@@ -8659,7 +8974,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     // Romaji is cached per term: a page is drawn more than once per key and the tokenizer is not free.
     if (!_romajiCache || _romajiCache.count > 4096) _romajiCache = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *cache = _romajiCache;
-    return MSIMEGlossPronunciation(candidate[@"text"], translation, _pronunciationTargets, _englishPronunciations,
+    return MSIMEGlossPronunciation(candidate[@"text"], translation, _pronunciationTargets, _sharedPronunciations,
                                    ^NSString *(NSString *term) {
                                        NSString *reading = cache[term];
                                        if (!reading) cache[term] = reading = MSIMEJapaneseRomaji(term);
@@ -8667,8 +8982,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
                                    });
 }
 
-// Asks the shared table for the English texts on the current page it has not answered yet, then redraws. Nothing is
-// asked while the switch is off; turning it on or off redraws the page with or without readings.
+// 把当前页上共享表还没回答过的释义行（以及英文候选）连同各自的语言交给共享表去查，回来后重画。开关关着时什么也不查；打开或关上开关时重画这一页，带上或去掉读音。
 - (void)synchronizePronunciation {
     NSDictionary *query = (_activeClient && _session && !_focusPending) ? [self serviceSnapshotQuery] : nil;
     NSArray<NSString *> *targets = [query[@"candidate_pronunciation"] isEqual:@YES] ? MSIMETranslationTargets(query) : nil;
@@ -8679,13 +8993,18 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (!targets) return;
     NSString *resources = [_session.hostOptions[@"resources"] copy];
     if (![resources isKindOfClass:NSString.class] || !resources.isAbsolutePath) return;
-    if (!_englishPronunciations || _englishPronunciations.count > 4096) _englishPronunciations = [NSMutableDictionary dictionary];
+    if (!_sharedPronunciations || _sharedPronunciations.count > 4096) _sharedPronunciations = [NSMutableDictionary dictionary];
     if (!_pronunciationPending) _pronunciationPending = [NSMutableSet set];
     NSMutableOrderedSet<NSString *> *missing = [NSMutableOrderedSet orderedSet];
+    NSMutableArray *items = [NSMutableArray array];
     for (NSDictionary *candidate in _view[@"candidates"]) {
         if (![candidate isKindOfClass:NSDictionary.class] || ![candidate[@"text"] isKindOfClass:NSString.class]) continue;
-        for (NSString *text in MSIMEGlossEnglishTexts(candidate[@"text"], CandidateTranslation(candidate), targets))
-            if (!_englishPronunciations[text] && ![_pronunciationPending containsObject:text]) [missing addObject:text];
+        for (NSDictionary<NSString *, NSString *> *item in MSIMEGlossSharedItems(candidate[@"text"], CandidateTranslation(candidate), targets)) {
+            NSString *key = MSIMEPronunciationKey(item[@"language"], item[@"text"]);
+            if (_sharedPronunciations[key] || [_pronunciationPending containsObject:key] || [missing containsObject:key]) continue;
+            [missing addObject:key];
+            [items addObject:item];
+        }
     }
     if (!missing.count) return;
     [_pronunciationPending addObjectsFromArray:missing.array];
@@ -8694,8 +9013,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         _pronunciationQueue.maxConcurrentOperationCount = 1;
         _pronunciationQueue.qualityOfService = NSQualityOfServiceUtility;
     }
-    NSMutableArray *items = [NSMutableArray arrayWithCapacity:missing.count];
-    for (NSString *text in missing) [items addObject:@{@"text": text, @"language": @"en"}];
     NSMutableDictionary *request = [@{@"generation": _view[@"generation"] ?: @0, @"items": items} mutableCopy];
     // 旧配置的活动词库可能位于用户目录，音标表仍随输入法 bundle 分发。
     NSString *supplementary = NSBundle.mainBundle.resourcePath;
@@ -8706,15 +9023,16 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         NSDictionary *result = [MSIMEClientSession pronunciationRequest:request resources:resources error:nil];
         NSMutableDictionary<NSString *, NSString *> *answered = [NSMutableDictionary dictionary];
         for (NSDictionary *entry in [result[@"pronunciations"] isKindOfClass:NSArray.class] ? result[@"pronunciations"] : @[])
-            if ([entry[@"text"] isKindOfClass:NSString.class] && [entry[@"pronunciation"] isKindOfClass:NSString.class])
-                answered[entry[@"text"]] = entry[@"pronunciation"];
+            if ([entry[@"text"] isKindOfClass:NSString.class] && [entry[@"language"] isKindOfClass:NSString.class] &&
+                [entry[@"pronunciation"] isKindOfClass:NSString.class])
+                answered[MSIMEPronunciationKey(entry[@"language"], entry[@"text"])] = entry[@"pronunciation"];
         dispatch_async(dispatch_get_main_queue(), ^{
             MSIMEInputController *current = weakSelf;
             if (!current) return;
             // A text the table does not know is remembered as having no reading, so it is not asked again every key.
-            for (NSString *text in asked) {
-                current->_englishPronunciations[text] = answered[text] ?: @"";
-                [current->_pronunciationPending removeObject:text];
+            for (NSString *key in asked) {
+                current->_sharedPronunciations[key] = answered[key] ?: @"";
+                [current->_pronunciationPending removeObject:key];
             }
             if (current->_activeClient && current->_pronunciationTargets && answered.count) [current renderCandidates];
         });
@@ -9281,7 +9599,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const msime::candidate::CandidateRowLayout &row = geometry.rows[slot];
     NSString *display = geometry.displays[slot];
     NSString *title = [NSString stringWithFormat:@"%@  %@", number, geometry.texts[slot]];
-    MSIMECandidateButton *button = [MSIMECandidateButton buttonWithTitle:title target:self action:action];
+    MSIMECandidateButton *button = MSIMEMakeCandidateButton(MSIMECandidateButton.class, title, self, action);
     button.candidateID = candidate[@"id"];
     button.accessibilityLabel = number.length ? [NSString stringWithFormat:@"%@  %@", number, display] : display;
     // 读屏先读候选本身，再说明后面那段是插件写的，免得把插件的文字当成输入法的释义或辅助码。
@@ -9328,7 +9646,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 // 原生主题的首行展开／收起按钮，标签 -3，模板符号图沿用既有外观。
 - (MSIMECandidateButton *)expandedCandidatesToggleButton:(BOOL)expanded frame:(NSRect)frame scale:(CGFloat)scale {
     NSString *label = expanded ? @"收起候选" : @"展开候选";
-    MSIMECandidateButton *button = [MSIMECandidateButton buttonWithTitle:@"" target:self action:@selector(toggleExpandedCandidates:)];
+    MSIMECandidateButton *button = MSIMEMakeCandidateButton(MSIMECandidateButton.class, @"", self, @selector(toggleExpandedCandidates:));
     NSImage *symbol = [NSImage imageWithSystemSymbolName:expanded ? @"chevron.up" : @"chevron.down" accessibilityDescription:label];
     NSImageSymbolConfiguration *configuration = [NSImageSymbolConfiguration configurationWithPointSize:11 * scale weight:NSFontWeightSemibold];
     button.image = [symbol imageWithSymbolConfiguration:configuration] ?: symbol;
@@ -9347,7 +9665,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 // 共享卷轴使用来源线段和字号尺寸，仍走原来的控制器身份与命令检查。
 - (MSIMECandidateButton *)skinExpandedCandidatesToggleButton:(BOOL)expanded frame:(NSRect)frame
     metrics:(msime::mac::CandidateExpandToggleMetrics)metrics {
-    MSIMECandidateExpandToggleButton *button = [MSIMECandidateExpandToggleButton buttonWithTitle:@"" target:self action:@selector(toggleExpandedCandidates:)];
+    MSIMECandidateExpandToggleButton *button = MSIMEMakeCandidateButton(MSIMECandidateExpandToggleButton.class, @"", self, @selector(toggleExpandedCandidates:));
     button.toggleMetrics = metrics;
     button.expanded = expanded;
     button.frame = frame;
@@ -10248,7 +10566,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         const CGFloat left = vertical ? inset + pageGeometry.textLeft - (listPager.buttonWidth - listPager.glyphWidth()) / 2
                                      : width - inset - listPager.marginRight - 2 * listPager.buttonWidth - listPager.gap;
         for (NSUInteger direction = 0; direction < 2; ++direction) {
-            MSIMECandidatePagerButton *button = [MSIMECandidatePagerButton buttonWithTitle:@"" target:self action:@selector(changeCandidatePage:)];
+            MSIMECandidatePagerButton *button = MSIMEMakeCandidateButton(MSIMECandidatePagerButton.class, @"", self, @selector(changeCandidatePage:));
             button.frame = NSMakeRect(left + direction * (listPager.buttonWidth + listPager.gap), bottom,
                 listPager.buttonWidth, listPager.buttonHeight);
             button.pagerMetrics = listPager;
@@ -10286,7 +10604,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             [content.candidateContentView addSubview:indicator];
         }
         for (NSUInteger direction = 0; direction < 2; ++direction) {
-            MSIMECandidateButton *button = [MSIMECandidateButton buttonWithTitle:direction == 0 ? @"‹" : @"›" target:self action:@selector(changeCandidatePage:)];
+            MSIMECandidateButton *button = MSIMEMakeCandidateButton(MSIMECandidateButton.class, direction == 0 ? @"‹" : @"›", self, @selector(changeCandidatePage:));
             button.frame = NSMakeRect(arrowsLeft + direction * headerArrowWidth, controlsBottom, headerArrowWidth, headerRow);
             button.font = [NSFont systemFontOfSize:NSFont.systemFontSize * scale];
             button.bordered = NO;
@@ -10371,7 +10689,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         }
         if (preview > 0) {
             // 和候选行里那一格是同一个候选：点它就选那一格，身份对不上当前视图时 selectCandidate: 不做任何事。
-            MSIMECandidateButton *button = [MSIMECandidateButton buttonWithTitle:previewText target:self action:@selector(selectCandidate:)];
+            MSIMECandidateButton *button = MSIMEMakeCandidateButton(MSIMECandidateButton.class, previewText, self, @selector(selectCandidate:));
             button.identifier = @"candidate-online-preview";
             button.tag = -4;
             button.bordered = NO;
@@ -10602,7 +10920,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         else if (tokens.translation)
             button.translationColor = SkinColor(*tokens.translation);
         else if (button.candidateFixed) button.translationColor = [button.titleColor colorWithAlphaComponent:MSIMECandidateTranslationOpacity];
-        else button.translationColor = button.candidateHighlighted ? SkinColor(tokens.selectedNumber) : SkinColor(tokens.number);
+        // 没有释义色的选中行按 `SelectedRowGloss` 取色：选中序号色在不透明选中底色上不到 4.5:1 时换成加深了不透明度的选中文字色。
+        else button.translationColor = button.candidateHighlighted ? SkinColor(msime::mac::SelectedRowGloss(tokens)) : SkinColor(tokens.number);
         button.numberColor = button.candidateHighlighted ? SkinColor(tokens.selectedNumber) : SkinColor(tokens.number);
         button.barColor = SkinColor(tokens.selectedBar.value_or(tokens.accent));
         button.showSelectedBar = tokens.showSelectedBar;
@@ -10624,9 +10943,19 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 
 - (void)selectCandidate:(MSIMECandidateButton *)button {
     if (![self predictionAnchorCurrent]) { [self clearPostCommitPrediction]; return; }
-    if (!_activeClient || !_session || !_panel.isVisible || !button.enabled || button.superview != MSIMECandidateControlsView(_panel.contentView)) return;
+    // 点了却没上屏时诊断日志写下是哪一道检查拦下的（不写候选文字），用户报「点不中」时据此定位。
+    if (!_activeClient || !_session || !_panel.isVisible || !button.enabled || button.superview != MSIMECandidateControlsView(_panel.contentView)) {
+        if (msime_macos_diagnostic_enabled())
+            msime_macos_diagnostic_writef("candidate click ignored reason=stale_button client=%d session=%d visible=%d enabled=%d",
+                _activeClient != nil, _session != nil, _panel.isVisible, button.enabled);
+        return;
+    }
     NSDictionary *identifier = button.candidateID;
-    if (!MSIMECurrentCandidateIdentity(identifier, _view)) return;
+    if (!MSIMECurrentCandidateIdentity(identifier, _view)) {
+        if (msime_macos_diagnostic_enabled())
+            msime_macos_diagnostic_writef("candidate click ignored reason=stale_identity prediction=%d", MSIMEViewPrediction(_view));
+        return;
+    }
     uint64_t generation = 0; NSUInteger index = 0;
     if (!MSIMEStrictUnsignedInteger(identifier[@"generation"], &generation) || !MSIMEStrictUnsignedIntegerValue(identifier[@"index"], &index)) return;
     // 指针点选先开一轮；上屏音和上屏特效照常来自这次派发。
@@ -10674,8 +11003,11 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     NSString *text = [candidate[@"text"] isKindOfClass:NSString.class] ? candidate[@"text"] : @"";
     // 「加入生词本」用的是这一帧显示着的释义和读音，菜单打开以后释义再变也不影响这一项。
     NSString *gloss = CandidateTranslation(candidate);
+    // 「朗读」读的英文同样在菜单打开时定下。
+    NSString *readAloud = MSIMEReadAloudText(text, gloss);
     NSDictionary *context = @{@"id":[identifier copy], @"text":text, @"render":_candidateMenuToken,
-                              @"gloss":gloss, @"pronunciation":[self pronunciationForCandidate:candidate] ?: @""};
+                              @"gloss":gloss, @"pronunciation":[self pronunciationForCandidate:candidate] ?: @"",
+                              @"read_aloud":readAloud ?: @""};
     NSMenuItem *(^item)(NSString *, NSInteger) = ^NSMenuItem *(NSString *title, NSInteger tag) {
         NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:title action:@selector(candidateMenuAction:) keyEquivalent:@""];
         entry.target = self;
@@ -10710,11 +11042,10 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         }
         [menu addItem:remove];
     }
-    // 候选旁有释义时才有「加入生词本」，和 Windows、Linux 的候选菜单放在同一个位置：最后一组，和词库操作隔开。
-    if (gloss.length) {
-        [menu addItem:NSMenuItem.separatorItem];
-        [menu addItem:item(@"加入生词本", 30)];
-    }
+    // 候选旁有释义时才有「加入生词本」，有能读的英文时同一组里先是「朗读」，和 Windows、Linux 的候选菜单放在同一个位置：最后一组，和词库操作隔开。
+    if (gloss.length || readAloud) [menu addItem:NSMenuItem.separatorItem];
+    if (readAloud) [menu addItem:item(@"朗读", 31)];
+    if (gloss.length) [menu addItem:item(@"加入生词本", 30)];
     return menu;
 }
 
@@ -10734,6 +11065,22 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             if (notice) [controller presentHUDText:notice announcement:notice];
             else NSBeep();
         });
+        return;
+    }
+    // 「朗读」也不经过 Engine。新的一次打断还在读的上一次。
+    if (item.tag == 31) {
+        NSString *text = context[@"read_aloud"];
+        AVSpeechSynthesisVoice *voice = MSIMEReadAloudVoice();
+        if (![text isKindOfClass:NSString.class] || !text.length) return;
+        if (!voice) {
+            [self presentHUDText:@"系统没有可用的朗读语音" announcement:@"系统没有可用的朗读语音"];
+            return;
+        }
+        if (!_readAloudSynthesizer) _readAloudSynthesizer = [AVSpeechSynthesizer new];
+        [_readAloudSynthesizer stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+        AVSpeechUtterance *utterance = [AVSpeechUtterance speechUtteranceWithString:text];
+        utterance.voice = voice;
+        [_readAloudSynthesizer speakUtterance:utterance];
         return;
     }
     uint64_t generation = 0; NSUInteger index = 0;

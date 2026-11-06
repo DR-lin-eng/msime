@@ -92,8 +92,30 @@ public final class ImePrivacyGateSmoke {
             "engine_session_create", "engine_session_ready",
             "ime_service_create", "input_view_create", "keyboard_first_draw",
             "engine_startup_preferences", "engine_startup_dictionary_sync",
-            "engine_session_main", "engine_session_destroy"};
+            "engine_session_main", "engine_session_destroy",
+            "engine_session_live_preferences", "engine_session_factory_preferences", "engine_session_hinted_preferences",
+            "touch_layout_first_drawn_twenty_six_key", "touch_layout_first_drawn_nine_key",
+            "touch_layout_first_drawn_japanese_nine_key", "touch_layout_first_drawn_handwriting",
+            "touch_layout_first_drawn_korean", "touch_layout_first_drawn_zhuyin",
+            "touch_layout_first_drawn_stroke", "touch_layout_first_drawn_zhuyin_nine_key",
+            "touch_layout_first_drawn_fourteen_key", "touch_layout_first_drawn_eighteen_key",
+            "touch_layout_created_twenty_six_key", "touch_layout_created_nine_key",
+            "touch_layout_created_japanese_nine_key", "touch_layout_created_handwriting",
+            "touch_layout_created_korean", "touch_layout_created_zhuyin",
+            "touch_layout_created_stroke", "touch_layout_created_zhuyin_nine_key",
+            "touch_layout_created_fourteen_key", "touch_layout_created_eighteen_key",
+            "touch_layout_live_twenty_six_key", "touch_layout_live_nine_key",
+            "touch_layout_live_japanese_nine_key", "touch_layout_live_handwriting",
+            "touch_layout_live_korean", "touch_layout_live_zhuyin",
+            "touch_layout_live_stroke", "touch_layout_live_zhuyin_nine_key",
+            "touch_layout_live_fourteen_key", "touch_layout_live_eighteen_key",
+            "engine_call", "candidate_rendered"};
         check(DiagnosticEventKind.values().length == kinds.length, "fixed local diagnostic event kinds");
+        // 按键路径拆段计时（#10457）只在本机导出，服务端不认这两个种类。
+        check(!DiagnosticEventKind.ENGINE_CALL.uploadable() && !DiagnosticEventKind.CANDIDATE_RENDERED.uploadable(),
+            "keystroke split timings stay local");
+        check(ImeDebugOverlay.EventLog.line(DiagnosticEventKind.ENGINE_CALL, 5, 3)
+            .equals("{\"t_ms\":5,\"kind\":\"engine_call\",\"duration_ms\":3}\n"), "engine call row carries only time, kind and duration");
         for (int index = 0; index < kinds.length; index++) {
             check(DiagnosticEventKind.values()[index].wire().equals(kinds[index]), "event kind " + kinds[index]);
             check(DiagnosticEventKind.fromWire(kinds[index]) == DiagnosticEventKind.values()[index],

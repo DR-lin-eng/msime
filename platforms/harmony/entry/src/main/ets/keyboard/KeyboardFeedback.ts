@@ -7,14 +7,17 @@
  *
  * 手写板的识别延迟和笔迹也出于同样的原因放在这里：它们描述的是这台设备上手写板的行为，共享偏好设置里也没有对应的键。
  *
- * 按键弹出预览和滑动输入符号及其方向同样如此，Android 把它们存在自己的本地设置文件里（`platform.android.key_popup`、`platform.android.swipe_down_symbols`、`platform.android.swipe_symbols_direction`），默认值相同：都开启，向上滑动。
+ * 按键弹出预览、滑动输入符号及其方向和「显示字母键角标」同样如此，Android 把它们存在自己的本地设置文件里（`platform.android.key_popup`、`platform.android.swipe_down_symbols`、`platform.android.swipe_symbols_direction`、`platform.android.letter_corner_hints`），默认值相同：都开启，向上滑动。
  *
  * 功能面板的单手模式和隐私模式也是如此，对应 Android 的 `platform.android.one_handed`（关）和 `platform.android.incognito`（关）。隐私模式尤其只属于这台设备：Android 从不同步它，这里的账号同步也只携带三个反馈字段。
  *
  * 浮动键盘的开关和位置同样只在本机，对应 Android 的 `platform.android.floating_keyboard`（关）与 `_x` / `_y`（可移动范围里的千分比，默认居中贴底，见 `FloatingKeyboardPolicy`）：位置与这块屏幕的尺寸有关，带到别的设备上没有意义。
+ *
+ * 「键盘调整」的底部抬高、宽度和水平位置（`KeyboardAdjustPolicy`）也只在本机，理由相同：它们按这块屏幕和握持方式调。键盘高度仍是共享偏好 `touch_keyboard_height_adjustment`，不在这里。
  */
 import { SwipeHintPolicy, SwipeSymbolsDirection } from "./input/SwipeHintPolicy";
 import { FloatingKeyboardPolicy } from "./FloatingKeyboardPolicy";
+import { KeyboardAdjustPolicy } from "./KeyboardAdjustPolicy";
 import { OneHandedMode, OneHandedPolicy } from "./OneHandedPolicy";
 import { PrivacyGate } from "./PrivacyGate";
 
@@ -51,6 +54,8 @@ export interface FeedbackSettings {
   readonly swipeSymbols: boolean;
   /** 滑动的方向。 */
   readonly swipeSymbolsDirection: SwipeSymbolsDirection;
+  /** 显示字母键角标：26 键字母键右上角画不画角标符号。除非关闭，否则开启；关掉只是不画，长按和滑动照样输入角标（#10587）。 */
+  readonly letterCornerHints: boolean;
   /** 单手模式：按键靠向哪一侧，或关闭。 */
   readonly oneHanded: OneHandedMode;
   /** 隐私模式：开启期间，这里输入的内容都不会被学习、统计或保存（PrivacyGate）。 */
@@ -60,6 +65,12 @@ export interface FeedbackSettings {
   /** 浮动面板的位置：水平、竖直方向可移动范围里的千分比（0–1000）。 */
   readonly floatingX: number;
   readonly floatingY: number;
+  /** 键盘调整的底部抬高（vp，0–160）。 */
+  readonly bottomLift: number;
+  /** 键盘调整的宽度（面板宽的百分比，60–100）。 */
+  readonly widthPercent: number;
+  /** 键盘调整的水平位置（两侧剩余空间里的千分比，0–1000，500 居中）。 */
+  readonly positionX: number;
 }
 
 /**
@@ -150,11 +161,15 @@ export class KeyboardFeedback {
     keyPopup: true,
     swipeSymbols: true,
     swipeSymbolsDirection: SwipeSymbolsDirection.UP,
+    letterCornerHints: true,
     oneHanded: OneHandedPolicy.DEFAULT,
     incognito: PrivacyGate.DEFAULT,
     floating: false,
     floatingX: FloatingKeyboardPolicy.DEFAULT_X_FRACTION,
     floatingY: FloatingKeyboardPolicy.DEFAULT_Y_FRACTION,
+    bottomLift: KeyboardAdjustPolicy.DEFAULT_LIFT_VP,
+    widthPercent: KeyboardAdjustPolicy.DEFAULT_WIDTH_PERCENT,
+    positionX: KeyboardAdjustPolicy.DEFAULT_POSITION,
   };
 
   static title(strength: HapticStrength): string {
@@ -256,6 +271,10 @@ export class KeyboardFeedback {
             ? raw.swipeSymbols
             : KeyboardFeedback.DEFAULTS.swipeSymbols,
         swipeSymbolsDirection: SwipeHintPolicy.direction(raw.swipeSymbolsDirection),
+        letterCornerHints:
+          typeof raw.letterCornerHints === "boolean"
+            ? raw.letterCornerHints
+            : KeyboardFeedback.DEFAULTS.letterCornerHints,
         oneHanded: OneHandedPolicy.parse(raw.oneHanded),
         incognito:
           typeof raw.incognito === "boolean" ? raw.incognito : KeyboardFeedback.DEFAULTS.incognito,
@@ -269,6 +288,9 @@ export class KeyboardFeedback {
           raw.floatingY,
           KeyboardFeedback.DEFAULTS.floatingY,
         ),
+        bottomLift: KeyboardAdjustPolicy.lift(raw.bottomLift),
+        widthPercent: KeyboardAdjustPolicy.widthPercent(raw.widthPercent),
+        positionX: KeyboardAdjustPolicy.position(raw.positionX),
       };
     } catch (error) {
       return KeyboardFeedback.DEFAULTS;
@@ -303,11 +325,45 @@ export class KeyboardFeedback {
       keyPopup: settings.keyPopup,
       swipeSymbols: settings.swipeSymbols,
       swipeSymbolsDirection: settings.swipeSymbolsDirection,
+      letterCornerHints: settings.letterCornerHints,
       oneHanded: settings.oneHanded,
       incognito: settings.incognito,
       floating: floating,
       floatingX: FloatingKeyboardPolicy.fraction(floatingX, settings.floatingX),
       floatingY: FloatingKeyboardPolicy.fraction(floatingY, settings.floatingY),
+      bottomLift: settings.bottomLift,
+      widthPercent: settings.widthPercent,
+      positionX: settings.positionX,
+    };
+  }
+
+  /** `settings` 换上键盘调整的底部抬高、宽度和水平位置，其余原样保留。键盘调整确认或以别的方式离开时经它写回；范围外的值钳回来，不是数时保留原值。 */
+  static withAdjust(
+    settings: FeedbackSettings,
+    bottomLift: number,
+    widthPercent: number,
+    positionX: number,
+  ): FeedbackSettings {
+    return {
+      sound: settings.sound,
+      haptics: settings.haptics,
+      strength: settings.strength,
+      glideTyping: settings.glideTyping,
+      handwritingDelayMs: settings.handwritingDelayMs,
+      handwritingStrokeColor: settings.handwritingStrokeColor,
+      handwritingStrokeWidth: settings.handwritingStrokeWidth,
+      keyPopup: settings.keyPopup,
+      swipeSymbols: settings.swipeSymbols,
+      swipeSymbolsDirection: settings.swipeSymbolsDirection,
+      letterCornerHints: settings.letterCornerHints,
+      oneHanded: settings.oneHanded,
+      incognito: settings.incognito,
+      floating: settings.floating,
+      floatingX: settings.floatingX,
+      floatingY: settings.floatingY,
+      bottomLift: KeyboardAdjustPolicy.lift(bottomLift, settings.bottomLift),
+      widthPercent: KeyboardAdjustPolicy.widthPercent(widthPercent, settings.widthPercent),
+      positionX: KeyboardAdjustPolicy.position(positionX, settings.positionX),
     };
   }
 

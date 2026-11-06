@@ -107,7 +107,7 @@ pub enum SchemeType {
     JapaneseRomaji = 3,
     /// 韩语两套式或罗马字布局：音节在预编辑中组合，稳定前缀逐步上屏；`Command::ConvertHanja` 打开当前音节的汉字候选。
     Korean = 4,
-    /// Cantonese in toneless Jyutping read against `msime-cantonese.db`: candidates are Traditional as stored, a candidate covering the leading syllables commits at once and leaves the rest composing, and nothing is learned.
+    /// Cantonese in toneless Jyutping read against `msime-cantonese.db`: candidates are Traditional as stored, a candidate covering the leading syllables commits at once and leaves the rest composing. Selections learn into the user journal under the pinyin learning switches (`cantonese::learning`), never into a main dictionary.
     Cantonese = 5,
     /// Zhuyin (bopomofo) on the Dachen layout read against `msime-zhuyin.db`: keys compose syllables that convert to Traditional text as typed, a list the user opens pins a span's text without committing, Enter or any key outside the layout commits the conversion, and nothing is learned.
     Zhuyin = 6,
@@ -1057,6 +1057,10 @@ pub struct QueryRequest {
     pub fuzzy_pinyin: FuzzyPinyinOptions,
     /// Hand back every whole-sentence reading rather than only the best.
     pub sentence_alternatives: bool,
+    /// 26 键全拼每条切分至少解出多少条整句读法交给逐键打分器比较；0 是不挂打分器时的默认条数。见 [`crate::Session::set_sentence_pool`]。
+    pub sentence_pool: usize,
+    /// 26 键全拼拼整句时给前缀打分的模型，见 [`crate::ordering::SentenceScorer`]；没挂时为空。
+    pub sentence_scorer: crate::ordering::SentenceScorerHandle,
     pub sentence_association: SentenceAssociationOptions,
     /// 首页能放下的行数：全长度组的精确同音词够这么多就不再并入更长的补全词。
     pub first_page_rows: FirstPageRows,
@@ -1582,6 +1586,8 @@ pub enum PersonalDictionaryKind {
     English = 3,
     /// 98 五笔，写入 `wubi98` 表。序号追加在末尾，已有的值不变。
     Wubi98 = 4,
+    /// 粤语，编码是不带声调的粤拼音节，以单个空格连接（与 `msime-cantonese.db` 的 `entries.key` 同一写法）。只记在用户日志里，没有工作表：粤语方案查词时从日志读出合进候选（`cantonese::UserWords`）。
+    Cantonese = 5,
 }
 
 impl PersonalDictionaryKind {
@@ -1592,6 +1598,7 @@ impl PersonalDictionaryKind {
             2 => Self::QuickPhrase,
             3 => Self::English,
             4 => Self::Wubi98,
+            5 => Self::Cantonese,
             _ => return None,
         })
     }
@@ -1601,12 +1608,17 @@ impl PersonalDictionaryKind {
         matches!(self, Self::Wubi | Self::Wubi98)
     }
 
+    /// 不写 `msime-pinyin.db` 的种类：英文词写在 `msime-english.db`，粤语词只记在日志里。代次里没有主词库时只有它们能编辑、列出。
+    pub fn stored_without_main_dictionary(self) -> bool {
+        matches!(self, Self::English | Self::Cantonese)
+    }
+
     /// 五笔种类对应的 `msime-pinyin.db` 码表。
     pub fn wubi_table(self) -> Option<&'static str> {
         match self {
             Self::Wubi => Some(WubiProfileKind::Wubi86.table()),
             Self::Wubi98 => Some(WubiProfileKind::Wubi98.table()),
-            Self::Pinyin | Self::QuickPhrase | Self::English => None,
+            Self::Pinyin | Self::QuickPhrase | Self::English | Self::Cantonese => None,
         }
     }
 
@@ -1618,6 +1630,7 @@ impl PersonalDictionaryKind {
             Self::QuickPhrase => "quick",
             Self::English => "english",
             Self::Wubi98 => "wubi98",
+            Self::Cantonese => "cantonese",
         }
     }
 
@@ -1628,12 +1641,13 @@ impl PersonalDictionaryKind {
             "quick" => Self::QuickPhrase,
             "english" => Self::English,
             "wubi98" => Self::Wubi98,
+            "cantonese" => Self::Cantonese,
             _ => return None,
         })
     }
 }
 
-/// A user's own dictionary entry. Pinyin keys are complete syllables joined by `'`; wubi 1..=4 letters; quick phrases 1..=32 letters or digits; English 1..=64 letters.
+/// A user's own dictionary entry. Pinyin keys are complete syllables joined by `'`; wubi 1..=4 letters; quick phrases 1..=32 letters or digits; English 1..=64 letters; 粤语是不带声调的粤拼音节，以单个空格连接。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PersonalDictionaryEntry {
     pub kind: PersonalDictionaryKind,
@@ -2103,7 +2117,7 @@ mod tests {
         }
     }
 
-    // Cantonese is a Chinese scheme writing Traditional text as stored, with Chinese punctuation and `'` boundaries; it learns nothing, holds no phrase progress and has none of the pinyin machinery.
+    // Cantonese is a Chinese scheme writing Traditional text as stored, with Chinese punctuation and `'` boundaries; it learns only into the journal's Cantonese rows (not `learns_into_main_dictionary`), holds no phrase progress and has none of the pinyin machinery.
     #[test]
     fn cantonese_predicates() {
         let scheme = SchemeType::Cantonese;

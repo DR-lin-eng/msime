@@ -13,7 +13,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * 按需下载的资源包（日文词典、语言词库、五笔码表、离线释义、英文音标、语音运行库），经共享层的 {@code msime_client_resource_pack_*} 列出、下载和收编。
+ * 按需下载的资源包（日文词典、语言词库、五笔码表、离线释义、英文音标、语音运行库、「增强」重排模型），经共享层的 {@code msime_client_resource_pack_*} 列出、下载和收编。
  *
  * <p>资源包装在 {@code filesDir/bootstrap/state/resource-packs/<id>/}：{@code bootstrap/state} 就是 host-api 的 {@code preferences_directory}，会话在获得焦点时从那里找到新装好的资源包；Bootstrap 随安装包替换的目录碰不到它。设置页和键盘的方案可用判断都以这里的 {@link #installed} 为准。
  *
@@ -26,8 +26,12 @@ public final class ResourcePacks {
     public static final String WUBI = "wubi";
     public static final String OFFLINE_GLOSSES = "offline-glosses";
     public static final String PRONUNCIATIONS = "pronunciations";
+    /** 法、日、西、俄、德、韩释义行的读音表 `<语言>-phonetic.db`（维基词典，CC BY-SA 4.0），和英文音标表分开下载。 */
+    public static final String TARGET_PRONUNCIATIONS = "target-pronunciations";
     public static final String OCR_MODULE = "ocr-module-android";
     public static final String VOICE_RUNTIME = "voice-runtime";
+    /** 整句候选「增强」逐键重排的手机档 ONNX 模型（6x256）：发布包不带，用户选「增强」时下载；没装好时输入法用随包的句子模型。 */
+    public static final String RERANK_MODEL = "rerank-model-small";
 
     /** 不联网安装时用户要自己下载的一个文件：上游文件名、下载地址和长度。资源包和本地语音模型共用。 */
     public record ImportFile(String name, String url, long size) {}
@@ -186,6 +190,26 @@ public final class ResourcePacks {
     /** 停下正在安装的 {@code id}；任何线程，立即返回。 */
     public static void cancel(String id) {
         if (id != null) NativeClient.resourcePackCancel(id);
+    }
+
+    /** 主进程工作线程卸载已发布的资源包，安装中拒绝；不删除用户原来下载的文件。
+     *
+     * <p>返回值区分“确实删除了已发布目录”和“目录本来就不存在”，避免调用方把幂等的空操作误报为成功。
+     */
+    public static boolean remove(Context context, String id) throws Failure {
+        requireInstallerThread(context);
+        try {
+            JSONObject request = new JSONObject()
+                .put("state_root", stateRoot(context.getFilesDir()).getAbsolutePath())
+                .put("pack", id);
+            JSONObject envelope = value(NativeClient.resourcePackRemove(request.toString()));
+            JSONObject result = envelope.optJSONObject("value");
+            Boolean removed = result == null ? null : JsonPolicy.strictBoolean(result.opt("removed"));
+            if (removed == null) throw new Failure("invalid resource pack response");
+            return removed;
+        } catch (JSONException error) {
+            throw new Failure("invalid resource pack response");
+        }
     }
 
     /**

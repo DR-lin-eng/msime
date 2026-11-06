@@ -29,6 +29,7 @@ fn options(root: &Path) -> EngineOptions {
         shuangpin_profile: 0,
         shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
+        shuangpin_preedit_separated: false,
         force_cantonese_shuangpin: false,
         single_character_only: false,
         caret_edit_suffix: false,
@@ -91,6 +92,7 @@ fn options(root: &Path) -> EngineOptions {
         quick_phrase_frequency: true,
         helpcode_table: None,
         helpcode_fallback_resources: None,
+        custom_helpcode_root: None,
         sentence_association: SentenceAssociationOptions {
             word_lattice: true,
             neural_keyboard: false,
@@ -744,6 +746,39 @@ fn english_phonetics_refuse_another_kind_version_or_a_missing_file() {
     );
 }
 
+#[test]
+fn target_phonetics_read_their_own_language_table_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let french = directory.path().join("fr-phonetic.db");
+    Connection::open(&french)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE fr_phonetics(word TEXT PRIMARY KEY, phonetic TEXT NOT NULL) WITHOUT ROWID;
+             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+             INSERT INTO meta VALUES('kind', 'fr_phonetic');
+             INSERT INTO fr_phonetics VALUES('chat', '/ʃa/');
+             INSERT INTO fr_phonetics VALUES('pomme de terre', '/pɔm də tɛʁ/');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    let path = french.to_str().unwrap();
+    let words = vec![
+        "pomme de terre".to_owned(),
+        "chien".to_owned(),
+        "chat".to_owned(),
+    ];
+    assert_eq!(
+        phonetics(path, "fr", &words).unwrap(),
+        vec!["/pɔm də tɛʁ/", "", "/ʃa/"]
+    );
+    // 法语表被当成西语或英文表来查时拒绝，而不是照读。
+    assert!(phonetics(path, "es", &words).is_err());
+    assert!(english_phonetics(path, &words).is_err());
+    // 表名由语言拼出，所以只接受已知的语言代码。
+    assert!(phonetics(path, "fr_phonetics; --", &words).is_err());
+    assert!(phonetics(path, "", &words).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn english_phonetics_rejects_a_linked_database() {
@@ -1161,6 +1196,104 @@ fn custom_table() -> crate::types::ShuangpinCustomTable {
     }
 }
 
+/// #10632：双拼选了「拼音分词」时 `preedit` 是展开的全拼，组字光标要按音节落在 `preedit` 里，而不是拿原文的偏移去数 `preedit` 的字母（那样 `uiui` 打完光标落在 `shi's|hi`）。
+#[test]
+fn expanded_shuangpin_preedit_carries_the_caret_by_syllable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = options(dir.path());
+    options.scheme = SchemeType::Shuangpin as u8;
+    options.shuangpin_preedit_uses_raw = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"uiui");
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.preedit, "shi'shi");
+    assert_eq!(snapshot.caret_position, 4);
+    assert_eq!(snapshot.preedit_caret, 7);
+    // 左移一个字母进到第二个单位中间，按单位起点算：第一个音节后面、隔音符前面。
+    session.command(Command::MoveLeft).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.caret_position, 3);
+    assert_eq!(snapshot.preedit_caret, 3);
+    session.command(Command::MoveLeft).unwrap();
+    assert_eq!(session.snapshot().unwrap().preedit_caret, 3);
+    session.command(Command::MoveHome).unwrap();
+    assert_eq!(session.snapshot().unwrap().preedit_caret, 0);
+
+    // 「原始按键」时 `preedit` 就是按键，光标照搬。
+    options.shuangpin_preedit_uses_raw = true;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"uiui");
+    session.command(Command::MoveLeft).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.preedit, "uiui");
+    assert_eq!(snapshot.preedit_caret, snapshot.caret_position);
+}
+
+/// #10717：「双拼分隔」画按音节切开的原始按键（自然码 `nimf` → `ni'mf`），按键原文和提交仍是 `nimf`；光标按字母数越过插入的隔音符，落在音节边界时停在隔音符前面。
+#[test]
+fn separated_shuangpin_preedit_keeps_the_keys_and_carries_the_caret() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = options(dir.path());
+    options.scheme = SchemeType::Shuangpin as u8;
+    options.shuangpin_profile = 1;
+    options.shuangpin_preedit_uses_raw = true;
+    options.shuangpin_preedit_separated = true;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"nimf");
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.preedit, "ni'mf");
+    assert_eq!(snapshot.editing_text, "nimf");
+    assert_eq!(snapshot.caret_position, 4);
+    assert_eq!(snapshot.preedit_caret, 5);
+    // 左移进第二个音节中间：三个字母之后，越过插入的隔音符。
+    session.command(Command::MoveLeft).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.caret_position, 3);
+    assert_eq!(snapshot.preedit_caret, 4);
+    // 音节边界：停在隔音符前面。
+    session.command(Command::MoveLeft).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.caret_position, 2);
+    assert_eq!(snapshot.preedit_caret, 2);
+    session.command(Command::MoveHome).unwrap();
+    assert_eq!(session.snapshot().unwrap().preedit_caret, 0);
+    drop(session);
+
+    // 打到一半的音节和用户自己打的隔音符都照原样留着；字面输入（句中大写）与拼音分词一样画按键原文，不切。
+    for (typed, expected) in [
+        (&b"wom"[..], "wo'm"),
+        (b"woMf", "woMf"),
+        (b"wo'mf", "wo'mf"),
+        (b"womf'", "wo'mf'"),
+    ] {
+        let mut session = Session::new(&options).unwrap();
+        for byte in typed {
+            session.character(*byte, byte.is_ascii_uppercase()).unwrap();
+        }
+        let snapshot = session.snapshot().unwrap();
+        assert_eq!(
+            snapshot.preedit,
+            expected,
+            "{}",
+            String::from_utf8_lossy(typed)
+        );
+        assert_eq!(snapshot.preedit_caret, expected.chars().count());
+    }
+
+    // 拼音分词时不读这一项：仍画展开的全拼。
+    options.shuangpin_preedit_uses_raw = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"nimf");
+    assert_eq!(session.snapshot().unwrap().preedit, "ni'men");
+
+    // 缺省（不分隔）仍是原始按键。
+    options.shuangpin_preedit_uses_raw = true;
+    options.shuangpin_preedit_separated = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"nimf");
+    assert_eq!(session.snapshot().unwrap().preedit, "nimf");
+}
+
 #[test]
 fn custom_profile_runs_the_users_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -1312,6 +1445,26 @@ fn shuangpin_key_hints_reject_an_unknown_profile() {
     assert!(shuangpin_key_hints("").is_empty());
     assert!(shuangpin_key_hints("xiaohe-v2").is_empty());
     assert!(shuangpin_key_hints("quanpin").is_empty());
+    assert!(shuangpin_key_hints("Cantonese").is_empty());
+    assert!(shuangpin_key_hints("cantonese_shuangpin").is_empty());
+}
+
+/// 粤语双拼没有普通话双拼的方案名，宿主用保留名取它的键面；这个名字不会被当成普通话方案。
+#[test]
+fn shuangpin_key_hints_answer_for_cantonese_shuangpin_by_its_reserved_name() {
+    let hints: std::collections::HashMap<String, String> =
+        shuangpin_key_hints(super::CANTONESE_SHUANGPIN_HINTS)
+            .into_iter()
+            .map(|entry| (entry.key, entry.hint))
+            .collect();
+    assert_eq!(hints.len(), 27);
+    assert_eq!(hints.get("I").map(String::as_str), Some("gw / i"));
+    assert_eq!(hints.get(";").map(String::as_str), Some("ik ing"));
+    assert!(shuangpin_zero_initials(super::CANTONESE_SHUANGPIN_HINTS).is_empty());
+    assert_eq!(
+        shuangpin_uses_semicolon(super::CANTONESE_SHUANGPIN_HINTS),
+        None
+    );
 }
 
 /// 评测工具靠它把全拼用例编成双拼按键：按名字取内置方案，`custom` 和不认识的名字没有表可编。

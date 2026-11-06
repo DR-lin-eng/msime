@@ -187,6 +187,20 @@ int main() {
             format_model_bytes(239.5e6) == L"240 MB" && format_model_bytes(200) == L"1 KB" &&
             format_model_bytes(1500) == L"2 KB",
         "model sizes");
+  // 「不联网安装」一句：语音模型卡片和整句模型行（#10622）共用。文件名和地址是合成的。
+  check(offline_install_spans({}).empty(), "no offline line without files");
+  {
+    const auto spans = offline_install_spans(
+        {{L"model-a.tar.bz2", L"https://example.com/a", 239.5e6}, {L"tokens.txt", L"https://example.com/t", 1500}});
+    std::wstring shown;
+    for (auto const &span : spans)
+      shown += span.text;
+    check(shown == L"不联网安装：先下载 model-a.tar.bz2（240 MB）、tokens.txt（2 KB），再点“从文件导入”一起选中。文件改过名也能认出。",
+          "offline line text");
+    check(spans.size() == 5 && spans[0].url.empty() && spans[1].url == L"https://example.com/a" &&
+              spans[2].url.empty() && spans[3].url == L"https://example.com/t" && spans[4].url.empty(),
+          "only file names link to their download");
+  }
   check(local_model_languages({L"zh", L"en", L"xx"}) == L"中文、英语、xx", "model languages");
   check(local_model_in_use(L"C:\\m\\a", L" C:\\m\\a\\ ") && !local_model_in_use(L"C:\\m\\a", L"") &&
             !local_model_in_use(L"C:\\m\\a", L"C:\\m\\b"),
@@ -215,6 +229,14 @@ int main() {
             local_model_import_error_message(L"new_model_error") ==
                 std::wstring(L"操作失败，请重试。"),
         "导入复用取消与未知错误的公共处理");
+
+  // #10633：对话框打不开或读不到所选文件时要有说明，用户自己关掉对话框不算失败。
+  check(!local_model_picker_error_message(0, false) &&
+            local_model_picker_error_message(static_cast<std::int32_t>(0x80004005U), false) ==
+                std::wstring(L"无法打开或读取文件选择对话框（错误 0x80004005），请重试。") &&
+            local_model_picker_error_message(0, true) ==
+                std::wstring(L"读不到所选文件在本机上的路径，请先把模型文件保存到本机磁盘上的文件夹，再重新选择。"),
+        "导入对话框失败的说明");
 
   // 「服务配置 ›」的状态（desktopVoiceServiceStatus 的 Windows 分支）：豆包没填时照实说没填，不说「暂用系统识别」。
   check(service_status(L"local", false, true, L"", L"", L"", L"", L"api_key") == L"未选模型" &&

@@ -226,6 +226,20 @@ assert (
     < menu_actions.index("candidate_clear_fix_label")
     < menu_actions.index("candidate_remove_label")
 )
+# 「朗读」「加入生词本」在词库操作之后，「朗读」在前，只在本机装着 spd-say、共享层答得出要读的英文时出现；IBus 的「候选操作」子菜单同样排在最后一组。
+assert (
+    menu_actions.index("candidate_remove_label")
+    < menu_actions.index("msime::read_aloud::kMenuLabel")
+    < menu_actions.index("candidate_personal_wordbook_label")
+)
+assert "read_aloud_available() &&\n      msime::read_aloud::text_for(item.text(), item.display().translation)" in menu_actions
+ibus_actions = body(ibus_source, "IBusProperty *candidate_actions(IBusEngine *engine) {")
+assert (
+    ibus_actions.index("candidate_remove_label")
+    < ibus_actions.index('"CandidateReadAloud"')
+    < ibus_actions.index('"CandidatePersonalWordbook"')
+)
+assert "msime::linux_host::read_aloud_available() &&" in ibus_actions
 # 关掉页码时主题不生成 ‹ ›：两节只在 page_arrows 为真时写出。
 assert "if (style.page_arrows)" in candidate_theme
 framework_actions = body(source, "candidateActions(const fcitx::CandidateWord &candidate) const override")
@@ -990,5 +1004,22 @@ assert "pronounce" not in body(ibus_source, "void translate_sentence(IBusEngine 
 assert "if (s.candidate_pronunciation) s.pronunciations.store(request->pronunciations);" in ibus_complete
 assert "pronunciations.clear();" in body(ibus_source, "  void invalidate_providers() {", "\n  }\n")
 assert "candidate_gloss_inline_readings(translation, pronunciation)" in body(ibus_source, "void render(IBusEngine *engine, const Json &view) {", "\n}\n")
+
+# 「背单词（今日待复习 N）…」：不进状态区顶层（kimpanel 把顶层动作画成常驻按钮，会变成一直挂着的角标），只在这个上下文有待复习、没有在组字时列进「桌面工具」子菜单；组字开始和结束时 render 跟着增删，受限的上下文不读也不列。IBus 那边同样放进桌面工具，可见性随组字在 render 里更新。
+arrange = body(source, "  void arrangeStatusArea(fcitx::InputContext *ic) {", "\n  }\n")
+assert "vocabulary_action_" not in arrange and "syncVocabularyEntry(ic);" in arrange
+sync_vocabulary = body(source, "  bool syncVocabularyEntry(fcitx::InputContext *ic) {", "\n  }\n")
+assert "state->vocabulary_due_.has_value() &&" in sync_vocabulary
+assert "!(state->view_.is_object() && state->composingOrCandidates())" in sync_vocabulary
+assert "desktop_tools_menu_.insertAction(&desktop_clipboard_action_, &vocabulary_action_);" in sync_vocabulary
+assert "desktop_tools_menu_.removeAction(&vocabulary_action_);" in sync_vocabulary
+assert "desktop_tools_menu_.addAction(&vocabulary_action_)" not in source
+refresh_vocabulary = body(source, "  void refreshVocabularyDue(fcitx::InputContext *ic) {", "\n  }\n")
+assert refresh_vocabulary.index("if (state->restricted()) return;") < refresh_vocabulary.index("vocabulary_due_label(")
+assert "engine_->syncVocabularyEntry(&ic_)" in body(source, "void FcitxState::render() {", "\n}\n")
+vocabulary_activate = body(source, "class FcitxVocabularyAction : public fcitx::Action {", "\n};\n")
+assert "menuTarget()" in vocabulary_activate and "restricted()" in vocabulary_activate
+assert "ibus_prop_list_append(items, vocabulary_due_property(engine));" in body(ibus_source, "IBusProperty *desktop_tools_property(IBusEngine *engine) {", "\n}\n")
+assert "sync_vocabulary_row(engine);" in body(ibus_source, "void render(IBusEngine *engine, const Json &view) {", "\n}\n")
 
 print("Fcitx5 addon metadata passed")

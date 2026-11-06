@@ -17,11 +17,13 @@ import android.widget.TextView;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
+import app.msime.android.AppEdition;
 import app.msime.android.ClearLearningCopy;
 import app.msime.android.CommunityCatalog;
 import app.msime.android.CommunityRequest;
 import app.msime.android.DictionaryCollectionsStore;
 import app.msime.android.InputFeatureToggle;
+import app.msime.android.KeyboardScheme;
 import app.msime.android.HttpBodyPolicy;
 import app.msime.android.ListPolicy;
 import app.msime.android.NumberPolicy;
@@ -52,8 +54,9 @@ public final class LexiconPage extends ReloadingDetailPage {
     private static final String BUILTIN_KIND = "pinyin";
     private static final int DISCOVER_LIMIT = 8;
 
-    /** 渲染一次需要的全部数据；`builtinCount` 为负表示读不到。 */
-    private record Model(DictionaryCollectionsStore.View view, long builtinCount, boolean learning, String failure) {}
+    /** 渲染一次需要的全部数据；`builtinCount`、`cantoneseCount` 为负表示读不到。 */
+    private record Model(DictionaryCollectionsStore.View view, long builtinCount, long cantoneseCount, boolean learning,
+                         String failure) {}
 
     @Nullable private Model model;
     @Nullable private SogouSection sogouSection;
@@ -126,13 +129,15 @@ public final class LexiconPage extends ReloadingDetailPage {
         // 打开页面也顺手送一批导入词库的待写入词条：返回的视图和 load 一样，只是多送了一批，不必等用户点刷新。
         DictionaryCollectionsStore.Result<DictionaryCollectionsStore.View> view = DictionaryCollectionsStore.flush(context);
         DictionaryCollectionsStore.Result<Long> count = DictionaryCollectionsStore.builtinCount(context, BUILTIN_KIND);
+        DictionaryCollectionsStore.Result<Long> cantonese = DictionaryCollectionsStore.builtinCount(context, "cantonese");
         JSONObject preferences = KeyboardSheets.preferences(context);
         boolean learning = preferences == null
             ? InputFeatureToggle.LEARNING.enabledByDefault()
             : preferences.optBoolean(InputFeatureToggle.LEARNING.key(), InputFeatureToggle.LEARNING.enabledByDefault());
         DictionaryCollectionsStore.View value = view.ok() ? view.value()
             : new DictionaryCollectionsStore.View(List.of(), List.of(), 0, null);
-        return new Model(value, count.ok() ? count.value() : -1, learning, view.failure());
+        return new Model(value, count.ok() ? count.value() : -1, cantonese.ok() ? cantonese.value() : -1, learning,
+            view.failure());
     }
 
     private void loadDiscover() {
@@ -160,6 +165,13 @@ public final class LexiconPage extends ReloadingDetailPage {
             : NumberPolicy.groupedCount(current.builtinCount());
         installed.addView(KeyboardSheets.badgeNavRow(context, "汉", "拼音词库", builtinCount, "已启用",
             ThemeColorPolicy.accent(context), () -> openDetail(DictionaryCollectionsStore.BUILTIN_PINYIN, "拼音词库")));
+        // 粤语词库只有自己加的粤语词，粤语方案打字时和发布的粤语词一起出候选；本版本没有粤语方案时这些词用不上，不列出。
+        if (KeyboardScheme.CANTONESE.offeredBy(AppEdition.current())) {
+            String cantoneseCount = current.cantoneseCount() <= 0 ? "自己加的粤语词"
+                : NumberPolicy.groupedCount(current.cantoneseCount()) + "自己的词";
+            installed.addView(KeyboardSheets.badgeNavRow(context, "粤", "粤语词库", cantoneseCount, "已启用",
+                ThemeColorPolicy.accent(context), () -> openDetail(DictionaryCollectionsStore.BUILTIN_CANTONESE, "粤语词库")));
+        }
         for (DictionaryCollectionsStore.Collection collection : current.view().collections()) {
             String subtitle = NumberPolicy.groupedCount(collection.entryCount())
                 + DictionaryCollectionsStore.pendingDescription(collection.pending())
@@ -169,12 +181,12 @@ public final class LexiconPage extends ReloadingDetailPage {
                 collection.enabled() ? ThemeColorPolicy.accent(context) : ThemeColorPolicy.subText(context),
                 () -> openDetail(collection.id(), collection.name())));
         }
-        installed.footer("点进词库可以启用、停用和编辑词条。已启用的词库会一起参与候选。");
+        installed.help("点进词库可以启用、停用和编辑词条。已启用的词库会一起参与候选。");
         if (!current.failure().isEmpty()) installed.note(current.failure());
 
         GroupCard updates = GroupCard.add(sectionColumn(target, "已安装"), "词库更新");
-        updates.toggle("自动更新词库", "每天检查兼容的词库版本", updateStatus == null || updateStatus.optBoolean("enabled", true),
-            enabled -> updateDictionary("configure", enabled));
+        updates.toggle("自动更新词库", null, updateStatus == null || updateStatus.optBoolean("enabled", true),
+            enabled -> updateDictionary("configure", enabled)).help("每天检查兼容的词库版本");
         updates.note(DictionaryUpdates.message(updateStatus));
         boolean updating = updateStatus != null && ("checking".equals(updateStatus.optString("phase")) || "downloading".equals(updateStatus.optString("phase")));
         updates.nav("检查词库更新", null, null, () -> updateDictionary("check", null)).setEnabled(!updating);
@@ -185,8 +197,8 @@ public final class LexiconPage extends ReloadingDetailPage {
         if (sogouSection == null) sogouSection = new SogouSection(getViewLifecycleOwner(), context, sectionColumn(target, "已安装"), false);
         else sogouSection.attach(sectionColumn(target, "已安装"));
         GroupCard sync = GroupCard.add(sectionColumn(target, "已安装"), "同步");
-        sync.nav(PageId.DICTIONARY_SYNC.title(), "「我的词条」经自己的 WebDAV 网盘在设备之间同步", null,
-            () -> SettingsNavigator.open(context, PageId.DICTIONARY_SYNC, null));
+        sync.nav(PageId.DICTIONARY_SYNC.title(), null, null,
+            () -> SettingsNavigator.open(context, PageId.DICTIONARY_SYNC, null)).help("「我的词条」经自己的 WebDAV 网盘在设备之间同步");
 
         GroupCard community = GroupCard.add(sectionColumn(target, "社区"), "发现词库").withDividers(58);
         List<CommunityCatalog.Item> items = discover;
@@ -198,21 +210,21 @@ public final class LexiconPage extends ReloadingDetailPage {
             for (CommunityCatalog.Item item : items) community.addView(discoverRow(item, current.view()));
         }
         // 这里只列前几个，完整列表（搜索、详情、举报）压在词库页上面，返回回到这里。
-        community.nav("浏览更多词库", "搜索社区里的全部词库", null,
-            () -> CommunityFragment.browse(context, CommunityRequest.Kind.DICTIONARY));
-        community.nav("提交缺失词条", "前往官网填写，审核后随公共词库更新；个人学习不会自动公开", null,
-            () -> AboutPage.openLink(context, "https://msime.app/words/"));
+        community.nav("浏览更多词库", null, null,
+            () -> CommunityFragment.browse(context, CommunityRequest.Kind.DICTIONARY)).help("搜索社区里的全部词库");
+        community.nav("提交缺失词条", null, null,
+            () -> AboutPage.openLink(context, "https://msime.app/words/")).help("前往官网填写，审核后随公共词库更新；个人学习不会自动公开");
 
         GroupCard learning = GroupCard.add(sectionColumn(target, "学习"), "学习");
         InputFeatureToggle toggle = InputFeatureToggle.LEARNING;
-        learning.toggle(toggle.title(), toggle.description(), current.learning(), this::saveLearning);
-        learning.nav(PageId.VOCABULARY_REVIEW.title(), "用内置词书或自己的词表复习英文单词", null,
-            () -> SettingsNavigator.open(context, PageId.VOCABULARY_REVIEW, null));
+        learning.toggle(toggle.title(), null, current.learning(), this::saveLearning).help(toggle.description());
+        learning.nav(PageId.VOCABULARY_REVIEW.title(), null, null,
+            () -> SettingsNavigator.open(context, PageId.VOCABULARY_REVIEW, null)).help("用内置词书或自己的词表复习英文单词");
         learning.button(ClearLearningCopy.TITLE, ClearLearningCopy.SUBTITLE, ClearLearningCopy.ACTION, this::confirmClearLearning);
 
         if (ManagementUi.available()) {
             GroupCard more = GroupCard.add(sectionColumn(target, "已安装"), "更多");
-            more.nav("云词库", "在管理界面里管理云端词库", null, this::openCloudDictionary);
+            more.nav("云词库", null, null, this::openCloudDictionary).help("在管理界面里管理云端词库");
         }
     }
 

@@ -29,11 +29,11 @@ export const themeCatalog: () => string;
  */
 export const resolveTheme: (request: string) => string;
 /**
- * 应用主题选择器：按选择器顺序（`siji`、`chunya`、`xiayin`、`qiushan`、`dongxue`）返回 `{app_themes:[{id,title,season,seasonal,light,dark}],default:"siji"}`。`light` 和 `dark` 是 `{accent,accent_soft,on_accent,background,card,hair}`；`siji` 的 `season` 为 null、`seasonal` 为 true，并绘制为秋杉，因此目录不随时钟变化。
+ * 应用主题选择器：按选择器顺序（`siji`、`chunya`、`xiayin`、`qiushan`、`dongxue`）返回 `{app_themes:[{id,title,season,seasonal,light,dark}],default:"siji"}`。`light` 和 `dark` 是 `{accent,accent_soft,on_accent,background,card,hair,candidate_accent}`；`siji` 的 `season` 为 null、`seasonal` 为 true，并绘制为秋杉，因此目录不随时钟变化。
  */
 export const appThemeCatalog: () => string;
 /**
- * 输入 `{app_theme,month?,dark}`，其中 `month` 是宿主的本地日历月份（1-12，仅 `siji` 使用；省略时取 UTC 月份）；输出 `{id,season,accent,accent_soft,on_accent,background,card,hair}`，`season` 为实际绘制的季节。纯函数，可以在主线程上运行。
+ * 输入 `{app_theme,month?,dark}`，其中 `month` 是宿主的本地日历月份（1-12，仅 `siji` 使用；省略时取 UTC 月份）；输出 `{id,season,accent,accent_soft,on_accent,background,card,hair,candidate_accent}`，`season` 为实际绘制的季节，`candidate_accent` 是触屏候选条首选的字色（浅色加深到 WCAG AA，深色等于 `accent`）。纯函数，可以在主线程上运行。
  */
 export const resolveAppTheme: (request: string) => string;
 /** Staged engine resources in; `{profile,sourceCommit}` from the packaged dictionary manifest out. */
@@ -150,6 +150,12 @@ export const aiSkinCancel: (request: string) => string;
  * Starts the usage-reporting session at keyboard start: `{directory,platform,version,preferences_directory}` in, `{enabled,crash_record_path?,previous_session_crashed?,crashes?}` out. Closes the previous session (`session_crash` only when it left a crash record), queues crash records and today's `active`, writes the new session marker. With `usage_reporting` off it clears instead. Small files only, no network.
  */
 export const telemetryBegin: (request: string) => string;
+/** 正常主线程路径以共享层返回的原路径和记录头武装原生采集；空值同步停写。 */
+export const telemetryNativeCapture: (path: string, header: string) => boolean;
+/** 按需加载的原生库（sherpa-onnx 语音运行库）加载后重建原生崩溃记录器的模块快照，崩溃帧才能对上模块名与 build-id；枚举失败保留旧快照。不联网。 */
+export const telemetryNativeRefreshModules: () => void;
+/** `{directory,edition?}`：读取并原子确保共享偏好的持续授权代次；不联网。 */
+export const telemetryConsent: (request: string) => string;
 /** `{directory}`: the keyboard is shutting down normally; queues the `session` event. No network. */
 export const telemetryEnd: (request: string) => string;
 /** `{directory,message,stack}` from the crash observer: writes the running session's crash record, sent on the next start. No network. */
@@ -180,10 +186,20 @@ export const keySoundRenderNotes: (
 /** The statistics master switch under an absolute state directory: 1 on, 0 off or never written, -1 for an invalid directory or unreadable document. */
 export const typingStatisticsEnabled: (directory: string) => number;
 export const vocabularyReview: (request: string) => Promise<string>;
+/** 「加入生词本」：msime_client_personal_wordbook_add，在工作线程上执行。 */
+export const personalWordbookAdd: (request: string) => Promise<string>;
+/** 设置应用导入键盘发布的生词本：msime_client_personal_wordbook_merge，请求里是文件路径，同步执行（共享沙箱的导入本来就在主线程上同步进行）。 */
+export const personalWordbookMerge: (request: string) => string;
+/** 「朗读」要读的英文：msime_client_read_aloud_text，请求是 {candidate,gloss?}，应答的 value 是要读的文字或 null。纯函数，同步执行。 */
+export const readAloudText: (request: string) => string;
+/** 键盘清走设置应用已经并过的词：msime_client_personal_wordbook_drain，请求里是文件路径，同步执行（在键盘获得焦点时的共享沙箱同步里）。 */
+export const personalWordbookDrain: (request: string) => string;
 /** Locked mobile history operations; every mutation answers with the latest complete entry list. */
 export const mobileClipboardHistory: (request: string) => string;
 export const emojiCatalog: (query: string, resources: string) => string;
 export const candidateGlosses: (request: string, resources: string) => string;
+/** 英文候选或英文释义首个词组的离线音标（`msime_client_pronunciation_request`）：请求为 `{generation,items:[{text,language:"en"}]}`，读 resources 旁的 `pronunciations/en-phonetic.db`，没装时回答空列表。同步查本机表，不联网。 */
+export const candidatePronunciations: (request: string, resources: string) => string;
 /** Close the calling thread's cached candidate-gloss databases and drop its parsed custom translations; the next query reopens them. Call on the thread that queries glosses (the UI thread). */
 export const releaseGlossCaches: () => void;
 /** `{prefix,limit}` against the packaged English dictionary; no session, safe off the UI thread. */

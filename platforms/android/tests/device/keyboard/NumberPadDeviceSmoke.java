@@ -14,18 +14,25 @@ import org.json.JSONObject;
 /** 数字九宫格：中文各键面的真实网格、连续字面输入、符号往返和键位统计，以及英文、长空格样式、日文罗马字和假名、韩文、藏文、大千注音借来的数字九宫格（半角写法的左列多出的半角符号、藏文 ' 交给会话、注音 #+= 的共享符号行）。 */
 public final class NumberPadDeviceSmoke extends DeviceSmoke {
     private boolean passwordNumberPad;
+    private boolean randomDigits;
 
     @Override public void onCreate(android.os.Bundle arguments) {
+        randomDigits = arguments != null && "true".equals(arguments.getString("random-digits"));
         passwordNumberPad = arguments != null && "true".equals(arguments.getString("password-number-pad"));
         super.onCreate(arguments);
     }
 
     @Override protected String successDescription() {
+        if (randomDigits) return "随机数字入口默认关闭、真实开关、逐次按键面上屏（U 模式进组字）与重排、离页保持及英文隔离";
         if (passwordNumberPad) return "文字密码框可在字母与数字九宫格间往返，数字密码直接显示九宫格";
         return "Number-pad geometry, continuous arithmetic input, symbols, return and key statistics in every scheme";
     }
 
     @Override protected void runChecks() throws Exception {
+        if (randomDigits) {
+            new RandomDigitsDeviceChecks(this).run();
+            return;
+        }
         if (passwordNumberPad) {
             verifyPasswordNumberPad();
             return;
@@ -93,7 +100,7 @@ public final class NumberPadDeviceSmoke extends DeviceSmoke {
                 Predicate<AccessibilityNodeInfo> mode = node -> node.isClickable()
                     && node.getContentDescription() != null
                     && node.getContentDescription().toString().startsWith("切换到");
-                await(key("中").or(key("英")).and(mode));
+                settleLetterFace(key("中").or(key("英")).and(mode));
                 if (hasKey(key("英"))) tap(key("英"));
                 awaitStableBounds(key("中").and(mode));
                 await(letterFace(layout[0]));
@@ -214,7 +221,7 @@ public final class NumberPadDeviceSmoke extends DeviceSmoke {
                 // 语言键的描述写「这一下切到哪里」：在所选方案里是「切换到英文输入」，在英文里是「切换到所选输入方案」。全局输入模式可能沿用上一套用例的英文。
                 Predicate<AccessibilityNodeInfo> toEnglish = languageTarget("切换到英文输入");
                 Predicate<AccessibilityNodeInfo> toScheme = languageTarget("切换到所选输入方案");
-                await(toEnglish.or(toScheme));
+                settleLetterFace(toEnglish.or(toScheme));
                 if (english ? hasKey(toEnglish) : hasKey(toScheme)) tap(english ? toEnglish : toScheme);
                 await(english ? toScheme : toEnglish);
                 Predicate<AccessibilityNodeInfo> entry = node -> equalsText("app.msime.android", node.getPackageName())
@@ -321,7 +328,44 @@ public final class NumberPadDeviceSmoke extends DeviceSmoke {
     }
 
     private void verifyPasswordNumberPad() throws Exception {
-        restartIme();
+        File root = getTargetContext().getFilesDir().getCanonicalFile();
+        JSONObject options = new JSONObject(read(new File(root, "runtime-options.json")));
+        File directory = new File(options.getString("preferences_directory")).getCanonicalFile();
+        if (!directory.toPath().startsWith(root.toPath()))
+            throw new AssertionError("Preferences escaped test sandbox");
+        File preferences = new File(directory, "preferences.json");
+        byte[] originalPreferences = snapshot(preferences);
+        long revision = originalPreferences == null ? 0
+            : new JSONObject(new String(originalPreferences, StandardCharsets.UTF_8)).getLong("revision");
+        try {
+            // 以九键用户进密码框（#10481）：没有引擎会话的数字密码框按记住的中文键面画字母层，先在中文框里显示一次九键，让这份记忆确定是九键，而不是取决于前一个套件停在哪种键面。
+            stage = "password nine-key user prepare";
+            JSONObject values = new JSONObject(options.getJSONObject("preferences").toString())
+                .put("scheme", "quanpin").put("last_chinese_scheme", "quanpin")
+                .put("touch_keyboard_layout", "nine_key").put("ime_mode_scope", "global")
+                .put("default_ime_mode", "chinese")
+                .put("touch_keyboard_schemes", new JSONObject().put("enabled", new JSONArray().put("nine_key"))
+                    .put("selected", "nine_key"));
+            publish(preferences, new JSONObject().put("format_version", 1).put("revision", ++revision)
+                .put("preferences", values).toString().getBytes(StandardCharsets.UTF_8));
+            restartIme();
+            openEditor();
+            Predicate<AccessibilityNodeInfo> mode = node -> node.isClickable()
+                && node.getContentDescription() != null
+                && node.getContentDescription().toString().startsWith("切换到");
+            await(key("中").or(key("英")).and(mode));
+            if (hasKey(key("英"))) tap(key("英"));
+            await(letterFace("nine_key"));
+            verifyPasswordTypes();
+        } finally {
+            shellDiscard("am start -W -n app.msime.android/app.msime.android.home.HomeActivity");
+            restartIme();
+            restore(preferences, originalPreferences);
+            restartIme();
+        }
+    }
+
+    private void verifyPasswordTypes() throws Exception {
         for (int type : new int[] {
                 android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD,
                 android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
@@ -344,12 +388,26 @@ public final class NumberPadDeviceSmoke extends DeviceSmoke {
             awaitPasswordLength(4);
             tap(key("⌫"));
             awaitPasswordLength(3);
+            // 数字密码也是英文字母层（#10481）：上一套件留下的九键、注音键面记忆不能画进密码框。
+            stage = "password letters type " + type;
             tap(described("返回原键盘"));
             await(key("q"));
             // 文字密码仍能输入字母；数字密码的编辑器会过滤字母，因此只检查往返键面。
             if ((type & android.text.InputType.TYPE_MASK_CLASS) == android.text.InputType.TYPE_CLASS_TEXT) {
                 tap(key("q"));
                 awaitPasswordLength(4);
+                // 密码框不建引擎会话，长按 123 照样打开符号面板（#10517）；点「（」只上屏这半个，不补「）」。
+                stage = "password symbol panel type " + type;
+                AccessibilityNodeInfo layer = await(described("切换到数字和符号"));
+                if (!layer.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK))
+                    throw new AssertionError("Symbol panel hold failed in password type " + type);
+                await(described("符号面板"));
+                tap(describedPrefix("符号分类 中文"));
+                await(described("符号分类 中文，已选中"));
+                tap(described("按键 符号 （，长按只输入这半个"));
+                awaitPasswordLength(5);
+                tap(described("关闭符号面板"));
+                await(key("q"));
             }
             tap(described("切换到数字和符号"));
             await(key("#+="));
@@ -484,6 +542,26 @@ public final class NumberPadDeviceSmoke extends DeviceSmoke {
         for (android.view.accessibility.AccessibilityWindowInfo window : automation.getWindows())
             if (find(window.getRoot(), predicate) != null) return true;
         return false;
+    }
+
+    /** 输入法重绑后符号面板可能晚于编辑器出现；轮询时把它关掉，再开始语言键断言。 */
+    private void settleLetterFace(Predicate<AccessibilityNodeInfo> target) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 15000;
+        do {
+            // API 34+ 的 find 不再逐节点刷新；每拍先清 UiAutomation 缓存，避免读到已拆掉的面板或旧语言键。
+            dropStaleNodes();
+            if (hasKey(target)) return;
+            // 只点本拍查到的关闭键且不阻塞：面板在检查和点击之间自己消失时，下一拍重新查询即可。
+            for (android.view.accessibility.AccessibilityWindowInfo window : automation.getWindows()) {
+                AccessibilityNodeInfo close = find(window.getRoot(), described("关闭符号面板"));
+                if (close != null && close.isClickable()) {
+                    close.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    break;
+                }
+            }
+            SystemClock.sleep(100);
+        } while (SystemClock.uptimeMillis() < deadline);
+        throw new AssertionError("等待字母键面超时：" + imeTexts());
     }
 
     private void awaitKeyStatistics(File file, long expectedDigits, long expectedNine,

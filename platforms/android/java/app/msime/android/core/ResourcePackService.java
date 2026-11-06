@@ -45,7 +45,7 @@ import org.json.JSONObject;
  *
  * <p>本地语音模型（{@link LocalVoiceModels}）和资源包走同一条队列：同样几十到几百 MB、同样要在主进程的工作线程上跑、同样要能从通知里取消。它们在这里的键是 {@code voice-model:<id>}（{@link #voiceModelKey}），状态、进度、取消和结果通知与资源包完全相同，只是安装和取消调用的是模型的共享接口。
  *
- * <p>下载只由用户的操作发起：在「添加语言」里加日语、粤语、注音、笔画或五笔，打开离线释义，打开离线识别，或在设置页点「下载」「重试」。启动时不自动下载，只有一个例外：偏好里当前方案或要切回的中文方案是五笔、而本机没有五笔码表时（升级到不带码表的瘦包后，旧码表与新词库锁对不上收编不了；或在首启引导里选了五笔），设置应用回到前台时弹窗问一次要不要下载（{@link #requestOnBehalf}），见 {@link KeyboardScheme#wubiTableWanted}。服务也不在进程被杀后自己重启（{@link #START_NOT_STICKY}）；没下完的文件留在共享层的续传目录里，下次点下载时用 HTTP Range 接着下。
+ * <p>下载只由用户的操作发起：在「添加语言」里加日语、粤语、注音、笔画或五笔，打开离线释义，打开离线识别，把整句候选选成「增强」，或在设置页点「下载」「重试」。启动时不自动下载，只有两个例外。一是整句候选「增强」的逐键重排模型：「增强」开着而本机没有它时，{@link RerankModelDownload} 排的后台任务在不按流量计费的网络上替用户在后台下载（不进前台、不发通知，状态照样记在这里，设置页那一行看得到进度），按流量计费时设置应用回到前台问一次。二是偏好里当前方案或要切回的中文方案是五笔、而本机没有五笔码表时（升级到不带码表的瘦包后，旧码表与新词库锁对不上收编不了；或在首启引导里选了五笔），设置应用回到前台时弹窗问一次要不要下载（{@link #requestOnBehalf}），见 {@link KeyboardScheme#wubiTableWanted}。服务也不在进程被杀后自己重启（{@link #START_NOT_STICKY}）；没下完的文件留在共享层的续传目录里，下次点下载时用 HTTP Range 接着下。
  *
  * <p>同一个资源包同一时间只有一个下载：这里按资源包记着状态，正在下的再点一次什么也不做（共享层另有 {@code resource_pack_busy} 兜底）。服务不声明 {@code android:process}，所以和设置页一样跑在主进程，:ime 进程从不安装：两个进程同时装同一个包会互相清掉对方的暂存目录。
  *
@@ -63,7 +63,8 @@ public final class ResourcePackService extends Service {
     private static final int RESULT_NOTIFICATION = 0x6d730510;
     private static final List<String> PACKS = List.of(ResourcePacks.JAPANESE, ResourcePacks.LANGUAGE_DICTIONARIES,
         ResourcePacks.OFFLINE_GLOSSES, ResourcePacks.PRONUNCIATIONS, ResourcePacks.VOICE_RUNTIME,
-        ResourcePacks.OCR_MODULE, ResourcePacks.WUBI);
+        ResourcePacks.OCR_MODULE, ResourcePacks.WUBI, ResourcePacks.TARGET_PRONUNCIATIONS,
+        ResourcePacks.RERANK_MODEL);
     private static final String VOICE_MODEL_PREFIX = "voice-model:";
 
     /** 一个资源包正在经历的阶段。下载完成后不再有状态。 */
@@ -93,6 +94,8 @@ public final class ResourcePackService extends Service {
     private static final Map<String, String> MODEL_TITLES = new ConcurrentHashMap<>();
     /** 这一次是从本地文件导入、而不是下载的资源包；结果通知据此说「已导入」。 */
     private static final Set<String> IMPORTS = ConcurrentHashMap.newKeySet();
+    /** 正在卸载的资源包。只在主线程上增删，并且与 {@link #claim} 都在主线程判断：同一个资源包的安装和卸载不会同时被接下。状态在进程里，设置页重建或关闭都不影响进行中的卸载。 */
+    private static final Set<String> REMOVING = ConcurrentHashMap.newKeySet();
     private static final Handler MAIN = MainThreadPolicy.mainHandler();
 
     // ---- 设置页用的静态入口（主线程） ----
@@ -100,6 +103,52 @@ public final class ResourcePackService extends Service {
     /** 这个资源包当前的下载状态；没在下、也没失败过时为 null。 */
     @Nullable public static Status status(String pack) {
         return STATUS.get(pack);
+    }
+
+    /** 卸载成功后清掉旧的失败提示，进行中的安装状态不能清除。主线程调用。 */
+    private static void clearFinishedStatus(String pack) {
+        STATUS.computeIfPresent(pack, (id, current) -> current.running() ? current : null);
+    }
+
+    /** 这个资源包是否正在卸载；卸载期间页面应禁用下载、导入和再次卸载。 */
+    public static boolean removing(String pack) {
+        return REMOVING.contains(pack);
+    }
+
+    /**
+     * 用户确认卸载：在进程级的工作线程上删除已发布的资源包，不删除用户原来下载的文件。正在下载、导入或卸载的资源包不接，提示后返回 false。主线程调用。
+     *
+     * <p>卸载开始和结束都会通知 {@link Listener}（结束时 {@code finished} 为真），结果用提示告诉用户；页面在卸载期间被重建或关闭，卸载照常完成，新页面按 {@link #removing} 和重读的安装状态显示。共享层对同一资源包的安装与卸载另有 {@code resource_pack_busy} 兜底。
+     */
+    public static boolean remove(Context context, String pack) {
+        Context app = context.getApplicationContext();
+        Status current = STATUS.get(pack);
+        if ((current != null && current.running()) || !REMOVING.add(pack)) {
+            MsToast.show(context, title(pack) + "正在下载、导入或卸载，请完成后再试");
+            return false;
+        }
+        notifyListeners(pack, false);
+        ThreadPolicy.startNamedThread("msime-resource-pack-remove-" + pack, () -> {
+            String message;
+            boolean removed = false;
+            try {
+                removed = ResourcePacks.remove(app, pack);
+                message = removed ? title(pack) + "已卸载" : title(pack) + "卸载失败：没有找到已导入的文件";
+            } catch (ResourcePacks.Failure failure) {
+                message = "resource_pack_busy".equals(failure.code())
+                    ? title(pack) + "正在下载、导入或卸载，请完成后再试"
+                    : title(pack) + "卸载失败，请稍后重试";
+            }
+            boolean success = removed;
+            String result = message;
+            MAIN.post(() -> {
+                REMOVING.remove(pack);
+                if (success) clearFinishedStatus(pack);
+                MsToast.show(app, result);
+                notifyListeners(pack, true);
+            });
+        });
+        return true;
     }
 
     public static void addListener(Listener listener) {
@@ -118,7 +167,7 @@ public final class ResourcePackService extends Service {
      */
     public static void request(Context context, String pack, long size) {
         Status current = STATUS.get(pack);
-        if (current != null && current.running()) return;
+        if ((current != null && current.running()) || REMOVING.contains(pack)) return;
         ConnectivityManager connectivity = context.getSystemService(ConnectivityManager.class);
         boolean metered = true;
         if (connectivity != null) {
@@ -150,7 +199,7 @@ public final class ResourcePackService extends Service {
      */
     public static void requestOnBehalf(Context context, String pack, long size, String reason) {
         Status current = STATUS.get(pack);
-        if (current != null && current.running()) return;
+        if ((current != null && current.running()) || REMOVING.contains(pack)) return;
         ConnectivityManager connectivity = context.getSystemService(ConnectivityManager.class);
         boolean metered = true;
         if (connectivity != null) {
@@ -194,7 +243,7 @@ public final class ResourcePackService extends Service {
      */
     public static void requestImport(Context context, String pack, @Nullable String title, List<Uri> uris, long[] expected) {
         Status current = STATUS.get(pack);
-        if ((current != null && current.running()) || uris.isEmpty()) return;
+        if ((current != null && current.running()) || REMOVING.contains(pack) || uris.isEmpty()) return;
         if (title != null && isVoiceModel(pack)) MODEL_TITLES.put(pack, title);
         ClipData clip = ClipData.newRawUri(null, uris.get(0));
         for (int index = 1; index < uris.size(); index++) clip.addItem(new ClipData.Item(uris.get(index)));
@@ -225,8 +274,10 @@ public final class ResourcePackService extends Service {
             case ResourcePacks.WUBI -> "五笔码表";
             case ResourcePacks.OFFLINE_GLOSSES -> "离线释义词典";
             case ResourcePacks.PRONUNCIATIONS -> "离线英文音标词典";
+            case ResourcePacks.TARGET_PRONUNCIATIONS -> "离线外语读音词典";
             case ResourcePacks.OCR_MODULE -> "离线拍照识字模块";
             case ResourcePacks.VOICE_RUNTIME -> "本地语音运行库";
+            case ResourcePacks.RERANK_MODEL -> "整句增强模型";
             default -> isVoiceModel(pack) ? MODEL_TITLES.getOrDefault(pack, "本地语音模型") : pack;
         };
     }
@@ -251,6 +302,39 @@ public final class ResourcePackService extends Service {
         Intent intent = new Intent(context, ResourcePackService.class)
             .setAction(ACTION_INSTALL).putExtra(EXTRA_PACK, pack);
         context.startForegroundService(intent);
+    }
+
+    // ---- 后台任务替用户下载（home.RerankModelJobService，任务自己的工作线程） ----
+
+    /** 后台任务开始下载前在主线程上占住这个资源包，与设置页的下载共用一份状态：已经在下或正在卸载时返回 false，任务就不下了。 */
+    public static boolean claimInBackground(String pack) {
+        Status current = STATUS.get(pack);
+        if ((current != null && current.running()) || REMOVING.contains(pack)) return false;
+        CANCELLING.remove(pack);
+        STATUS.put(pack, new Status(Phase.DOWNLOADING, 0, 0, null));
+        notifyListeners(pack, false);
+        return true;
+    }
+
+    /** 后台下载的进度，任意线程：只更新状态和页面，不发通知（没有前台服务）。用户在页面上点了取消时把取消交给共享层。 */
+    public static void backgroundProgress(String pack, String phase, long done, long total) {
+        if (CANCELLING.contains(pack)) cancelInstall(pack);
+        Phase next = "download".equals(phase) ? Phase.DOWNLOADING : Phase.VERIFYING;
+        Status updated = new Status(next, done, total, null);
+        Status previous = STATUS.get(pack);
+        if (previous != null && previous.phase() == next && previous.percent() == updated.percent()) return;
+        STATUS.put(pack, updated);
+        MAIN.post(() -> notifyListeners(pack, false));
+    }
+
+    /** 后台下载结束，任意线程。{@code failureCode} 为 null 是成功，{@code local_model_cancelled} 是取消（系统停了任务或用户点了取消），都不留状态；其它记成失败原因，页面那一行显示它和「重试」。 */
+    public static void backgroundFinished(String pack, @Nullable String failureCode, @Nullable String message) {
+        MAIN.post(() -> {
+            CANCELLING.remove(pack);
+            if (failureCode == null || "local_model_cancelled".equals(failureCode)) STATUS.remove(pack);
+            else STATUS.put(pack, new Status(Phase.FAILED, 0, 0, "下载失败：" + reason(failureCode, message)));
+            notifyListeners(pack, true);
+        });
     }
 
     // ---- 服务 ----
@@ -285,13 +369,13 @@ public final class ResourcePackService extends Service {
             && !((ResourcePacks.VOICE_RUNTIME.equals(pack) || ResourcePacks.OCR_MODULE.equals(pack))
                 && AppVersionPolicy.playDistribution())
             && !(ACTION_INSTALL.equals(action) && ResourcePacks.OCR_MODULE.equals(pack));
-        if (ACTION_INSTALL.equals(action) && known && claim(pack)) {
+        if (ACTION_INSTALL.equals(action) && known && claim(pack, false)) {
             IMPORTS.remove(pack);
             install(pack, null, null);
         } else if (ACTION_IMPORT.equals(action) && known) {
             List<Uri> uris = uris(intent);
             long[] expected = intent.getLongArrayExtra(EXTRA_SIZES);
-            if (!uris.isEmpty() && expected != null && claim(pack)) {
+            if (!uris.isEmpty() && expected != null && claim(pack, true)) {
                 IMPORTS.add(pack);
                 install(pack, uris, expected);
             }
@@ -310,10 +394,15 @@ public final class ResourcePackService extends Service {
         stop();
     }
 
-    /** 占住这个资源包；已经在下时返回 false。只在主线程上调用。 */
-    private static boolean claim(String pack) {
+    /** 占住这个资源包；已经在下时返回 false。正在卸载时记下失败原因再返回 false：请求在卸载开始前发出、卸载开始后才到达时，用户能看到它为什么没开始。只在主线程上调用。 */
+    private static boolean claim(String pack, boolean imported) {
         Status current = STATUS.get(pack);
         if (current != null && current.running()) return false;
+        if (REMOVING.contains(pack)) {
+            STATUS.put(pack, new Status(Phase.FAILED, 0, 0, (imported ? "导入失败：" : "下载失败：") + reason("resource_pack_removing", null)));
+            notifyListeners(pack, true);
+            return false;
+        }
         CANCELLING.remove(pack);
         STATUS.put(pack, new Status(Phase.DOWNLOADING, 0, 0, null));
         notifyListeners(pack, false);
@@ -447,7 +536,7 @@ public final class ResourcePackService extends Service {
     }
 
     /** 用户在共享偏好里填的下载镜像前缀（与本地语音模型共用的 `voice_input.asr_model_mirror`）；没填时为空，按项目镜像、锁文件原地址的顺序下载。 */
-    private static List<String> mirrors(Context context) {
+    public static List<String> mirrors(Context context) {
         JSONObject snapshot = HostStore.loadPreferences(context);
         JSONObject preferences = snapshot == null ? null : snapshot.optJSONObject("preferences");
         JSONObject voice = preferences == null ? null : preferences.optJSONObject("voice_input");
@@ -508,7 +597,9 @@ public final class ResourcePackService extends Service {
             case "local_model_io" -> "无法写入文件，请检查手机剩余空间";
             case "local_model_invalid_mirror" -> "下载镜像地址无效，请检查镜像设置";
             case "local_model_invalid_root", "invalid state root" -> "请先完成首次设置";
-            case "resource_pack_busy", "local_model_install_running" -> "正在下载中";
+            case "resource_pack_busy" -> "正在下载、导入或卸载中，请稍后重试";
+            case "resource_pack_removing" -> "正在卸载，请等卸载完成后重试";
+            case "local_model_install_running" -> "正在下载中";
             case "local_model_unknown" -> "这个模型已不在目录里，请更新应用";
             default -> code.isEmpty() ? "下载组件不可用，请重试" : "下载失败（" + code + "）";
         };

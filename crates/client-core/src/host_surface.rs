@@ -51,6 +51,21 @@ impl HostPlatform {
         }
     }
 
+    /// 这个宿主是否显示上屏后联想（偏好 `next_word_prediction`），见 `HostCapabilities::next_word_prediction`。联想没有组字，宿主要能在没有预编辑时显示候选，并且像普通候选一样能点选、按数字键或空格选中联想，回车和标点照常输入，Esc 关闭联想。每个宿主在接好这些的那次改动里加上自己；host-api 只在这里为真的宿主上把偏好交给 Engine。
+    ///
+    /// Windows 没有预编辑时由 TIP 在光标处给 Server 发 Show，候选窗画 Server 会话自己的联想；点选、数字键和空格都由 Server 在它的会话里选中，TIP 把文字插在光标处；回车、标点照常交给应用，Esc 由 TIP 吃下并关掉联想。
+    pub fn shows_next_word_prediction(self) -> bool {
+        matches!(
+            self,
+            HostPlatform::Android
+                | HostPlatform::Linux
+                | HostPlatform::Macos
+                | HostPlatform::Windows
+                | HostPlatform::Ios
+                | HostPlatform::Harmony
+        )
+    }
+
     /// 这个宿主是否读偏好里的中英混输触发字符数，见 `HostCapabilities::mixed_input_minimum_prefix`。只有触屏宿主（Android、iOS、HarmonyOS）读：九键、十四键上触发字符数是按键次数，在玻璃上多打几个字母的代价更大，Android 也是应用户要求才加的这一项。三个桌面宿主（macOS、Windows、Linux）不读，固定用 [`crate::preferences::DEFAULT_MIXED_INPUT_MINIMUM_PREFIX`]。
     pub fn reads_mixed_input_minimum_prefix(self) -> bool {
         matches!(
@@ -229,7 +244,7 @@ pub struct HostCapabilities {
     /// candidate size into the desktop panel's single font, but the composition itself is drawn by
     /// the focused application, so a separate preedit size would have nothing to change there.
     pub candidate_preedit_font: bool,
-    /// The host can hide the candidate panel's page indicator without changing pagination. On macOS and in the Linux Fcitx5 theme that also hides the ‹ › arrows sharing the card's top row.
+    /// 宿主能按 `show_candidate_page_number` 隐藏候选的页码而不改变翻页。macOS、Windows 和 Linux Fcitx5 主题里，首行的 ‹ › 箭头跟着一起隐藏。
     pub candidate_page_number: bool,
     /// 宿主按 `show_app_logo` 显示或隐藏候选窗和悬浮工具栏左端的水杉 logo。
     pub app_logo: bool,
@@ -393,6 +408,8 @@ pub struct HostCapabilities {
     pub vocabulary_review: bool,
     /// 背单词书目里列出单词本插件（`pack-<插件 id>` 词书）：宿主把插件目录交给背单词的入口。
     pub wordbook_packs: bool,
+    /// 宿主能用系统自带的语音合成在背单词卡片上读出英文词头，卡片上才画喇叭。macOS、Windows 的设置应用用网页的 `speechSynthesis`（只用本机声音），Linux 的设置应用起 speech-dispatcher 的 `spd-say`，所以 Linux 只在 `PATH` 上有它时为真（`fill_linux_environment` 填）。iOS 和 Android 的原生背单词页用 `AVSpeechSynthesizer` 和 `TextToSpeech`（Android 另外看装没装语音引擎），HarmonyOS 的设置页经设置桥交给 Core Speech Kit 的离线声音。候选菜单里的「朗读」不读这一位，各宿主按自己的引擎在不在决定。见 `.agents/notes/implemented/feature/2026-11-01-system-tts-read-aloud.md`。
+    pub read_aloud: bool,
     /// 宿主的符号面板显示已安装的符号集插件。没打开时插件详情说明本机的符号面板不显示插件符号集。
     pub symbol_set_packs: bool,
     /// 设置页的「脚本插件（实验）」分组：列出已安装的脚本插件、授权、调整执行顺序。三个桌面平台的 release 构建都运行脚本：macOS（输入法进程）、Linux（IBus 引擎、Fcitx5 addon）和 Windows（Server）。Windows 的设置是原生应用（platforms/windows/settings），它照这个分组画出自己的授权页；这里为真也让 Windows 上的共享设置页和它一致。
@@ -415,6 +432,8 @@ pub struct HostCapabilities {
     pub quick_phrase_candidates: bool,
     /// 宿主提供「移动光标后编辑光标后的部分」（偏好 `caret_edit_suffix`）：实体键盘能把组字光标移进拼音中间，候选窗画模式提示。三个桌面宿主提供；host-api 在其他宿主上不把偏好交给 Engine，设置页也不列出它。
     pub caret_edit_suffix: bool,
+    /// 宿主显示上屏后联想（偏好 `next_word_prediction`），设置页列出它的开关；触屏宿主（`mobile_settings`）还列出联想栏按键的样式（`next_word_prediction_buttons`）。取值见 [`HostPlatform::shows_next_word_prediction`]。
+    pub next_word_prediction: bool,
     /// 宿主实现了「Ctrl+Shift+J 在中文和日语之间切换」（`KeybindingPreferences::toggle_japanese_ctrl_shift_j`）：实体键盘在中文状态按下时，从中文方案切到日语方案，或从日语等外语方案回到 `last_chinese_scheme`。设置页还要看本版本是否同时提供中文方案和日语，才显示这个开关。
     pub japanese_toggle_shortcut: bool,
     /// 宿主把「切换中英文」那一组快捷键接进中日英循环（`KeybindingPreferences::trilingual_cycle` 与 `crate::language_cycle`）：中 → 日 → 英 → 中，有组字时先上屏原始字母，英文模式下交回应用。目前只有 macOS 接入；其余宿主不声明此能力。
@@ -668,8 +687,14 @@ impl HostCapabilities {
             // candidate size into the panel's font: the IBus panel settings or
             // the Fcitx5 classic UI.
             candidate_font_controls: true,
-            // macOS 候选窗首行的「1 / 3」和 ‹ › 一起隐藏，只留翻页箭头的话首行照样占高度，候选窗不会变紧凑（#7316）。Linux 去掉辅助文本里的「当前页/总页数」，Fcitx5 的经典界面主题和原生画布也一起不画 ‹ ›；IBus 面板的翻页箭头属于面板，管不到。键盘和滚轮翻页都不受影响。
-            candidate_page_number: matches!(platform, HostPlatform::Linux | HostPlatform::Macos),
+            // macOS 候选窗首行的「1 / 3」和 ‹ › 一起隐藏，只留翻页箭头的话首行照样占高度，候选窗不会变紧凑（#7316）。Windows 候选窗首行同样一起隐藏页码和 ‹ ›（`CandidateLayoutSettings.h`）。Linux 去掉辅助文本里的「当前页/总页数」，Fcitx5 的经典界面主题和原生画布也一起不画 ‹ ›；IBus 面板的翻页箭头属于面板，管不到。Android 候选栏读音行右侧的「1/3」跟着隐藏，候选栏本来没有翻页箭头（#10709）。键盘和滚轮翻页都不受影响。iOS 候选栏不画页码；鸿蒙 2in1 候选窗画页码和 ‹ › 但还不读这个偏好（`CandidatePagerPolicy.ts`），两者都不声明。
+            candidate_page_number: matches!(
+                platform,
+                HostPlatform::Linux
+                    | HostPlatform::Macos
+                    | HostPlatform::Windows
+                    | HostPlatform::Android
+            ),
             // macOS、Windows 和 Linux 按这个开关画 logo（Linux 是 Fcitx5 经典界面主题里的那个，IBus 面板本来就画不了 logo，见 `CandidatePanelLimit::IbusPanel`）；鸿蒙的候选窗照常显示 logo，不提供这个开关。
             app_logo: matches!(
                 platform,
@@ -813,8 +838,11 @@ impl HostCapabilities {
             ),
             english_suggestions: matches!(platform, HostPlatform::Android | HostPlatform::Harmony),
             english_online_candidates: platform == HostPlatform::Macos,
-            // HarmonyOS 的符号面板和外接键盘都按引擎发布的拼写符号把前导键当字符送进来（`HardwareKeyRouter.touchSpells`）。
-            helpcode_trigger_key: matches!(platform, HostPlatform::Linux | HostPlatform::Harmony),
+            // HarmonyOS 的符号面板和外接键盘都按引擎发布的拼写符号把前导键当字符送进来（`HardwareKeyRouter.touchSpells`）。macOS 的 `InputController` 在候选翻页、以词定字、智能标点和配对标点之前先查 `spelling_symbols`，列着的键走 `msime_client_character` 交给 Engine。
+            helpcode_trigger_key: matches!(
+                platform,
+                HostPlatform::Linux | HostPlatform::Harmony | HostPlatform::Macos
+            ),
             // Android、HarmonyOS 和 iOS 键盘在组字时用 Shift 标记辅助码；桌面默认直接追加编码。
             helpcode_shift_entry: matches!(
                 platform,
@@ -857,6 +885,8 @@ impl HostCapabilities {
             vocabulary_review: true,
             // 桌面宿主的背单词由 Tauri 层传入插件目录；HarmonyOS 在自己的设置投影里按形态打开；Android 和 iOS 不传插件目录。
             wordbook_packs: platform.is_desktop(),
+            // Linux 的取值由设置应用按 `spd-say` 在不在填，这里先当作没有。
+            read_aloud: platform != HostPlatform::Linux,
             // Windows 和 Linux 桌面的符号面板是 Tauri 层的表情面板（`load_emoji_catalog`），Linux 的 Fcitx5 菜单和 macOS 的原生表情与符号面板另外读同一批插件组。HarmonyOS 在自己的设置投影里按形态打开；Android 和 iOS 没有接入。
             symbol_set_packs: platform.is_desktop(),
             // 三个桌面平台的输入法进程在启动时打开脚本插件（`msime_client_scripts_enable`），授权由设置应用经 client-services 的 `script_grants` 写入，授权页写明同一用户下的其他程序能伪造授权。Windows 的授权页在原生设置应用里（经 host-api 的 `msime_client_plugins`），共享设置页在 Windows 上也照样显示这一组。移动端没有脚本插件。各宿主接入生命周期核心（`msime_client_set_lifecycle`）之前，会话不满足运行条件，授权写下了也不会运行。
@@ -877,6 +907,7 @@ impl HostCapabilities {
             quick_phrase_candidates: matches!(platform, HostPlatform::Macos | HostPlatform::Linux),
             // 三个桌面宿主的候选窗都画「候选编辑：光标后」提示，设置在共享设置页（macOS、Linux）和 Windows 的原生设置里。
             caret_edit_suffix: platform.is_desktop(),
+            next_word_prediction: platform.shows_next_word_prediction(),
             // Windows 和 Linux 只注册了一个中文输入法，没有别的键盘快捷键能换到日语方案。macOS 把「日」声明成系统输入模式，用 Ctrl+空格和地球键轮换，不需要它。Android 实体键盘和 HarmonyOS 2in1 实体键盘也读共享快捷键，但还没有接上这个组合键，接上的那次改动再在这里加上自己。
             japanese_toggle_shortcut: matches!(
                 platform,

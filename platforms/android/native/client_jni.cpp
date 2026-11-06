@@ -1,6 +1,8 @@
 #include <jni.h>
+#include <android/log.h>
 #include "msime_client.h"
 #include "../../common/HostApiString.h"
+#include "../../common/CrashRecorder.h"
 // 会话存储和 listener 回调进 Java 的那一半（JNI_OnLoad 记下的 JavaVM、attach 与 detach、异常清理）。
 #include "JniCallbacks.h"
 // The polish presets carry their own prompt-injection wording, and there are already four copies
@@ -58,6 +60,8 @@ constexpr jsize kCloudClipboardRelayRequestLimit = 131072;
 constexpr jsize kDictionarySyncRequestLimit = 2 * 1024 * 1024;
 // 与 C 入口一致：为 8 MiB 原始词表的 JSON 转义和元数据留出空间。
 constexpr jsize kVocabularyReviewRequestLimit = 17 * 1024 * 1024;
+// 「加入生词本」：候选原文、释义和读音，与 C 入口的 64 KiB 上限一致。
+constexpr jsize kPersonalWordbookRequestLimit = 65536;
 constexpr jsize kPrepareHostRequestLimit = 16384;
 constexpr jsize kSavePreferencesDirectoryLimit = 16384;
 constexpr jsize kSavePreferencesSnapshotLimit = 1 * 1024 * 1024;
@@ -94,8 +98,18 @@ constexpr jsize kPolishPromptCustomLimit = 8192;
 
 extern "C" {
 // 注入的会话存储的回调可能在 Rust 自己起的线程上发生，那里要经 JavaVM 取 env，所以加载时记下它。
+// host-api 自己恢复的失败（音效包、整句模型读不了等）和整句候选「增强」挂上的是哪一档逐键重排（`keyboard reranker onnx small`、`keyboard reranker bundled model` 等）没有出口时写 stderr，Android 应用进程的 stderr 没人读。这里转进 logcat（标签 MSIMEHost），写成 `host_api: <类别>`，只留冒号前的类别，与 iOS、macOS 一样：类别是固定的英文短语，细节可能带路径和错误原文。按 msime_client.h 的约定，这个出口可能在任何线程上被调用，不阻塞、不回调 host-api。
+static void forward_host_diagnostic(const char *line) {
+    if (!line) return;
+    const char *colon = std::strchr(line, ':');
+    size_t length = colon ? static_cast<size_t>(colon - line) : std::strlen(line);
+    if (length == 0 || length > 200) return;
+    __android_log_print(ANDROID_LOG_INFO, "MSIMEHost", "host_api: %.*s", static_cast<int>(length), line);
+}
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     msime::android::remember_java_vm(vm);
+    // 在第一个会话之前登记，会话建立时写的那一行也收得到。
+    msime_client_set_diagnostic_sink(forward_host_diagnostic);
     return JNI_VERSION_1_6;
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_loadPreferencesRaw(JNIEnv *env, jclass, jbyteArray directory) {
@@ -112,11 +126,41 @@ static jbyteArray json_call(JNIEnv *env, jbyteArray request, char *(*call)(const
     env->ReleaseByteArrayElements(request, bytes, JNI_ABORT);
     return response(env, result);
 }
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_telemetryConsentRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return json_call(env, request, msime_client_telemetry_consent);
+}
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_migrateKeyLayoutRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, 65536, msime_client_migrate_android_key_layout);
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_telemetryBeginRaw(JNIEnv *env, jclass, jbyteArray request) {
     return json_call(env, request, msime_client_telemetry_begin);
+}
+JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_telemetryCrashInstall(JNIEnv *, jclass) {
+    msime_native_crash_install();
+}
+JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_telemetryCrashDisarm(JNIEnv *, jclass) {
+    msime_native_crash_disarm();
+}
+JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_telemetryCrashRefreshModulesRaw(JNIEnv *, jclass) {
+    msime_native_crash_refresh_modules();
+}
+JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_telemetryCrashCaptureRaw(JNIEnv *env, jclass, jbyteArray path, jbyteArray header) {
+    msime_native_crash_disarm();
+    if (!path || !header) return;
+    const auto path_size = env->GetArrayLength(path);
+    const auto header_size = env->GetArrayLength(header);
+    if (path_size <= 0 || path_size >= 4096 || header_size <= 0 || header_size >= 1024) return;
+    char path_text[4096]{};
+    char header_text[1024]{};
+    env->GetByteArrayRegion(path, 0, path_size, reinterpret_cast<jbyte *>(path_text));
+    if (env->ExceptionCheck()) return;
+    env->GetByteArrayRegion(header, 0, header_size, reinterpret_cast<jbyte *>(header_text));
+    if (env->ExceptionCheck()) return;
+    if (std::memchr(path_text, '\0', path_size) || std::memchr(header_text, '\0', header_size)) return;
+    msime_native_crash_arm(path_text, header_text);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_telemetryRecordCrashRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, 256 * 1024, msime_client_telemetry_record_crash);
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_telemetryEndRaw(JNIEnv *env, jclass, jbyteArray request) {
     return json_call(env, request, msime_client_telemetry_end);
@@ -214,6 +258,15 @@ JNIEXPORT jint JNICALL Java_app_msime_android_NativeClient_typingStatisticsEnabl
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_vocabularyReviewRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, kVocabularyReviewRequestLimit,
         msime_client_vocabulary_review);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_personalWordbookAddRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kPersonalWordbookRequestLimit,
+        msime_client_personal_wordbook_add);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_readAloudTextRaw(JNIEnv *env, jclass, jbyteArray request) {
+    // 与「加入生词本」同一个上限：候选和释义都是一行显示文字。
+    return bounded_request(env, request, kPersonalWordbookRequestLimit,
+        msime_client_read_aloud_text);
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_emojiCatalogRaw(JNIEnv *env, jclass, jbyteArray query, jbyteArray resources) {
     if (!query || !resources) {
@@ -899,6 +952,9 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_clearOnlineCand
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_destroyRaw(JNIEnv *env, jclass, jlong handle) {
     return response(env, msime_client_destroy(static_cast<uint64_t>(handle)));
 }
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_flushAllRaw(JNIEnv *env, jclass) {
+    return response(env, msime_client_flush_all());
+}
 }
 
 // ---- on-device speech recognition ----
@@ -1123,6 +1179,9 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceHotwordCor
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceNormalizeNumbersRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, kVoiceRequestLimit, msime_client_voice_normalize_numbers);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voicePunctuationRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kVoiceRequestLimit, msime_client_voice_punctuation);
 }
 // 应用主题目录与当季颜色：纯计算。
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_appThemeCatalogRaw(JNIEnv *env, jclass) {
@@ -1365,6 +1424,9 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resourcePackVer
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resourcePackAdoptRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, kResourcePackRequestLimit, msime_client_resource_pack_adopt);
 }
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resourcePackRemoveRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kResourcePackRequestLimit, msime_client_resource_pack_remove);
+}
 // listener 可以为 null；不为 null 时在本线程上收到 onProgress(phase, done, total)。listener 抛出的异常在安装结束后原样抛给调用方，此时不返回结果。
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resourcePackInstallRaw(JNIEnv *env, jclass, jbyteArray request, jobject listener) {
     ResourcePackProgress progress{env, listener, nullptr};
@@ -1467,8 +1529,8 @@ JNIEXPORT jlong JNICALL Java_app_msime_android_NativeClient_localSpeechCreateRaw
         return 0;
     }
 }
-// Loads the model (seconds on a phone the first time; cached afterwards) and opens the session. Hotwords arrive newline-separated. Returns null on success, else a message for logs.
-JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_localSpeechStartRaw(JNIEnv *env, jclass, jlong handle, jbyteArray model, jbyteArray language, jbyteArray hotwords, jint threads) {
+// 加载模型并开始会话。热词用换行分隔；成功返回空，失败返回原因。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_localSpeechStartRaw(JNIEnv *env, jclass, jlong handle, jbyteArray model, jbyteArray language, jbyteArray hotwords, jint threads, jint vad_sensitivity) {
     auto state = speech(handle);
     if (!state || state->session) return bytes_of(env, "invalid local speech session");
     std::string model_text;
@@ -1483,6 +1545,7 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_localSpeechStar
     options.model_dir = model_text;
     options.language = language_text;
     options.threads = threads < 0 ? 0 : threads;
+    options.vad_sensitivity_percent = vad_sensitivity;
     const std::string &words = hotwords_text;
     for (size_t start = 0; start < words.size();) {
         size_t end = words.find('\n', start);

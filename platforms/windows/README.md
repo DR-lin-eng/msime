@@ -79,6 +79,19 @@ ctest --test-dir target/windows-full/x64/win7-panels -C RelWithDebInfo --output-
 
 核心必须由同一份源码运行 `Build-Windows7Core.ps1` 重新生成，包含 `msime_client_windows_handwriting`。32 位构建使用 x86 的依赖与核心、`-A Win32`、`target/windows-full/x86/win7-panels`。通过 vcpkg 工具链构建时，`VCPKG_MANIFEST_DIR` 指向 `platforms/windows/settings/win7`，复用其最小清单。两个原生兼容宿主都在程序目录生成当前 edition 的 `edition.json`。
 
+### 现代 Windows 包里的同一份面板宿主
+
+全部界面改为原生之后，Win10/11 的面板与 Win7 共用这一份宿主（见 `.agents/notes/proposed/architecture/2026-11-03-all-native-ui.md`）。现代构建已经把它编进安装包，但缺省不用：`Build-Client.ps1` 以 `-DMSIME_PANELS_MODERN_WINDOWS=ON` 配置 `panels/win7`，把中性名字的 `msime-client-panels.exe` 和它的 PDB 输出到 `target/windows-<edition>/x64/bin`，于是它随 Server 输出进入安装包、SignPath 签名清单和符号包，`Prepare-PackageFiles.ps1` 在现代包里缺了它就拒绝打包。托盘、悬浮工具栏和 WinUI 设置只在 `MSIME_WINDOWS_PANEL_HOST=native` 时把面板交给它，开关见「托盘菜单与共享界面」。
+
+这个变体与 Win7 包的 `msime-client-panels-win7.exe` 只差四处：版本号取 `version.txt`（或 `-TargetVersion`）；链接与 WinUI 设置相同的普通核心导入库，不是 full 的版本用按版本改名生成的那份；不链接 HarfBuzz、不带随包表情字体，因为 Win10/11 的 DirectWrite 自带字体回退，`common/Windows7EmojiFont.h` 在那里直接画系统字体；键盘、语音面板里跳到设置或别的面板时找 `msime-client-settings.exe` 和 `msime-client-panels.exe`（`settings/win7/SurfaceLauncher.h`）。窗口、控件、单进程行为和 DPI 都与 Win7 相同：进程声明系统 DPI 感知，外观是 Win32 原生控件，之后逐个面板改用 msimeui 的 Direct2D 绘制。Win7 构建的程序名、版本号和 HarfBuzz 整形不变。单独编现代变体：
+
+```powershell
+cmake -S platforms/windows/panels/win7 -B target/windows-full/x64/panels -A x64 -DMSIME_PANELS_MODERN_WINDOWS=ON "-DCMAKE_PREFIX_PATH=<x64 原生依赖前缀>" "-DMSIME_HOST_LIBRARY=$PWD/target/windows-rust/x64/msime_host_api.dll.lib"
+cmake --build target/windows-full/x64/panels --config RelWithDebInfo --target msime-client-panels
+```
+
+CI 的 `windows-settings` 作业（Windows native settings）在「Build and test Windows 7 handwriting host」一步里先按 Win7 变体、再按现代变体编译这份源码，各跑一遍面板 CTest。
+
 `windows7-handwriting-test.exe` 用实际窗口鼠标消息与真实识别器验证合成笔划，输入提交边界可注入测试回调。另在有中文识别器的交互桌面运行 `windows7-handwriting-test.exe --desktop`，验证合成候选进入它自己创建的编辑器、切换到另一个测试窗口时拒绝上屏，以及按手写来源只记一次；全部状态使用临时合成目录。测试通过不能替代 Win7 SP1 的实际组件、安装和输入法验收。
 
 本地剪贴板面板按每页 20 条显示历史，支持刷新、固定、删除、复制和输入原编辑器；输入和复制前重新读取历史，外部关闭后禁止使用旧列表。云剪贴板面板复用设置页的全部表单和账号／中继来源校验，复制和输入前重新读取列表与设备；来源变化、待批准或读取失败时拒绝旧条目，不回退账号。云面板允许编辑搜索、上传和配置，只有本面板仍在前台时才恢复原编辑器，第三个窗口在前台时拒绝输入。复制与失败输入不计统计，成功输入使用 TSF 面板标记避免重复计数。
@@ -174,7 +187,7 @@ Windows 原生界面验收入口是 `tests/tools/settings_ui.ps1`：通过真实
 
 ### `panels/` 是什么
 
-`EmojiPanel.h`、`HandwritingPanel.h` 和 `EmojiPanelIcons.{h,cpp}` 不在 `CMakeLists.txt` 里，也没有任何文件 include 它们——它们不参与构建。现代 Windows 产品里的表情/符号面板和手写识别板由共享桌面面板宿主（Tauri）提供；Win7 则使用 `panels/win7` 的原生宿主。现代入口托盘菜单通过 `--route` 拉起，见下文「托盘菜单与共享界面」。`msimeui/demos/` 下另有一份**在构建的** `EmojiPanel`，但那是 demo，比这里这份短（163 行对 210 行），且不接 `ClipboardHistory` 与 `NativeTextInput`。这里这份是原生面板的另一条实现路线，单独成目录保留，让它的状态一眼可见，而不是混在 `system/` 里。
+`EmojiPanel.h`、`HandwritingPanel.h` 和 `EmojiPanelIcons.{h,cpp}` 不在 `CMakeLists.txt` 里，也没有任何文件 include 它们——它们不参与构建。现代 Windows 产品里的表情/符号面板和手写识别板缺省由共享桌面面板宿主（Tauri）提供，打开 `MSIME_WINDOWS_PANEL_HOST=native` 后改由 `panels/win7` 编出的 `msime-client-panels.exe` 提供；Win7 使用同一份源码编出的 `msime-client-panels-win7.exe`。现代入口托盘菜单通过 `--route` 拉起，见下文「托盘菜单与共享界面」。`msimeui/demos/` 下另有一份**在构建的** `EmojiPanel`，但那是 demo，比这里这份短（163 行对 210 行），且不接 `ClipboardHistory` 与 `NativeTextInput`。这里这份是原生面板的另一条实现路线，单独成目录保留，让它的状态一眼可见，而不是混在 `system/` 里。
 
 本目录以 MSIME-Windows 的完整功能和既有 TSF DLL / Server 协议为基线：Rust/C++ 共享会话、管道、焦点和回复编排，以及 TSF 注册、Server/Host DLL、原生候选窗口、语音与安装打包都在这里落地。
 
@@ -202,7 +215,7 @@ Windows 原生界面验收入口是 `tests/tools/settings_ui.ps1`：通过真实
 
 ## 原生界面渲染与皮肤
 
-候选窗、悬浮工具条、托盘菜单和 `msimeui` 的面板 demo 都通过 `msimeui` 的 Direct2D 设备资源绘制，本仓库不引入第二套 D2D 路径。几何与配色从已发布 Windows 呈现器移植：`CandidateCardSize.h` 提供卡片尺寸、行矩形与命中测试的唯一来源，`CandidatePalette.h` 解析皮肤清单里的 CSS 颜色子集（三位/四位/六位/八位十六进制、`rgb()`/`rgba()`、`transparent`），无法表示的写法保留内置 token 而不是渲染出不可见窗口。候选卡片用 DirectWrite 实测预编辑与每个候选的宽度后合成尺寸，工作区一半封顶两个轴；绘制和命中读同一份 metrics，点击不会落到渲染器没画的行上。卡片外框按窗口客户区排（`DeviceResources::GetClientSize`），不按渲染目标的 `GetSize()`：合成交换链按 64 像素分档、只增不减，比窗口大，按它排会把卡片右边和下边画到窗口外面；候选菜单和托盘卡片同样如此。固定排位候选只在未高亮时用 macOS 的固定色 `#379AD3`（不跟主题的强调色走），括号里的辅助码和候选文字同色，没有皮肤释义色时它的释义是这个颜色的 0.62 倍透明度；进入高亮行后，候选正文和辅助码改用选中行正文颜色，释义用 `selected_translation`，没有时用皮肤的释义色，再没有时用 `selected_number`（`candidate_row_translation_color`）。
+候选窗、悬浮工具条、托盘菜单和 `msimeui` 的面板 demo 都通过 `msimeui` 的 Direct2D 设备资源绘制，本仓库不引入第二套 D2D 路径。几何与配色从已发布 Windows 呈现器移植：`CandidateCardSize.h` 提供卡片尺寸、行矩形与命中测试的唯一来源，`CandidatePalette.h` 解析皮肤清单里的 CSS 颜色子集（三位/四位/六位/八位十六进制、`rgb()`/`rgba()`、`transparent`），无法表示的写法保留内置 token 而不是渲染出不可见窗口。候选卡片用 DirectWrite 实测预编辑与每个候选的宽度后合成尺寸，工作区一半封顶两个轴；绘制和命中读同一份 metrics，点击不会落到渲染器没画的行上。卡片外框按窗口客户区排（`DeviceResources::GetClientSize`），不按渲染目标的 `GetSize()`：合成交换链按 64 像素分档、只增不减，比窗口大，按它排会把卡片右边和下边画到窗口外面；候选菜单和托盘卡片同样如此。固定排位候选只在未高亮时用 macOS 的固定色 `#379AD3`（不跟主题的强调色走），括号里的辅助码和候选文字同色，没有皮肤释义色时它的释义是这个颜色的 0.62 倍透明度；进入高亮行后，候选正文和辅助码改用选中行正文颜色，释义和读音用 `selected_translation`；皮肤没写它而选中底色不透明（alpha ≥ 0.85）时，皮肤包自己的释义色换成从选中文字推导的颜色（选中文字的颜色，不透明度从 0.82 起往上加到对底色至少 4.5:1，到不透明为止；同一行只有一种前景色，选中文字本身不够 4.5:1 时释义也到不了，默认深色约 2.3:1），没有皮肤释义色时用 `selected_number`，它对底色不到 4.5:1 时同样换成推导色；半透明选中底色上仍用皮肤的释义色，再没有时用 `selected_number`（`candidate_row_translation_color`）。
 
 没有皮肤版式键时，候选窗的缺省几何照 macOS 候选窗（`CandidateChrome.h`、`CandidateTypography.h`、`CandidateItemLayout.h`）：卡片四边到候选行 4 DIP，行与行之间不留空，高亮和悬停底色比行四边各缩进 1 DIP；行高是 DirectWrite 实测的一行候选字高（回退字体比主字体高时取这一页最高的）加上下各 6 DIP，折行的候选文字同样上下各留 6 DIP；序号是 0.8 倍候选字号、从行左缘 8 DIP 处左对齐（主题或皮肤包打开选中竖条 `show_selected_bar` 时从 14 DIP 起，和 macOS 的 `MSIMECandidateTextLeft(showSelectedBar)` 一样），候选文字从这一页最宽的序号之后 1.5 DIP 处开始，内容后留 8 DIP；选中竖条画在行内 1 DIP 处、落在高亮底色里（带着共享层出厂版式的皮肤仍按 msime-windows 骑在行左缘上，写了 `selected_bar_inside` 时贴在左缘之内）；引擎的注释（辅助码、五笔剩余编码、emoji 说明……）一律包在半角括号里、紧贴候选文字（已经带半角或全角括号的不再加）；释义固定 12 DIP，不随候选字号变大；卡片最小宽度是 7 倍候选字号（带着共享层出厂版式 `resolvedLayout` 的皮肤和 macOS 一样是 msime-windows 固定的 160 DIP），超过半个工作区时按半个工作区封顶。首行有 logo 或翻页时 26 DIP 高，页码和两个翻页箭头之间、页码和拼音之间各隔 4 DIP，每个箭头是 28 DIP 宽、与首行等高的点击区；共享偏好 `show_candidate_page_number` 关掉时页码和箭头都不画、首行不为它们留高度，键盘和滚轮照常翻页。「下一页」箭头不在最后一页变暗：Engine 按需放出候选，页数随翻页增长（`input-runtime` 的 `page_count`），最后数到的一页往后翻仍可能有候选，这一点和 macOS 不同。脚本插件给候选加的注释单独占释义那一段的最后一行、画成斜体，释义后面的读音按释义色的 0.72 倍透明度画（选中底色不透明时不减淡）。拼音里的插入点是 1.25 DIP 宽的竖线，光标在拼音中间时两边的字各让开 0.85 DIP、不压字，拼音长过首行那一段时整行左移，插入点总在看得见的地方。右键菜单的「删除」行在右侧用次要色提示 `Ctrl+Shift+Alt+N`（本页前 8 个候选），这组维护快捷键直接删掉本页第 N 个候选。
 
@@ -283,6 +296,27 @@ target/windows-boundary/windows-session-smoke /absolute/verified-resources
 ```
 
 Windows 构建时 MSIME_HOST_LIBRARY 应指定同架构 Rust DLL 的导入库，运行时需可找到对应 DLL；Linux 本机边界测试使用 .so。Windows MSVC 的完整构建入口是 `Build-Client.ps1`（见 `Build-Client.md`），MinGW 交叉构建不替代它；两者产出同一组目标。
+
+WER 进程外回调有不依赖 Rust 的专项工程，复用 TSF 工程中的 helper 构建定义。在 Windows 上运行：
+
+```powershell
+cmake -S platforms/windows/tsf/tests/telemetry_wer -B target/windows-full/x64/wer-callback -A x64
+cmake --build target/windows-full/x64/wer-callback --config RelWithDebInfo
+ctest --test-dir target/windows-full/x64/wer-callback -C RelWithDebInfo -V
+```
+
+x86 使用独立的 `target/windows-full/x86/wer-callback` 目录并将 `-A` 改为 `Win32`。专项创建合成子进程并读取其真实远端上下文，验证停采、模块归属、文件发布及宿主 WER 输出；目录重解析点夹具缺少符号链接权限时明确跳过。微软 SDK 的回调是 `cdecl`，不能沿用 MinGW 的 x86 `WINAPI` 声明。
+
+TSF 生命周期专项运行生产控制器、真实线程池与 DLL 装卸，默认 CTest 不制造致命故障。实际系统投递另由显式脚本验证：
+
+```powershell
+cmake -S platforms/windows/tsf/tests/capture_lifecycle -B target/windows-full/x64/wer-lifecycle -A x64
+cmake --build target/windows-full/x64/wer-lifecycle --config RelWithDebInfo
+ctest --test-dir target/windows-full/x64/wer-lifecycle -C RelWithDebInfo --output-on-failure
+platforms/windows/tsf/tests/Invoke-SystemWer.ps1 -BuildDirectory target/windows-full/x64/wer-lifecycle -OutputDirectory C:/msime-tests/wer-system-new-run
+```
+
+`OutputDirectory` 必须是尚不存在的合成目录。系统专项临时将本次 helper 的完整路径加入当前用户的 WER 允许列表，结束时只删除自己的值；不改通用 WER 策略、不调用产品上传入口。它验证 TIP/Host API 自有故障、外部故障、授权撤回重开、最后租约释放和被宿主捕获的异常，分别核对系统退出码与落盘。x86 的系统 WER 偶尔会把挂起的目标停在 WerSvc 的 LPC 回复上、不再结束它；脚本只对这种已确认的形态在 `<用例>-retry` 目录重跑一次，重跑仍须通过全部断言，首次诊断保留在原目录的 `timeout.json`。x86 将构建目录改为 `target/windows-full/x86/wer-lifecycle`、架构改为 `Win32`，使用不同输出目录。脚本带 UTF-8 BOM，可直接由 Windows PowerShell 5 执行。生产安装器和 Arm64X 已接线；合成控制器与系统回调通过仍不等于完整 TIP 产品、真实编辑器、ARM64 或后台验收，范围见[TSF 采集笔记](../../.agents/notes/implemented/feature/2026-11-01-windows-tsf-wer-capture.md)。
 
 `bash tests/tools/check-cross.sh /absolute/nlohmann-include-root` 使用 x86_64/i686 MinGW 分别编译适配器、测试源和 `shared/contracts` 中的 IPC 契约，验证 32/64 位 COFF 和 Windows SDK 键码断言；另将不依赖 Rust 的编码测试链接为 Windows PE。不会链接 Windows Rust 库，也不执行 Windows 二进制。会话测试覆盖真实 Unicode 输入、锁定词库第二页数字选词、配置延迟、客户端/焦点/线程拒绝及本地取消不回复。
 
@@ -547,11 +581,13 @@ key_bindings 可选对象示例：
 
 托盘入口按构建配置选择原生宿主：Win7 使用 `msime-client-settings-win7.exe` 和 `msime-client-panels-win7.exe`，现代 Windows 使用下述 WinUI 3 与 Tauri 入口，二者复用相同路由。悬浮工具栏开关由 Server 自己处理；现代设置和关于在独立的 WinUI 3 `msime-client-settings.exe` 中打开，表情/符号面板、手写识别板和屏幕键盘仍在共享桌面面板宿主（Tauri）中打开。两类窗口与 Linux 的 IBus 属性菜单共用同一套路由契约——用 `--route=<面板>` 指定面板，`--route=settings:<分类>` 指定设置分类（关于用 `settings:about`），只接受小写 ASCII 标识符；同一路由也写进子进程的 `MSIME_CLIENT_ROUTE`，进程自身继承到的同名变量会被丢弃，不会盖过实际点击的那一行。Windows 语音输入由 Server 内置的 VoiceInputSession 和波形浮层负责录音、识别及 TSF 提交；共享外壳的语音入口通过固定 Aux 管道发送 `ToggleVoiceInput`，由 Server 主线程消费，避免让 Tauri 伪造一个无法录音的面板。
 
-托盘卡片的行与 macOS 输入菜单对齐（`src/candidate/TrayMenuLayout.h`）：「中文输入」「英文输入」（日语、韩语、越南语和藏文方案下第一行写「日语输入」等）之后是「英文候选模式」（Ctrl+Shift+E，只在 TIP 报告中文、方案不是韩文/注音/越南文/藏文时可用，Server 经 `SessionController::set_dedicated_english` 在焦点会话上设置 Engine 的英文模式，组字中不切换），开关组里有「繁体输出」（与工具栏简繁按钮、Ctrl+Shift+F 同一个工作线程）；`punctuation_lock` 钉住标点时「中文标点」不可用。「输入方案」和「主题」各占一行、右侧写当前选择，点开后整张卡片换成那一页（`TrayMenuPage`），方案的名字与 macOS 方案菜单相同（日语、韩语、越南语），主题页的行直接写 `global_theme`，末行「主题设置…」打开设置应用的主题页。之后是图标工具条（工具栏、表情、键盘、手写、语音，与 macOS 输入菜单同序），紧接着「云剪贴板…」「云词库…」两行，最后是「词库…」「水杉输入法设置…」「关于水杉输入法…」（产品名按版本取）。悬浮工具栏的切换输入方案菜单用同一组方案行，但像 macOS 一样不列出缺词典跑不起来的方案，托盘方案页则把它们显示为不可用。「云词库…」按 `cloud-dictionary` 路由打开共享应用的云词库面板，与 macOS 的同名一行相同。「云剪贴板…」按 `cloud-clipboard` 路由打开共享应用的面板，卡片不抢焦点，所以 Tauri 打开面板时记下的前台编辑器就是用户在用的那个，条目能直接输入回去；焦点控件是密码框（Win32 编辑控件的 ES_PASSWORD，或 UI Automation 的 IsPassword，最多等 250 毫秒）时拒绝打开并响一声（`src/system/SecureFieldPolicy.h`、`SecureFieldProbe.h`）。卡片开着时装一个低级键盘钩子：↑↓、Home/End 移动高亮，回车/空格执行高亮的行（没有高亮时收起卡片、交给应用），→ 打开翻页行，← 和 Esc 在子页上返回，Esc 在主页上收起卡片，工具条里用 ←→ 在几格之间移动；别的键收起卡片并照常交给应用，模拟的按键不算。卡片有 UI Automation 树：`src/candidate/AccessibleWindow.h` 把 `TrayMenuAccessibility.h` 的 `tray_menu_accessible_tree` 发布成一个菜单容器，每行是一个元素，名字是行的文字，可点的行是菜单项，勾上的行报告为已勾选，带快捷键的行报告快捷键，翻页行右侧的当前选择作为补充说明，键盘高亮的行报告为焦点，读屏执行一个元素等同于点那一行；卡片开合时发菜单打开、关闭事件，读屏键（Caps Lock、Insert）原样交给读屏，不收起卡片。`windows-accessible-elements` 测试核对这棵树。
+托盘卡片的行与 macOS 输入菜单对齐（`src/candidate/TrayMenuLayout.h`）：「中文输入」「英文输入」（日语、韩语、越南语和藏文方案下第一行写「日语输入」等）之后是「英文候选模式」（Ctrl+Shift+E，只在 TIP 报告中文、方案不是韩文/注音/越南文/藏文时可用，Server 经 `SessionController::set_dedicated_english` 在焦点会话上设置 Engine 的英文模式，组字中不切换），开关组里有「繁体输出」（与工具栏简繁按钮、Ctrl+Shift+F 同一个工作线程）；`punctuation_lock` 钉住标点时「中文标点」不可用。「输入方案」和「主题」各占一行、右侧写当前选择，点开后整张卡片换成那一页（`TrayMenuPage`），方案的名字与 macOS 方案菜单相同（日语、韩语、越南语），主题页的行直接写 `global_theme`，末行「主题设置…」打开设置应用的主题页。之后是图标工具条（工具栏、表情、键盘、手写、语音，与 macOS 输入菜单同序），紧接着「云剪贴板…」「云词库…」两行；今天有背单词的卡在等、候选窗没开着、共享应用在场时，其后多一行「背单词（今日待复习 N）…」，按 `vocabulary` 路由打开共享应用的背单词面板，张数在卡片每次打开时经 `msime_client_vocabulary_due_count` 现读，没有待复习时不占一行（文案和条件与 macOS、Linux 共用 `platforms/common/VocabularyDueMenu.h`）；最后是「词库…」「水杉输入法设置…」「关于水杉输入法…」（产品名按版本取）。悬浮工具栏的切换输入方案菜单用同一组方案行，但像 macOS 一样不列出缺词典跑不起来的方案，托盘方案页则把它们显示为不可用。「云词库…」按 `cloud-dictionary` 路由打开共享应用的云词库面板，与 macOS 的同名一行相同。「云剪贴板…」按 `cloud-clipboard` 路由打开共享应用的面板，卡片不抢焦点，所以 Tauri 打开面板时记下的前台编辑器就是用户在用的那个，条目能直接输入回去；焦点控件是密码框（Win32 编辑控件的 ES_PASSWORD，或 UI Automation 的 IsPassword，最多等 250 毫秒）时拒绝打开并响一声（`src/system/SecureFieldPolicy.h`、`SecureFieldProbe.h`）。卡片开着时装一个低级键盘钩子：↑↓、Home/End 移动高亮，回车/空格执行高亮的行（没有高亮时收起卡片、交给应用），→ 打开翻页行，← 和 Esc 在子页上返回，Esc 在主页上收起卡片，工具条里用 ←→ 在几格之间移动；别的键收起卡片并照常交给应用，模拟的按键不算。卡片有 UI Automation 树：`src/candidate/AccessibleWindow.h` 把 `TrayMenuAccessibility.h` 的 `tray_menu_accessible_tree` 发布成一个菜单容器，每行是一个元素，名字是行的文字，可点的行是菜单项，勾上的行报告为已勾选，带快捷键的行报告快捷键，翻页行右侧的当前选择作为补充说明，键盘高亮的行报告为焦点，读屏执行一个元素等同于点那一行；卡片开合时发菜单打开、关闭事件，读屏键（Caps Lock、Insert）原样交给读屏，不收起卡片。`windows-accessible-elements` 测试核对这棵树。
 
 不点托盘也能在中文和日语之间来回：打开「快捷键 › Ctrl+Shift+J 在中文和日语之间切换」（`keybindings.toggle_japanese_ctrl_shift_j`，缺省关）后，TIP 报告中文、Engine 不在自己的英文模式时按 Ctrl+Shift+J，当前跑的是中文方案就切到日语，并把这个中文方案记进 `last_chinese_scheme`；跑的是日语、韩语、越南语或藏语就回到 `last_chinese_scheme`，它跑不起来时按 `effective_scheme` 的规则退回（`common/InputSchemeTraits.h` 的 `japanese_toggle_target`）。英文模式、开关关着、Server 没有协商到 `JapaneseToggleShortcut`（新 TIP 配旧 Server）或本版本不同时提供日语和中文方案（只有 full 同时提供）时，组合键照常交给应用；浏览器里它是开发者工具或下载页的快捷键，所以缺省关。键的分类和 Ctrl+Shift+F 一样：TIP 吃下后作为 `FUNCTION_TOGGLE_JAPANESE` 发给 Server，不读回复，自动重复不再排队，Server 不可用时直接结束。Server 的 `ReplyComposer::toggle_japanese` 回 NoReply、不碰组字，把写入交给单次工作线程；线程上 `toggle_japanese_scheme` 和托盘的 `store_input_scheme` 一样从存储读出偏好、带 revision 写回，并唤醒偏好监视器立即检查，再由监视器按原有版本顺序发布；host-api 等组字结束、运行时空闲后才换方案，所以组字中按下时正在组的字照常上屏后才换成日语。只注册了一个 zh-CN 配置，切到日语后只有语言栏图标变成「日」，系统输入指示器仍是中文，上屏文字的 `GUID_PROP_LANGID` 也仍是中文；需要系统层面的日语时另装水杉日语（ja-JP）。
 
-现代构建的设置外壳按 `MSIME_CLIENT_SETTINGS_COMMAND`（须为绝对路径且存在）、Server 同目录的 `msime-client-settings.exe` 查找；面板外壳使用同目录的 `MSIME.exe`。找不到时这些行保持可见但禁用，点击不会做任何事，也不会声称已打开；启动失败同样按未处理返回，菜单不会因为一个没发生的动作而关闭。两个外壳都用 `CreateProcessW` 启动并继承本进程令牌，因此打包时它们与 Server 的完整性级别一致。
+现代构建的设置外壳按 `MSIME_CLIENT_SETTINGS_COMMAND`（须为绝对路径且存在）、Server 同目录的 `msime-client-settings.exe` 查找；面板外壳缺省使用同目录的 `MSIME.exe`。找不到时这些行保持可见但禁用，点击不会做任何事，也不会声称已打开；启动失败同样按未处理返回，菜单不会因为一个没发生的动作而关闭。两个外壳都用 `CreateProcessW` 启动并继承本进程令牌，因此打包时它们与 Server 的完整性级别一致。
+
+面板宿主由环境变量 `MSIME_WINDOWS_PANEL_HOST` 选择：值为 `native`（不分大小写）时，表情、手写、屏幕键盘、语音、云剪贴板、云词库和背单词这 7 个面板改由同目录的原生面板宿主 `msime-client-panels.exe` 打开（见「现代 Windows 包里的同一份面板宿主」）；不设、为空或任何别的值都是缺省的 `MSIME.exe`，拼错不会让面板消失。选了 `native` 就只找 `msime-client-panels.exe`，不退回 `MSIME.exe`：它不在时手写、云剪贴板、云词库和背单词这些行显示为不可用，表情和屏幕键盘照旧退回系统自带的面板，设置窗口里的面板按钮给出打不开的提示。设置窗口不受这个开关影响。Server 启动时读一次，托盘、悬浮工具栏的可用性判断和实际启动用同一个选择，它拉起的设置窗口继承同一个环境；从开始菜单打开的设置窗口每次打开面板时读自己的环境。在测试机上打开：`setx MSIME_WINDOWS_PANEL_HOST native`，然后注销并重新登录，让按需拉起 Server 的应用、看门狗的登录任务和开始菜单都拿到新的环境；关闭：`reg delete HKCU\Environment /v MSIME_WINDOWS_PANEL_HOST /f`，同样注销重登。Win7 包只有原生面板，忽略这个变量。选择逻辑是 `src/system/ShellSurfaces.h` 的 `panel_host_from_setting` 和 `shell_executable_names`，`windows-shell-surfaces`、`windows7-shell-surfaces` 和 `windows-settings-navigation` 核对两种状态下每个面板路由落到哪个程序、原生宿主认不认这个路由（`panels/win7/PanelRoutes.h`）。
 
 隔离预览实例不注册 TSF，也不接管系统输入源：它挂上候选窗口、后台点击选词和悬浮工具条，走 configured_key 的同一套路径；未支持的路由会断开当前连接。生产模式复用同一份 Server 会话/窗口实现，只是换成安装器注册的生产管道名，TSF 注册和 DLL/Server 部署由安装器完成。Enter 缺少宿主实际本地提交观察时明确拒绝，不从 Engine 伪造观察。预览实例不连接旧产品管道，也不替代生产 KeyHandler。运行时检查包含此 EXE 的依赖，PowerShell 合成测试不启动常驻 Server 进程；CMake 另登记无副作用的 `windows-preview-help` --help 测试。
 
@@ -622,6 +658,8 @@ ABI 1 的附加符号 msime_client_punctuation，适配器与宿主库必须成�
 PuncSwitch 的 keycode 与 StatusSnapshot/FocusRestored 的 pinyin_length 同步到当前会话的中文标点开关。经共享 C ABI 调用固定 Engine 的运行时 setter，不重建会话，不改变组合、光标、候选代次或引号配对。待回复和过期焦点仍不能修改状态。TSF 开关是每会话临时覆盖，不写入配置文件，并在共享偏好替换 Engine 时重新应用；未收到覆盖的会话继续使用持久化偏好默认值。
 
 msime_client_set_chinese_punctuation 是 ABI 1 的附加符号，适配器和宿主库须成套更新。其返回值为未变化的 View；关闭时空组合 ASCII 标点由宿主透传，组合中标点仍按共享运行时的完成策略处理。这个接口只管每会话的标点开关，全局作用域由 `ModeAuthority` 和共享的 `ime_mode_scope` 决定。
+
+TIP 的标点 compartment 在激活和每次切换中英文（Shift、语言栏、Server 推送的应用规则）时回到这个模式的起始状态：`punctuation_lock` 为跟随时，英文模式用英文标点，中文模式用已存的 `chinese_punctuation`（设置「标点」里的「中文标点」「英文标点」，出厂为中文标点）；锁定时取锁定值。规则在 `tsf/Global/PunctuationModePolicy.h` 的 `PunctuationOpenForImeMode`，接在 `CompositionProcessorEngine.cpp` 的 `SyncPunctuationWithImeMode`、`InitializeMetasequoiaIMECompartment` 和 OPENCLOSE 回调上，起始标点与锁定一起由 `FanyUtils::RefreshPunctuationLockFromConfig` 从内存快照刷新。Ctrl+.、工具栏和托盘的切换只改当前 compartment（`PunctuationOpenForRequest`），不写偏好，下一次激活或中英文切换后回到起始标点。`msime-tsf-punctuation-mode-policy` 测试核对规则和这几处接线。
 
 ### 书名号自动补全后的嵌套回退
 
@@ -720,6 +758,8 @@ TSF 在收到 Server 回复之前就要决定一个键是组合输入还是选�
 内置音效包由安装器放在 DataDir 的 `sound-packs`（与提示音 `audios` 同级），Server 通过 `src/system/SoundPackRoot.h` 在会话选项里写入 `sound_packs`；开发运行的状态目录里没有它时不写，由共享库按 resources 旁边的默认位置查找。官方插件包（uuid 脚本插件、latex-symbols 短语表，`plugins/official-packs.json` 登记的那些）不放 DataDir，而由安装器从 `server_exe/plugin-packs` 装到 Program Files 下 Server 目录的 `plugin-packs`：那里只有管理员能写。Server 通过 `src/system/PluginPackRoot.h` 在会话选项里写入 `plugin_packs`，目录不在（开发运行）时也照样写上，免得共享库退回到可写的 DataDir 旁边去找；原生设置应用和 Tauri 设置壳都取自己所在目录的 `plugin-packs`。它们默认停用：脚本插件要在授权页授权，短语表要在插件页启用。
 
 内置辅助码表同样不在资源目录里：安装器把它们放在 DataDir 的 `helpcodes`，Server 的 `server\resources` 没有 `helpcodes\`，而共享库只从资源目录的 `helpcodes\` 读内置码表，缺表时才读 `helpcode_fallback_resources`。Server 和 TIP 都通过 `src/system/HelpcodeRoot.h` 在内存里的会话选项中把 DataDir 写成 `helpcode_fallback_resources`（TIP 在 `tsf/HostConfiguration.cpp` 读 `runtime-options.json` 时写），不写回文件；DataDir 下没有 `helpcodes` 目录（开发运行）或选项里已有这个键时不写。
+
+用户自己的辅助码表（`custom/<文件名>`）放在 DataDir 的 `helpcodes\custom`：Engine、设置窗口和 Win7 设置都先读状态根下的这一份，再读 `server\resources\helpcodes\custom`（以前的位置，`server` 目录每次安装都整个删掉）。安装器清理 DataDir 的安装包条目时留下 `helpcodes\custom`，删 `server` 目录之前把那里的 `*.txt` 搬进 DataDir（同名不覆盖，`AdoptCustomHelpcodes`），Server 每次准备宿主时 host-api 也会把资源目录里剩下的表搬过来（#10707）。
 
 ### 打字特效
 

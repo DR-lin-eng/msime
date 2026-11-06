@@ -134,7 +134,7 @@ fn performance_records_need_exactly_the_three_whitelisted_keys() {
     assert!(crash_record(br#"{"at":"x","message":"m","stack":"s","extra":1}"#).is_none());
 }
 
-// Android 键盘建会话的耗时（#10086）和键盘弹出各阶段的耗时（#9916）只有种类和毫秒数，进本机导出的诊断包；服务端不认这些种类，云端上传器把它们滤掉。
+// Android 键盘建会话的耗时（#10086）、键盘弹出各阶段的耗时（#9916）和按键路径拆段的耗时（#10457）只有种类和毫秒数，进本机导出的诊断包；服务端不认这些种类，云端上传器把它们滤掉。
 #[test]
 fn engine_session_timing_records_stay_in_local_bundles() {
     for kind in [
@@ -147,6 +147,8 @@ fn engine_session_timing_records_stay_in_local_bundles() {
         "engine_startup_dictionary_sync",
         "engine_session_main",
         "engine_session_destroy",
+        "engine_call",
+        "candidate_rendered",
     ] {
         let line = format!(r#"{{"t_ms":1,"kind":"{kind}","duration_ms":840}}"#);
         assert_eq!(
@@ -154,6 +156,47 @@ fn engine_session_timing_records_stay_in_local_bundles() {
             Some(serde_json::json!({"t_ms": 1, "kind": kind, "duration_ms": 840}))
         );
         assert!(!upload::UPLOAD_EVENT_KINDS.contains(&kind));
+    }
+}
+
+// Android 首帧布局诊断（#10389）是只有种类的输入事件：布局编进种类名里，多带一个布局字段的行照样整行丢弃；服务端不认这些种类，云端上传器把它们滤掉。
+#[test]
+fn first_frame_layout_events_stay_in_local_bundles() {
+    let layouts = [
+        "twenty_six_key",
+        "nine_key",
+        "japanese_nine_key",
+        "handwriting",
+        "korean",
+        "zhuyin",
+        "stroke",
+        "zhuyin_nine_key",
+        "fourteen_key",
+        "eighteen_key",
+    ];
+    let mut kinds = vec![
+        "engine_session_live_preferences".to_owned(),
+        "engine_session_factory_preferences".to_owned(),
+        "engine_session_hinted_preferences".to_owned(),
+    ];
+    for stage in ["first_drawn", "created", "live"] {
+        for layout in layouts {
+            kinds.push(format!("touch_layout_{stage}_{layout}"));
+        }
+    }
+    for kind in &kinds {
+        let line = format!(r#"{{"t_ms":1,"kind":"{kind}"}}"#);
+        assert_eq!(
+            input_event_record(line.as_bytes()),
+            Some(serde_json::json!({"t_ms": 1, "kind": kind})),
+            "{kind}"
+        );
+        let with_field = format!(r#"{{"t_ms":1,"kind":"{kind}","layout":"nine_key"}}"#);
+        assert!(
+            input_event_record(with_field.as_bytes()).is_none(),
+            "{kind}"
+        );
+        assert!(!upload::UPLOAD_EVENT_KINDS.contains(&kind.as_str()));
     }
 }
 
@@ -188,6 +231,37 @@ fn crash_records_keep_the_exception_type_and_frames_but_not_the_reason() {
 }
 
 #[test]
+fn native_crash_headers_are_local_and_do_not_replace_diagnostic_summaries() {
+    let epoch = uuid::Uuid::new_v4();
+    let header = format!(
+        "MSIME-CRASH/1 {}",
+        serde_json::json!({"platform":"ios","version":"0.1.0","revision":"synthetic", "run":"", "attempt":"", "arch":"arm64", "component":"application", "consent_epoch":epoch})
+    );
+    let stack = "SyntheticFault: synthetic-private-reason\n0 synthetic.dylib + 64";
+    let line = serde_json::json!({"at":"2026-10-28T00:00:00Z", "message":header, "stack":stack});
+    let parsed = crash_record(line.to_string().as_bytes()).unwrap();
+    assert_eq!(parsed["message"], "SyntheticFault");
+    assert_eq!(parsed["stack"], "0 synthetic.dylib + 64");
+    for local in [
+        "consent_epoch",
+        epoch.to_string().as_str(),
+        "synthetic-private-reason",
+    ] {
+        assert!(!parsed.to_string().contains(local));
+    }
+    // 文件目录与 iOS 适配的 NDJSON 共用相同解析边界。
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("synthetic.crash");
+    std::fs::write(&path, format!("{header}\n{stack}")).unwrap();
+    let parsed_file =
+        crash_file_record_file(File::open(path).unwrap(), std::time::SystemTime::now()).unwrap();
+    assert_eq!(parsed_file["message"], parsed["message"]);
+    assert_eq!(parsed_file["stack"], parsed["stack"]);
+    let invalid = serde_json::json!({"at":"2026-10-28T00:00:00Z", "message":"MSIME-CRASH/1 {}", "stack":stack});
+    assert!(crash_record(invalid.to_string().as_bytes()).is_none());
+}
+
+#[test]
 fn a_missing_source_is_an_empty_section() {
     let directory = tempfile::tempdir().unwrap();
     let mut request = request(
@@ -218,6 +292,9 @@ fn the_configuration_snapshot_is_redacted_inside_the_zip() {
     preferences.voice_input.asr_token = "voice-secret".into();
     preferences.ai_assistant.token = "ai-secret".into();
     preferences.tencent_tmt.secret_key = "tencent-secret".into();
+    let store = crate::preferences::PreferencesStore::new(directory.path());
+    let consent = store.usage_reporting_consent().unwrap().unwrap();
+    preferences.usage_reporting_consent = Some(consent);
     save_preferences(directory.path(), preferences);
     let destination = directory.path().join("bundle.zip");
     let mut request = request(
@@ -258,6 +335,8 @@ fn the_configuration_snapshot_is_redacted_inside_the_zip() {
     assert!(!config.contains("voice-secret"));
     assert!(!config.contains("ai-secret"));
     assert!(!config.contains("tencent-secret"));
+    assert!(!config.contains("usage_reporting_consent"));
+    assert!(!config.contains(&consent.epoch.to_string()));
     assert!(config.contains(crate::preferences::REDACTED));
 }
 

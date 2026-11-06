@@ -24,7 +24,9 @@
 #include "DictionaryQuiesceLease.h"
 #include "InputModeIndicator.h"
 #include "MenuLabels.h"
+#include "VocabularyDue.h"
 #include "ViewComposition.h"
+#include "NextWordPrediction.h"
 #include "ReplacedProgram.h"
 #include "SmartPunctuationSpace.h"
 #include "SmartPunctuationChoice.h"
@@ -34,6 +36,7 @@
 #include "WordCharacterBinding.h"
 #include "SurroundingCharacters.h"
 #include "../voice/VoiceAction.h"
+#include "../voice/VoiceHoldChord.h"
 #include "../voice/VoiceHotwords.h"
 #include "../voice/VoiceProviderOptions.h"
 #include "../voice/VoiceWorker.h"
@@ -57,6 +60,7 @@
 #include "../candidates/PanelRestoreRecord.h"
 #include "../candidates/CandidateActionPolicy.h"
 #include "../candidates/PersonalWordbook.h"
+#include "../candidates/ReadAloud.h"
 #include "../candidates/CandidateLocalModeLabels.h"
 #include "../candidates/CandidatePanelStatus.h"
 #include "../candidates/CandidateScriptAnnotation.h"
@@ -387,6 +391,10 @@ struct State {
   msime::linux_host::ClientInputModeMemory app_input_modes;
   bool chinese_punctuation = true;
   bool properties_registered = false;
+  // 获得焦点时读到的「背单词（今日待复习 N）…」文字，没有待复习时为空。
+  std::optional<std::string> vocabulary_due;
+  // 「背单词」一行最近一次发布时是否可见：render 据此只在开始或结束组字的那一下更新它（sync_vocabulary_row）。
+  bool vocabulary_row_shown = false;
   std::optional<bool> english_override;
   std::optional<bool> dedicated_english_override;
   std::optional<bool> cloud_candidates_override;
@@ -520,6 +528,8 @@ struct State {
   // Japanese converts with Space and commits with Enter; see core/JapaneseConversion.h.
   msime::linux_host::JapaneseConversion japanese_conversion;
   msime::linux_host::BackspaceHoldPolicy backspace_hold;
+  // 自己上屏、出了上屏后联想之后紧跟着的 reset 不收起联想（NextWordPrediction.h）。
+  msime::linux_host::PredictionResetEcho prediction_echo;
   std::string ai_context;
   // surrounding text 不可用时，只用本会话由输入法自己上屏的末尾文本判断智能标点；任何交给应用的按键、光标移动或删除都会使它失效。
   std::string smart_punctuation_shadow;
@@ -587,6 +597,8 @@ struct State {
   // Key ownership lasts until release, independently of provider completion.
   std::set<guint> voice_consumed_keys;
   guint voice_hold_key = 0;
+  // 这次按住右 Alt 自己开始的录音的代次，按住只是接管或停止已有录音时为 0。按住期间按了组合键，只取消代次对得上的这一段（#10580）。
+  uint64_t voice_hold_generation = 0;
   bool voice_space_consumed = false;
   bool voice_space_locked = false;
   bool voice_active = false;
@@ -813,6 +825,7 @@ struct State {
     wave_overlay.reset();
     voice_consumed_keys.clear();
     voice_hold_key = 0;
+    voice_hold_generation = 0;
     voice_space_consumed = false;
     voice_space_locked = false;
     reset_mode_modifiers();
@@ -1723,6 +1736,32 @@ IBusProperty *desktop_panel_property(IBusEngine *engine, const DesktopPanelActio
       TRUE, PROP_STATE_UNCHECKED, nullptr);
 }
 
+// 「背单词（今日待复习 N）…」，在「桌面工具」子菜单里（GNOME Shell 的精简菜单里在顶层）。不放属性菜单顶层：kimpanel 的 IBus 后端把顶层属性画成面板上一直在的按钮，那就成了常驻的角标，而这一行只该在用户点开菜单时看得到。张数在获得焦点时读一次（focus_in 写进 State::vocabulary_due），这里只按记下的文字和当前状态决定显示与否，不读盘：publish_mode 在模式和开关变化时都会走到这里，不能每次都去读进度文档。属性总是注册，没有待复习、正在组字、失焦或被挡时设成不可见，属性树的形状因此不随计数变化。组字的开始和结束由 render 经 sync_vocabulary_row 跟上。点下去打开共享应用的背单词面板。
+bool vocabulary_row_wanted(const State &s) {
+  // 还没有会话时 view 是 null，不能对它取值。
+  const bool composing = s.view.is_object() &&
+                         msime::linux_host::view_has_composition(
+                             s.view.value("editing_text", std::string{}),
+                             !s.view.value("candidates", Json::array()).empty(),
+                             s.view.value("phrase_prefix", std::string{}));
+  return s.vocabulary_due && !composing && s.focused && !s.blocked;
+}
+IBusProperty *vocabulary_due_property(IBusEngine *engine) {
+  auto &s = state(engine);
+  const bool shown = vocabulary_row_wanted(s);
+  s.vocabulary_row_shown = shown;
+  return ibus_property_new(
+      "DesktopTools/Vocabulary", PROP_TYPE_NORMAL,
+      ibus_text_new_from_string(shown ? s.vocabulary_due->c_str() : "背单词…"), "",
+      ibus_text_new_from_static_string("打开背单词面板"), shown, shown, PROP_STATE_UNCHECKED, nullptr);
+}
+// 每次绘制都会走到这里，但只在可见与否真的变了（开始或结束组字）时才发一次属性更新：属性菜单正开着时组字，这一行随即收起。
+void sync_vocabulary_row(IBusEngine *engine) {
+  const auto &s = state(engine);
+  if (!s.properties_registered || vocabulary_row_wanted(s) == s.vocabulary_row_shown) return;
+  ibus_engine_update_property(engine, vocabulary_due_property(engine));
+}
+
 IBusProperty *desktop_tools_property(IBusEngine *engine) {
   const auto &s = state(engine);
   auto items = ibus_prop_list_new();
@@ -1736,6 +1775,7 @@ IBusProperty *desktop_tools_property(IBusEngine *engine) {
       ibus_text_new_from_static_string("重新读取最新设置并重试上次菜单修改"),
       can_retry && !menu_save_pending && s.focused && !s.blocked,
       menu_save_pending || can_retry, PROP_STATE_UNCHECKED, nullptr));
+  ibus_prop_list_append(items, vocabulary_due_property(engine));
   for (const auto &action : desktop_panel_actions)
     if (action.slot == DesktopPanelSlot::Tools && desktop_panel_offered(action))
       ibus_prop_list_append(items, desktop_panel_property(engine, action));
@@ -3063,12 +3103,25 @@ IBusProperty *candidate_actions(IBusEngine *engine) {
           ibus_text_new_from_static_string("操作当前页候选"), actions_available, TRUE,
           PROP_STATE_UNCHECKED, nullptr));
     }
-    // 和 macOS、Windows 的候选菜单一样，「加入生词本」在最后一组，只在这一行显示着释义时出现。
-    if (!displayed_candidate_gloss(s, candidate).empty()) {
+    // 和 macOS、Windows 的候选菜单一样，「朗读」「加入生词本」在最后一组：「加入生词本」只在这一行显示着释义时出现，「朗读」在有能读的英文、本机又装着 spd-say 时排在它前面。
+    const auto gloss = displayed_candidate_gloss(s, candidate);
+    const bool read_aloud = msime::linux_host::read_aloud_available() &&
+                            msime::read_aloud::text_for(candidate_text, gloss).has_value();
+    if (read_aloud || !gloss.empty()) {
       const auto separator_name = candidate_action_name("CandidateSeparator", candidate.at("id"));
       ibus_prop_list_append(actions, ibus_property_new(
           separator_name.c_str(), PROP_TYPE_SEPARATOR, nullptr, "", nullptr, TRUE, TRUE,
           PROP_STATE_UNCHECKED, nullptr));
+    }
+    if (read_aloud) {
+      const auto read_name = candidate_action_name("CandidateReadAloud", candidate.at("id"));
+      ibus_prop_list_append(actions, ibus_property_new(
+          read_name.c_str(), PROP_TYPE_NORMAL,
+          ibus_text_new_from_static_string(msime::read_aloud::kMenuLabel), "",
+          ibus_text_new_from_static_string("用系统语音读出这个英文单词"),
+          actions_available, TRUE, PROP_STATE_UNCHECKED, nullptr));
+    }
+    if (!gloss.empty()) {
       const auto personal_name = candidate_action_name("CandidatePersonalWordbook", candidate.at("id"));
       ibus_prop_list_append(actions, ibus_property_new(
           personal_name.c_str(), PROP_TYPE_NORMAL,
@@ -3193,10 +3246,12 @@ void publish_mode(IBusEngine *engine, bool registration) {
       auto *properties = ibus_prop_list_new();
       ibus_prop_list_append(properties, mode);
       ibus_prop_list_append(properties, settings);
+      ibus_prop_list_append(properties, vocabulary_due_property(engine));
       ibus_engine_register_properties(engine, properties);
     } else {
       ibus_engine_update_property(engine, mode);
       ibus_engine_update_property(engine, settings);
+      ibus_engine_update_property(engine, vocabulary_due_property(engine));
     }
     return;
   }
@@ -3906,6 +3961,7 @@ void publish_mode(IBusEngine *engine, bool registration) {
       for (auto *action : *list) ibus_engine_update_property(engine, action);
     ibus_engine_update_property(engine, voice);
     ibus_engine_update_property(engine, voice_cancel_property);
+    ibus_engine_update_property(engine, vocabulary_due_property(engine));
     ibus_engine_update_property(engine, candidate_actions(engine));
     ibus_engine_update_property(engine, nine_key_spellings_property);
     ibus_engine_update_property(engine, clipboard);
@@ -4120,8 +4176,12 @@ std::string candidate_aux_text(IBusEngine *engine, const Json &view) {
       if (!paging.empty()) paging += "  · ";
       const auto editing_text = view.value("editing_text", std::string{});
       const auto caret = view.value("caret_position", editing_text.size());
+      const auto preedit_caret = view.find("preedit_caret");
       paging += msime::linux_host::candidate_preedit_with_caret(
-          candidate_preedit, editing_text, caret);
+          candidate_preedit, editing_text, caret,
+          preedit_caret != view.end() && preedit_caret->is_number_unsigned()
+              ? std::optional<std::size_t>(preedit_caret->get<std::size_t>())
+              : std::nullopt);
     }
   }
   const auto mode = view.at("local_mode").get<std::string>();
@@ -4223,6 +4283,7 @@ void hide_wave_overlay(IBusEngine *engine) {
 }
 void render(IBusEngine *engine, const Json &view) {
   sync_shuangpin_keymap(engine, view);
+  sync_vocabulary_row(engine);
   const bool hide_pending = state(engine).candidate_hide_source != 0;
   cancel_candidate_hide(engine);
   // Engine caret offsets refer to ASCII editing_text, never the display
@@ -4614,6 +4675,9 @@ bool apply(IBusEngine *engine, char *raw, PunctuationPairMode pair_mode,
     }
   }
   state(engine).view = result.at("view");
+  if (commit.is_string())
+    state(engine).prediction_echo.committed(
+        msime::linux_host::view_is_prediction(state(engine).view), g_get_monotonic_time() / 1000);
   render(engine, state(engine).view);
   online_schedule(engine);
   translation_schedule(engine);
@@ -5292,6 +5356,10 @@ void focus_in(IBusEngine *engine) {
     const bool mode_changed = s.input_enabled != mode_before_restore;
     if (s.session && (!already_focused || s.session != previous_session || mode_changed))
       apply(engine, s.focus_session(s.input_enabled));
+    // 今日待复习只在获得焦点时读一次，之后的属性更新都用这一份（vocabulary_due_property）。
+    if (!already_focused)
+      s.vocabulary_due = s.blocked ? std::nullopt
+                                   : msime::linux_host::vocabulary_due_label(configured, false);
     if (!s.properties_registered &&
         g_getenv("MSIME_DISABLE_IBUS_PROPERTIES") == nullptr) {
       register_properties(engine);
@@ -5324,6 +5392,7 @@ void focus_out(IBusEngine *engine) {
                                                            s.session)});
     s.voice_consumed_keys.clear();
     s.voice_hold_key = 0;
+    s.voice_hold_generation = 0;
     s.voice_space_consumed = false;
     s.focused = false;
 #ifdef MSIME_IBUS_MODE_BADGE
@@ -5397,6 +5466,32 @@ void property_activate(IBusEngine *engine, const gchar *name, guint value) {
     page(engine, candidate_name == "CandidatePreviousPage"
                    ? MSIME_PREVIOUS_PAGE
                    : MSIME_NEXT_PAGE);
+    return;
+  }
+  if (candidate_name.rfind("CandidateReadAloud", 0) == 0) {
+    if (value != PROP_STATE_UNCHECKED && value != PROP_STATE_CHECKED)
+      return;
+    guarded(engine, "candidate_read_aloud", [&] {
+      auto &s = state(engine);
+      if (!s.session || !s.focused || s.blocked || !s.input_enabled)
+        return;
+      if (s.rendered_session != s.session || !s.rendered_candidates.is_array() ||
+          !s.rendered_view.is_object() ||
+          s.rendered_view.value("generation", uint64_t{0}) !=
+              s.view.value("generation", uint64_t{0}))
+        return;
+      for (const auto &candidate : s.rendered_candidates) {
+        if (candidate_name != candidate_action_name("CandidateReadAloud", candidate.at("id")))
+          continue;
+        // 不经过 Engine，组字不变；起不来 spd-say 时用辅助区域那句提示告诉用户。
+        const auto text = msime::read_aloud::text_for(candidate.value("text", std::string{}),
+                                                      displayed_candidate_gloss(s, candidate));
+        if (text && !msime::linux_host::read_aloud(*text))
+          show_candidate_menu_hint(engine, s.rendered_view.value("generation", uint64_t{0}),
+                                   msime::linux_host::read_aloud_failure_notice);
+        return;
+      }
+    });
     return;
   }
   if (candidate_name.rfind("CandidatePersonalWordbook", 0) == 0) {
@@ -5542,6 +5637,11 @@ void property_activate(IBusEngine *engine, const gchar *name, guint value) {
     if (property_name == "DesktopTools/ToolbarEnabled") {
       if (value == PROP_STATE_CHECKED || value == PROP_STATE_UNCHECKED)
         save_menu_preference(engine, MenuPreference::Toolbar, value == PROP_STATE_CHECKED);
+      return;
+    }
+    if (property_name == "DesktopTools/Vocabulary") {
+      if (!launch_desktop_panel(msime::vocabulary_due::kPanelRoute))
+        g_warning("Cannot start MSIME desktop panel launcher");
       return;
     }
     for (const auto &action : desktop_panel_actions) {
@@ -6546,11 +6646,17 @@ void reset(IBusEngine *engine) {
       voice_cancel(engine);
     state(engine).voice_consumed_keys.clear();
     state(engine).voice_hold_key = 0;
+    state(engine).voice_hold_generation = 0;
     state(engine).voice_space_consumed = false;
     state(engine).last_smart_punctuation = 0;
     state(engine).last_smart_punctuation_time = 0;
     state(engine).smart_punctuation_rejected = 0;
     state(engine).paired_tracker.clear();
+    // 自己上屏之后客户端回头送来的 reset 是上屏的回声，不是光标移动，联想留着（NextWordPrediction.h）。
+    if (state(engine).prediction_echo.keeps(msime::linux_host::view_is_prediction(state(engine).view),
+                                            g_get_monotonic_time() / 1000))
+      return;
+    state(engine).prediction_echo.forget();
     if (state(engine).session)
       apply(engine, msime_client_command(state(engine).session, MSIME_CANCEL));
     clear(engine);
@@ -7311,6 +7417,19 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   }
   s.pure_shift_candidate = false;
   s.pure_ctrl_candidate = false;
+  // 按住右 Alt（或右 Ctrl+右 Alt）时又按下一个非修饰键，用户按的是组合键而不是要说话（#10580，对齐 Windows #10581）：按住就此结束，这次按住自己开始、还没锁定的录音取消、不上屏。
+  // 按键本身照常往下走，它的修饰状态里本来就带着 Alt，应用收到的是组合键，不必像 Windows 那样补发修饰键。Alt_R 留在 voice_consumed_keys 里，它的自动重复和松开仍被吞掉；voice_hold_key 已清零，松开时不再结束录音。
+  // 哪些键算组合键见 voice_hold_becomes_chord：修饰键还在拼组合，Esc 保持取消，空格锁定开着时空格保持锁定，已锁定的按住是用户要留下的听写。Ctrl+Win 吞的是 Win，不在此列。
+  if (s.voice_hold_key == IBUS_Alt_R &&
+      msime::linux_host::voice_hold_becomes_chord(key, s.voice_hotkey_hold_space_lock, s.voice_space_locked)) {
+    const bool drop = s.voice_hold_generation != 0 && s.voice_hold_generation == s.voice_generation &&
+                      s.voice_active && !s.voice_stopping;
+    s.voice_hold_key = 0;
+    s.voice_requires_control = false;
+    s.voice_hold_generation = 0;
+    if (drop)
+      guarded(engine, "voice_hold_chord", [&] { voice_cancel(engine); });
+  }
   const guint modifiers = canonical_modifiers(flags);
   if (s.voice_enabled && !s.voice_provider_socket.empty() && s.focused && !s.blocked &&
       voice_toggle_hotkey(s, key, modifiers, keycode)) {
@@ -7562,6 +7681,31 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   };
   guarded(engine, "process_key", [&] {
     s.open();
+    // 上屏后联想（NextWordPrediction.h）：空格和选词数字照常走下面按渲染行 id 选词的路径（select_rendered_highlight 与数字选词），点选走 candidate_clicked；别的键先收起建议，再按没有候选的状态走，逗号句号这些翻页键因此照常出中文标点，回车照常换行。Esc 收起后不再交给应用。
+    s.prediction_echo.forget();
+    const bool prediction = msime::linux_host::view_is_prediction(s.view);
+    bool picks = false;
+    if (prediction && modifiers == 0) {
+      if (key == IBUS_space) {
+        picks = true;
+      } else if (s.number_row_selection && s.rendered_session == s.session &&
+                 s.rendered_candidates.is_array()) {
+        const auto slot = candidate_digit_slot(key, keycode, flags, s.rendered_view);
+        picks = slot && *slot < s.rendered_candidates.size();
+      }
+    }
+    switch (msime::linux_host::prediction_key(prediction, key == IBUS_Escape && modifiers == 0, picks)) {
+    case msime::linux_host::PredictionKey::Route:
+    case msime::linux_host::PredictionKey::Pick:
+      break;
+    case msime::linux_host::PredictionKey::DismissThenRoute:
+      apply(engine, msime_client_command(s.session, MSIME_CANCEL));
+      break;
+    case msime::linux_host::PredictionKey::Close:
+      apply(engine, msime_client_command(s.session, MSIME_CANCEL));
+      handled = true;
+      return;
+    }
     const bool bare_backspace = key == IBUS_BackSpace && modifiers == 0;
     if (!bare_backspace) {
       s.backspace_hold.reset();
@@ -7690,6 +7834,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
       if (key != IBUS_F9 && s.voice_hold_key != 0)
         return;
       s.voice_consumed_keys.insert(key);
+      const bool was_active = s.voice_active;
       // Hold shortcuts start/continue recording; only a locked recording
       // turns their next press into Stop. Ctrl+F9 always toggles recording.
       if (s.voice_active) {
@@ -7703,6 +7848,8 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
       if (key != IBUS_F9) {
         s.voice_hold_key = key;
         s.voice_requires_control = (modifiers & IBUS_CONTROL_MASK) != 0;
+        // 只有这次按住开始的录音记下代次；接管或停止已有录音时记 0，组合键不动它。
+        s.voice_hold_generation = !was_active && s.voice_active ? s.voice_generation : 0;
       }
       handled = true;
       return;

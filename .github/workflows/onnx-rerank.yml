@@ -125,7 +125,7 @@ jobs:
           curl -sL -o "$RUNNER_TEMP/ort-dylib.tgz" https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
           mkdir -p "$RUNNER_TEMP/ort-dylib"
           tar -xf "$RUNNER_TEMP/ort-dylib.tgz" -C "$RUNNER_TEMP/ort-dylib"
-          export ORT_DYLIB_PATH="$RUNNER_TEMP/ort-dylib/libonnxruntime.so"
+          export ORT_DYLIB_PATH="$RUNNER_TEMP/ort-dylib/onnxruntime-linux-x64-1.24.4/libonnxruntime.so"
           test -f "$ORT_DYLIB_PATH"
           cargo test --locked -p msime-onnx-rerank --features runtime
           cargo test --locked -p msime-host-api --features onnx-rerank --lib keyboard_reranker

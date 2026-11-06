@@ -215,7 +215,7 @@ jobs:
   linux-resource-integration:
     needs: changes
     name: Linux native host resource integration
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
       MSIME_SKIP_RUST_TESTS: '1'

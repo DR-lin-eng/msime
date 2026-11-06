@@ -47,7 +47,7 @@ Status: implemented
 - **Android**：`ImeLetterRows` 取上游 `candidateTapsOnly()`（包住本机原条件并感知上屏后联想），保留本机 `directLetterOnRelease` 复位；`MSIMEInputService` 取并集——本机触点样本字段与 `typeWithTouch`、上游 `timedEngineCall` 计时包装共存，本机触点路径也计时；`TypingPage` 云候选说明保留本机动态版（区分是否发送联想文本）；`PageId` 搜索关键词并集（上游新增「键盘底部高度」等 + 本机「尺寸」「按键区域宽度」「恢复默认宽度与间距」「数字行」）；`verify-native.sh` 导出清单取上游全集（语音标点、遥测同意、生词本、朗读等新导出）后补回 `msime_client_character_with_touch`/`characterWithTouchRaw`。
 - **iOS**：键盘控制器保留本机 `applyCustomKeyboardWidth()` 与按宽度比例折算的行宽算式（上游 `keyRowWidth` 重构在其余自动合并区域生效）；工程文件并集（本机 `AppleInputAssistance.swift` + 上游 `AsynchronousLetterInputTests.swift`）。
 - **macOS**：上屏后联想双轨并存——本机预测锚点（点击守卫）原样保留，上游 `trackPredictionAfterTransition`（鼠标监听）照常调用；`selectCandidate:` 先本机锚点守卫再上游的带诊断日志守卫；CMake 并集（本机 input-assistance 测试 + 上游 #10728 测试主目录隔离）。
-- **CI**：`ci-platforms.yml` 的 windows-scripts 取上游更新的注释与步骤说明，runs-on 保留 owner 条件表达式（同前几轮）。
+- **CI**：`ci-platforms.yml` 的 windows-scripts 取上游更新的注释与步骤说明，runs-on 保留 owner 条件表达式（同前几轮）。上游新增的 `onnx-rerank.yml`（Linux/Windows 两个作业）与 `ci-platforms.yml` 新增的 `linux-resource-integration` 都是裸 Depot 标签，本仓没有对应 runner，排队 24 小时后被取消——补上同一 owner 条件回退（`build-linux-legacy.yml` 的一处裸标签挂在 `inputs.publish` 手动发布上，平时不跑，保留原样）。
 - **Cargo.lock**：取上游后重放 `pulldown-cmark 0.13.6`（RUSTSEC-2026-0433），ort 随本机钉版本统一到 rc.15。
 
 本轮新增边界：商业云预测沿用显式权限、最多三条后缀和生成代次校验；普通云候选仍是单条，在线结果不绕过隐私开关。共享 Rust 热路径采用上游的内存快照、WAL、文件身份与 `data_version` 失效判断，候选条沿用 `candidate_range`，没有再叠加第二套缓存或全量复制。Android 触点接线保留旧 `characterWithTouch` 兼容入口，同时使用上游 `setKeyGeometry`/`touchCharacter`；键盘空隙路由、触点清理和滑出点击恢复合并为同一生命周期。

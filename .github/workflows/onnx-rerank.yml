@@ -54,7 +54,7 @@ permissions:
 jobs:
   linux:
     name: ONNX rerank backend (Linux x86_64)
-    runs-on: depot-ubuntu-24.04-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-ubuntu-24.04-8' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     env:
       SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
@@ -127,7 +127,7 @@ jobs:
   # Windows 的发布（Build-RustOutputs.ps1）给 x64 宿主开着 onnx-rerank，链接锁里发布的 x86_64-pc-windows-msvc 精简库（/MD）。上面的 Linux 作业现编自己的库，碰不到 MSVC 的链接和这一份发布的库；这里用 fetch_onnxruntime.py 按锁下载核对它，跑同样的 golden 和挂载测试。只编 x64：x86 和 arm64 的宿主只给 TIP 加载，TIP 的会话不挂逐键重排，不开这个特性。
   windows:
     name: ONNX rerank backend (Windows x64)
-    runs-on: depot-windows-2025-8
+    runs-on: ${{ github.repository_owner == 'metasequoiaime' && 'depot-windows-2025-8' || 'windows-2025' }}
     timeout-minutes: 90
     env:
       SCCACHE_IGNORE_SERVER_IO_ERROR: '1'

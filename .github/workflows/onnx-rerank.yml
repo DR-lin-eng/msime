@@ -122,7 +122,7 @@ jobs:
           export ORT_LIB_LOCATION="$ORT_WORK/out/linux-x86_64"
           test -f "$ORT_LIB_LOCATION/libonnxruntime.a"
           # 本机的设备推理把 ort 统一成 load-dynamic，host-api 的测试图也带着它：运行时从这里加载一个 1.24 的动态库，不用系统里可能过时的那份。crate 自己的测试走上面的静态链接，不受它影响。
-          curl -sL -o "$RUNNER_TEMP/ort-dylib.tgz" https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
+          curl -fSL --retry 3 -o "$RUNNER_TEMP/ort-dylib.tgz" https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
           mkdir -p "$RUNNER_TEMP/ort-dylib"
           tar -xf "$RUNNER_TEMP/ort-dylib.tgz" -C "$RUNNER_TEMP/ort-dylib"
           export ORT_DYLIB_PATH="$RUNNER_TEMP/ort-dylib/onnxruntime-linux-x64-1.24.4/libonnxruntime.so"

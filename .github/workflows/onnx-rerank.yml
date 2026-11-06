@@ -121,6 +121,12 @@ jobs:
           set -euo pipefail
           export ORT_LIB_LOCATION="$ORT_WORK/out/linux-x86_64"
           test -f "$ORT_LIB_LOCATION/libonnxruntime.a"
+          # 本机的设备推理把 ort 统一成 load-dynamic，host-api 的测试图也带着它：运行时从这里加载一个 1.24 的动态库，不用系统里可能过时的那份。crate 自己的测试走上面的静态链接，不受它影响。
+          curl -sL -o "$RUNNER_TEMP/ort-dylib.tgz" https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
+          mkdir -p "$RUNNER_TEMP/ort-dylib"
+          tar -xf "$RUNNER_TEMP/ort-dylib.tgz" -C "$RUNNER_TEMP/ort-dylib"
+          export ORT_DYLIB_PATH="$RUNNER_TEMP/ort-dylib/libonnxruntime.so"
+          test -f "$ORT_DYLIB_PATH"
           cargo test --locked -p msime-onnx-rerank --features runtime
           cargo test --locked -p msime-host-api --features onnx-rerank --lib keyboard_reranker
 
@@ -160,6 +166,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'fetch_onnxruntime.py failed' }
           $env:ORT_LIB_LOCATION = $location[-1]
           if (-not (Test-Path -LiteralPath (Join-Path $env:ORT_LIB_LOCATION 'onnxruntime.lib') -PathType Leaf)) { throw "no onnxruntime.lib in $env:ORT_LIB_LOCATION" }
+          # 本机的设备推理把 ort 统一成 load-dynamic，host-api 的测试图也带着它：运行时从这里加载一个 1.24 的动态库，不用系统里可能过时的那份。crate 自己的测试走上面的静态链接，不受它影响。
+          Invoke-WebRequest -Uri 'https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip' -OutFile "$env:RUNNER_TEMP\ort-dylib.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\ort-dylib.zip" -DestinationPath "$env:RUNNER_TEMP\ort-dylib"
+          $env:ORT_DYLIB_PATH = (Get-ChildItem -Path "$env:RUNNER_TEMP\ort-dylib" -Filter 'onnxruntime.dll' -Recurse | Select-Object -First 1).FullName
+          if (-not (Test-Path -LiteralPath $env:ORT_DYLIB_PATH -PathType Leaf)) { throw "no onnxruntime.dll in $env:RUNNER_TEMP\ort-dylib" }
           cargo test --locked -p msime-onnx-rerank --features runtime
           if ($LASTEXITCODE -ne 0) { throw 'msime-onnx-rerank tests failed' }
           cargo test --locked -p msime-host-api --features onnx-rerank --lib keyboard_reranker

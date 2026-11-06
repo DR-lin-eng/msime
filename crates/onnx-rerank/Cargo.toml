@@ -13,7 +13,8 @@ runtime = ["dep:ort"]
 # 注意：ort-sys 的构建脚本把 `ORT_LIB_LOCATION` 里的静态库复制进它自己的输出目录，之后换了那里的库文件也不会重新复制。换库（比如换了算子清单重编）之后先 `cargo clean -p ort-sys`，不然链进去的还是旧库，加载新模型时报找不到算子的实现。
 
 [dependencies]
-msime-engine = { path = "../engine" }
+# 本 crate 只用引擎的排序接口（`CandidateScorer`），关掉引擎默认特性：默认的 `device-inference` 依赖 load-dynamic 的 ort，会把这里的静态 `api-24` ort 在同一构建图里统一成动态加载，上游与本仓的 ONNX 测试于是都找不到匹配的运行时。本机的设备推理照常由产品 crate 开启引擎默认特性时生效。
+msime-engine = { path = "../engine", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
